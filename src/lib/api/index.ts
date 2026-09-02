@@ -9,12 +9,26 @@ import { products } from "@/lib/mock/products";
 import { homeSummaries } from "@/lib/mock/home";
 import { orders, nextOrderSequence } from "@/lib/mock/orders";
 import { couriers, shops, staff, activeShopId } from "@/lib/mock/shop";
+import {
+  customerEvents,
+  customerNotes,
+  deliveries,
+  orderEvents,
+  orderPayments,
+} from "@/lib/mock/fulfillment";
 import type {
   Conversation,
   ConversationDetail,
   ConversationStatus,
   Courier,
   Customer,
+  CustomerEvent,
+  CustomerNote,
+  Delivery,
+  DeliveryStatus,
+  OrderEvent,
+  PaymentRecord,
+  StaffRole,
   HomeSummary,
   MetricRange,
   Money,
@@ -243,4 +257,203 @@ export async function createSale(input: CreateSaleInput): Promise<Sale> {
     createdAt: new Date().toISOString(),
   };
   return resolve(sale, 260);
+}
+
+/* --------------------- Phase 4: order / customer / delivery -------------- */
+
+export interface OrderDetail {
+  order: Order;
+  customer: Customer | null;
+  events: OrderEvent[];
+  payments: PaymentRecord[];
+  delivery: Delivery | null;
+  staffName: string | null;
+}
+
+/** Current session role. Mocked; a real app resolves it from auth. */
+export const currentRole: StaffRole = "manager";
+
+export async function getOrderDetail(id: string): Promise<OrderDetail> {
+  const order = orders.find((o) => o.id === id || o.code === id);
+  if (!order) throw new Error(`Order ${id} not found`);
+  if (order.restricted) {
+    await resolve(null, 140);
+    throw new Error(PERMISSION_DENIED);
+  }
+  const detail: OrderDetail = {
+    order,
+    customer: customers.find((c) => c.id === order.customerId) ?? null,
+    events: [...(orderEvents[order.id] ?? [])].sort((a, b) => b.at.localeCompare(a.at)),
+    payments: orderPayments[order.id] ?? [],
+    delivery: deliveries.find((d) => d.orderId === order.id) ?? null,
+    staffName: staff.find((s) => s.id === order.staffId)?.name ?? null,
+  };
+  return resolve(detail);
+}
+
+export async function getOrders(): Promise<Order[]> {
+  return resolve([...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+}
+
+export interface DeliveryDetail {
+  delivery: Delivery;
+  order: Order | null;
+  customer: Customer | null;
+}
+
+export async function getDeliveryDetail(id: string): Promise<DeliveryDetail> {
+  const delivery = deliveries.find((d) => d.id === id || d.trackingNumber === id);
+  if (!delivery) throw new Error(`Delivery ${id} not found`);
+  if (delivery.restricted) {
+    await resolve(null, 140);
+    throw new Error(PERMISSION_DENIED);
+  }
+  return resolve({
+    delivery,
+    order: orders.find((o) => o.id === delivery.orderId) ?? null,
+    customer: customers.find((c) => c.id === delivery.customerId) ?? null,
+  });
+}
+
+export interface Customer360 {
+  customer: Customer;
+  orders: Order[];
+  events: CustomerEvent[];
+  notes: CustomerNote[];
+  activeConversationId: string | null;
+}
+
+export async function getCustomer360(id: string): Promise<Customer360> {
+  const customer = customers.find((c) => c.id === id);
+  if (!customer) throw new Error(`Customer ${id} not found`);
+  return resolve({
+    customer,
+    orders: orders
+      .filter((o) => o.customerId === id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    events: [...(customerEvents[id] ?? [])].sort((a, b) => b.at.localeCompare(a.at)),
+    notes: customerNotes
+      .filter((n) => n.customerId === id)
+      .sort((a, b) => b.at.localeCompare(a.at)),
+    activeConversationId: conversations.find((c) => c.customerId === id)?.id ?? null,
+  });
+}
+
+/** Mock note creation. Returns the note; nothing is persisted. */
+export async function addCustomerNote(customerId: string, body: string): Promise<CustomerNote> {
+  return resolve(
+    {
+      id: `cn-new-${Date.now()}`,
+      customerId,
+      body,
+      staffName: staff[0]?.name ?? "Staff",
+      at: new Date().toISOString(),
+    },
+    200,
+  );
+}
+
+export interface RecordPaymentInput {
+  orderId: string;
+  method: PaymentMethod;
+  amount: Money;
+  reference?: string;
+}
+
+/** Manual confirmation only — APSA never claims a provider verified the money. */
+export async function recordPayment(input: RecordPaymentInput): Promise<PaymentRecord> {
+  return resolve(
+    {
+      id: `pay-new-${Date.now()}`,
+      method: input.method,
+      amount: input.amount,
+      status: "paid",
+      ...(input.reference ? { reference: input.reference } : {}),
+      confirmedManuallyBy: staff[0]?.name ?? "Staff",
+      at: new Date().toISOString(),
+    },
+    240,
+  );
+}
+
+export interface ReturnInput {
+  orderId: string;
+  reason: string;
+  restock: boolean;
+}
+
+/** Return moves goods. It never moves money — refund is a separate decision. */
+export async function createReturn(input: ReturnInput): Promise<OrderEvent> {
+  return resolve(
+    {
+      id: `oe-new-${Date.now()}`,
+      kind: "returned",
+      at: new Date().toISOString(),
+      actor: staff[0]?.name ?? "Staff",
+      context: input.reason,
+    },
+    240,
+  );
+}
+
+export interface RefundInput {
+  orderId: string;
+  amount: Money;
+  method: PaymentMethod;
+  reason: string;
+}
+
+/** Refund moves money. It never assumes the goods came back. */
+export async function createRefund(input: RefundInput): Promise<PaymentRecord> {
+  if (input.amount.amount <= 0) throw new Error("invalid_amount");
+  return resolve(
+    {
+      id: `pay-ref-${Date.now()}`,
+      method: input.method,
+      amount: input.amount,
+      status: "refunded",
+      confirmedManuallyBy: staff[0]?.name ?? "Staff",
+      at: new Date().toISOString(),
+    },
+    240,
+  );
+}
+
+export interface ArrangeDeliveryInput {
+  orderId: string;
+  courierId: string;
+}
+
+/** Mock delivery request. No courier API is contacted. */
+export async function arrangeDelivery(input: ArrangeDeliveryInput): Promise<Delivery> {
+  const order = orders.find((o) => o.id === input.orderId);
+  const courier = couriers.find((c) => c.id === input.courierId) ?? couriers[0]!;
+  return resolve(
+    {
+      id: `dlv-new-${Date.now()}`,
+      orderId: input.orderId,
+      orderCode: order?.code ?? "",
+      customerId: order?.customerId ?? "",
+      courierId: courier.id,
+      courierName: courier.name,
+      trackingNumber: `TMP-${Date.now().toString().slice(-6)}`,
+      status: "requested",
+      fee: courier.fee,
+      events: [{ id: `de-new-${Date.now()}`, status: "requested", at: new Date().toISOString() }],
+    },
+    240,
+  );
+}
+
+export type DeliveryAction = "retry" | "reschedule" | "return_to_shop" | "mark_delivered";
+
+/** Mock delivery action. Returns the delivery's next status. */
+export async function applyDeliveryAction(
+  deliveryId: string,
+  action: DeliveryAction,
+): Promise<DeliveryStatus> {
+  const next: DeliveryStatus =
+    action === "mark_delivered" ? "delivered" : action === "return_to_shop" ? "cancelled" : "in_transit";
+  void deliveryId;
+  return resolve(next, 220);
 }

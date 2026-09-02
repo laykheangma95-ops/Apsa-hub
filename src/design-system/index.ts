@@ -16,4 +16,5 @@ export { MetricTile, Sparkline } from "./MetricTile";
 export { Money } from "./Money";
 export { QuantityStepper } from "./QuantityStepper";
 export { QuickActionGrid, type QuickActionId } from "./QuickActionGrid";
+export { Timeline, type TimelineItem } from "./Timeline";
 export { StatusChip } from "./StatusChip";

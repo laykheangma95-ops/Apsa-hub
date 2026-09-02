@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { BottomSheet, CustomerSummaryCard, ErrorState, SkeletonBlock, StatusChip } from "@/design-system";
 import { getCustomerOrders } from "@/lib/api";
@@ -20,6 +21,7 @@ export function CustomerDetailSheet({
   displayName,
 }: CustomerDetailSheetProps) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const ordersQuery = useQuery({
     queryKey: ["customer-orders", customer.id],
     queryFn: () => getCustomerOrders(customer.id),
@@ -101,7 +103,10 @@ export function CustomerDetailSheet({
 
         <button
           type="button"
-          onClick={() => onOpenChange(false)}
+          onClick={() => {
+            onOpenChange(false);
+            void navigate({ to: "/app/customers/$id", params: { id: customer.id } });
+          }}
           className="tap-target text-label w-full rounded-xl border border-border-default text-action-primary"
         >
           {t("customer.viewProfile")}
