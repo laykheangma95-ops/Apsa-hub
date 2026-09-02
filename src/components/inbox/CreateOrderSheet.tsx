@@ -451,7 +451,7 @@ export function CreateOrderSheet({
                         <span
                           className={cn(
                             "text-caption block",
-                            item.stock === 0 ? "text-status-danger" : "text-text-secondary",
+                            item.stock === 0 ? "text-status-danger-text" : "text-text-secondary",
                           )}
                         >
                           {item.stock === 0
