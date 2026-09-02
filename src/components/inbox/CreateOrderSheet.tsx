@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, ErrorState, QuantityStepper, SkeletonBlock } from "@/design-system";
-import { createOrder, getRecentProducts } from "@/lib/api";
+import { createOrder, getRecentProducts, PERMISSION_DENIED } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, usd, usdToKhr } from "@/lib/money";
@@ -51,7 +51,7 @@ export function CreateOrderSheet({
   const [discountValue, setDiscountValue] = useState(0);
   const [deliveryFeeCents, setDeliveryFeeCents] = useState(90);
   const [submitting, setSubmitting] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
 
   const productsQuery = useQuery({
@@ -91,7 +91,7 @@ export function CreateOrderSheet({
     setDiscountValue(0);
     setDeliveryFeeCents(90);
     setSubmitting(false);
-    setFailed(false);
+    setFailure(null);
     setCreatedCode(null);
   }
 
@@ -109,7 +109,7 @@ export function CreateOrderSheet({
   async function submit() {
     if (!product) return;
     setSubmitting(true);
-    setFailed(false);
+    setFailure(null);
     try {
       const order = await createOrder({
         customerId: customer.id,
@@ -134,8 +134,8 @@ export function CreateOrderSheet({
         onCreated(order);
         handleOpenChange(false);
       }, 1100);
-    } catch {
-      setFailed(true);
+    } catch (error) {
+      setFailure(error instanceof Error && error.message === PERMISSION_DENIED ? "permission" : "generic");
       setSubmitting(false);
     }
   }
@@ -366,10 +366,18 @@ export function CreateOrderSheet({
                 </div>
               </div>
 
-              {failed ? (
+              {failure ? (
                 <ErrorState
-                  title={t("createOrder.error.title")}
-                  body={t("createOrder.error.body")}
+                  title={t(
+                    failure === "permission"
+                      ? "createOrder.permission.title"
+                      : "createOrder.error.title",
+                  )}
+                  body={t(
+                    failure === "permission"
+                      ? "createOrder.permission.body"
+                      : "createOrder.error.body",
+                  )}
                   onRetry={() => void submit()}
                   className="py-4"
                 />
@@ -427,13 +435,29 @@ export function CreateOrderSheet({
                     <button
                       type="button"
                       onClick={() => pickProduct(item)}
-                      className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary"
+                      disabled={item.stock === 0}
+                      className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
                     >
                       <span className="min-w-0 flex-1">
                         <span className="text-label block truncate text-text-primary">
                           {localName(item, language)}
                         </span>
-                        <span className="text-caption tnum block text-text-muted">{item.sku}</span>
+                        <span className="text-caption tnum block truncate text-text-muted">
+                          {item.sku}
+                          {item.options?.length
+                            ? ` · ${item.options.map((o) => o.values.join("/")).join(" · ")}`
+                            : ""}
+                        </span>
+                        <span
+                          className={cn(
+                            "text-caption block",
+                            item.stock === 0 ? "text-status-danger" : "text-text-secondary",
+                          )}
+                        >
+                          {item.stock === 0
+                            ? t("createOrder.outOfStock")
+                            : t("createOrder.stock", { count: item.stock })}
+                        </span>
                       </span>
                       <span className="text-financial shrink-0 text-text-primary">
                         {formatMoney(item.price)}
