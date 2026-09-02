@@ -1,0 +1,222 @@
+{
+  "brand": {
+    "name": "APSA",
+    "tagline": "One inbox. Every customer."
+  },
+  "common": {
+    "language": "Language",
+    "khmer": "ខ្មែរ",
+    "english": "English",
+    "retry": "Try again",
+    "loading": "Loading",
+    "close": "Close",
+    "back": "Back",
+    "notifications": "Notifications",
+    "viewAll": "View all",
+    "dismiss": "Dismiss",
+    "search": "Search",
+    "cancel": "Cancel",
+    "increase": "Increase",
+    "decrease": "Decrease",
+    "quantity": "Quantity",
+    "online": "Online",
+    "offline": "Connection lost",
+    "syncing": "Syncing",
+    "synced": "All changes saved",
+    "syncProblem": "Sync problem"
+  },
+  "nav": {
+    "home": "Home",
+    "inbox": "Inbox",
+    "create": "Create",
+    "orders": "Orders",
+    "more": "More",
+    "contacts": "Contacts",
+    "newSale": "New sale",
+    "newOrder": "New order",
+    "addProduct": "Add product",
+    "scanBarcode": "Scan barcode"
+  },
+  "landing": {
+    "nav": {
+      "product": "Product",
+      "workflow": "Workflow",
+      "cambodia": "Built for Cambodia",
+      "start": "Start free"
+    },
+    "hero": {
+      "title": "Your business. All in one place.",
+      "subtitle": "Messages, customers, orders, payments, stock and delivery — one connected flow instead of six disconnected apps.",
+      "primary": "Start free",
+      "secondary": "See how it works",
+      "demoMessage": "Do you have the black one in M?",
+      "demoCustomer": "Dara Sok · 9 orders",
+      "demoOrder": "Create order",
+      "demoPaid": "Paid $19.80",
+      "demoTransit": "In transit · J&T",
+      "demoStock": "Cotton Tee 63 → 61"
+    },
+    "problem": {
+      "title": "Six tools. One lost customer.",
+      "body": "A message arrives on Facebook. The payment lands in a bank app. Delivery lives in a courier chat. The record ends in a notebook. Nothing talks to anything.",
+      "apsa": "APSA",
+      "result": "APSA joins them into one line."
+    },
+    "inbox": {
+      "title": "Every channel in one inbox",
+      "body": "Facebook, Instagram and Telegram in a single list, with follow-up status on every conversation so nothing goes quiet by accident."
+    },
+    "flow": {
+      "title": "Message to order in four taps",
+      "body": "The customer is already filled in. Pick the product, pick the variant, create the order. The thread records it for you.",
+      "step1": "Read the message",
+      "step2": "Pick product and variant",
+      "step3": "Order APSA-0143 created"
+    },
+    "ops": {
+      "title": "Orders, payment, delivery",
+      "orders": "Orders",
+      "ordersBody": "One order, one full story — items, staff, timeline.",
+      "payment": "Payment",
+      "paymentBody": "Cash, KHQR or transfer. Marked paid by a human, never guessed.",
+      "delivery": "Delivery",
+      "deliveryBody": "Courier, tracking and COD amount tracked to the door."
+    },
+    "history": {
+      "title": "History that prevents wrong orders",
+      "body": "Every customer carries their sizes, their address, their last purchase and their notes — so the second order is easier than the first."
+    },
+    "cambodia": {
+      "title": "Built for Cambodia",
+      "khqr": "KHQR",
+      "khqrBody": "The payment method your customers already use.",
+      "currency": "Riel and dollar",
+      "currencyBody": "Both currencies, riel rounded to the nearest 100.",
+      "couriers": "Local couriers",
+      "couriersBody": "J&T, VET, Capital and Grab Express.",
+      "khmer": "Khmer first",
+      "khmerBody": "Khmer is the default language, not an afterthought."
+    },
+    "cta": {
+      "title": "Never lose a customer, message, order, payment or follow-up again.",
+      "body": "Set up your shop in minutes. No card, no contract.",
+      "action": "Start free"
+    },
+    "footer": {
+      "product": "Product",
+      "company": "Company",
+      "support": "Support",
+      "inbox": "Inbox",
+      "orders": "Orders",
+      "pos": "POS",
+      "delivery": "Delivery",
+      "about": "About",
+      "careers": "Careers",
+      "contact": "Contact",
+      "help": "Help centre",
+      "privacy": "Privacy",
+      "terms": "Terms",
+      "rights": "APSA. All rights reserved."
+    }
+  },
+  "home": {
+    "greeting": "Good morning, {{name}}",
+    "subtitle": "Here's what's happening today.",
+    "revenue": "Revenue",
+    "attention": "Needs attention",
+    "attentionSubtitle": "What to do now",
+    "attentionItems": {
+      "unread_conversations": "Unread conversations",
+      "awaiting_payment": "Orders awaiting payment",
+      "awaiting_delivery": "Orders waiting for delivery",
+      "low_stock": "Low stock products"
+    },
+    "quickActions": "Quick actions",
+    "actions": {
+      "receivePayment": "Receive payment",
+      "newOrder": "New order",
+      "addProduct": "Add product",
+      "sendInvoice": "Send invoice"
+    },
+    "overview": "Business overview",
+    "range": { "today": "Today", "week": "Week", "month": "Month" },
+    "metrics": {
+      "orders": "Orders",
+      "new_customers": "New customers",
+      "avg_order": "Average order",
+      "messages": "Messages"
+    },
+    "apsi": {
+      "title": "You replied to 26 messages today.",
+      "body": "That's your best day this week. Three follow-ups are still waiting."
+    },
+    "empty": {
+      "title": "Today is quiet",
+      "body": "No orders yet. Your first sale will show up here.",
+      "action": "New order"
+    },
+    "error": {
+      "title": "Today's numbers didn't load",
+      "body": "The data didn't come back. Check your connection and try again."
+    }
+  },
+  "status": {
+    "unread": "Unread",
+    "needs_reply": "Needs reply",
+    "follow_up": "Follow up",
+    "waiting_customer": "Waiting on customer",
+    "order_created": "Order created",
+    "closed": "Closed",
+    "pending_payment": "Pending payment",
+    "paid": "Paid",
+    "failed": "Failed",
+    "refunded": "Refunded",
+    "confirmed": "Confirmed",
+    "packing": "Packing",
+    "ready": "Ready",
+    "in_transit": "In transit",
+    "delivered": "Delivered",
+    "cancelled": "Cancelled",
+    "returned": "Returned",
+    "low_stock": "Low stock",
+    "out_of_stock": "Out of stock"
+  },
+  "channel": {
+    "facebook": "Facebook",
+    "instagram": "Instagram",
+    "telegram": "Telegram",
+    "pos": "In store"
+  },
+  "money": {
+    "approx": "≈ {{value}}",
+    "amountUsd": "Amount (USD)"
+  },
+  "customer": {
+    "orders": "Orders",
+    "spend": "Lifetime spend",
+    "lastPurchase": "Last purchase",
+    "viewProfile": "View full profile",
+    "noNote": "No notes yet"
+  },
+  "design": {
+    "title": "APSA design system",
+    "subtitle": "Tokens, type, and every component in every state. Reviewed before screens.",
+    "colours": "Colour tokens",
+    "typography": "Typography",
+    "motion": "Motion",
+    "components": "Components",
+    "states": "States",
+    "money": "Money",
+    "openSheet": "Open bottom sheet",
+    "sheetTitle": "Bottom sheet",
+    "sheetBody": "Drag the handle, press Escape, or tap the scrim to close."
+  },
+  "empty": {
+    "title": "Nothing here yet",
+    "body": "When something arrives, it shows up in this list."
+  },
+  "error": {
+    "title": "This didn't load",
+    "body": "The data didn't come back. Check your connection and try again."
+  }
+}
