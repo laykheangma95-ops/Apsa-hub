@@ -58,4 +58,16 @@ export const products: Product[] = [
     options: [{ name: "size", values: ["27", "28", "29", "30", "31"] }],
     companion: "luma",
   },
+  {
+    id: "prd-6",
+    nameKm: "មួកសំឡី",
+    nameEn: "Bucket Hat",
+    sku: "HAT-BKT",
+    price: usd(850),
+    stock: 0,
+    lowStockThreshold: 4,
+    options: [{ name: "colour", values: ["Black", "Cream"] }],
+    companion: "vela",
+  },
 ];
+

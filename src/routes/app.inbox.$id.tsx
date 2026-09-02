@@ -20,7 +20,7 @@ import { getConversation, getCustomer } from "@/lib/api";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import type { CompanionColor, ConversationStatus, Message } from "@/types";
+import type { CompanionColor, ConversationStatus, Message, Order } from "@/types";
 
 export const Route = createFileRoute("/app/inbox/$id")({
   head: () => ({
@@ -75,6 +75,7 @@ function ConversationScreen() {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [orderOpen, setOrderOpen] = useState(false);
   const [savedOpen, setSavedOpen] = useState(false);
+  const [lastOrder, setLastOrder] = useState<Order | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const conversationQuery = useQuery({
@@ -98,6 +99,7 @@ function ConversationScreen() {
     setAppended([]);
     setStatus(null);
     setDraft("");
+    setLastOrder(null);
   }, [id]);
 
   useEffect(() => {
@@ -178,6 +180,14 @@ function ConversationScreen() {
           />
         ) : null}
 
+        {customerQuery.isError ? (
+          <ErrorState
+            title={t("conversation.customerUnavailable.title")}
+            body={t("conversation.customerUnavailable.body")}
+            onRetry={() => void customerQuery.refetch()}
+          />
+        ) : null}
+
         {conversationQuery.isSuccess && messages.length === 0 ? (
           <EmptyState title={t("conversation.empty.title")} body={t("conversation.empty.body")} />
         ) : null}
@@ -192,6 +202,22 @@ function ConversationScreen() {
 
       {/* Persistent order action sits directly above the composer. */}
       <div className="border-t border-border-default px-4 py-2">
+        {lastOrder ? (
+          <nav
+            aria-label={t("conversation.orderActions.label")}
+            className="mb-2 flex gap-2 overflow-x-auto"
+          >
+            {(["payment", "delivery", "view"] as const).map((action) => (
+              <button
+                key={action}
+                type="button"
+                className="tap-target text-label shrink-0 rounded-full border border-border-strong px-4 text-text-primary"
+              >
+                <span className="chip-text">{t(`conversation.orderActions.${action}`)}</span>
+              </button>
+            ))}
+          </nav>
+        ) : null}
         <Button
           className="tap-target h-12 w-full"
           disabled={!customer}
@@ -316,6 +342,7 @@ function ConversationScreen() {
               at: order.createdAt,
             });
             setStatus("order_created");
+            setLastOrder(order);
           }}
         />
       ) : null}

@@ -295,6 +295,16 @@
       "created": "Order {{code}} created",
       "paid": "Order {{code}} marked paid",
       "delivered": "Order {{code}} delivered"
+    },
+    "customerUnavailable": {
+      "title": "Customer details unavailable",
+      "body": "The customer record didn't load, so ordering is paused."
+    },
+    "orderActions": {
+      "label": "Order actions",
+      "payment": "Record payment",
+      "delivery": "Arrange delivery",
+      "view": "View order"
     }
   },
   "createOrder": {
@@ -323,6 +333,14 @@
     "error": {
       "title": "The order wasn't created",
       "body": "Nothing was saved. Try creating it again."
+    },
+    "stock": "{{count}} in stock",
+    "outOfStock": "Out of stock",
+    "variants": "Variants",
+    "noStockHint": "Restock before selling this one.",
+    "permission": {
+      "title": "You can't approve this order",
+      "body": "Orders above $500 need an owner. Ask the shop owner to create it."
     }
   }
 }

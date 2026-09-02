@@ -310,6 +310,16 @@
     outline: 2px solid var(--border-focus);
     outline-offset: 2px;
   }
+
+
+}
+
+/* Unlayered so it wins over shadcn's focus-visible:outline-none utility. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }
 
 /*
