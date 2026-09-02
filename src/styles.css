@@ -310,6 +310,15 @@
     outline: 2px solid var(--border-focus);
     outline-offset: 2px;
   }
+
+  /* shadcn inputs opt out of outlines; keep the ring visible for keyboard users. */
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--border-focus);
+    outline-offset: 1px;
+  }
+
 }
 
 /*
