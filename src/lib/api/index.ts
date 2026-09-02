@@ -145,8 +145,16 @@ export interface CreateOrderInput {
 
 let orderSequence = nextOrderSequence;
 
+/** Staff cannot approve high-value orders; mocked here, not in components. */
+export const ORDER_APPROVAL_LIMIT_CENTS = 50_000;
+export const PERMISSION_DENIED = "permission_denied";
+
 /** Mock order creation. Returns the created order; nothing is persisted. */
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
+  if (input.total.amount > ORDER_APPROVAL_LIMIT_CENTS) {
+    await resolve(null, 160);
+    throw new Error(PERMISSION_DENIED);
+  }
   const code = `APSA-${String(orderSequence++).padStart(4, "0")}`;
   const order: Order = {
     id: `ord-${code}`,
