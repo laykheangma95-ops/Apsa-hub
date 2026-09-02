@@ -58,11 +58,16 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
         ) : null}
 
         {isBusiness ? (
-          <span className={cn(linkClass, "opacity-60")} aria-disabled>
+          <Link
+            to="/app/pos"
+            className={linkClass}
+            activeProps={{ className: "text-action-primary" }}
+          >
             <ShoppingBag className="size-5" aria-hidden />
-            <span className="chip-text">{t("nav.orders")}</span>
-          </span>
+            <span className="chip-text">{t("nav.pos")}</span>
+          </Link>
         ) : (
+
           <span className={cn(linkClass, "opacity-60")} aria-disabled>
             <Users className="size-5" aria-hidden />
             <span className="chip-text">{t("nav.contacts")}</span>

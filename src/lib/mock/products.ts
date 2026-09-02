@@ -4,6 +4,9 @@ import { usd } from "@/lib/money";
 export const products: Product[] = [
   {
     id: "prd-1",
+    category: "skincare",
+    barcode: "8850001000017",
+    reserved: 6,
     nameKm: "ក្រែមការពារកម្តៅថ្ងៃ SPF50",
     nameEn: "Sunscreen SPF50",
     sku: "SUN-50-30",
@@ -14,6 +17,9 @@ export const products: Product[] = [
   },
   {
     id: "prd-2",
+    category: "skincare",
+    barcode: "8850001000024",
+    reserved: 1,
     nameKm: "សេរ៉ូមវីតាមីន C",
     nameEn: "Vitamin C Serum",
     sku: "SER-VTC-30",
@@ -24,6 +30,9 @@ export const products: Product[] = [
   },
   {
     id: "prd-3",
+    category: "apparel",
+    barcode: "8850001000031",
+    reserved: 8,
     nameKm: "អាវយឺតកប្បាស",
     nameEn: "Cotton Tee",
     sku: "TEE-CTN",
@@ -38,6 +47,9 @@ export const products: Product[] = [
   },
   {
     id: "prd-4",
+    category: "accessories",
+    barcode: "8850001000048",
+    reserved: 2,
     nameKm: "កាបូបស្ពាយ",
     nameEn: "Shoulder Bag",
     sku: "BAG-SHD-01",
@@ -49,6 +61,9 @@ export const products: Product[] = [
   },
   {
     id: "prd-5",
+    category: "apparel",
+    barcode: "8850001000055",
+    reserved: 0,
     nameKm: "ខោខូវប៊យ",
     nameEn: "Denim Jeans",
     sku: "JEN-STR",
@@ -60,6 +75,9 @@ export const products: Product[] = [
   },
   {
     id: "prd-6",
+    category: "accessories",
+    barcode: "8850001000062",
+    reserved: 0,
     nameKm: "មួកសំឡី",
     nameEn: "Bucket Hat",
     sku: "HAT-BKT",
@@ -69,5 +87,31 @@ export const products: Product[] = [
     options: [{ name: "colour", values: ["Black", "Cream"] }],
     companion: "vela",
   },
+  {
+    id: "prd-7",
+    category: "drinks",
+    barcode: "8850001000079",
+    reserved: 0,
+    nameKm: "កាហ្វេទឹកដោះគោត្រជាក់",
+    nameEn: "Iced Milk Coffee",
+    sku: "DRK-ICM",
+    price: usd(180),
+    stock: 48,
+    lowStockThreshold: 12,
+    options: [{ name: "size", values: ["Regular", "Large"] }],
+    companion: "suri",
+  },
+  {
+    id: "prd-8",
+    category: "drinks",
+    barcode: "8850001000086",
+    reserved: 4,
+    nameKm: "តែផ្លែឈើ",
+    nameEn: "Fruit Tea",
+    sku: "DRK-FRT",
+    price: usd(220),
+    stock: 5,
+    lowStockThreshold: 8,
+    companion: "minto",
+  },
 ];
-
