@@ -139,7 +139,11 @@
       "sendInvoice": "Send invoice"
     },
     "overview": "Business overview",
-    "range": { "today": "Today", "week": "Week", "month": "Month" },
+    "range": {
+      "today": "Today",
+      "week": "Week",
+      "month": "Month"
+    },
     "metrics": {
       "orders": "Orders",
       "new_customers": "New customers",
@@ -218,5 +222,107 @@
   "error": {
     "title": "This didn't load",
     "body": "The data didn't come back. Check your connection and try again."
+  },
+  "inbox": {
+    "title": "Inbox",
+    "subtitle": "Every channel, one list",
+    "tabs": {
+      "messages": "Messages",
+      "comments": "Comments"
+    },
+    "searchPlaceholder": "Search name, phone or message",
+    "filters": {
+      "all": "All"
+    },
+    "channels": {
+      "all": "All channels"
+    },
+    "pullToRefresh": "Pull to refresh",
+    "releaseToRefresh": "Release to refresh",
+    "refreshing": "Refreshing",
+    "empty": {
+      "title": "No conversations here",
+      "body": "Change the filter, or wait for the next message to arrive."
+    },
+    "emptySearch": {
+      "title": "No matches",
+      "body": "Nothing matched that search. Try a name, phone number or word from the message."
+    },
+    "error": {
+      "title": "The inbox didn't load",
+      "body": "Your conversations didn't come back. Check your connection and try again."
+    },
+    "comments": {
+      "title": "Comments are coming",
+      "body": "Post comments will land in this tab so you can reply without leaving APSA."
+    },
+    "selectPrompt": {
+      "title": "Pick a conversation",
+      "body": "Choose someone on the left and the thread opens here."
+    }
+  },
+  "conversation": {
+    "back": "Back to inbox",
+    "statusLabel": "Follow-up status",
+    "composerPlaceholder": "Write a reply",
+    "send": "Send",
+    "savedReplies": "Saved replies",
+    "attachment": "Attach a photo",
+    "createOrder": "Create order",
+    "openCustomer": "Open customer details",
+    "empty": {
+      "title": "No messages yet",
+      "body": "When this customer writes, the thread starts here."
+    },
+    "error": {
+      "title": "This conversation didn't load",
+      "body": "The thread didn't come back. Check your connection and try again."
+    },
+    "saved": {
+      "greeting": "Hello! How can I help you today?",
+      "price": "The price is $19.80 including delivery.",
+      "stock": "Yes, that one is in stock.",
+      "delivery": "Delivery to Phnom Penh is $0.90 and arrives today."
+    },
+    "customer": {
+      "recentOrders": "Recent orders",
+      "noOrders": "No orders yet",
+      "timeline": "Timeline",
+      "notes": "Notes",
+      "identities": "Channels"
+    },
+    "timeline": {
+      "created": "Order {{code}} created",
+      "paid": "Order {{code}} marked paid",
+      "delivered": "Order {{code}} delivered"
+    }
+  },
+  "createOrder": {
+    "title": "Create order",
+    "customer": "Customer",
+    "locked": "Locked to this conversation",
+    "product": "Product",
+    "searchProducts": "Search products",
+    "recents": "Recent",
+    "allProducts": "All products",
+    "noProducts": "No product matched that search.",
+    "change": "Change product",
+    "variant": "Variant",
+    "quantity": "Quantity",
+    "unitPrice": "Unit price",
+    "discount": "Discount",
+    "discountAmount": "Amount",
+    "discountPercent": "Percent",
+    "delivery": "Delivery fee",
+    "subtotal": "Subtotal",
+    "total": "Total",
+    "submit": "Create order",
+    "creating": "Creating order",
+    "created": "Order {{code}} created",
+    "createdBody": "It's on the thread and waiting for payment.",
+    "error": {
+      "title": "The order wasn't created",
+      "body": "Nothing was saved. Try creating it again."
+    }
   }
 }

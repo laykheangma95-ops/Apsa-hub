@@ -35,10 +35,14 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
           <Home className="size-5" aria-hidden />
           <span className="chip-text">{t("nav.home")}</span>
         </Link>
-        <span className={cn(linkClass, "opacity-60")} aria-disabled>
+        <Link
+          to="/app/inbox"
+          className={linkClass}
+          activeProps={{ className: "text-action-primary" }}
+        >
           <Inbox className="size-5" aria-hidden />
           <span className="chip-text">{t("nav.inbox")}</span>
-        </span>
+        </Link>
 
         {isBusiness ? (
           <div className="flex w-16 shrink-0 justify-center">

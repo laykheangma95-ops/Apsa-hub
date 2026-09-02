@@ -14,7 +14,7 @@ const SNAP_HEIGHT: Record<SheetSnap, string> = {
 interface BottomSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  title?: string;
+  title?: string | undefined;
   snap?: SheetSnap;
   children: ReactNode;
   className?: string;
