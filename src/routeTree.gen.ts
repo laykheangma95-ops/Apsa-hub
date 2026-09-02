@@ -14,7 +14,10 @@ import { Route as DesignRouteImport } from './routes/design'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppPosRouteImport } from './routes/app.pos'
+import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
+import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
+import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -41,10 +44,25 @@ const AppPosRoute = AppPosRouteImport.update({
   path: '/app/pos',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppCustomersIdRoute = AppCustomersIdRouteImport.update({
+  id: '/app/customers/$id',
+  path: '/app/customers/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppDeliveriesIdRoute = AppDeliveriesIdRouteImport.update({
+  id: '/app/deliveries/$id',
+  path: '/app/deliveries/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppInboxIdRoute = AppInboxIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => AppInboxRoute,
+} as any)
+const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
+  id: '/app/orders/$id',
+  path: '/app/orders/$id',
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -53,7 +71,10 @@ export interface FileRoutesByFullPath {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/': typeof AppIndexRoute
+  '/app/customers/$id': typeof AppCustomersIdRoute
+  '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/orders/$id': typeof AppOrdersIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -61,7 +82,10 @@ export interface FileRoutesByTo {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app': typeof AppIndexRoute
+  '/app/customers/$id': typeof AppCustomersIdRoute
+  '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/orders/$id': typeof AppOrdersIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -70,14 +94,34 @@ export interface FileRoutesById {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/': typeof AppIndexRoute
+  '/app/customers/$id': typeof AppCustomersIdRoute
+  '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/orders/$id': typeof AppOrdersIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/design' | '/app/inbox' | '/app/pos' | '/app/' | '/app/inbox/$id'
+    | '/'
+    | '/design'
+    | '/app/inbox'
+    | '/app/pos'
+    | '/app/'
+    | '/app/customers/$id'
+    | '/app/deliveries/$id'
+    | '/app/inbox/$id'
+    | '/app/orders/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/design' | '/app/inbox' | '/app/pos' | '/app' | '/app/inbox/$id'
+  to:
+    | '/'
+    | '/design'
+    | '/app/inbox'
+    | '/app/pos'
+    | '/app'
+    | '/app/customers/$id'
+    | '/app/deliveries/$id'
+    | '/app/inbox/$id'
+    | '/app/orders/$id'
   id:
     | '__root__'
     | '/'
@@ -85,7 +129,10 @@ export interface FileRouteTypes {
     | '/app/inbox'
     | '/app/pos'
     | '/app/'
+    | '/app/customers/$id'
+    | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/orders/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -94,6 +141,9 @@ export interface RootRouteChildren {
   AppInboxRoute: typeof AppInboxRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppCustomersIdRoute: typeof AppCustomersIdRoute
+  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
+  AppOrdersIdRoute: typeof AppOrdersIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -133,12 +183,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppPosRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/app/customers/$id': {
+      id: '/app/customers/$id'
+      path: '/app/customers/$id'
+      fullPath: '/app/customers/$id'
+      preLoaderRoute: typeof AppCustomersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/app/deliveries/$id': {
+      id: '/app/deliveries/$id'
+      path: '/app/deliveries/$id'
+      fullPath: '/app/deliveries/$id'
+      preLoaderRoute: typeof AppDeliveriesIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/app/inbox/$id': {
       id: '/app/inbox/$id'
       path: '/$id'
       fullPath: '/app/inbox/$id'
       preLoaderRoute: typeof AppInboxIdRouteImport
       parentRoute: typeof AppInboxRoute
+    }
+    '/app/orders/$id': {
+      id: '/app/orders/$id'
+      path: '/app/orders/$id'
+      fullPath: '/app/orders/$id'
+      preLoaderRoute: typeof AppOrdersIdRouteImport
+      parentRoute: typeof rootRouteImport
     }
   }
 }
@@ -161,6 +232,9 @@ const rootRouteChildren: RootRouteChildren = {
   AppInboxRoute: AppInboxRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppIndexRoute: AppIndexRoute,
+  AppCustomersIdRoute: AppCustomersIdRoute,
+  AppDeliveriesIdRoute: AppDeliveriesIdRoute,
+  AppOrdersIdRoute: AppOrdersIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

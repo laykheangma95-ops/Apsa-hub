@@ -21,9 +21,14 @@ export type StatusKey =
   | "order_created"
   | "closed"
   | "pending_payment"
+  | "partially_paid"
   | "paid"
   | "failed"
   | "refunded"
+  | "partially_refunded"
+  | "requested"
+  | "accepted"
+  | "picked_up"
   | "confirmed"
   | "packing"
   | "ready"
@@ -99,7 +104,13 @@ export interface OrderItem {
   unitPrice: Money;
 }
 
-export type PaymentStatus = "pending_payment" | "paid" | "failed" | "refunded";
+export type PaymentStatus =
+  | "pending_payment"
+  | "partially_paid"
+  | "paid"
+  | "failed"
+  | "refunded"
+  | "partially_refunded";
 export type FulfillmentStatus =
   | "confirmed"
   | "packing"
@@ -108,6 +119,9 @@ export type FulfillmentStatus =
   | "delivered"
   | "cancelled"
   | "returned";
+
+/** Where the order came from. POS and manual entry are not social channels. */
+export type OrderSource = Channel | "manual";
 
 export interface Order {
   id: string;
@@ -122,7 +136,113 @@ export interface Order {
   paymentStatus: PaymentStatus;
   fulfillmentStatus: FulfillmentStatus;
   createdAt: string;
+  source?: OrderSource;
+  /** staff member who handled the order */
+  staffId?: string;
+  /** mock permission flag — some orders are not visible to this role */
+  restricted?: boolean;
 }
+
+/** Business-language event kinds. Never raw machine names in the UI. */
+export type OrderEventKind =
+  | "created"
+  | "payment_confirmed"
+  | "payment_failed"
+  | "packing_started"
+  | "ready"
+  | "picked_up"
+  | "in_transit"
+  | "delivered"
+  | "cancelled"
+  | "returned"
+  | "refunded"
+  | "note";
+
+export interface OrderEvent {
+  id: string;
+  kind: OrderEventKind;
+  at: string;
+  actor?: string;
+  context?: string;
+}
+
+export interface PaymentRecord {
+  id: string;
+  method: PaymentMethod;
+  amount: Money;
+  status: PaymentStatus;
+  reference?: string;
+  /** manual confirmation by a staff member — never a provider verification */
+  confirmedManuallyBy?: string;
+  at: string;
+}
+
+export type DeliveryStatus =
+  | "requested"
+  | "accepted"
+  | "picked_up"
+  | "in_transit"
+  | "delivered"
+  | "failed"
+  | "cancelled";
+
+export type DeliveryFailureReason =
+  | "customer_unavailable"
+  | "wrong_address"
+  | "customer_rejected"
+  | "courier_issue";
+
+export interface DeliveryEvent {
+  id: string;
+  status: DeliveryStatus;
+  at: string;
+  context?: string;
+}
+
+export interface Delivery {
+  id: string;
+  orderId: string;
+  orderCode: string;
+  customerId: string;
+  courierId: string;
+  courierName: string;
+  trackingNumber: string;
+  status: DeliveryStatus;
+  fee: Money;
+  codAmount?: Money;
+  /** courier holds the cash until settlement — delivered never means paid out */
+  codCollected?: boolean;
+  settlementPending?: boolean;
+  address?: Address;
+  failureReason?: DeliveryFailureReason;
+  events: DeliveryEvent[];
+  restricted?: boolean;
+}
+
+export interface CustomerNote {
+  id: string;
+  customerId: string;
+  body: string;
+  staffName: string;
+  at: string;
+}
+
+export type CustomerEventKind =
+  | "message_received"
+  | "conversation_opened"
+  | "order_created"
+  | "payment_confirmed"
+  | "delivery_created"
+  | "delivered"
+  | "note_added";
+
+export interface CustomerEvent {
+  id: string;
+  kind: CustomerEventKind;
+  at: string;
+  context?: string;
+}
+
 
 export type MessageDirection = "inbound" | "outbound" | "system";
 export type DeliveryState = "sending" | "sent" | "delivered" | "read" | "failed";
