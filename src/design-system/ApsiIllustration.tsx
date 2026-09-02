@@ -11,8 +11,9 @@ interface ApsiIllustrationProps {
 }
 
 /**
- * Loads /apsi/{pose}.png. On failure renders a soft blue blob at the exact
- * requested dimensions so dropping real art in later causes zero layout shift.
+ * Loads /apsi/{pose}.png. Until (or unless) the art loads, a soft blue blob
+ * holds the exact requested dimensions, so dropping real art in later causes
+ * zero layout shift and no broken-image flash.
  */
 export function ApsiIllustration({
   pose = "default",
@@ -20,30 +21,34 @@ export function ApsiIllustration({
   className,
   alt = "",
 }: ApsiIllustrationProps) {
+  const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
-  const style = { width: size, height: size };
-
-  if (failed) {
-    return (
-      <div
-        aria-hidden={alt === "" ? true : undefined}
-        role={alt === "" ? undefined : "img"}
-        aria-label={alt || undefined}
-        className={cn("shrink-0 rounded-[38%]", className)}
-        style={{ ...style, backgroundColor: "var(--companion-nilo)", opacity: 0.6 }}
-      />
-    );
-  }
 
   return (
-    <img
-      src={`/apsi/${pose}.png`}
-      alt={alt}
-      width={size}
-      height={size}
-      onError={() => setFailed(true)}
-      className={cn("shrink-0 rounded-[38%] object-contain", className)}
-      style={style}
-    />
+    <div
+      role={alt ? "img" : undefined}
+      aria-label={alt || undefined}
+      aria-hidden={alt === "" ? true : undefined}
+      className={cn("relative shrink-0 overflow-hidden rounded-[38%]", className)}
+      style={{
+        width: size,
+        height: size,
+        backgroundColor: loaded ? "transparent" : "var(--companion-nilo)",
+        opacity: loaded ? 1 : 0.6,
+      }}
+    >
+      {failed ? null : (
+        <img
+          src={`/apsi/${pose}.png`}
+          alt=""
+          width={size}
+          height={size}
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+          className="size-full object-contain"
+          style={{ opacity: loaded ? 1 : 0 }}
+        />
+      )}
+    </div>
   );
 }
