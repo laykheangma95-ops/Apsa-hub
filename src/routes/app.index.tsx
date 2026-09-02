@@ -22,7 +22,7 @@ import {
 } from "@/design-system";
 import type { MetricRange } from "@/types";
 
-export const Route = createFileRoute("/app")({
+export const Route = createFileRoute("/app/")({
   head: () => ({
     meta: [
       { title: "Business Home — APSA" },

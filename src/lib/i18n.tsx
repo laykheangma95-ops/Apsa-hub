@@ -18,6 +18,8 @@ if (!i18n.isInitialized) {
     fallbackLng: "en",
     interpolation: { escapeValue: false },
     react: { useSuspense: false },
+    // Initialize synchronously so SSR and the first client render match.
+    ...({ initImmediate: false } as object),
   });
 }
 

@@ -19,7 +19,7 @@ interface ConversationRowProps {
   companion: CompanionColor;
   assignedStaff?: Staff | undefined;
   onClick?: () => void;
-  className?: string;
+  className?: string | undefined;
 }
 
 export function ConversationRow({
