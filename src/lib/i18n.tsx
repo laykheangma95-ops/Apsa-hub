@@ -16,9 +16,10 @@ if (!i18n.isInitialized) {
     },
     lng: DEFAULT_LANGUAGE,
     fallbackLng: "en",
-    initImmediate: false,
     interpolation: { escapeValue: false },
     react: { useSuspense: false },
+    // Initialize synchronously so SSR and the first client render match.
+    ...({ initImmediate: false } as object),
   });
 }
 
