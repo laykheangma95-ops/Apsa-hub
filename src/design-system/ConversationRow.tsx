@@ -17,7 +17,7 @@ interface ConversationRowProps {
   conversation: Conversation;
   customerName: string;
   companion: CompanionColor;
-  assignedStaff?: Staff;
+  assignedStaff?: Staff | undefined;
   onClick?: () => void;
   className?: string;
 }

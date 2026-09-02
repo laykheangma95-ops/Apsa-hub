@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 
 interface AppHeaderProps {
   title: string;
-  subtitle?: string;
+  subtitle?: string | undefined;
   onBack?: () => void;
   onShopSwitch?: () => void;
   notificationCount?: number;
