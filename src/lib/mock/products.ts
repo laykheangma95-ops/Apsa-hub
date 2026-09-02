@@ -1,0 +1,61 @@
+import type { Product } from "@/types";
+import { usd } from "@/lib/money";
+
+export const products: Product[] = [
+  {
+    id: "prd-1",
+    nameKm: "ក្រែមការពារកម្តៅថ្ងៃ SPF50",
+    nameEn: "Sunscreen SPF50",
+    sku: "SUN-50-30",
+    price: usd(1250),
+    stock: 24,
+    lowStockThreshold: 6,
+    companion: "suri",
+  },
+  {
+    id: "prd-2",
+    nameKm: "សេរ៉ូមវីតាមីន C",
+    nameEn: "Vitamin C Serum",
+    sku: "SER-VTC-30",
+    price: usd(1800),
+    stock: 4,
+    lowStockThreshold: 6,
+    companion: "minto",
+  },
+  {
+    id: "prd-3",
+    nameKm: "អាវយឺតកប្បាស",
+    nameEn: "Cotton Tee",
+    sku: "TEE-CTN",
+    price: usd(990),
+    stock: 63,
+    lowStockThreshold: 10,
+    options: [
+      { name: "colour", values: ["Black", "White", "Cream"] },
+      { name: "size", values: ["S", "M", "L", "XL"] },
+    ],
+    companion: "nilo",
+  },
+  {
+    id: "prd-4",
+    nameKm: "កាបូបស្ពាយ",
+    nameEn: "Shoulder Bag",
+    sku: "BAG-SHD-01",
+    price: usd(2400),
+    stock: 11,
+    lowStockThreshold: 4,
+    options: [{ name: "colour", values: ["Black", "Brown"] }],
+    companion: "vela",
+  },
+  {
+    id: "prd-5",
+    nameKm: "ខោខូវប៊យ",
+    nameEn: "Denim Jeans",
+    sku: "JEN-STR",
+    price: usd(1950),
+    stock: 2,
+    lowStockThreshold: 5,
+    options: [{ name: "size", values: ["27", "28", "29", "30", "31"] }],
+    companion: "luma",
+  },
+];
