@@ -2,6 +2,7 @@
  * The only data boundary. Components call these functions.
  * When a real backend arrives, only the bodies change.
  */
+import { usd } from "@/lib/money";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -19,6 +20,8 @@ import type {
   Money,
   Order,
   OrderItem,
+  PaymentMethod,
+  Sale,
   Product,
   Shop,
   Staff,
@@ -171,4 +174,73 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
     createdAt: new Date().toISOString(),
   };
   return resolve(order, 240);
+}
+
+/* ----------------------------- POS (mock only) ---------------------------- */
+
+export async function getPosProducts(): Promise<Product[]> {
+  return resolve(products);
+}
+
+export async function searchCustomers(query: string): Promise<Customer[]> {
+  const q = query.trim().toLowerCase();
+  if (!q) return resolve(customers.slice(0, 4), 80);
+  const digits = q.replace(/\s/g, "");
+  return resolve(
+    customers.filter(
+      (c) =>
+        c.nameKm.toLowerCase().includes(q) ||
+        c.nameEn.toLowerCase().includes(q) ||
+        c.phone.replace(/\s/g, "").includes(digits),
+    ),
+    80,
+  );
+}
+
+export interface QuickCustomerInput {
+  name: string;
+  phone: string;
+}
+
+/** Mock quick-create. Nothing is persisted beyond this session's return value. */
+export async function createQuickCustomer(input: QuickCustomerInput): Promise<Customer> {
+  const customer: Customer = {
+    id: `cus-new-${Date.now()}`,
+    nameKm: input.name,
+    nameEn: input.name,
+    phone: input.phone,
+    identities: [{ channel: "pos", handle: input.phone }],
+    tags: [],
+    orderCount: 0,
+    lifetimeSpend: usd(0),
+    companion: "nilo",
+  };
+  return resolve(customer, 200);
+}
+
+export interface CreateSaleInput {
+  items: OrderItem[];
+  subtotal: Money;
+  discount: Money;
+  total: Money;
+  paymentMethod: PaymentMethod;
+  customerId?: string;
+}
+
+/** Mock sale creation. COD is never financially settled. */
+export async function createSale(input: CreateSaleInput): Promise<Sale> {
+  const code = `APSA-${String(orderSequence++).padStart(4, "0")}`;
+  const sale: Sale = {
+    id: `sal-${code}`,
+    code,
+    items: input.items,
+    subtotal: input.subtotal,
+    discount: input.discount,
+    total: input.total,
+    paymentMethod: input.paymentMethod,
+    paymentStatus: input.paymentMethod === "cod" ? "pending_payment" : "paid",
+    ...(input.customerId ? { customerId: input.customerId } : {}),
+    createdAt: new Date().toISOString(),
+  };
+  return resolve(sale, 260);
 }

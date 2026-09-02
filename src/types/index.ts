@@ -82,7 +82,13 @@ export interface Product {
   lowStockThreshold: number;
   options?: ProductVariantOption[];
   companion: CompanionColor;
+  /** units held for confirmed-but-unfulfilled orders */
+  reserved?: number;
+  category?: ProductCategory;
+  barcode?: string;
 }
+
+export type ProductCategory = "skincare" | "apparel" | "accessories" | "drinks";
 
 export interface OrderItem {
   productId: string;
@@ -159,6 +165,21 @@ export interface Staff {
   name: string;
   role: StaffRole;
   companion: CompanionColor;
+}
+
+export type PaymentMethod = "cash" | "khqr" | "bank_transfer" | "cod";
+
+export interface Sale {
+  id: string;
+  code: string;
+  items: OrderItem[];
+  subtotal: Money;
+  discount: Money;
+  total: Money;
+  paymentMethod: PaymentMethod;
+  paymentStatus: PaymentStatus;
+  customerId?: string;
+  createdAt: string;
 }
 
 export interface Courier {

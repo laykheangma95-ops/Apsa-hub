@@ -342,5 +342,102 @@
       "title": "You can't approve this order",
       "body": "Orders above $500 need an owner. Ask the shop owner to create it."
     }
+  },
+  "pos": {
+    "title": "Point of sale",
+    "products": "Products",
+    "optional": "Optional",
+    "searchLabel": "Search products",
+    "searchPlaceholder": "Name, SKU or barcode",
+    "scan": "Scan barcode",
+    "categories": "Categories",
+    "view": {
+      "grid": "Grid view",
+      "list": "List view"
+    },
+    "category": {
+      "all": "All",
+      "skincare": "Skincare",
+      "apparel": "Apparel",
+      "accessories": "Accessories",
+      "drinks": "Drinks"
+    },
+    "addToCartLabel": "Add {{name}} to cart",
+    "stockAvailable": "{{count}} available",
+    "stockReserved": "{{count}} reserved",
+    "unitPrice": "Unit price",
+    "addToCart": "Add to cart",
+    "itemCount": "{{count}} items",
+    "subtotal": "Subtotal",
+    "total": "Total",
+    "checkout": "Checkout",
+    "completeSale": "Complete sale",
+    "markPaid": "Mark as paid",
+    "paymentMethod": "Payment method",
+    "method": {
+      "cash": "Cash",
+      "khqr": "KHQR",
+      "bank_transfer": "Bank transfer",
+      "cod": "Cash on delivery"
+    },
+    "cash": {
+      "received": "Cash received",
+      "change": "Change",
+      "shortfall": "Cash received is less than the total."
+    },
+    "manualConfirm": "Confirm the transfer on your bank app, then mark the sale as paid.",
+    "codNote": "Payment is collected on delivery. The sale stays pending until paid.",
+    "offline": "You are offline. Sales cannot be completed until the connection returns.",
+    "cart": {
+      "title": "Cart",
+      "empty": {
+        "title": "Cart is empty",
+        "body": "Add products to start a sale."
+      },
+      "remove": "Remove {{name}}",
+      "clear": "Clear cart",
+      "clearConfirmTitle": "Clear all items from this cart?"
+    },
+    "discount": {
+      "label": "Discount",
+      "amount": "Amount",
+      "percent": "Percent",
+      "approval": "This discount is above the cashier limit and needs manager approval."
+    },
+    "customer": {
+      "title": "Customer",
+      "add": "Add customer",
+      "remove": "Remove customer",
+      "search": "Search name or phone",
+      "recent": "Recent customers",
+      "results": "Results",
+      "quickCreate": "Create new customer",
+      "name": "Name",
+      "phone": "Phone",
+      "save": "Save customer",
+      "empty": {
+        "title": "No customer found",
+        "body": "Try another name or phone number, or create a new customer."
+      }
+    },
+    "empty": {
+      "title": "No products yet",
+      "body": "Add products to your catalogue to start selling."
+    },
+    "noResults": {
+      "title": "No matching products",
+      "body": "Try a different name, SKU or barcode."
+    },
+    "error": {
+      "title": "Payment could not be recorded",
+      "body": "Nothing was charged. Try again."
+    },
+    "success": {
+      "title": "Sale complete",
+      "newSale": "New sale",
+      "viewReceipt": "View receipt",
+      "viewOrder": "View order",
+      "codNote": "Collect payment when the order is delivered."
+    }
   }
 }
