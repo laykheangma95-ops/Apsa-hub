@@ -1,0 +1,81 @@
+<svg viewBox="0 0 640 400" xmlns="http://www.w3.org/2000/svg" style="font-family: var(--font-sans)">
+  <style>
+    .lbl { font-size: 14px; font-weight: 480; fill: hsl(var(--foreground)); }
+    .sm { font-size: 12px; fill: hsl(var(--muted-foreground)); }
+    .tag { font-size: 12px; fill: hsl(var(--border)); }
+    .box { fill: none; stroke: hsl(var(--muted-foreground)); stroke-width: 1; }
+    .rail { stroke: hsl(var(--border)); stroke-width: 1; }
+    .fill { fill: hsl(var(--muted)); stroke: none; }
+    .greek { fill: hsl(var(--border)); }
+  </style>
+
+  <!-- Team screen -->
+  <rect x="8" y="24" width="180" height="340" rx="8" class="box"/>
+  <text x="20" y="16" class="tag">team screen /app/team</text>
+  <rect x="8" y="24" width="180" height="40" rx="8" class="fill"/>
+  <text x="20" y="49" class="lbl">Team</text>
+
+  <rect x="20" y="76" width="156" height="52" rx="8" class="box"/>
+  <circle cx="42" cy="102" r="12" class="fill"/>
+  <text x="62" y="98" class="lbl">Sokchea</text>
+  <rect x="62" y="106" width="52" height="12" rx="6" fill="hsl(var(--accent))"/>
+  <text x="68" y="116" style="font-size:9px" fill="hsl(var(--accent-foreground))">Owner</text>
+
+  <rect x="20" y="136" width="156" height="52" rx="8" class="box"/>
+  <circle cx="42" cy="162" r="12" class="fill"/>
+  <text x="62" y="158" class="lbl">Lyda</text>
+  <rect x="62" y="166" width="40" height="10" rx="5" class="greek"/>
+
+  <rect x="20" y="196" width="156" height="52" rx="8" class="box"/>
+  <circle cx="42" cy="222" r="12" class="fill"/>
+  <text x="62" y="218" class="lbl">Ratana</text>
+  <rect x="62" y="226" width="46" height="10" rx="5" class="greek"/>
+
+  <rect x="20" y="256" width="156" height="52" rx="8" class="box" stroke-dasharray="4 3"/>
+  <circle cx="42" cy="282" r="12" class="fill"/>
+  <text x="62" y="278" class="lbl">Chan</text>
+  <text x="62" y="292" class="sm">Invite pending</text>
+
+  <rect x="20" y="320" width="156" height="32" rx="8" fill="hsl(var(--primary))"/>
+  <text x="52" y="341" style="font-size:13px" fill="hsl(var(--primary-foreground))">Invite staff</text>
+
+  <!-- Workspace switcher -->
+  <rect x="228" y="24" width="180" height="340" rx="8" class="box"/>
+  <text x="240" y="16" class="tag">workspace switcher sheet</text>
+  <line x1="290" y1="44" x2="346" y2="44" class="rail" stroke-width="3" stroke-linecap="round"/>
+  <text x="240" y="72" class="lbl">Switch business</text>
+
+  <rect x="240" y="88" width="156" height="56" rx="8" class="box" stroke="hsl(var(--accent))"/>
+  <text x="252" y="110" class="lbl">Sreyneang Shop</text>
+  <text x="252" y="128" class="sm">Business · Phnom Penh · Owner</text>
+  <circle cx="380" cy="116" r="7" fill="hsl(var(--accent))"/>
+
+  <rect x="240" y="156" width="156" height="56" rx="8" class="box"/>
+  <text x="252" y="178" class="lbl">Bao Bao Shop</text>
+  <text x="252" y="196" class="sm">Business · Manager</text>
+
+  <rect x="240" y="228" width="156" height="30" rx="8" class="box" stroke-dasharray="4 3"/>
+  <text x="252" y="248" class="sm">Workspace settings (soon)</text>
+
+  <!-- Invite sheet -->
+  <rect x="448" y="24" width="184" height="340" rx="8" class="box"/>
+  <text x="460" y="16" class="tag">invite staff sheet</text>
+  <line x1="512" y1="44" x2="568" y2="44" class="rail" stroke-width="3" stroke-linecap="round"/>
+  <text x="460" y="72" class="lbl">Invite staff</text>
+  <rect x="460" y="86" width="160" height="30" rx="8" class="box"/>
+  <text x="470" y="105" class="sm">Name</text>
+  <rect x="460" y="124" width="160" height="30" rx="8" class="box"/>
+  <text x="470" y="143" class="sm">Phone or email</text>
+
+  <text x="460" y="176" class="lbl">Role</text>
+  <rect x="460" y="186" width="160" height="42" rx="8" class="box"/>
+  <text x="470" y="203" class="lbl">Cashier</text>
+  <text x="470" y="219" class="sm">Can use POS and handle sales</text>
+  <rect x="460" y="236" width="160" height="42" rx="8" class="box"/>
+  <text x="470" y="253" class="lbl">Sales</text>
+  <text x="470" y="269" class="sm">Can reply and create orders</text>
+  <text x="460" y="296" class="sm">Owner is not offered here</text>
+
+  <rect x="460" y="320" width="160" height="32" rx="8" fill="hsl(var(--primary))"/>
+  <text x="500" y="341" style="font-size:13px" fill="hsl(var(--primary-foreground))">Send invite</text>
+</svg>
