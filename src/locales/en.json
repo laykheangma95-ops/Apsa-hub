@@ -39,6 +39,14 @@
     "team": "Team"
   },
   "landing": {
+    "head": {
+      "title": "APSA — One workspace for every Cambodian seller",
+      "description": "APSA is designed for Facebook, Instagram and Telegram messages, connected with orders, payments and delivery — one workspace built for Cambodian social-commerce sellers.",
+      "ogTitle": "APSA — One workspace for every Cambodian seller",
+      "ogDescription": "Never lose a customer, message, order, payment or follow-up again. Khmer first, built to support KHQR.",
+      "twitterTitle": "APSA — One workspace for every Cambodian seller",
+      "twitterDescription": "Messages, customers, orders, payments, stock and delivery in one connected flow. Khmer first, built to support KHQR."
+    },
     "nav": {
       "product": "Product",
       "workflow": "Workflow",
@@ -98,7 +106,7 @@
       "step5i": "Inventory",
       "step6": "History",
       "step7": "Analytics",
-      "step1desc": "A message arrives from any channel.",
+      "step1desc": "A customer message opens the conversation.",
       "step2desc": "Customer record is linked to the order.",
       "step3desc": "Order created within the thread.",
       "step4desc": "Staff confirms cash, KHQR or transfer.",
@@ -152,7 +160,7 @@
       "step2": "Pick product",
       "step3": "Order created",
       "step1msg": "Do you have the black one in M?",
-      "step1detail": "Arrives from any channel",
+      "step1detail": "From the customer conversation",
       "step2hint": "Customer already attached",
       "step3code": "APSA-0143",
       "step3detail": "Thread records it. Payment follows."

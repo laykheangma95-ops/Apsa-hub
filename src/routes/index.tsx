@@ -21,30 +21,19 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { ApsiIllustration, ChannelBadge, LanguageToggle, StatusChip } from "@/design-system";
+import i18n from "@/lib/i18n";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "APSA — One workspace for every Cambodian seller" },
-      {
-        name: "description",
-        content:
-          "APSA connects Facebook, Instagram and Telegram messages with orders, payments and delivery — one workspace built for Cambodian social-commerce sellers.",
-      },
-      { property: "og:title", content: "APSA — One workspace for every Cambodian seller" },
-      {
-        property: "og:description",
-        content:
-          "Never lose a customer, message, order, payment, or follow-up again. Khmer first, KHQR ready.",
-      },
+      { title: i18n.t("landing.head.title") },
+      { name: "description", content: i18n.t("landing.head.description") },
+      { property: "og:title", content: i18n.t("landing.head.ogTitle") },
+      { property: "og:description", content: i18n.t("landing.head.ogDescription") },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:title", content: "APSA — One workspace for every Cambodian seller" },
-      {
-        name: "twitter:description",
-        content:
-          "Messages, customers, orders, payments, stock and delivery in one connected flow. Khmer first, KHQR ready.",
-      },
+      { name: "twitter:title", content: i18n.t("landing.head.twitterTitle") },
+      { name: "twitter:description", content: i18n.t("landing.head.twitterDescription") },
     ],
   }),
   component: Landing,
