@@ -298,6 +298,42 @@
   background-image: var(--gradient-brand);
 }
 
+@utility elevation-1 {
+  box-shadow: var(--elevation-1);
+}
+@utility elevation-2 {
+  box-shadow: var(--elevation-2);
+}
+@utility elevation-3 {
+  box-shadow: var(--elevation-3);
+}
+@utility elevation-action {
+  box-shadow: var(--elevation-action);
+}
+
+/* Glass is for sheets, floating nav and overlays. Never a content card. */
+@utility surface-glass {
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(var(--surface-glass-blur));
+  -webkit-backdrop-filter: blur(var(--surface-glass-blur));
+}
+
+/* One spacing rhythm across every screen */
+@utility stack-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-section);
+}
+@utility stack-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-group);
+}
+@utility pad-card {
+  padding: var(--space-card);
+}
+
+
 @utility tap-target {
   min-height: 44px;
   min-width: 44px;
