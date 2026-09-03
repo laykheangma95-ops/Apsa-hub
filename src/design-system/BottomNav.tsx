@@ -11,7 +11,7 @@ interface BottomNavProps {
 }
 
 const linkClass =
-  "tap-target flex flex-1 flex-col items-center justify-center gap-1 px-1 py-2 text-caption text-text-secondary transition-colors";
+  "tap-target flex flex-1 flex-col items-center justify-center gap-1 px-1 py-2 text-caption text-text-secondary transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
 export function BottomNav({ workspace = "business", onCreate, className }: BottomNavProps) {
   const { t } = useTranslation();
@@ -21,10 +21,11 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
     <nav
       aria-label={t("nav.home")}
       className={cn(
-        "fixed inset-x-0 bottom-0 z-40 border-t border-border-default bg-surface-primary pb-[env(safe-area-inset-bottom)]",
+        "elevation-3 surface-glass fixed inset-x-0 bottom-0 z-40 border-t border-border-default pb-[env(safe-area-inset-bottom)]",
         className,
       )}
     >
+
       <div className="relative mx-auto flex max-w-[560px] items-stretch">
         <Link
           to="/app"
@@ -50,7 +51,7 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
               type="button"
               onClick={onCreate}
               aria-label={t("nav.create")}
-              className="absolute -top-5 flex size-14 items-center justify-center rounded-full bg-action-primary text-text-on-action shadow-[0_8px_20px_rgba(37,99,217,0.35)] transition-colors hover:bg-action-primary-hover active:bg-action-primary-pressed"
+              className="absolute -top-5 flex size-14 items-center justify-center rounded-full bg-action-primary text-text-on-action elevation-action transition-colors hover:bg-action-primary-hover active:bg-action-primary-pressed"
             >
               <Plus className="size-6" aria-hidden />
             </button>

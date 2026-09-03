@@ -41,7 +41,7 @@ export function MetricTile({ label, value, deltaPercent, series, className }: Me
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-2xl border border-border-default bg-surface-primary p-3",
+        "elevation-1 flex flex-col gap-1.5 rounded-2xl border border-border-default bg-surface-primary p-4",
         className,
       )}
     >
@@ -50,7 +50,7 @@ export function MetricTile({ label, value, deltaPercent, series, className }: Me
       {deltaPercent !== undefined ? (
         <span
           className={cn(
-            "text-caption inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5",
+            "text-caption tnum inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5",
             up
               ? "bg-status-success-soft text-status-success-text"
               : "bg-status-danger-soft text-status-danger-text",
