@@ -126,65 +126,36 @@ function InboxLayout() {
                 />
               </div>
 
-              <div
-                role="group"
-                aria-label={t("inbox.filters.all")}
-                className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1"
-              >
+              <ChipRow label={t("inbox.filters.all")}>
                 {STATUS_FILTERS.map((value) => {
                   const count = value === "all" ? counts["all"] : counts[value];
-                  const active = status === value;
                   return (
-                    <button
+                    <Chip
                       key={value}
-                      type="button"
-                      aria-pressed={active}
+                      selected={status === value}
                       onClick={() => setStatus(value)}
-                      className={cn(
-                        "tap-target text-caption shrink-0 rounded-full border px-3 whitespace-nowrap",
-                        active
-                          ? "border-action-primary bg-action-primary text-text-on-action"
-                          : "border-border-default bg-surface-primary text-text-secondary",
-                      )}
+                      count={typeof count === "number" ? count : undefined}
                     >
-                      <span className="chip-text">
-                        {value === "all" ? t("inbox.filters.all") : t(`status.${value}`)}
-                        {typeof count === "number" ? ` · ${count}` : ""}
-                      </span>
-                    </button>
+                      {value === "all" ? t("inbox.filters.all") : t(`status.${value}`)}
+                    </Chip>
                   );
                 })}
-              </div>
+              </ChipRow>
 
-              <div
-                role="group"
-                aria-label={t("inbox.channels.all")}
-                className="-mx-4 flex gap-2 overflow-x-auto px-4"
-              >
-                {CHANNEL_FILTERS.map((value) => {
-                  const active = channel === value;
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => setChannel(value)}
-                      className={cn(
-                        "tap-target text-caption shrink-0 rounded-full border px-3 whitespace-nowrap",
-                        active
-                          ? "border-border-strong bg-surface-secondary text-text-primary"
-                          : "border-border-default bg-surface-primary text-text-secondary",
-                      )}
-                    >
-                      <span className="chip-text">
-                        {value === "all" ? t("inbox.channels.all") : t(`channel.${value}`)}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              <ChipRow label={t("inbox.channels.all")}>
+                {CHANNEL_FILTERS.map((value) => (
+                  <Chip
+                    key={value}
+                    selected={channel === value}
+                    onClick={() => setChannel(value)}
+                  >
+                    {value === "all" ? t("inbox.channels.all") : t(`channel.${value}`)}
+                  </Chip>
+                ))}
+              </ChipRow>
             </>
           ) : null}
+
         </div>
       </AppHeader>
 
