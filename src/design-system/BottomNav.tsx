@@ -21,10 +21,11 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
     <nav
       aria-label={t("nav.home")}
       className={cn(
-        "fixed inset-x-0 bottom-0 z-40 border-t border-border-default bg-surface-primary pb-[env(safe-area-inset-bottom)]",
+        "elevation-3 surface-glass fixed inset-x-0 bottom-0 z-40 border-t border-border-default pb-[env(safe-area-inset-bottom)]",
         className,
       )}
     >
+
       <div className="relative mx-auto flex max-w-[560px] items-stretch">
         <Link
           to="/app"
