@@ -19,40 +19,21 @@
 -- ── organizations: add membership-based SELECT policy ────────────────────────
 -- Only active members of the organization can read it.
 -- Application layer enforces the full authorization chain; RLS is defense-in-depth.
+-- Uses is_active_member_of() SECURITY DEFINER helper from 006_memberships.sql to
+-- avoid RLS recursion through memberships (same pattern as memberships_select_org_roster).
 CREATE POLICY "organizations_select_member"
   ON public.organizations FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = organizations.id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+  USING (public.is_active_member_of(id));
 
 -- ── workspaces: add membership-based SELECT policy ───────────────────────────
 CREATE POLICY "workspaces_select_member"
   ON public.workspaces FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = workspaces.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+  USING (public.is_active_member_of(organization_id));
 
 -- ── locations: add membership-based SELECT policy ────────────────────────────
 CREATE POLICY "locations_select_member"
   ON public.locations FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = locations.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+  USING (public.is_active_member_of(organization_id));
 
 -- ── roles: add org-specific custom role SELECT policy ────────────────────────
 -- Org-specific roles (organization_id IS NOT NULL): active members of that org can read.
@@ -62,12 +43,7 @@ CREATE POLICY "roles_select_org_member"
   ON public.roles FOR SELECT
   USING (
     organization_id IS NOT NULL AND
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = roles.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
+    public.is_active_member_of(organization_id)
   );
 
 -- ── role_permissions: add org-specific mapping SELECT policy ─────────────────
@@ -81,11 +57,9 @@ CREATE POLICY "role_permissions_select_org_member"
     EXISTS (
       SELECT 1
       FROM public.roles r
-      JOIN public.memberships m ON m.organization_id = r.organization_id
       WHERE r.id = role_permissions.role_id
         AND r.organization_id IS NOT NULL
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
+        AND public.is_active_member_of(r.organization_id)
     )
   );
 

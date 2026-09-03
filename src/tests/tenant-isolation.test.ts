@@ -22,25 +22,45 @@
  * 14.  Audit log access respects org.read permission gate
  * 15.  Tenant-private role_permissions do not leak to other orgs
  *
+ * Unit tests (no DB required):
+ *  U1.  Error class invariants
+ *  U2.  auditLog() rejects mandatory-audit actions (Blocker 4 guard)
+ *  U3.  MANDATORY_AUDIT_ACTIONS set is correct
+ *
+ * ── Running live tests ────────────────────────────────────────────────────────
+ * Live tests require a real Supabase connection. Configure the following
+ * environment variables before running (use a dedicated test project, NOT production):
+ *
+ *   VITE_SUPABASE_URL=https://<your-test-project>.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY=<your-test-service-role-key>
+ *   VITE_SUPABASE_ANON_KEY=<your-test-anon-key>
+ *
+ * FIX (Blocker 5): The env vars above are the ones actually read by the server
+ * client (src/lib/supabase/server.ts). Earlier versions of this file documented
+ * SUPABASE_TEST_* names which were never read by the server client, making it
+ * impossible to run live tests with test-specific credentials. Always configure
+ * the VITE_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY pair.
+ *
+ * Seed data: copy supabase/README.md test-seed section and run the migrations
+ * against the test project before running these tests. Seed data constants at
+ * the top must match the seeded test rows exactly.
+ *
  * Run: bun test src/tests/tenant-isolation.test.ts
- *
- * LIVE vs UNIT: Most tests require a real Supabase connection to test DB-level behavior.
- * Tests that require live DB will skip gracefully if SUPABASE_* env vars are absent.
- * Unit-style tests (error classes, application-layer behavior with mocked DB responses)
- * run without any external connection.
- *
- * Live test setup: copy .env.example to .env.test.local, fill in SUPABASE_TEST_* values,
- * then run the migration sequence against the test project before running tests.
- * Seed data constants at the top must match the seeded test rows exactly.
  */
 
-import { describe, it, expect, beforeAll, afterAll, mock } from "bun:test";
+import { describe, it, expect, beforeAll } from "bun:test";
 import {
   AuthorizationService,
   ForbiddenError,
   UnauthorizedError,
   assertOwnerWouldRemain,
 } from "../server/auth/authorization";
+import {
+  auditLog,
+  auditLogRequired,
+  MANDATORY_AUDIT_ACTIONS,
+  type AuditAction,
+} from "../server/auth/audit";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 // These UUIDs represent test data to be seeded in a test database.
@@ -60,6 +80,28 @@ const USER_NO_MEMBERSHIP = "user-none-0000-0000-0000-000000000099";
 const USER_SUSPENDED = "user-susp-0000-0000-0000-000000000003";
 const USER_REMOVED = "user-rmvd-0000-0000-0000-000000000004";
 
+// ── Environment check ─────────────────────────────────────────────────────────
+
+let supabaseConfigured = false;
+
+beforeAll(() => {
+  // FIX (Blocker 5): Verify the env vars that the server client actually reads.
+  // The server client (src/lib/supabase/server.ts) reads VITE_SUPABASE_URL and
+  // SUPABASE_SERVICE_ROLE_KEY. Checking these here ensures the skip logic in
+  // requireSupabase() correctly reflects real connectivity, not a var-name mismatch.
+  supabaseConfigured =
+    Boolean(process.env["VITE_SUPABASE_URL"]) &&
+    Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
+
+  if (!supabaseConfigured) {
+    console.warn(
+      "[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. " +
+        "Configure a test Supabase project and set those env vars to run live tests. " +
+        "Unit tests (U1–U3) will still run.",
+    );
+  }
+});
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function expectForbidden(fn: () => Promise<unknown>): Promise<void> {
@@ -76,6 +118,10 @@ async function expectForbidden(fn: () => Promise<unknown>): Promise<void> {
 
 /** Skip test gracefully when Supabase is not configured. */
 async function requireSupabase<T>(fn: () => Promise<T>): Promise<T | null> {
+  if (!supabaseConfigured) {
+    console.warn("[SKIP] Supabase not configured — skipping live test");
+    return null;
+  }
   try {
     return await fn();
   } catch (e) {
@@ -96,7 +142,7 @@ async function requireSupabase<T>(fn: () => Promise<T>): Promise<T | null> {
 
 // ── Unit tests (no DB required) ───────────────────────────────────────────────
 
-describe("Error class invariants", () => {
+describe("U1: Error class invariants", () => {
   it("ForbiddenError has correct statusCode and name", () => {
     const err = new ForbiddenError("test");
     expect(err.statusCode).toBe(403);
@@ -123,6 +169,126 @@ describe("Error class invariants", () => {
   });
 });
 
+describe("U2: auditLog() rejects mandatory-audit actions (Blocker 4 guard)", () => {
+  // FIX (Blocker 4): auditLog() is best-effort and must NOT be used for
+  // mandatory high-risk actions. It now throws a programming-error at runtime
+  // if called with a mandatory action, so the mistake is caught in development.
+  // These unit tests verify the guard fires for every mandatory action.
+
+  it("auditLog() throws when called with 'orders.refund' (mandatory)", async () => {
+    // We don't need a real ctx or DB — the guard fires before any DB call.
+    const fakeCtx = {
+      userId: "u1",
+      organizationId: "org1",
+    } as unknown as Parameters<typeof auditLog>[0];
+
+    await expect(
+      auditLog(fakeCtx, { action: "orders.refund", resourceType: "order" }),
+    ).rejects.toThrow(/mandatory-audit/);
+  });
+
+  it("auditLog() throws when called with 'payments.override' (mandatory)", async () => {
+    const fakeCtx = {
+      userId: "u1",
+      organizationId: "org1",
+    } as unknown as Parameters<typeof auditLog>[0];
+
+    await expect(
+      auditLog(fakeCtx, { action: "payments.override", resourceType: "payment" }),
+    ).rejects.toThrow(/mandatory-audit/);
+  });
+
+  it("auditLog() throws when called with 'inventory.adjust' (mandatory)", async () => {
+    const fakeCtx = {
+      userId: "u1",
+      organizationId: "org1",
+    } as unknown as Parameters<typeof auditLog>[0];
+
+    await expect(
+      auditLog(fakeCtx, { action: "inventory.adjust", resourceType: "inventory" }),
+    ).rejects.toThrow(/mandatory-audit/);
+  });
+
+  it("auditLog() throws for all MANDATORY_AUDIT_ACTIONS", async () => {
+    const fakeCtx = {
+      userId: "u1",
+      organizationId: "org1",
+    } as unknown as Parameters<typeof auditLog>[0];
+
+    for (const action of MANDATORY_AUDIT_ACTIONS) {
+      await expect(
+        auditLog(fakeCtx, { action, resourceType: "test" }),
+      ).rejects.toThrow(/mandatory-audit/);
+    }
+  });
+
+  it("auditLog() does not throw for non-mandatory actions (error only if DB fails)", async () => {
+    const fakeCtx = {
+      userId: "u1",
+      organizationId: "org1",
+    } as unknown as Parameters<typeof auditLog>[0];
+
+    const nonMandatoryActions: AuditAction[] = [
+      "auth.sign_in",
+      "auth.sign_out",
+      "auth.password_reset",
+      "orders.create",
+      "orders.update",
+      "orders.cancel",
+      "payments.confirm",
+      "products.price_change",
+      "products.delete",
+      "team.invite",
+      "org.update",
+    ];
+
+    for (const action of nonMandatoryActions) {
+      // Should not throw the programming-error guard — may fail on DB connection
+      // but that's caught internally by auditLog (best-effort, no throw on DB error).
+      // We only verify it doesn't throw the mandatory-action programming error.
+      try {
+        await auditLog(fakeCtx, { action, resourceType: "test" });
+      } catch (e) {
+        // Reject only if it's the mandatory-action guard error — not a DB error.
+        if (e instanceof Error && /mandatory-audit/.test(e.message)) {
+          throw new Error(
+            `auditLog() incorrectly rejected non-mandatory action '${action}': ${e.message}`,
+          );
+        }
+        // Other errors (DB connectivity) are acceptable in unit test context.
+      }
+    }
+  });
+});
+
+describe("U3: MANDATORY_AUDIT_ACTIONS set is correct", () => {
+  it("contains all expected high-risk actions", () => {
+    const expected: AuditAction[] = [
+      "orders.refund",
+      "payments.override",
+      "inventory.adjust",
+      "customers.export",
+      "team.remove",
+      "team.role_change",
+      "org.ownership_transfer",
+    ];
+    for (const action of expected) {
+      expect(MANDATORY_AUDIT_ACTIONS.has(action)).toBe(true);
+    }
+  });
+
+  it("does not contain low-risk actions", () => {
+    const lowRisk: AuditAction[] = [
+      "auth.sign_in",
+      "auth.sign_out",
+      "orders.create",
+    ];
+    for (const action of lowRisk) {
+      expect(MANDATORY_AUDIT_ACTIONS.has(action)).toBe(false);
+    }
+  });
+});
+
 // ── Cross-organization isolation tests (require live Supabase) ────────────────
 
 describe("Test 1: Authorized member can access own organization", () => {
@@ -142,18 +308,21 @@ describe("Test 1: Authorized member can access own organization", () => {
 
 describe("Test 2: Member cannot read another organization", () => {
   it("Owner of Org A cannot access Org B", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_B_ID),
     );
   });
 
   it("Owner of Org B cannot access Org A", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_ORG_B_OWNER, ORG_A_ID),
     );
   });
 
   it("Manager of Org A cannot access Org B even if they know the ID", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_B_ID),
     );
@@ -179,6 +348,7 @@ describe("Test 3: Member cannot update another organization", () => {
 
 describe("Test 4: Guessed org ID is rejected", () => {
   it("Using a valid UUID that is not a real org returns unauthorized", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_ORG_A_OWNER, FAKE_ORG_ID),
     );
@@ -196,12 +366,14 @@ describe("Test 4: Guessed org ID is rejected", () => {
 
 describe("Test 5: Manipulated organization input is rejected", () => {
   it("User with no membership cannot access Org A", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_A_ID),
     );
   });
 
   it("User with no membership cannot access Org B either", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_B_ID),
     );
@@ -220,6 +392,7 @@ describe("Test 5: Manipulated organization input is rejected", () => {
 
 describe("Test 6: Suspended membership is denied", () => {
   it("Suspended member cannot access the organization", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_SUSPENDED, ORG_A_ID),
     );
@@ -228,6 +401,7 @@ describe("Test 6: Suspended membership is denied", () => {
 
 describe("Test 7: Removed membership is denied", () => {
   it("Removed member cannot access the organization", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest(USER_REMOVED, ORG_A_ID),
     );
@@ -245,6 +419,7 @@ describe("Test 8: Unauthenticated access is denied", () => {
   });
 
   it("forRequest with empty userId throws", async () => {
+    if (!supabaseConfigured) return;
     await expectForbidden(() =>
       AuthorizationService.forRequest("", ORG_A_ID),
     );
@@ -328,6 +503,10 @@ describe("Test 11: Final owner removal is blocked", () => {
   it("DB trigger blocks last owner removal via UPDATE (enforce_last_owner_protection)", async () => {
     // The enforce_last_owner_protection() trigger in migration 006_memberships.sql
     // fires BEFORE UPDATE and prevents demoting/deactivating the last active owner.
+    //
+    // FIX (Blocker 2): The trigger uses a subquery for COUNT(*) + FOR UPDATE:
+    //   SELECT COUNT(*) FROM (SELECT id ... FOR UPDATE) locked_owners;
+    // This avoids the PostgreSQL error "FOR UPDATE cannot be applied to aggregate queries".
     //
     // Manual test instructions (run as service role):
     //   1. Ensure ORG_A has exactly one active owner (USER_ORG_A_OWNER)

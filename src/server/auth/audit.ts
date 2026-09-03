@@ -5,6 +5,7 @@
  *
  * 1. auditLog()         — best-effort. Logs and continues even if the write fails.
  *                         Use for informational, lower-risk activity (sign-in, read exports, etc.).
+ *                         MUST NOT be called for mandatory high-risk actions — throws at runtime.
  *
  * 2. auditLogRequired() — fail-closed. Throws if the audit record cannot be persisted.
  *                         Use for mandatory high-risk actions:
@@ -85,14 +86,28 @@ function buildAuditRow(ctx: AuthorizationContext, payload: AuditPayload) {
 
 /**
  * Best-effort audit log write.
- * Never throws — audit failure does NOT block the main operation.
+ * Never throws on DB failures — audit failure does NOT block the main operation.
  * Suitable for informational, lower-risk activity.
- * NOT acceptable for mandatory high-risk actions (use auditLogRequired instead).
+ *
+ * FIX (Blocker 4): Throws immediately (programming error guard) when called with
+ * a mandatory high-risk action. Mandatory actions MUST use auditLogRequired() so
+ * that the operation is blocked when the audit write fails. Calling auditLog() for
+ * a mandatory action would silently drop the audit trail on DB errors, which is
+ * a security-correctness violation. This guard converts that silent failure into a
+ * visible programming error caught at development time.
  */
 export async function auditLog(
   ctx: AuthorizationContext,
   payload: AuditPayload,
 ): Promise<void> {
+  if (MANDATORY_AUDIT_ACTIONS.has(payload.action)) {
+    throw new Error(
+      `[APSA] Programming error: action '${payload.action}' is a mandatory-audit action ` +
+        `and must use auditLogRequired() — not auditLog(). ` +
+        `auditLog() is best-effort and would silently drop the audit trail on write failures.`,
+    );
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { error } = await (supabaseAdmin as any)
     .from("audit_logs")

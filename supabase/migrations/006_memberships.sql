@@ -10,10 +10,12 @@
 --   last-owner protection trigger (cannot demote/deactivate the last active owner)
 -- Tenant ownership: organization_id
 -- RLS: users can read their own memberships; org active members can list membership roster
+--      via is_active_member_of() SECURITY DEFINER helper (prevents RLS recursion)
 -- NOTE: This migration runs AFTER 003_roles_permissions.sql — roles table exists here.
 -- Rollback: DROP TABLE public.memberships CASCADE; DROP TYPE public.membership_status;
 --           DROP FUNCTION public.check_membership_role_org_integrity();
 --           DROP FUNCTION public.enforce_last_owner_protection();
+--           DROP FUNCTION public.is_active_member_of(UUID);
 
 CREATE TYPE public.membership_status AS ENUM ('active', 'invited', 'suspended', 'removed');
 
@@ -80,6 +82,12 @@ CREATE TRIGGER memberships_role_org_integrity
 -- eliminates the TOCTOU window present in application-level pre-checks.
 -- Both concurrent transactions cannot both pass; the second waits, then sees the
 -- correct (post-first-commit) owner count.
+--
+-- FIX (Blocker 2): COUNT(*) cannot be combined with FOR UPDATE — PostgreSQL rejects
+-- aggregate queries with locking clauses. The fix wraps the locking SELECT in a
+-- subquery so FOR UPDATE applies to the individual row scan, and COUNT(*) aggregates
+-- the subquery result. The pg_advisory_xact_lock() already provides the primary
+-- concurrency guard; FOR UPDATE on the subquery adds a secondary row-level lock.
 
 CREATE OR REPLACE FUNCTION public.enforce_last_owner_protection()
 RETURNS TRIGGER
@@ -127,15 +135,19 @@ BEGIN
     ('x' || lpad(substring(OLD.organization_id::text, 1, 8), 8, '0'))::bit(32)::int
   );
 
-  -- Count remaining active owners EXCLUDING the current row.
-  -- Uses FOR UPDATE to lock competing rows (additional defense against concurrent ops).
+  -- FIX (Blocker 2): PostgreSQL rejects "SELECT COUNT(*) ... FOR UPDATE" because
+  -- FOR UPDATE cannot be applied to aggregate queries. Wrap the locking row scan
+  -- in a subquery; COUNT(*) aggregates the subquery result.
   SELECT COUNT(*) INTO v_other_active_owners
-  FROM public.memberships
-  WHERE organization_id = OLD.organization_id
-    AND role_id = v_owner_role_id
-    AND status = 'active'
-    AND id != OLD.id
-  FOR UPDATE;
+  FROM (
+    SELECT id
+    FROM public.memberships
+    WHERE organization_id = OLD.organization_id
+      AND role_id = v_owner_role_id
+      AND status = 'active'
+      AND id != OLD.id
+    FOR UPDATE
+  ) locked_owners;
 
   IF v_other_active_owners = 0 THEN
     RAISE EXCEPTION 'last_owner_protection: cannot demote or deactivate the last active owner of an organization — at least one active owner must remain';
@@ -149,6 +161,37 @@ CREATE TRIGGER memberships_last_owner_protection
   BEFORE UPDATE ON public.memberships
   FOR EACH ROW EXECUTE FUNCTION public.enforce_last_owner_protection();
 
+-- ── RLS helper: is_active_member_of ──────────────────────────────────────────
+-- FIX (Blocker 1): The "memberships_select_org_roster" policy previously contained
+-- a self-referential EXISTS subquery directly on public.memberships.
+-- PostgreSQL applies RLS to all tables in a policy's USING expression, including
+-- recursive references to the same table — this causes infinite RLS recursion and
+-- a PostgreSQL error: "stack depth limit exceeded" or infinite loop.
+--
+-- The fix: wrap the inner membership check in a SECURITY DEFINER function.
+-- SECURITY DEFINER functions run as the function owner (postgres), bypassing RLS
+-- on the tables they query. This breaks the recursion: the policy on memberships
+-- calls is_active_member_of(), which queries memberships without triggering the
+-- memberships RLS policy again.
+--
+-- The function only returns a boolean and does not expose raw membership rows,
+-- so the bypass is scoped and safe.
+
+CREATE OR REPLACE FUNCTION public.is_active_member_of(p_organization_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.memberships
+    WHERE organization_id = p_organization_id
+      AND user_id = auth.uid()
+      AND status = 'active'
+  )
+$$;
+
 -- ── RLS ──────────────────────────────────────────────────────────────────────
 ALTER TABLE public.memberships ENABLE ROW LEVEL SECURITY;
 
@@ -158,18 +201,11 @@ CREATE POLICY "memberships_select_own"
   USING (user_id = auth.uid());
 
 -- Active members of an organization can see the membership roster of that org.
--- Note: the self-referential EXISTS subquery is safe — it is filtered by user_id = auth.uid()
--- which matches the memberships_select_own policy, preventing infinite recursion.
+-- FIX (Blocker 1): Uses is_active_member_of() SECURITY DEFINER helper instead of
+-- a direct self-referential subquery, preventing PostgreSQL RLS infinite recursion.
 CREATE POLICY "memberships_select_org_roster"
   ON public.memberships FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m2
-      WHERE m2.organization_id = memberships.organization_id
-        AND m2.user_id = auth.uid()
-        AND m2.status = 'active'
-    )
-  );
+  USING (public.is_active_member_of(organization_id));
 
 -- Writes blocked for JWT clients — application server manages membership lifecycle.
 CREATE POLICY "memberships_write_blocked"

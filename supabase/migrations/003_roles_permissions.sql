@@ -27,12 +27,22 @@ CREATE TYPE public.risk_level AS ENUM ('low', 'medium', 'high', 'critical');
 
 -- Roles: system roles (organization_id IS NULL) serve as templates.
 -- Custom org roles have organization_id set and system_role IS NULL.
+--
+-- FIX (Blocker 3): roles_system_xor_custom enforces the invariant that a row is
+-- EITHER a system template (organization_id IS NULL, system_role IS NOT NULL)
+-- OR a custom org role (organization_id IS NOT NULL, system_role IS NULL).
+-- Without this constraint, a custom org role could carry system_role = 'OWNER',
+-- which would undermine owner-uniqueness semantics and allow privilege escalation.
 CREATE TABLE public.roles (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID REFERENCES public.organizations(id) ON DELETE CASCADE,
   name            TEXT NOT NULL,
   system_role     public.system_role_key,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT roles_system_xor_custom CHECK (
+    (organization_id IS NULL AND system_role IS NOT NULL) OR
+    (organization_id IS NOT NULL AND system_role IS NULL)
+  )
 );
 
 -- FIX: Role uniqueness — the old UNIQUE NULLS NOT DISTINCT constraint on (organization_id, system_role)
