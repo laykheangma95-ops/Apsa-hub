@@ -29,6 +29,7 @@ function Thumb({ product, size }: { product: Product; size: "sm" | "lg" }) {
     <span
       aria-hidden
       className={cn(
+        "press",
         "flex shrink-0 items-center justify-center rounded-xl text-text-inverse",
         size === "sm" ? "size-11 text-body" : "h-20 w-full text-h3",
       )}

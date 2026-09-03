@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AppHeader, BottomSheet, ErrorState, ListSkeleton } from "@/design-system";
+import { AppHeader, BottomSheet, Chip, ChipRow, ErrorState, ListSkeleton } from "@/design-system";
 import { PosNotice } from "@/components/pos/PosNotice";
 import { PosCart } from "@/components/pos/PosCart";
 import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
@@ -199,7 +199,7 @@ function PosScreen() {
                 type="button"
                 aria-label={t("pos.scan")}
                 onClick={() => setQuery("8850001000031")}
-                className="tap-target flex shrink-0 items-center justify-center rounded-xl border border-border-strong bg-surface-primary px-3 text-text-primary"
+                className="press tap-target flex shrink-0 items-center justify-center rounded-xl border border-border-default bg-surface-primary px-3 text-text-primary"
               >
                 <ScanLine className="size-5" aria-hidden />
               </button>
@@ -218,28 +218,17 @@ function PosScreen() {
               </button>
             </div>
 
-            <div
-              role="group"
-              aria-label={t("pos.categories")}
-              className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1"
-            >
+            <ChipRow label={t("pos.categories")} className="-mx-4 px-4">
               {CATEGORIES.map((value) => (
-                <button
+                <Chip
                   key={value}
-                  type="button"
-                  aria-pressed={category === value}
+                  selected={category === value}
                   onClick={() => setCategory(value)}
-                  className={cn(
-                    "tap-target shrink-0 rounded-full border px-4 text-label transition-colors",
-                    category === value
-                      ? "border-action-primary bg-action-primary text-text-on-action"
-                      : "border-border-strong bg-surface-primary text-text-primary",
-                  )}
                 >
-                  <span className="chip-text">{t(`pos.category.${value}`)}</span>
-                </button>
+                  {t(`pos.category.${value}`)}
+                </Chip>
               ))}
-            </div>
+            </ChipRow>
           </div>
 
           <section
@@ -276,25 +265,25 @@ function PosScreen() {
       </div>
 
       {/* Mobile: total + checkout stay pinned above the fold. */}
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border-default bg-surface-primary px-4 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] lg:hidden">
+      <div className="surface-glass elevation-3 fixed inset-x-0 bottom-0 z-40 border-t border-border-default px-4 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] lg:hidden">
         <div className="mx-auto grid max-w-[560px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
           <button
             type="button"
             onClick={() => setCartOpen(true)}
-            className="tap-target flex min-w-0 items-center gap-2 text-left"
+            className="press tap-target flex min-w-0 items-center gap-2 text-left"
           >
             <ShoppingCart className="size-5 shrink-0 text-text-secondary" aria-hidden />
             <span className="min-w-0">
               <span className="text-caption block text-text-secondary">
                 {t("pos.itemCount", { count: totals.itemCount })}
               </span>
-              <span className="text-financial block truncate text-text-primary">
+              <span className="text-financial-lg block truncate text-text-primary">
                 {formatMoney(totals.total)}
               </span>
             </span>
           </button>
           <Button
-            className="tap-target shrink-0"
+            className="press tap-target elevation-action shrink-0"
             disabled={totals.itemCount === 0 || approvalRequired || offline}
             onClick={() => setCheckoutOpen(true)}
           >
