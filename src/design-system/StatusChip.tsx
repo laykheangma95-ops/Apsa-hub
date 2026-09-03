@@ -74,13 +74,13 @@ export function StatusChip({ status, className, size = "sm" }: StatusChipProps) 
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5",
-        size === "md" ? "text-label px-2.5 py-1" : "text-caption",
+        "text-label inline-flex max-w-full items-center gap-1.5 rounded-full",
+        size === "md" ? "px-2.5 py-1" : "px-2 py-0.5",
         TONE_CLASS[tone],
         className,
       )}
     >
-      <Icon className="size-3 shrink-0" aria-hidden />
+      <Icon className="size-3.5 shrink-0" aria-hidden />
       <span className="chip-text">{t(`status.${status}`)}</span>
     </span>
   );

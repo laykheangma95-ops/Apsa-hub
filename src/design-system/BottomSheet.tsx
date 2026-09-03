@@ -101,7 +101,7 @@ export function BottomSheet({
             transition={{ duration: 0.24, ease: [0.2, 0, 0, 1] }}
             style={{ maxHeight: SNAP_HEIGHT[snap] }}
             className={cn(
-              "relative flex w-full max-w-[560px] flex-col rounded-t-3xl bg-surface-elevated pb-[env(safe-area-inset-bottom)] outline-none",
+              "elevation-3 relative flex w-full max-w-[560px] flex-col rounded-t-3xl bg-surface-elevated pb-[env(safe-area-inset-bottom)] outline-none",
               className,
             )}
           >
