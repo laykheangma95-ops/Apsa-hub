@@ -39,11 +39,23 @@
     "team": "Team"
   },
   "landing": {
+    "head": {
+      "title": "APSA — One workspace for every Cambodian seller",
+      "description": "APSA is designed for Facebook, Instagram and Telegram messages, connected with orders, payments and delivery — one workspace built for Cambodian social-commerce sellers.",
+      "ogTitle": "APSA — One workspace for every Cambodian seller",
+      "ogDescription": "Never lose a customer, message, order, payment or follow-up again. Khmer first, built to support KHQR.",
+      "twitterTitle": "APSA — One workspace for every Cambodian seller",
+      "twitterDescription": "Messages, customers, orders, payments, stock and delivery in one connected flow. Khmer first, built to support KHQR."
+    },
     "nav": {
       "product": "Product",
       "workflow": "Workflow",
       "cambodia": "Built for Cambodia",
-      "start": "Start free"
+      "start": "Start free",
+      "primaryNav": "Primary navigation",
+      "mobileNav": "Mobile navigation",
+      "openMenu": "Open menu",
+      "closeMenu": "Close menu"
     },
     "hero": {
       "title": "Your business. All in one place.",
@@ -55,52 +67,132 @@
       "demoOrder": "Create order",
       "demoPaid": "Paid $19.80",
       "demoTransit": "In transit · J&T",
-      "demoStock": "Cotton Tee 63 → 61"
+      "demoStock": "Cotton Tee 63 → 61",
+      "demoName1": "Sophea Chan",
+      "demoName2": "Dara Ly",
+      "demoName3": "Mony Kim",
+      "inboxPreviewLabel": "APSA unified inbox preview",
+      "badge": "For social-commerce sellers",
+      "lead": "APSA is designed to connect Facebook, Instagram and Telegram messages with orders, payments and delivery — one workspace built for Cambodian sellers."
     },
     "problem": {
       "title": "Six tools. One lost customer.",
       "body": "A message arrives on Facebook. The payment lands in a bank app. Delivery lives in a courier chat. The record ends in a notebook. Nothing talks to anything.",
       "apsa": "APSA",
-      "result": "APSA joins them into one line."
+      "result": "APSA joins them into one line.",
+      "tag": "The old way",
+      "pain1": "Customers send on Facebook, Instagram and Telegram — at the same time.",
+      "pain2": "Payment confirmation is a screenshot in another app.",
+      "pain3": "Delivery address repeated every single order.",
+      "pain4": "Order history lives in a notebook or nowhere.",
+      "pain5": "Staff give wrong price or wrong stock.",
+      "pain6": "Follow-up forgotten because Inbox was too full."
     },
     "inbox": {
+      "badge": "Unified inbox",
       "title": "Every channel in one inbox",
-      "body": "Facebook, Instagram and Telegram in a single list, with follow-up status on every conversation so nothing goes quiet by accident."
+      "body": "Designed for Facebook, Instagram and Telegram conversations — in a single list, with follow-up status on every thread so nothing goes quiet by accident.",
+      "channelOverviewLabel": "Unified inbox with channel overview"
     },
     "flow": {
-      "title": "Message to order in four taps",
+      "title": "Your complete business flow",
       "body": "The customer is already filled in. Pick the product, pick the variant, create the order. The thread records it for you.",
-      "step1": "Read the message",
-      "step2": "Pick product and variant",
-      "step3": "Order APSA-0143 created"
+      "step1": "Message",
+      "step2": "Customer",
+      "step3": "Order",
+      "badge": "How it works",
+      "step4": "Payment",
+      "step5": "Delivery",
+      "step5i": "Inventory",
+      "step6": "History",
+      "step7": "Analytics",
+      "step1desc": "A customer message opens the conversation.",
+      "step2desc": "Customer record is linked to the order.",
+      "step3desc": "Order created within the thread.",
+      "step4desc": "Staff confirms cash, KHQR or transfer.",
+      "step5desc": "Courier details and COD amount recorded.",
+      "flowLabel": "APSA product flow"
     },
     "ops": {
+      "badge": "Everything in one place",
       "title": "Orders, payment, delivery",
+      "body": "Six operational modules in one workspace. No switching between apps, no data entry twice.",
       "orders": "Orders",
       "ordersBody": "One order, one full story — items, staff, timeline.",
       "payment": "Payment",
       "paymentBody": "Cash, KHQR or transfer. Marked paid by a human, never guessed.",
       "delivery": "Delivery",
-      "deliveryBody": "Courier, tracking and COD amount tracked to the door."
+      "deliveryBody": "Record courier details, tracking numbers and COD amounts in one place.",
+      "pos": "Point of sale",
+      "posBody": "Sell in-store with your phone. Cash, KHQR or bank transfer.",
+      "customers": "Customers",
+      "customersBody": "Complete history and notes for every customer, across all channels.",
+      "team": "Team",
+      "teamBody": "Five roles from owner to cashier. Everyone sees only what they need."
     },
     "history": {
       "title": "History that prevents wrong orders",
       "body": "Every customer carries their sizes, their address, their last purchase and their notes — so the second order is easier than the first."
     },
     "cambodia": {
-      "title": "Built for Cambodia",
+      "badge": "Built for Cambodia",
+      "title": "Built for how Cambodia buys",
+      "body": "Every payment method, every courier, every language — made for the way sellers and buyers here actually work.",
       "khqr": "KHQR",
-      "khqrBody": "The payment method your customers already use.",
+      "khqrBody": "Built to support KHQR, Cambodia's national QR payment standard.",
       "currency": "Riel and dollar",
       "currencyBody": "Both currencies, riel rounded to the nearest 100.",
       "couriers": "Local couriers",
-      "couriersBody": "J&T, VET, Capital and Grab Express.",
+      "couriersBody": "Built to support J&T, VET, Capital and Grab Express.",
       "khmer": "Khmer first",
       "khmerBody": "Khmer is the default language, not an afterthought."
     },
     "cta": {
       "title": "Never lose a customer, message, order, payment or follow-up again.",
       "body": "Set up your shop in minutes. No card, no contract.",
+      "action": "Start free"
+    },
+    "msgToOrder": {
+      "badge": "Signature workflow",
+      "title": "Message to order in three taps",
+      "body": "A customer asks a question. In three taps it becomes an order — customer, product and price already in place. You just confirm.",
+      "step1": "Customer message",
+      "step2": "Pick product",
+      "step3": "Order created",
+      "step1msg": "Do you have the black one in M?",
+      "step1detail": "From the customer conversation",
+      "step2hint": "Customer already attached",
+      "step3code": "APSA-0143",
+      "step3detail": "Thread records it. Payment follows."
+    },
+    "c360": {
+      "badge": "Customer 360",
+      "title": "Know the customer before you reply",
+      "body": "Every customer carries their full history — sizes, address, last purchase and notes. The second order is faster than the first.",
+      "detail1": "M · black — 3 orders",
+      "detail2": "Toul Kork, Phnom Penh",
+      "detail3": "Last order $19.80 · 12 Feb",
+      "detail4": "Prefers Telegram",
+      "profilePreviewLabel": "Customer 360 profile preview"
+    },
+    "lteam": {
+      "badge": "For every role",
+      "title": "Grow from one seller to a full team",
+      "body": "Start alone. Add staff when you're ready. Every role has the right access from day one.",
+      "owner": "Owner",
+      "ownerDesc": "Full access including money and team.",
+      "manager": "Manager",
+      "managerDesc": "Daily operations, orders and reports.",
+      "sales": "Sales",
+      "salesDesc": "Replies to customers and order creation.",
+      "cashier": "Cashier",
+      "cashierDesc": "POS, payments and receipts.",
+      "cs": "Customer service",
+      "csDesc": "Conversations and delivery support."
+    },
+    "apsi": {
+      "title": "Built with care, for Cambodian sellers",
+      "body": "APSA was designed around how Cambodian merchants actually sell — through messages, trust and relationships. That's why it feels right.",
       "action": "Start free"
     },
     "footer": {
