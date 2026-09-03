@@ -7,11 +7,18 @@ import { Input } from "@/components/ui/input";
 import {
   AppHeader,
   ChannelBadge,
+  Chip,
+  ChipRow,
   ListSkeleton,
+  Section,
+  SectionRow,
+  SectionRows,
   StatusChip,
+  StickyActionBar,
   Timeline,
   type TimelineItem,
 } from "@/design-system";
+
 import { OperationalState } from "@/components/common/OperationalState";
 import { addCustomerNote, currentRole, getCustomer360 } from "@/lib/api";
 import { fullTimestamp, initials, localName } from "@/lib/format";
