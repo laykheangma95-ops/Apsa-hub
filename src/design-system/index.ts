@@ -5,6 +5,10 @@ export { AttentionCard } from "./AttentionCard";
 export { BottomNav } from "./BottomNav";
 export { BottomSheet, type SheetSnap } from "./BottomSheet";
 export { ChannelBadge } from "./ChannelBadge";
+export { Chip, ChipRow } from "./Chip";
+export { Section, SectionRow, SectionRows } from "./Section";
+export { StickyActionBar } from "./StickyActionBar";
+
 export { ConversationRow } from "./ConversationRow";
 export { CurrencyInput } from "./CurrencyInput";
 export { CustomerSummaryCard } from "./CustomerSummaryCard";
