@@ -56,6 +56,8 @@ const MAP: Record<StatusKey, { tone: Tone; icon: LucideIcon }> = {
   returned: { tone: "warning", icon: PackageX },
   low_stock: { tone: "warning", icon: AlertTriangle },
   out_of_stock: { tone: "danger", icon: PackageX },
+  active: { tone: "success", icon: Check },
+  invited: { tone: "warning", icon: Clock },
 };
 
 interface StatusChipProps {

@@ -37,7 +37,9 @@ export type StatusKey =
   | "cancelled"
   | "returned"
   | "low_stock"
-  | "out_of_stock";
+  | "out_of_stock"
+  | "active"
+  | "invited";
 
 export type CompanionColor = "nilo" | "minto" | "vela" | "suri" | "luma";
 
