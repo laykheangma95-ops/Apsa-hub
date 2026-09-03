@@ -2,6 +2,113 @@
  * APSA domain types. Pure TypeScript — no React, no UI concerns.
  */
 
+// ── Production tenancy types ──────────────────────────────────────────────────
+
+export type OrganizationStatus = "active" | "suspended" | "deleted";
+export type WorkspaceType = "INBOX" | "BUSINESS";
+export type WorkspaceStatus = "active" | "archived";
+export type LocationType = "branch" | "warehouse" | "virtual";
+export type LocationStatus = "active" | "closed";
+export type MembershipStatus = "active" | "invited" | "suspended" | "removed";
+export type SystemRoleKey = "OWNER" | "MANAGER" | "CASHIER" | "SALES" | "CUSTOMER_SERVICE";
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+export type UserStatus = "active" | "suspended" | "deleted";
+
+/** Platform user profile (extends Supabase Auth). */
+export interface UserProfile {
+  id: string;
+  email: string;
+  phone: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+  locale: string;
+  timezone: string;
+  status: UserStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Root tenant entity. All business data is scoped to an Organization. */
+export interface Organization {
+  id: string;
+  legalName: string;
+  displayName: string;
+  slug: string;
+  businessType: string | null;
+  defaultCurrency: Currency;
+  country: string;
+  timezone: string;
+  status: OrganizationStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Workspace — logical grouping within an Organization.
+ * INBOX: social-commerce channels (Facebook, Telegram, etc.)
+ * BUSINESS: operational areas (POS, Inventory, etc.)
+ */
+export interface ProductionWorkspace {
+  id: string;
+  organizationId: string;
+  name: string;
+  type: WorkspaceType;
+  status: WorkspaceStatus;
+  settings: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Physical or virtual location belonging to a Workspace/Organization. */
+export interface Location {
+  id: string;
+  organizationId: string;
+  workspaceId: string | null;
+  name: string;
+  type: LocationType;
+  phone: string | null;
+  timezone: string;
+  status: LocationStatus;
+  createdAt: string;
+}
+
+/** User ↔ Organization membership with role assignment. */
+export interface Membership {
+  id: string;
+  userId: string;
+  organizationId: string;
+  roleId: string;
+  status: MembershipStatus;
+  joinedAt: string;
+  invitedBy: string | null;
+}
+
+/** Role template (system) or custom org role. */
+export interface Role {
+  id: string;
+  organizationId: string | null;
+  name: string;
+  systemRole: SystemRoleKey | null;
+  createdAt: string;
+}
+
+/** Permission key definition. Naming: domain.action */
+export interface Permission {
+  id: string;
+  key: string;
+  description: string;
+  riskLevel: RiskLevel;
+}
+
+/** Resolved membership context — used in server auth layer. */
+export interface MembershipWithRole extends Membership {
+  role: Role;
+  permissions: string[];
+}
+
+// ── Money / Currency ──────────────────────────────────────────────────────────
+
 export type Currency = "USD" | "KHR";
 
 /** amount is ALWAYS an integer minor unit. USD = cents. KHR = riel (exponent 0). */
