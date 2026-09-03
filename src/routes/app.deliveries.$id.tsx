@@ -110,11 +110,13 @@ function DeliveryScreen() {
             : "default",
     }));
 
+  const showActions = failed || status === "in_transit";
+
   return (
-    <div className="min-h-dvh bg-surface-page pb-24">
+    <div className="min-h-dvh bg-surface-page">
       <AppHeader title={t("delivery.title")} subtitle={delivery.trackingNumber} onBack={back} />
 
-      <div className="mx-auto max-w-[560px] space-y-3 px-4 py-4 lg:max-w-[880px]">
+      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
         {notice ? (
           <p
             role="status"
@@ -124,58 +126,58 @@ function DeliveryScreen() {
           </p>
         ) : null}
 
-        <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-caption text-text-muted">{t("delivery.courier")}</p>
-              <p className="text-body text-text-primary">{delivery.courierName}</p>
+        <Section variant="plain">
+          <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-caption text-text-muted">{t("delivery.courier")}</p>
+                <p className="text-h3 text-text-primary">{delivery.courierName}</p>
+              </div>
+              <StatusChip status={status} size="md" />
             </div>
-            <StatusChip status={status} size="md" />
-          </div>
-          <dl className="mt-3 grid grid-cols-2 gap-3">
-            <div>
-              <dt className="text-caption text-text-muted">{t("delivery.tracking")}</dt>
-              <dd className="text-data tnum text-text-primary">{delivery.trackingNumber}</dd>
-            </div>
-            <div>
-              <dt className="text-caption text-text-muted">{t("delivery.fee")}</dt>
-              <dd className="text-financial text-text-primary">{formatMoney(delivery.fee)}</dd>
-            </div>
-          </dl>
-          {order ? (
-            <button
-              type="button"
-              onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
-              className="tap-target text-label mt-2 inline-flex text-action-primary"
-            >
-              {t("delivery.viewOrder")} · {order.code}
-            </button>
-          ) : null}
-        </section>
 
-        <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-          <h2 className="text-h3 text-text-primary">{t("delivery.progress")}</h2>
-          <div className="mt-3">
-            <DeliveryProgress status={status} />
-          </div>
-          {failed ? (
-            <div className="mt-4 rounded-xl bg-status-danger-soft px-3 py-2">
-              <p className="text-body-sm text-status-danger-text">{t("delivery.failed")}</p>
-              {delivery.failureReason ? (
-                <p className="text-caption text-status-danger-text">
-                  {t(`delivery.failReason.${delivery.failureReason}`)}
-                </p>
-              ) : null}
+            <div className="mt-3 border-t border-border-default pt-3">
+              <DeliveryProgress status={status} />
             </div>
-          ) : null}
-        </section>
+
+            {failed ? (
+              <div className="mt-3 rounded-xl bg-status-danger-soft px-3 py-2">
+                <p className="text-body-sm text-status-danger-text">{t("delivery.failed")}</p>
+                {delivery.failureReason ? (
+                  <p className="text-caption text-status-danger-text">
+                    {t(`delivery.failReason.${delivery.failureReason}`)}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            <SectionRows className="mt-3 border-t border-border-default pt-2">
+              <SectionRow
+                label={t("delivery.tracking")}
+                value={<span className="tnum">{delivery.trackingNumber}</span>}
+              />
+              <SectionRow label={t("delivery.fee")} value={formatMoney(delivery.fee)} />
+              {order ? (
+                <SectionRow
+                  label={t("delivery.viewOrder")}
+                  value={
+                    <button
+                      type="button"
+                      onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
+                      className="text-label tnum text-action-primary"
+                    >
+                      {order.code}
+                    </button>
+                  }
+                />
+              ) : null}
+            </SectionRows>
+          </div>
+        </Section>
 
         {delivery.codAmount ? (
-          <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-            <h2 className="text-h3 text-text-primary">{t("delivery.cod")}</h2>
-            <p className="text-financial-lg mt-2 text-text-primary">
-              {formatMoney(delivery.codAmount)}
-            </p>
+          <Section title={t("delivery.cod")}>
+            <p className="text-financial-lg text-text-primary">{formatMoney(delivery.codAmount)}</p>
             <p className="text-body-sm mt-1 text-text-secondary">
               {delivery.codCollected ? t("delivery.codCollected") : t("delivery.codNotCollected")}
             </p>
@@ -184,13 +186,12 @@ function DeliveryScreen() {
                 {t("delivery.settlementPending")}
               </p>
             ) : null}
-          </section>
+          </Section>
         ) : null}
 
-        <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-          <h2 className="text-h3 text-text-primary">{t("delivery.address")}</h2>
+        <Section title={t("delivery.address")}>
           {customer ? (
-            <p className="text-body-sm mt-2 text-text-primary">{localName(customer, language)}</p>
+            <p className="text-body text-text-primary">{localName(customer, language)}</p>
           ) : null}
           <p className="text-body-sm mt-1 text-text-secondary">
             {!permissions.viewCustomerAddress
@@ -205,58 +206,55 @@ function DeliveryScreen() {
                   ].join(", ")
                 : t("delivery.noAddress")}
           </p>
-        </section>
+        </Section>
 
-        <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-          <h2 className="text-h3 text-text-primary">{t("delivery.history")}</h2>
-          <div className="mt-3">
-            <Timeline items={timelineItems} />
-          </div>
-        </section>
-
-        {failed || status === "in_transit" ? (
-          <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-            <h2 className="text-h3 text-text-primary">{t("order.actions")}</h2>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {failed ? (
-                <>
-                  <Button
-                    className="tap-target h-12"
-                    disabled={actionMutation.isPending}
-                    onClick={() => actionMutation.mutate("retry")}
-                  >
-                    {t("delivery.retry")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="tap-target h-12"
-                    disabled={actionMutation.isPending}
-                    onClick={() => actionMutation.mutate("reschedule")}
-                  >
-                    {t("delivery.reschedule")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="tap-target h-12"
-                    disabled={actionMutation.isPending}
-                    onClick={() => actionMutation.mutate("return_to_shop")}
-                  >
-                    {t("delivery.returnToShop")}
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  className="tap-target h-12"
-                  disabled={actionMutation.isPending}
-                  onClick={() => actionMutation.mutate("mark_delivered")}
-                >
-                  {t("delivery.markDelivered")}
-                </Button>
-              )}
-            </div>
-          </section>
-        ) : null}
+        <Section title={t("delivery.history")}>
+          <Timeline items={timelineItems} />
+        </Section>
       </div>
+
+      {showActions ? (
+        <StickyActionBar aboveNav>
+          {failed ? (
+            <>
+              <Button
+                className="tap-target h-12 w-full"
+                disabled={actionMutation.isPending}
+                onClick={() => actionMutation.mutate("retry")}
+              >
+                {t("delivery.retry")}
+              </Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  className="tap-target text-label h-11 flex-1 text-text-secondary"
+                  disabled={actionMutation.isPending}
+                  onClick={() => actionMutation.mutate("reschedule")}
+                >
+                  {t("delivery.reschedule")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="tap-target text-label h-11 flex-1 text-text-secondary"
+                  disabled={actionMutation.isPending}
+                  onClick={() => actionMutation.mutate("return_to_shop")}
+                >
+                  {t("delivery.returnToShop")}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Button
+              className="tap-target h-12 w-full"
+              disabled={actionMutation.isPending}
+              onClick={() => actionMutation.mutate("mark_delivered")}
+            >
+              {t("delivery.markDelivered")}
+            </Button>
+          )}
+        </StickyActionBar>
+      ) : null}
     </div>
   );
 }
+
