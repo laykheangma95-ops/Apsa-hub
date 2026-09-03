@@ -35,7 +35,8 @@
     "newSale": "New sale",
     "newOrder": "New order",
     "addProduct": "Add product",
-    "scanBarcode": "Scan barcode"
+    "scanBarcode": "Scan barcode",
+    "team": "Team"
   },
   "landing": {
     "nav": {
@@ -188,7 +189,9 @@
     "partially_refunded": "Partly refunded",
     "requested": "Requested",
     "accepted": "Courier accepted",
-    "picked_up": "Picked up"
+    "picked_up": "Picked up",
+    "active": "Active",
+    "invited": "Invite pending"
   },
   "channel": {
     "facebook": "Facebook",
@@ -597,6 +600,81 @@
       "delivery_created": "Delivery arranged",
       "delivered": "Delivered",
       "note_added": "Note added"
+    }
+  },
+  "team": {
+    "title": "Team",
+    "subtitle": "Who works in this shop and what they can do.",
+    "inviteAction": "Invite staff",
+    "role": {
+      "owner": "Owner",
+      "manager": "Manager",
+      "cashier": "Cashier",
+      "sales": "Sales",
+      "customer_service": "Customer service"
+    },
+    "roleDescription": {
+      "owner": "Owns the business. Can do everything, including money and team.",
+      "manager": "Can manage most daily operations.",
+      "cashier": "Can use POS and handle sales.",
+      "sales": "Can reply to customers and create orders.",
+      "customer_service": "Can manage conversations and delivery support."
+    },
+    "workspace": {
+      "title": "Your businesses",
+      "current": "Current",
+      "switch": "Switch",
+      "switching": "Switching…",
+      "singleHint": "You manage one business today.",
+      "settingsSoon": "Workspace settings (coming soon)",
+      "errorTitle": "Could not load your businesses",
+      "errorBody": "Check your connection and try again.",
+      "type": {
+        "business": "Business",
+        "creator": "Creator"
+      }
+    },
+    "invite": {
+      "title": "Invite staff",
+      "name": "Name",
+      "contact": "Phone or email",
+      "contactPlaceholder": "012 345 678",
+      "role": "Role",
+      "send": "Send invite",
+      "sending": "Sending…",
+      "nameRequired": "Please enter a name.",
+      "contactRequired": "Please enter a phone number or email.",
+      "contactInvalid": "That phone number or email does not look right.",
+      "ownerNotOffered": "Only the owner can hand over ownership, so Owner is not offered here."
+    },
+    "detail": {
+      "workspace": "Business",
+      "contact": "Contact",
+      "changeRole": "Change role",
+      "saveRole": "Save role",
+      "removeAccess": "Remove access",
+      "roleUpdated": "Role updated."
+    },
+    "pending": {
+      "resend": "Resend invite",
+      "cancel": "Cancel invite",
+      "resent": "Invitation sent again."
+    },
+    "owner": {
+      "protectedTitle": "Ownership is protected",
+      "protectedBody": "The last owner cannot be removed or changed to another role. Ownership must be handed over first."
+    },
+    "empty": {
+      "title": "Only you so far",
+      "body": "Invite your team so they can reply to customers and take orders."
+    },
+    "restricted": {
+      "title": "You cannot manage the team",
+      "body": "Ask the owner or a manager to add or change staff."
+    },
+    "error": {
+      "title": "Could not load the team",
+      "body": "Something went wrong. Try again."
     }
   }
 }
