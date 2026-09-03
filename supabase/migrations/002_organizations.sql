@@ -5,7 +5,10 @@
 -- Indexes: slug (unique lookup), created_by, status
 -- Constraints: slug unique, status enum, created_by FK to auth.users
 -- Tenant ownership: IS the tenant root; no parent organization_id
--- RLS: only active members of an organization can see it
+-- RLS: SELECT policy referencing memberships is deferred to 007_rls_deferred_member_policies
+--      because memberships does not exist yet at this point in the migration sequence.
+--      JWT clients cannot SELECT until migration 007 adds the policy.
+--      Service role (server-side) bypasses RLS and can always read.
 -- Rollback: DROP TABLE public.organizations CASCADE; DROP TYPE public.organization_status;
 
 CREATE TYPE public.organization_status AS ENUM ('active', 'suspended', 'deleted');
@@ -38,18 +41,10 @@ CREATE TRIGGER organizations_updated_at
 -- ── RLS ──────────────────────────────────────────────────────────────────────
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 
--- Only active members of the organization can see it.
--- Application layer enforces the full authorization chain; RLS is defense-in-depth.
-CREATE POLICY "organizations_select_member"
-  ON public.organizations FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+-- NOTE: The SELECT policy that checks active membership is in 007_rls_deferred_member_policies.sql
+-- because the memberships table does not exist yet when this migration runs.
+-- Until migration 007 applies, JWT clients have no SELECT access (RLS blocks them).
+-- Service-role (server-side) always bypasses RLS.
 
 -- Only service-role (server) can insert/update/delete organizations.
 -- Application code never allows client to write directly.

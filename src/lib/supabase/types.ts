@@ -1,9 +1,16 @@
 /**
- * Supabase database type definitions.
+ * Supabase database type definitions — TEMPORARY SCAFFOLDING.
  *
- * Hand-authored to match migrations exactly until a real Supabase project exists.
- * Once connected: `supabase gen types typescript --local > src/lib/supabase/types.ts`
- * and delete this file.
+ * These types are hand-authored to match the current migration schema.
+ * They are intended as a stopgap only. Once the migrations are applied to the
+ * live APSA Supabase project, replace this file entirely with generated types:
+ *
+ *   supabase gen types typescript --local > src/lib/supabase/types.ts
+ *
+ * Do NOT add hand-authored types here indefinitely. Any schema drift between
+ * this file and the actual DB schema will cause silent runtime bugs.
+ * After running `gen types`, also update the type aliases (MembershipRow, etc.)
+ * below to reference the generated Database["public"]["Tables"] paths.
  */
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];

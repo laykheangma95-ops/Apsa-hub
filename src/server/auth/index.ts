@@ -16,5 +16,5 @@ export {
   assertOwnerWouldRemain,
 } from "./authorization";
 
-export { auditLog } from "./audit";
-export type { AuditAction, AuditContext } from "./audit";
+export { auditLog, auditLogRequired, MANDATORY_AUDIT_ACTIONS } from "./audit";
+export type { AuditAction, AuditPayload } from "./audit";

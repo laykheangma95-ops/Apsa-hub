@@ -1,4 +1,4 @@
--- Migration: 006_roles_permissions
+-- Migration: 003_roles_permissions
 -- Purpose: RBAC foundation — roles, permission keys, role↔permission mapping
 -- Tables: roles, permissions, role_permissions
 -- Classification:
@@ -6,8 +6,14 @@
 --   permissions: shared reference data (platform-defined keys)
 --   role_permissions: shared reference (system) + tenant-private (custom)
 -- Indexes: roles(organization_id), permissions(key), role_permissions(role_id, permission_id)
--- Constraints: permissions.key unique; system_role enum
+-- Constraints: permissions.key unique; partial unique indexes for system roles and custom role names
+-- NOTE: Must come BEFORE memberships (migration 006) because memberships.role_id references roles.
+-- NOTE: roles.organization_id references organizations (migration 002) — correct order maintained.
+-- RLS: System roles/permissions readable by authenticated users.
+--      Org-specific role SELECT and org-specific role_permissions SELECT are deferred to
+--      007_rls_deferred_member_policies.sql because memberships does not exist yet.
 -- Rollback: DROP TABLE public.role_permissions, public.permissions, public.roles CASCADE;
+--           DROP TYPE public.system_role_key; DROP TYPE public.risk_level;
 
 CREATE TYPE public.system_role_key AS ENUM (
   'OWNER',
@@ -20,15 +26,30 @@ CREATE TYPE public.system_role_key AS ENUM (
 CREATE TYPE public.risk_level AS ENUM ('low', 'medium', 'high', 'critical');
 
 -- Roles: system roles (organization_id IS NULL) serve as templates.
--- Custom org roles have organization_id set.
+-- Custom org roles have organization_id set and system_role IS NULL.
 CREATE TABLE public.roles (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID REFERENCES public.organizations(id) ON DELETE CASCADE,
   name            TEXT NOT NULL,
   system_role     public.system_role_key,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT roles_system_unique UNIQUE NULLS NOT DISTINCT (organization_id, system_role)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- FIX: Role uniqueness — the old UNIQUE NULLS NOT DISTINCT constraint on (organization_id, system_role)
+-- prevented multiple custom roles per organization because all custom roles have system_role=NULL,
+-- making (org_id, NULL) and (org_id, NULL) collide.
+-- Solution: use two separate partial unique indexes instead:
+
+-- 1. One system role template per system_role key (org IS NULL means system template).
+CREATE UNIQUE INDEX roles_system_template_unique
+  ON public.roles(system_role)
+  WHERE organization_id IS NULL;
+
+-- 2. Custom roles within an org must have unique names (org IS NOT NULL means custom).
+--    This allows each org to have arbitrarily many custom roles as long as names differ.
+CREATE UNIQUE INDEX roles_org_custom_name_unique
+  ON public.roles(organization_id, name)
+  WHERE organization_id IS NOT NULL;
 
 CREATE INDEX idx_roles_organization_id ON public.roles(organization_id);
 CREATE INDEX idx_roles_system_role ON public.roles(system_role) WHERE organization_id IS NULL;
@@ -66,28 +87,26 @@ CREATE POLICY "roles_select_system"
   ON public.roles FOR SELECT
   USING (organization_id IS NULL AND auth.uid() IS NOT NULL);
 
--- Org-specific roles: active members of that org can read.
-CREATE POLICY "roles_select_org_member"
-  ON public.roles FOR SELECT
-  USING (
-    organization_id IS NOT NULL AND
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = roles.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+-- NOTE: Org-specific role SELECT policy deferred to 007_rls_deferred_member_policies.sql
+-- (requires memberships table which does not exist yet)
 
 -- Permissions are readable by any authenticated user.
 CREATE POLICY "permissions_select_authenticated"
   ON public.permissions FOR SELECT
   USING (auth.uid() IS NOT NULL);
 
--- Role-permission mapping: readable by org members (or any authenticated for system roles).
-CREATE POLICY "role_permissions_select_authenticated"
+-- FIX: role_permissions RLS — do NOT allow every authenticated user to read all role_permissions.
+-- System role mappings (role has organization_id IS NULL): readable by any authenticated user.
+-- Org-specific role mappings: deferred to 007_rls_deferred_member_policies.sql.
+CREATE POLICY "role_permissions_select_system"
   ON public.role_permissions FOR SELECT
-  USING (auth.uid() IS NOT NULL);
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.roles r
+      WHERE r.id = role_permissions.role_id
+        AND r.organization_id IS NULL
+    )
+  );
 
 -- All writes via service role only.
 CREATE POLICY "roles_write_blocked" ON public.roles FOR INSERT WITH CHECK (false);
@@ -137,7 +156,7 @@ INSERT INTO public.permissions (key, description, risk_level) VALUES
   ('team.remove',           'Remove team members',                            'high'),
   ('team.roles_assign',     'Assign roles to team members',                   'critical'),
   -- Organization settings
-  ('org.read',              'View organization settings',                     'low'),
+  ('org.read',              'View organization settings and audit logs',      'low'),
   ('org.update',            'Update organization settings',                   'high'),
   -- POS
   ('pos.access',            'Access Point-of-Sale',                           'low'),

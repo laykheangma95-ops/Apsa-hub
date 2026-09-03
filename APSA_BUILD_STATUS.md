@@ -3,7 +3,7 @@
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
 **Last updated:** 2026-09-03
-**Branch:** `claude/apsa-build-status-7bueea`
+**Branch:** `claude/apsa-production-foundation-sneozb` (production blockers fixed)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -483,127 +483,180 @@
 
 ### 24. Authentication
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — Foundation implemented; not yet wired to routes or live-tested.
 
-**What exists today:** No authentication library, no session management, no login route, no JWT. `currentRole` in `src/lib/api/index.ts` is hardcoded as `"manager"`. No Supabase Auth, no OAuth, no email/phone OTP.
+**What exists today:**
+- `src/server/auth/session.ts` — server-side JWT validation via `supabase.auth.getUser()`. Never trusts client-provided userId.
+- `src/server/auth/membership.ts` — `verifyActiveMembership()` + `resolveOrganizationId(slug)`. Org ID derived from slug, not from client body.
+- `src/server/auth/authorization.ts` — `AuthorizationService.forRequest/forSlug/can`, `AuthorizationContext.require/requireOwner`, `assertOwnerWouldRemain`.
+- `src/lib/supabase/client.ts` + `src/lib/supabase/server.ts` — Supabase client (browser) and service-role client (server-only).
+- `currentRole` in mock API is still hardcoded `"manager"` — existing UI routes are unaffected (mock data only).
 
-**Repository evidence:** `src/lib/api/index.ts` line ~275: `export const currentRole: StaffRole = "manager";` — hardcoded mock. `package.json` — no auth library present.
+**Not yet done:** Auth login/signup UI screens, session middleware wired to API routes, Supabase Auth configured in the live project, email/phone OTP.
 
-**Source-of-truth doc:** SECURITY.md §§ Auth, Session Management; ARCHITECTURE.md (security work required); DATA_MODEL.md (User, Session); MVP_ROADMAP.md Phase 1
+**Repository evidence:** `src/server/auth/`, `src/lib/supabase/`, `src/lib/api/index.ts` (still mock).
+
+**Source-of-truth doc:** SECURITY.md §§ Auth, Session Management; ARCHITECTURE.md; DATA_MODEL.md (User, Session); MVP_ROADMAP.md Phase 1
 
 **Owner:** Claude Code
 
-**Dependencies:** Supabase project (external), domain types
+**Dependencies:** Live Supabase project credentials, auth UI (Lovable)
 
-**Next action:** Claude Code — implement Supabase Auth (email/password + phone OTP). Session middleware that attaches authenticated user + membership context to every API request. This is the first backend task — nothing else can be production without it.
+**Next action:** Claude Code — wire `AuthorizationService` into TanStack Start server functions for each protected route. Build Supabase Auth login/signup screens. This is the first backend integration task before any real data can be accessed.
 
 ---
 
 ### 25. Organization / Tenancy
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — Migrations written and reviewed; not yet applied to live Supabase project.
 
-**What exists today:** Mock `Shop` type and `activeShopId` in `src/lib/mock/shop.ts`. Type `WorkspaceSummary` exists in `src/types/index.ts`. The multi-tenant model (User → Membership → Organization → Workspace → Location) is not implemented.
+**What exists today:**
+- `supabase/migrations/002_organizations.sql` — Organizations table with slug uniqueness, status, audit fields.
+- `supabase/migrations/004_workspaces.sql` — Workspaces (INBOX/BUSINESS types) scoped to organization.
+- `supabase/migrations/005_locations.sql` — Locations scoped to organization + workspace; cross-org workspace trigger enforced at DB level.
+- `supabase/migrations/006_memberships.sql` — User↔Org membership with role, status, invite flow structure; cross-org role trigger; last-owner protection trigger.
+- `supabase/migrations/007_rls_deferred_member_policies.sql` — Membership-based SELECT RLS on all tenant-scoped tables.
+- `src/types/index.ts` — Production types for Organization, Membership, Role, Location, ProductionWorkspace added.
+- Mock `Shop` and `WorkspaceSummary` remain in UI code (unaffected — mock data only).
 
-**Repository evidence:** `src/types/index.ts#WorkspaceSummary`, `src/lib/mock/shop.ts`, no Organization table or migration.
+**Not yet done:** Migrations not applied to live Supabase project. Org creation API not implemented. UI routes not wired to real data.
 
-**Source-of-truth doc:** DATA_MODEL.md (Organization, Workspace, Location, Membership), APSA_MASTER_PLAN.md (multi-tenancy model), ARCHITECTURE.md
+**Repository evidence:** `supabase/migrations/002–008_*.sql`, `src/types/index.ts`.
+
+**Source-of-truth doc:** DATA_MODEL.md, APSA_MASTER_PLAN.md (multi-tenancy model), ARCHITECTURE.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Authentication, Supabase database
+**Dependencies:** Live Supabase credentials (owner must apply migrations), Authentication
 
-**Next action:** Claude Code — create Organization, Workspace, Location, Membership tables with RLS. Org creation API. This enables all tenant-scoped data.
+**Next action:** Project owner applies migrations to the live APSA Supabase project. Claude Code implements org creation API and wires routes to real tenant data.
 
 ---
 
 ### 26. Membership
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — Membership table + triggers written in migration; not yet applied or wired.
 
-**What exists today:** `Staff` type and mock invite/remove/role-change logic exist in mock API. No real Membership table, no invitation tokens, no email/SMS delivery.
+**What exists today:**
+- `supabase/migrations/006_memberships.sql` — Memberships table with role assignment, status enum, unique active-or-invited index.
+- Cross-org role integrity trigger (`check_membership_role_org_integrity`) — prevents assigning a role from another org.
+- Last-owner protection trigger (`enforce_last_owner_protection`) — database-level, concurrency-safe, blocks removing/demoting last active owner.
+- `src/server/auth/authorization.ts#assertOwnerWouldRemain` — application-level guard (defense-in-depth layer above DB trigger).
+- Mock `inviteStaff` / `changeStaffRole` / `removeStaff` remain in UI mock API (unaffected).
 
-**Repository evidence:** `src/types/index.ts#Staff`, `src/lib/api/index.ts#inviteStaff` (mock only).
+**Not yet done:** Invitation token system, email/SMS delivery, UI routes wired to real membership data, manager-cannot-grant-above-self enforcement.
+
+**Repository evidence:** `supabase/migrations/006_memberships.sql`, `src/server/auth/authorization.ts`.
 
 **Source-of-truth doc:** DATA_MODEL.md (Membership, Role), PERMISSIONS_MATRIX.md, MVP_ROADMAP.md Phase 3
 
 **Owner:** Claude Code
 
-**Dependencies:** Authentication, Organization domain
+**Dependencies:** Live Supabase (migrations applied), Authentication, Email/SMS provider for invitations
 
-**Next action:** Claude Code — implement Membership table (userId + organizationId + role + status). Invitation via time-limited token (email link or SMS OTP). Server-side enforcement that members cannot grant roles higher than their own.
+**Next action:** Apply migrations. Implement invitation token flow (time-limited signed token sent via email/SMS). Wire Team screen to real Membership API.
 
 ---
 
 ### 27. RBAC / Permissions
 
-**Status:** `PARTIAL`
+**Status:** `PARTIAL` — Server-side AuthorizationService implemented; not yet wired to any live route.
 
-**What exists today:** `src/lib/permissions.ts` defines a pure-function permission model keyed by `StaffRole`. Components call `permissionsFor(role)` using the hardcoded `currentRole = "manager"`. Correct role names (owner/manager/cashier/sales/customer_service) and granular permissions (refund, cancelOrder, viewCustomerPhone, manageTeam, etc.) are present. Guards are frontend-only — the backend never checks them.
+**What exists today:**
+- `supabase/migrations/003_roles_permissions.sql` — roles, permissions, role_permissions tables with 37 permission keys and 5 system role seeds (OWNER/MANAGER/CASHIER/SALES/CUSTOMER_SERVICE). Role uniqueness fixed: partial unique indexes prevent duplicate system templates and enforce org-scoped custom role name uniqueness.
+- `src/server/auth/authorization.ts` — `AuthorizationService.forRequest/forSlug/can`, `AuthorizationContext.require/requireOwner`. Never trusts client-provided orgId. Derives auth from server-side session.
+- `src/server/auth/membership.ts` — `verifyActiveMembership()` loads membership + role + permissions from DB via service-role key.
+- `src/lib/permissions.ts` — client-side pure-function guard remains (UI-only decorative, no security value).
+- `currentRole = "manager"` still hardcoded in mock API (mock UI unaffected).
 
-**Repository evidence:** `src/lib/permissions.ts`, `src/lib/api/index.ts` comment: "Mocked; a real app resolves it from auth."
+**Not yet done:** AuthorizationService not wired to any production API route. Frontend guards still consuming hardcoded role. Manager-cannot-grant-above-self rule not yet enforced in application code (DB triggers prevent worst cases).
 
-**Source-of-truth doc:** PERMISSIONS_MATRIX.md (centralized AuthorizationService, 30-category permission matrix, server-side enforcement), SECURITY.md
+**Repository evidence:** `supabase/migrations/003_roles_permissions.sql`, `src/server/auth/`.
+
+**Source-of-truth doc:** PERMISSIONS_MATRIX.md, SECURITY.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Authentication, Membership domain
+**Dependencies:** Live Supabase (migrations applied), Authentication, Membership
 
-**Next action:** Claude Code — implement server-side `AuthorizationService` that resolves role from the authenticated session (not from client input). Permission keys must follow `domain.action` format (e.g., `orders.refund`, `inventory.adjust`) per PERMISSIONS_MATRIX.md. Frontend guards are UI-only; the backend must independently enforce every permission.
+**Next action:** Wire AuthorizationService into all server functions that handle mutations. Add manager-cannot-grant-above-self enforcement in the team.role_change flow.
 
 ---
 
 ### 28. Database
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — 8 migrations written and reviewed; not yet applied to the live APSA Supabase project.
 
-**What exists today:** No database. No Supabase project. No migrations. No schema. No ORM.
+**What exists today:**
+- `supabase/migrations/001–008_*.sql` — 8 migration files covering: auth profiles, organizations, roles/permissions, workspaces, locations, memberships, deferred RLS policies, and audit logs.
+- All tables have RLS enabled. Write paths blocked for JWT clients (service role only). Cross-tenant integrity enforced by DB triggers. Last-owner protection at DB level with advisory lock concurrency guard.
+- `@supabase/supabase-js` is added to `package.json`.
+- `src/lib/supabase/types.ts` is hand-authored scaffolding — **must be replaced** with `supabase gen types typescript` after migrations are applied.
+- Supabase project exists: Seoul region, `laykheangma95-ops/Apsa-hub`.
 
-**Repository evidence:** `package.json` — no `@supabase/supabase-js`, no Prisma, no Drizzle, no database client.
+**Not yet done:** Migrations not applied to live project. 20+ domain tables (Customer, Product, Order, etc.) not yet written. All domain data still in mock arrays.
 
-**Source-of-truth doc:** ARCHITECTURE.md (PostgreSQL/Supabase), DATA_MODEL.md (30+ entities), MVP_ROADMAP.md Phase 1
+**Repository evidence:** `supabase/migrations/`, `package.json` (@supabase/supabase-js), `src/lib/supabase/`.
+
+**Source-of-truth doc:** ARCHITECTURE.md (PostgreSQL/Supabase), DATA_MODEL.md, MVP_ROADMAP.md Phase 1
 
 **Owner:** Claude Code
 
-**Dependencies:** Supabase project (requires external provisioning)
+**Dependencies:** Project owner must apply migrations (requires Supabase service-role credentials)
 
-**Next action:** Claude Code — provision Supabase project (BLOCKED_EXTERNAL until credentials are provided). Then implement migrations for all MVP entities per DATA_MODEL.md. **Critical:** Supabase project must be entirely separate from any other project (ARCHITECTURE.md constraint).
+**Next action:** Project owner applies migrations 001–008 to the live APSA Supabase project. Regenerate types. Then implement remaining domain entity migrations per DATA_MODEL.md.
 
 ---
 
 ### 29. Row-Level Security (RLS)
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — RLS policies written in migrations; not yet applied or live-tested against real Supabase.
 
-**What exists today:** Nothing. No database, no RLS policies.
+**What exists today:**
+- All 8 migration files have `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
+- Organizations, workspaces, locations: SELECT gated on active membership (via 007_rls_deferred_member_policies.sql). All writes blocked for JWT clients.
+- Memberships: SELECT for own row + org roster. All writes blocked.
+- Roles: System roles readable by authenticated users; org-specific roles require membership (migration 007).
+- Role_permissions: System mappings readable by authenticated users; org-specific mappings require membership (migration 007). FIX: Custom org role mappings no longer leak to members of other orgs.
+- Audit logs: SELECT requires `org.read` permission (via has_audit_access() function). Only Owner and Manager can read. FIX: Cashier, Sales, Customer Service cannot read audit logs.
 
-**Repository evidence:** No database exists; RLS is impossible without it.
+**Not yet done:** RLS policies not verified against live project. Future domain tables (Customer, Order, etc.) need RLS added when their migrations are written.
 
-**Source-of-truth doc:** SECURITY.md (RLS on every table, non-negotiable), ARCHITECTURE.md (security requirements), PERMISSIONS_MATRIX.md
+**Repository evidence:** `supabase/migrations/002–008_*.sql`.
+
+**Source-of-truth doc:** SECURITY.md (RLS on every table), ARCHITECTURE.md, PERMISSIONS_MATRIX.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Database (Supabase), Membership domain
+**Dependencies:** Live Supabase project (migrations applied)
 
-**Next action:** Claude Code — implement RLS policy on every table keyed to `organization_id` derived from the authenticated session. Organization A must never access Organization B's data. This is the most critical security requirement in the entire system.
+**Next action:** Apply migrations. Verify RLS via Supabase Dashboard → Policies. Run integration tests to confirm org A cannot read org B data.
 
 ---
 
 ### 30. Audit Logging
 
-**Status:** `NOT_BUILT`
+**Status:** `PARTIAL` — Audit infrastructure implemented; not yet live or integrated with domain mutations.
 
-**What exists today:** Nothing. No AuditLog table, no audit events, no logging infrastructure.
+**What exists today:**
+- `supabase/migrations/008_audit_logs.sql` — audit_logs table with actor, action, resource_type, resource_id, org, before/after JSON, IP, user agent. Append-only enforced by UPDATE/DELETE triggers. RLS restricted to org.read holders (Owner + Manager only).
+- `src/server/auth/audit.ts` — two-path audit design:
+  - `auditLog()` — best-effort, never throws, for informational actions.
+  - `auditLogRequired()` — fail-closed, throws if write fails, for mandatory high-risk actions (refunds, role changes, stock adjustments, exports, staff removal).
+- `MANDATORY_AUDIT_ACTIONS` constant enumerates which actions require fail-closed audit.
+- Actor and orgId always derived from validated `AuthorizationContext`, never from client input.
 
-**Repository evidence:** No AuditLog type in `src/types/index.ts`. No audit-related code anywhere.
+**Not yet done:** Audit calls not wired into any domain mutation handlers (none exist yet). Transactional audit + mutation atomicity not yet implemented (requires domain service layer).
 
-**Source-of-truth doc:** DATA_MODEL.md (AuditLog), SECURITY.md §§ Audit, APSA_MASTER_PLAN.md (audit foundation)
+**Repository evidence:** `supabase/migrations/008_audit_logs.sql`, `src/server/auth/audit.ts`.
+
+**Source-of-truth doc:** DATA_MODEL.md (AuditLog), SECURITY.md §§ Audit, APSA_MASTER_PLAN.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Database, Authentication, Domain events
+**Dependencies:** Live Supabase (migrations applied), domain service layer
 
-**Next action:** Claude Code — implement AuditLog table with actor, action, resource_type, resource_id, organization_id, timestamp. All financial mutations (payment, refund, stock adjustment) and permission-sensitive actions (role change, staff removal) must write an audit record.
+**Next action:** When domain mutation handlers are implemented (orders, payments, inventory, team), call `auditLogRequired()` for all mandatory actions before returning success.
 
 ---
 

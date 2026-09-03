@@ -1,11 +1,26 @@
 /**
  * Audit logging service — server-side only.
  *
- * All sensitive actions must call auditLog() after execution.
- * Audit records are append-only and must never be modified.
- * Uses the service-role key to bypass RLS for writes.
+ * Two paths:
+ *
+ * 1. auditLog()         — best-effort. Logs and continues even if the write fails.
+ *                         Use for informational, lower-risk activity (sign-in, read exports, etc.).
+ *
+ * 2. auditLogRequired() — fail-closed. Throws if the audit record cannot be persisted.
+ *                         Use for mandatory high-risk actions:
+ *                           - refunds, payment overrides
+ *                           - role/permission changes
+ *                           - stock adjustments
+ *                           - staff removal
+ *                           - sensitive data exports
+ *                         The protected mutation and this call should share the same
+ *                         service-role transaction where the DB supports it.
+ *
+ * SECURITY: Never pass organizationId or actorUserId from client-supplied request body.
+ * Always derive them from the validated AuthorizationContext (ctx.organizationId, ctx.userId).
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
+import type { AuthorizationContext } from "./authorization";
 
 export type AuditAction =
   | "auth.sign_in"
@@ -27,9 +42,18 @@ export type AuditAction =
   | "org.update"
   | "org.ownership_transfer";
 
-export interface AuditContext {
-  organizationId: string;
-  actorUserId: string;
+/** High-risk actions that MUST use auditLogRequired() — not auditLog(). */
+export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
+  "orders.refund",
+  "payments.override",
+  "inventory.adjust",
+  "customers.export",
+  "team.remove",
+  "team.role_change",
+  "org.ownership_transfer",
+]);
+
+export interface AuditPayload {
   action: AuditAction;
   resourceType: string;
   resourceId?: string;
@@ -41,34 +65,76 @@ export interface AuditContext {
 }
 
 /**
- * Write an audit log entry.
- * For critical actions, await before returning.
- * Never throws — audit failure must not cascade to block the main operation.
+ * Build the DB row from a validated AuthorizationContext + payload.
+ * Org and actor are always taken from the server-verified context.
  */
-export async function auditLog(ctx: AuditContext): Promise<void> {
-  const payload = {
+function buildAuditRow(ctx: AuthorizationContext, payload: AuditPayload) {
+  return {
     organization_id: ctx.organizationId,
-    actor_user_id: ctx.actorUserId,
-    action: ctx.action,
-    resource_type: ctx.resourceType,
-    resource_id: ctx.resourceId ?? null,
-    before_json: ctx.beforeJson ?? null,
-    after_json: ctx.afterJson ?? null,
-    reason: ctx.reason ?? null,
-    ip_address: ctx.ipAddress ?? null,
-    user_agent: ctx.userAgent ?? null,
+    actor_user_id: ctx.userId,
+    action: payload.action,
+    resource_type: payload.resourceType,
+    resource_id: payload.resourceId ?? null,
+    before_json: payload.beforeJson ?? null,
+    after_json: payload.afterJson ?? null,
+    reason: payload.reason ?? null,
+    ip_address: payload.ipAddress ?? null,
+    user_agent: payload.userAgent ?? null,
   };
+}
 
-  // Explicit cast required: supabase-js type inference needs a connected project.
+/**
+ * Best-effort audit log write.
+ * Never throws — audit failure does NOT block the main operation.
+ * Suitable for informational, lower-risk activity.
+ * NOT acceptable for mandatory high-risk actions (use auditLogRequired instead).
+ */
+export async function auditLog(
+  ctx: AuthorizationContext,
+  payload: AuditPayload,
+): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (supabaseAdmin as any).from("audit_logs").insert(payload);
+  const { error } = await (supabaseAdmin as any)
+    .from("audit_logs")
+    .insert(buildAuditRow(ctx, payload));
 
   if (error) {
-    // Audit failure is logged but never rethrown — main operation must not be blocked.
-    console.error("[APSA] audit_log write failed:", (error as { message?: string }).message, {
-      action: ctx.action,
+    console.error("[APSA] audit_log write failed (best-effort):", (error as { message?: string }).message, {
+      action: payload.action,
       organizationId: ctx.organizationId,
-      actorUserId: ctx.actorUserId,
+      actorUserId: ctx.userId,
     });
+  }
+}
+
+/**
+ * Mandatory audit log write — fail-closed.
+ * Throws if the audit record cannot be persisted.
+ * MUST be used for all high-risk actions listed in MANDATORY_AUDIT_ACTIONS.
+ *
+ * Usage pattern:
+ *   await auditLogRequired(ctx, { action: "orders.refund", ... });
+ *   // audit confirmed — proceed with the mutation
+ *   // OR: wrap mutation + audit in the same DB transaction via service role
+ */
+export async function auditLogRequired(
+  ctx: AuthorizationContext,
+  payload: AuditPayload,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (supabaseAdmin as any)
+    .from("audit_logs")
+    .insert(buildAuditRow(ctx, payload));
+
+  if (error) {
+    const msg = (error as { message?: string }).message ?? "unknown error";
+    console.error("[APSA] CRITICAL: mandatory audit_log write failed — blocking action:", msg, {
+      action: payload.action,
+      organizationId: ctx.organizationId,
+      actorUserId: ctx.userId,
+    });
+    throw new Error(
+      `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail. (${msg})`,
+    );
   }
 }

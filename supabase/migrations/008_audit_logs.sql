@@ -1,12 +1,17 @@
--- Migration: 007_audit_logs
+-- Migration: 008_audit_logs
 -- Purpose: Append-only audit log for sensitive actions
 -- Tables: audit_logs
 -- Classification: tenant-private (scoped to organization_id)
 -- Indexes: organization_id+created_at (primary query pattern), actor_user_id, resource
 -- Constraints: append-only — no UPDATE or DELETE allowed even for service role via trigger
 -- Tenant ownership: organization_id
--- RLS: org members with analytics.read can see logs; INSERT only via service role
+-- RLS: Only org members with 'org.read' permission can SELECT audit logs.
+--      This restricts audit log access to Owner and Manager roles by default.
+--      Cashier, Sales, and Customer Service cannot read audit logs.
+--      INSERT only via service role (server-side).
+-- NOTE: Requires has_audit_access() function from 007_rls_deferred_member_policies.sql
 -- Rollback: DROP TABLE public.audit_logs CASCADE;
+--           DROP FUNCTION public.prevent_audit_log_modification();
 
 CREATE TABLE public.audit_logs (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -55,19 +60,15 @@ CREATE TRIGGER audit_logs_no_delete
 -- ── RLS ──────────────────────────────────────────────────────────────────────
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
--- Active org members with org.read permission can view audit logs.
--- The analytics.read check is enforced at the application layer;
--- RLS here only verifies org membership as defense-in-depth.
-CREATE POLICY "audit_logs_select_member"
+-- FIX: Only org members with 'org.read' permission can read audit logs.
+-- The old policy allowed ANY active org member to read audit logs, which exposed
+-- security-sensitive history to cashiers, sales staff, and customer service.
+-- Per PERMISSIONS_MATRIX.md: org.read is granted to OWNER and MANAGER only.
+-- Cashier, Sales, and Customer Service do not have org.read and cannot access logs.
+-- The has_audit_access() function is defined in 007_rls_deferred_member_policies.sql.
+CREATE POLICY "audit_logs_select_org_read_permission"
   ON public.audit_logs FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = audit_logs.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+  USING (public.has_audit_access(organization_id));
 
 -- INSERT is blocked for JWT clients — only service role can write audit logs.
 CREATE POLICY "audit_logs_insert_blocked"

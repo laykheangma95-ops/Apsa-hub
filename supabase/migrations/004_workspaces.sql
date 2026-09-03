@@ -1,12 +1,14 @@
--- Migration: 003_workspaces
+-- Migration: 004_workspaces
 -- Purpose: Workspace entity — logical grouping within an organization (INBOX vs BUSINESS)
 -- Tables: workspaces
 -- Classification: tenant-private (scoped to organization_id)
 -- Indexes: organization_id, type, status
 -- Constraints: organization_id FK, type enum, status enum
 -- Tenant ownership: organization_id (must match caller's org in application layer)
--- RLS: active org members can read their org's workspaces; writes via service role only
--- Rollback: DROP TABLE public.workspaces CASCADE; DROP TYPE ...;
+-- RLS: SELECT policy referencing memberships is deferred to 007_rls_deferred_member_policies.sql
+--      because memberships does not exist yet at this point in the migration sequence.
+--      Writes are blocked for JWT clients.
+-- Rollback: DROP TABLE public.workspaces CASCADE; DROP TYPE public.workspace_type; DROP TYPE public.workspace_status;
 
 CREATE TYPE public.workspace_type AS ENUM ('INBOX', 'BUSINESS');
 CREATE TYPE public.workspace_status AS ENUM ('active', 'archived');
@@ -33,17 +35,8 @@ CREATE TRIGGER workspaces_updated_at
 -- ── RLS ──────────────────────────────────────────────────────────────────────
 ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
 
--- Active members of the organization can read its workspaces.
-CREATE POLICY "workspaces_select_member"
-  ON public.workspaces FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.organization_id = workspaces.organization_id
-        AND m.user_id = auth.uid()
-        AND m.status = 'active'
-    )
-  );
+-- NOTE: The SELECT policy that checks active membership is in 007_rls_deferred_member_policies.sql
+-- because the memberships table does not exist yet when this migration runs.
 
 -- Writes blocked for JWT clients; use service-role key server-side.
 CREATE POLICY "workspaces_write_blocked"
