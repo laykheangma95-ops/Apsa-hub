@@ -344,8 +344,6 @@
     transform var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
   -webkit-tap-highlight-color: transparent;
-}
-@utility press {
   &:active {
     transform: scale(0.98);
   }
