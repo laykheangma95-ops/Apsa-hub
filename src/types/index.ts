@@ -280,12 +280,31 @@ export interface ConversationDetail extends Conversation {
 
 export type StaffRole = "owner" | "manager" | "cashier" | "sales" | "customer_service";
 
+export type StaffStatus = "active" | "invited";
+
 export interface Staff {
   id: string;
   name: string;
   role: StaffRole;
   companion: CompanionColor;
+  status?: StaffStatus;
+  phone?: string;
+  email?: string;
+  shopId?: string;
+  invitedAt?: string;
 }
+
+/** A business context the signed-in person can operate in. */
+export interface WorkspaceSummary {
+  id: string;
+  nameKm: string;
+  nameEn: string;
+  city: string;
+  type: Workspace;
+  role: StaffRole;
+  active: boolean;
+}
+
 
 export type PaymentMethod = "cash" | "khqr" | "bank_transfer" | "cod";
 
