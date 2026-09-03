@@ -190,7 +190,7 @@ function Customer360Screen() {
                 value={customer.lastPurchaseAt ? fullTimestamp(customer.lastPurchaseAt) : "—"}
               />
               <SectionRow
-                label={t("order.customer")}
+                label={t("delivery.address")}
                 value={
                   permissions.viewCustomerAddress && customer.address
                     ? [
