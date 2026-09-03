@@ -62,7 +62,7 @@ function BusinessHome() {
   const isEmpty = summary && summary.revenue.amount === 0;
 
   return (
-    <div className="min-h-screen bg-surface-secondary pb-28">
+    <div className="min-h-screen bg-surface-page pb-28">
       <AppHeader
         title={shopQuery.data ? localName(shopQuery.data, language) : t("brand.name")}
         subtitle={shopQuery.data?.city}
