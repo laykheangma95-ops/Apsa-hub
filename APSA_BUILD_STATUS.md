@@ -3,7 +3,7 @@
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
 **Last updated:** 2026-09-03
-**Branch:** `claude/apsa-production-foundation-sneozb` (production blockers fixed)
+**Branch:** `claude/apsa-live-supabase-verification` (live Supabase verification tooling)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -32,6 +32,28 @@
 **Backend APIs:** NONE YET — server auth layer built; API route handlers are next sprint.  
 **Data layer:** Still mock — production repositories are next (mock not ripped out; UI unbroken).  
 **Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
+
+### Live Supabase Verification Tooling Added (2026-09-03)
+
+| Area | Status | Files |
+|---|---|---|
+| Connection probe script | BUILT | `scripts/verify-supabase-connection.ts` |
+| `verify:supabase` npm script | ADDED | `package.json` |
+| Test seed SQL | BUILT | `supabase/seed-test.sql` |
+| Migration verification SQL | BUILT | `supabase/verify-migrations.sql` |
+| Unit tests (U1–U3) | PASSING | 40/40 pass without Supabase credentials |
+| Live DB tests (T1–T15) | SKIP-READY | Skip cleanly until credentials + migrations are in place |
+
+**How to activate live tests:**
+1. Open APSA's Supabase project (Seoul region)
+2. Copy `.env.example` → `.env.local`, fill in `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+3. Apply migrations 001–008: `supabase db push` (or paste each file in SQL Editor)
+4. Run connection probe: `bun run verify:supabase`
+5. Run migration verification: paste `supabase/verify-migrations.sql` in SQL Editor
+6. Seed test data: paste `supabase/seed-test.sql` in SQL Editor (test project only), update UUIDs in `src/tests/tenant-isolation.test.ts`
+7. Run full integration tests: `bun test src/tests/tenant-isolation.test.ts`
+
+---
 
 ### Production Foundation Added (2026-09-03)
 
