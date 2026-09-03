@@ -10,10 +10,12 @@ export interface Permissions {
   viewLifetimeSpend: boolean;
   refund: boolean;
   cancelOrder: boolean;
+  manageTeam: boolean;
 }
 
 const BY_ROLE: Record<StaffRole, Permissions> = {
   owner: {
+    manageTeam: true,
     viewCustomerPhone: true,
     viewCustomerAddress: true,
     viewLifetimeSpend: true,
@@ -21,6 +23,7 @@ const BY_ROLE: Record<StaffRole, Permissions> = {
     cancelOrder: true,
   },
   manager: {
+    manageTeam: true,
     viewCustomerPhone: true,
     viewCustomerAddress: true,
     viewLifetimeSpend: true,
@@ -28,6 +31,7 @@ const BY_ROLE: Record<StaffRole, Permissions> = {
     cancelOrder: true,
   },
   cashier: {
+    manageTeam: false,
     viewCustomerPhone: false,
     viewCustomerAddress: false,
     viewLifetimeSpend: false,
@@ -35,6 +39,7 @@ const BY_ROLE: Record<StaffRole, Permissions> = {
     cancelOrder: false,
   },
   sales: {
+    manageTeam: false,
     viewCustomerPhone: true,
     viewCustomerAddress: true,
     viewLifetimeSpend: false,
@@ -42,6 +47,7 @@ const BY_ROLE: Record<StaffRole, Permissions> = {
     cancelOrder: false,
   },
   customer_service: {
+    manageTeam: false,
     viewCustomerPhone: true,
     viewCustomerAddress: true,
     viewLifetimeSpend: false,
