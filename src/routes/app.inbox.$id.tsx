@@ -200,71 +200,74 @@ function ConversationScreen() {
         <div ref={endRef} />
       </div>
 
-      {/* Persistent order action sits directly above the composer. */}
-      <div className="border-t border-border-default px-4 py-2">
-        {lastOrder ? (
-          <nav
-            aria-label={t("conversation.orderActions.label")}
-            className="mb-2 flex gap-2 overflow-x-auto"
+      {/* One bottom surface: order action first, composer beneath it. */}
+      <div className="surface-glass elevation-3 border-t border-border-default pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+        <div className="px-4 pt-3">
+          {lastOrder ? (
+            <nav
+              aria-label={t("conversation.orderActions.label")}
+              className="scrollbar-none mb-2 flex gap-2 overflow-x-auto"
+            >
+              {(["payment", "delivery", "view"] as const).map((action) => (
+                <button
+                  key={action}
+                  type="button"
+                  className="press tap-target text-label shrink-0 rounded-full border border-border-default bg-surface-primary px-4 text-text-primary"
+                >
+                  <span className="chip-text">{t(`conversation.orderActions.${action}`)}</span>
+                </button>
+              ))}
+            </nav>
+          ) : null}
+          <Button
+            className="press tap-target elevation-action h-12 w-full"
+            disabled={!customer}
+            onClick={() => setOrderOpen(true)}
           >
-            {(["payment", "delivery", "view"] as const).map((action) => (
-              <button
-                key={action}
-                type="button"
-                className="tap-target text-label shrink-0 rounded-full border border-border-strong px-4 text-text-primary"
-              >
-                <span className="chip-text">{t(`conversation.orderActions.${action}`)}</span>
-              </button>
-            ))}
-          </nav>
-        ) : null}
-        <Button
-          className="tap-target h-12 w-full"
-          disabled={!customer}
-          onClick={() => setOrderOpen(true)}
+            {t("conversation.createOrder")}
+          </Button>
+        </div>
+
+        <form
+          className="flex items-end gap-1.5 px-3 pt-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            send(draft);
+          }}
         >
-          {t("conversation.createOrder")}
-        </Button>
+          <button
+            type="button"
+            aria-label={t("conversation.savedReplies")}
+            onClick={() => setSavedOpen(true)}
+            className="press tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
+          >
+            <MessageSquareQuote className="size-5" aria-hidden />
+          </button>
+          <button
+            type="button"
+            aria-label={t("conversation.attachment")}
+            className="press tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
+          >
+            <ImagePlus className="size-5" aria-hidden />
+          </button>
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={t("conversation.composerPlaceholder")}
+            aria-label={t("conversation.composerPlaceholder")}
+            className="h-12 min-w-0 flex-1 rounded-full bg-surface-primary"
+          />
+          <button
+            type="submit"
+            aria-label={t("conversation.send")}
+            disabled={draft.trim().length === 0}
+            className="press tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
+          >
+            <Send className="size-5" aria-hidden />
+          </button>
+        </form>
       </div>
 
-      <form
-        className="flex items-end gap-2 border-t border-border-default px-3 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]"
-        onSubmit={(event) => {
-          event.preventDefault();
-          send(draft);
-        }}
-      >
-        <button
-          type="button"
-          aria-label={t("conversation.savedReplies")}
-          onClick={() => setSavedOpen(true)}
-          className="tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
-        >
-          <MessageSquareQuote className="size-5" aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label={t("conversation.attachment")}
-          className="tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
-        >
-          <ImagePlus className="size-5" aria-hidden />
-        </button>
-        <Input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={t("conversation.composerPlaceholder")}
-          aria-label={t("conversation.composerPlaceholder")}
-          className="h-12 min-w-0 flex-1"
-        />
-        <button
-          type="submit"
-          aria-label={t("conversation.send")}
-          disabled={draft.trim().length === 0}
-          className="tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
-        >
-          <Send className="size-5" aria-hidden />
-        </button>
-      </form>
 
       <BottomSheet
         open={statusOpen}
