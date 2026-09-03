@@ -66,25 +66,8 @@ const EVENT_TONE: Record<string, TimelineItem["tone"]> = {
   refunded: "warning",
 };
 
-function Section({
-  title,
-  children,
-  action,
-}: {
-  title: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-h3 text-text-primary">{title}</h2>
-        {action}
-      </div>
-      <div className="mt-3">{children}</div>
-    </section>
-  );
-}
+
+
 
 function OrderDetailScreen() {
   const { id } = Route.useParams();
