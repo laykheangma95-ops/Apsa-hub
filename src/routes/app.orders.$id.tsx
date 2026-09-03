@@ -199,11 +199,22 @@ function OrderDetailScreen() {
   const canReturn = order.fulfillmentStatus === "delivered";
   const canRefund = permissions.refund && paid.amount > 0;
 
+  /** Exactly one dominant action: the next step the merchant actually owes. */
+  const actions = [
+    canPay ? { key: "pay", label: t("order.recordPayment"), open: () => setPaymentOpen(true) } : null,
+    canDeliver
+      ? { key: "deliver", label: t("order.arrangeDelivery"), open: () => setDeliveryOpen(true) }
+      : null,
+    canReturn ? { key: "return", label: t("order.startReturn"), open: () => setReturnOpen(true) } : null,
+    canRefund ? { key: "refund", label: t("order.refund"), open: () => setRefundOpen(true) } : null,
+  ].filter(Boolean) as { key: string; label: string; open: () => void }[];
+  const [primaryAction, ...secondaryActions] = actions;
+
   return (
-    <div className="min-h-dvh bg-surface-canvas pb-28">
+    <div className="min-h-dvh bg-surface-page">
       <AppHeader title={order.code} subtitle={fullTimestamp(order.createdAt)} onBack={back} />
 
-      <div className="mx-auto max-w-[560px] space-y-3 px-4 py-4 lg:max-w-[880px]">
+      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
         {notice ? (
           <p
             role="status"
@@ -213,23 +224,22 @@ function OrderDetailScreen() {
           </p>
         ) : null}
 
-        <Section title={t("order.title")}>
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusChip status={order.paymentStatus} size="md" />
-            <StatusChip status={order.fulfillmentStatus} size="md" />
+        {/* One hero number, then quiet supporting facts. */}
+        <Section variant="plain">
+          <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+            <MoneyText value={order.total} showSecondary size="lg" />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <StatusChip status={order.paymentStatus} size="md" />
+              <StatusChip status={order.fulfillmentStatus} size="md" />
+            </div>
+            <SectionRows className="mt-3 border-t border-border-default pt-2">
+              <SectionRow
+                label={t("order.source")}
+                value={<ChannelBadge channel={order.channel} withLabel />}
+              />
+              <SectionRow label={t("order.placedBy")} value={staffName ?? "—"} />
+            </SectionRows>
           </div>
-          <dl className="mt-3 grid grid-cols-2 gap-3">
-            <div>
-              <dt className="text-caption text-text-muted">{t("order.source")}</dt>
-              <dd className="mt-0.5">
-                <ChannelBadge channel={order.channel} withLabel />
-              </dd>
-            </div>
-            <div>
-              <dt className="text-caption text-text-muted">{t("order.placedBy")}</dt>
-              <dd className="text-body-sm text-text-primary">{staffName ?? "—"}</dd>
-            </div>
-          </dl>
         </Section>
 
         <Section
@@ -239,15 +249,16 @@ function OrderDetailScreen() {
               <button
                 type="button"
                 onClick={() => navigate({ to: "/app/customers/$id", params: { id: customer.id } })}
-                className="tap-target text-label text-action-primary"
+                className="text-label rounded-full px-1 py-2 text-action-primary"
               >
                 {t("order.viewCustomer")}
               </button>
             ) : null
           }
+          variant={customer ? "card" : "plain"}
         >
           {customer ? (
-            <div>
+            <div className="min-w-0">
               <p className="text-body text-text-primary">{localName(customer, language)}</p>
               <p className="text-body-sm tnum text-text-secondary">
                 {permissions.viewCustomerPhone ? customer.phone : t("customer360.hidden")}
@@ -264,7 +275,10 @@ function OrderDetailScreen() {
         <Section title={t("order.items")}>
           <ul className="divide-y divide-border-default">
             {order.items.map((item, index) => (
-              <li key={`${item.productId}-${index}`} className="flex items-start gap-3 py-2.5">
+              <li
+                key={`${item.productId}-${index}`}
+                className="flex items-start gap-3 py-2.5 first:pt-0"
+              >
                 <div className="min-w-0 flex-1">
                   <p className="text-body-sm text-text-primary">{localName(item, language)}</p>
                   <p className="text-caption text-text-muted">
@@ -289,15 +303,15 @@ function OrderDetailScreen() {
               [t("order.discount"), order.discount],
               [t("order.deliveryFee"), order.deliveryFee],
             ].map(([label, value]) => (
-              <div key={label as string} className="flex items-center justify-between">
-                <dt className="text-body-sm text-text-secondary">{label as string}</dt>
+              <div key={label as string} className="flex items-center justify-between gap-3">
+                <dt className="text-body-sm min-w-0 text-text-secondary">{label as string}</dt>
                 <dd className="text-financial text-text-primary">{formatMoney(value as never)}</dd>
               </div>
             ))}
-            <div className="flex items-start justify-between pt-1">
+            <div className="flex items-start justify-between gap-3 pt-1">
               <dt className="text-label text-text-primary">{t("order.total")}</dt>
               <dd>
-                <MoneyText value={order.total} showSecondary size="lg" className="items-end" />
+                <MoneyText value={order.total} showSecondary className="items-end" />
               </dd>
             </div>
           </dl>
@@ -307,14 +321,14 @@ function OrderDetailScreen() {
           {payments.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("order.noPayments")}</p>
           ) : (
-            <ul className="space-y-2">
+            <ul className="divide-y divide-border-default">
               {payments.map((payment) => (
-                <li key={payment.id} className="rounded-xl bg-surface-secondary px-3 py-2">
+                <li key={payment.id} className="py-2.5 first:pt-0">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-body-sm text-text-primary">
+                    <span className="text-body-sm min-w-0 text-text-primary">
                       {t(`pos.method.${payment.method}`)}
                     </span>
-                    <span className="text-financial text-text-primary">
+                    <span className="text-financial shrink-0 text-text-primary">
                       {formatMoney(payment.amount)}
                     </span>
                   </div>
@@ -336,11 +350,11 @@ function OrderDetailScreen() {
             </ul>
           )}
           <dl className="mt-3 space-y-1.5 border-t border-border-default pt-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <dt className="text-body-sm text-text-secondary">{t("order.paid")}</dt>
               <dd className="text-financial text-text-primary">{formatMoney(paid)}</dd>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <dt className="text-body-sm text-text-secondary">{t("order.balance")}</dt>
               <dd
                 className={cn(
@@ -361,7 +375,7 @@ function OrderDetailScreen() {
               <button
                 type="button"
                 onClick={() => navigate({ to: "/app/deliveries/$id", params: { id: delivery.id } })}
-                className="tap-target text-label text-action-primary"
+                className="text-label rounded-full px-1 py-2 text-action-primary"
               >
                 {t("order.viewDelivery")}
               </button>
@@ -371,7 +385,7 @@ function OrderDetailScreen() {
           {delivery ? (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-body-sm text-text-primary">{delivery.courierName}</span>
+                <span className="text-body-sm min-w-0 text-text-primary">{delivery.courierName}</span>
                 <StatusChip status={delivery.status} />
               </div>
               <p className="text-caption tnum text-text-muted">
@@ -393,32 +407,30 @@ function OrderDetailScreen() {
             <Timeline items={timelineItems} />
           )}
         </Section>
-
-        <Section title={t("order.actions")}>
-          <div className="flex flex-wrap gap-2">
-            {canPay ? (
-              <Button className="tap-target h-12" onClick={() => setPaymentOpen(true)}>
-                {t("order.recordPayment")}
-              </Button>
-            ) : null}
-            {canDeliver ? (
-              <Button variant="outline" className="tap-target h-12" onClick={() => setDeliveryOpen(true)}>
-                {t("order.arrangeDelivery")}
-              </Button>
-            ) : null}
-            {canReturn ? (
-              <Button variant="outline" className="tap-target h-12" onClick={() => setReturnOpen(true)}>
-                {t("order.startReturn")}
-              </Button>
-            ) : null}
-            {canRefund ? (
-              <Button variant="outline" className="tap-target h-12" onClick={() => setRefundOpen(true)}>
-                {t("order.refund")}
-              </Button>
-            ) : null}
-          </div>
-        </Section>
       </div>
+
+      {primaryAction ? (
+        <StickyActionBar aboveNav>
+          <Button className="tap-target h-12 w-full" onClick={primaryAction.open}>
+            {primaryAction.label}
+          </Button>
+          {secondaryActions.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {secondaryActions.map((action) => (
+                <Button
+                  key={action.key}
+                  variant="ghost"
+                  className="tap-target text-label h-11 flex-1 text-text-secondary"
+                  onClick={action.open}
+                >
+                  {action.label}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </StickyActionBar>
+      ) : null}
+
 
       <RecordPaymentSheet
         open={paymentOpen}
