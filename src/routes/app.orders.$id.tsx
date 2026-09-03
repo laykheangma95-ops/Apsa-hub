@@ -142,7 +142,7 @@ function OrderDetailScreen() {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-canvas pb-24">
+      <div className="min-h-dvh bg-surface-page pb-24">
         <AppHeader title={t("order.title")} onBack={back} />
         <ListSkeleton rows={5} />
       </div>
@@ -152,7 +152,7 @@ function OrderDetailScreen() {
   if (query.isError) {
     const denied = (query.error as Error).message === PERMISSION_DENIED;
     return (
-      <div className="min-h-dvh bg-surface-canvas pb-24">
+      <div className="min-h-dvh bg-surface-page pb-24">
         <AppHeader title={t("order.title")} onBack={back} />
         {denied ? (
           <OperationalState title={t("order.denied")} body={t("order.deniedBody")} />

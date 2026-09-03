@@ -78,7 +78,7 @@ function Customer360Screen() {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-canvas">
+      <div className="min-h-dvh bg-surface-page">
         <AppHeader title={t("customer360.title")} onBack={back} />
         <ListSkeleton rows={6} />
       </div>
@@ -87,7 +87,7 @@ function Customer360Screen() {
 
   if (query.isError) {
     return (
-      <div className="min-h-dvh bg-surface-canvas">
+      <div className="min-h-dvh bg-surface-page">
         <AppHeader title={t("customer360.title")} onBack={back} />
         <OperationalState
           title={t("customer360.notFound")}
@@ -119,7 +119,7 @@ function Customer360Screen() {
   }));
 
   return (
-    <div className="min-h-dvh bg-surface-canvas pb-24">
+    <div className="min-h-dvh bg-surface-page pb-24">
       <AppHeader title={displayName} subtitle={t("customer360.title")} onBack={back} />
 
       <div className="mx-auto max-w-[560px] px-4 py-4 lg:max-w-[880px]">

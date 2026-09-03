@@ -66,7 +66,7 @@ function DeliveryScreen() {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-canvas">
+      <div className="min-h-dvh bg-surface-page">
         <AppHeader title={t("delivery.title")} onBack={back} />
         <ListSkeleton rows={5} />
       </div>
@@ -76,7 +76,7 @@ function DeliveryScreen() {
   if (query.isError) {
     const denied = (query.error as Error).message === PERMISSION_DENIED;
     return (
-      <div className="min-h-dvh bg-surface-canvas">
+      <div className="min-h-dvh bg-surface-page">
         <AppHeader title={t("delivery.title")} onBack={back} />
         {denied ? (
           <OperationalState title={t("delivery.denied")} body={t("delivery.deniedBody")} />
@@ -111,7 +111,7 @@ function DeliveryScreen() {
     }));
 
   return (
-    <div className="min-h-dvh bg-surface-canvas pb-24">
+    <div className="min-h-dvh bg-surface-page pb-24">
       <AppHeader title={t("delivery.title")} subtitle={delivery.trackingNumber} onBack={back} />
 
       <div className="mx-auto max-w-[560px] space-y-3 px-4 py-4 lg:max-w-[880px]">
