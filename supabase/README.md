@@ -78,11 +78,30 @@ cannot be added inline. Migration 007 adds them after `memberships` exists.
 
 ---
 
-## Test Project
+## Integration Tests
 
-For integration tests, create a separate test Supabase project (different project ref)
-and apply the same migrations. Configure `SUPABASE_TEST_URL` and `SUPABASE_TEST_SERVICE_ROLE_KEY`
-in `.env.test.local` (never committed). Run `bun test` to execute the test suite.
+The integration test suite (`src/tests/tenant-isolation.test.ts`) reads the same environment
+variables used by the server client. To run live DB tests, configure a **dedicated APSA
+test/staging Supabase project** — never the production project — and set:
+
+```
+VITE_SUPABASE_URL=https://<your-test-project>.supabase.co
+VITE_SUPABASE_ANON_KEY=<test-anon-key>
+SUPABASE_SERVICE_ROLE_KEY=<test-service-role-key>
+```
+
+Store these in `.env.test.local` (never committed). Then run:
+
+```
+bun test src/tests/tenant-isolation.test.ts
+```
+
+**Important:**
+- Use a dedicated test/staging Supabase project, not the production project.
+- Apply the same migrations (001–008) to the test project before running tests.
+- Never run destructive or security integration tests against production data.
+- When the environment variables are absent, unit tests (U1–U3) still run; DB-dependent
+  tests are skipped automatically with a clear `[SKIP]` warning.
 
 ---
 
