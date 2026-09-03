@@ -20,6 +20,7 @@ import {
   QuickActionGrid,
   Sparkline,
 } from "@/design-system";
+import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
 import type { MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
@@ -48,6 +49,7 @@ function BusinessHome() {
   const { language } = useLanguage();
   const [range, setRange] = useState<MetricRange>("today");
   const [createOpen, setCreateOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [insightDismissed, setInsightDismissed] = useState(false);
 
   const shopQuery = useQuery({ queryKey: ["shop"], queryFn: getActiveShop });
@@ -64,7 +66,7 @@ function BusinessHome() {
       <AppHeader
         title={shopQuery.data ? localName(shopQuery.data, language) : t("brand.name")}
         subtitle={shopQuery.data?.city}
-        onShopSwitch={() => undefined}
+        onShopSwitch={() => setSwitcherOpen(true)}
         notificationCount={3}
         variant="plain"
       >
@@ -178,6 +180,7 @@ function BusinessHome() {
         ) : null}
       </main>
 
+      <WorkspaceSwitcherSheet open={switcherOpen} onOpenChange={setSwitcherOpen} />
       <BottomNav workspace="business" onCreate={() => setCreateOpen(true)} />
 
       <BottomSheet

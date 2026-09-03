@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Home, Inbox, MoreHorizontal, Plus, ShoppingBag, Users } from "lucide-react";
+import { Home, Inbox, Plus, ShoppingBag, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { Workspace } from "@/types";
@@ -73,10 +73,14 @@ export function BottomNav({ workspace = "business", onCreate, className }: Botto
             <span className="chip-text">{t("nav.contacts")}</span>
           </span>
         )}
-        <span className={cn(linkClass, "opacity-60")} aria-disabled>
-          <MoreHorizontal className="size-5" aria-hidden />
-          <span className="chip-text">{t("nav.more")}</span>
-        </span>
+        <Link
+          to="/app/team"
+          className={linkClass}
+          activeProps={{ className: "text-action-primary" }}
+        >
+          <Users className="size-5" aria-hidden />
+          <span className="chip-text">{t("nav.team")}</span>
+        </Link>
       </div>
     </nav>
   );
