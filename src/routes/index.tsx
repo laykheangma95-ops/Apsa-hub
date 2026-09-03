@@ -50,17 +50,13 @@ export const Route = createFileRoute("/")({
   component: Landing,
 });
 
-function Sec({
-  id,
-  children,
-  className = "",
-}: {
-  id?: string;
+type SecProps = React.ComponentPropsWithoutRef<"section"> & {
   children: React.ReactNode;
-  className?: string;
-}) {
+};
+
+function Sec({ children, className = "", ...rest }: SecProps) {
   return (
-    <section id={id} className={`px-5 py-14 md:py-20 ${className}`}>
+    <section className={`px-5 py-14 md:py-20 ${className}`} {...rest}>
       <div className="mx-auto w-full max-w-5xl">{children}</div>
     </section>
   );
@@ -153,7 +149,7 @@ function Landing() {
             {t("brand.name")}
           </Link>
 
-          <nav className="hidden items-center gap-6 md:flex" aria-label="Primary navigation">
+          <nav className="hidden items-center gap-6 md:flex" aria-label={t("landing.nav.primaryNav")}>
             <a href="#product" className="text-label text-text-secondary transition-colors hover:text-text-primary">
               {t("landing.nav.product")}
             </a>
@@ -174,7 +170,7 @@ function Landing() {
           <button
             className="tap-target flex size-9 items-center justify-center rounded-lg text-text-secondary md:hidden"
             onClick={() => setMobileOpen((v) => !v)}
-            aria-label={mobileOpen ? "Close menu" : "Open menu"}
+            aria-label={mobileOpen ? t("landing.nav.closeMenu") : t("landing.nav.openMenu")}
             aria-expanded={mobileOpen}
           >
             {mobileOpen ? <X className="size-5" aria-hidden /> : <Menu className="size-5" aria-hidden />}
@@ -184,7 +180,7 @@ function Landing() {
         {mobileOpen && (
           <nav
             className="border-t border-border-default bg-surface-primary px-5 py-4 md:hidden"
-            aria-label="Mobile navigation"
+            aria-label={t("landing.nav.mobileNav")}
           >
             <ul className="space-y-1">
               {[
@@ -245,7 +241,7 @@ function Landing() {
           {/* Inline inbox preview panel */}
           <div
             className="overflow-hidden rounded-2xl bg-surface-primary shadow-2xl"
-            aria-label="APSA unified inbox preview"
+            aria-label={t("landing.hero.inboxPreviewLabel")}
           >
             <div className="flex items-center gap-2 border-b border-border-default px-4 py-3">
               <span className="text-label text-text-primary flex-1">{t("landing.inbox.title")}</span>
@@ -254,9 +250,9 @@ function Landing() {
             <ul className="divide-y divide-border-default text-text-primary">
               {(
                 [
-                  { channel: "facebook", status: "unread", name: "Sophea Chan", msg: t("landing.hero.demoMessage") },
-                  { channel: "instagram", status: "needs_reply", name: "Dara Ly", msg: t("landing.hero.demoCustomer") },
-                  { channel: "telegram", status: "follow_up", name: "Mony Kim", msg: t("landing.hero.demoOrder") },
+                  { channel: "facebook", status: "unread", name: t("landing.hero.demoName1"), msg: t("landing.hero.demoMessage") },
+                  { channel: "instagram", status: "needs_reply", name: t("landing.hero.demoName2"), msg: t("landing.hero.demoCustomer") },
+                  { channel: "telegram", status: "follow_up", name: t("landing.hero.demoName3"), msg: t("landing.hero.demoOrder") },
                 ] as const
               ).map(({ channel, status, name, msg }) => (
                 <li key={channel} className="flex items-start gap-3 px-4 py-3">
@@ -316,7 +312,7 @@ function Landing() {
         <div
           className="mt-8 flex flex-wrap items-center gap-1.5"
           role="list"
-          aria-label="APSA product flow"
+          aria-label={t("landing.flow.flowLabel")}
         >
           {flowSteps.map(({ icon: Icon, key, label }, i) => (
             <div key={key} className="flex items-center gap-1.5" role="listitem">
@@ -359,7 +355,7 @@ function Landing() {
 
           <div
             className="overflow-hidden rounded-2xl border border-border-default bg-surface-primary"
-            aria-label="Unified inbox with channel overview"
+            aria-label={t("landing.inbox.channelOverviewLabel")}
           >
             <div className="border-b border-border-default px-4 py-3">
               <p className="text-label">{t("landing.inbox.title")}</p>
@@ -477,7 +473,7 @@ function Landing() {
 
           <div
             className="overflow-hidden rounded-2xl border border-border-default bg-surface-primary"
-            aria-label="Customer 360 profile preview"
+            aria-label={t("landing.c360.profilePreviewLabel")}
           >
             <div className="flex items-center gap-3 border-b border-border-default px-4 py-3">
               <span className="flex size-9 items-center justify-center rounded-full bg-action-primary-soft text-action-primary">
