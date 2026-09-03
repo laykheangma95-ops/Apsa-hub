@@ -41,8 +41,10 @@
 | `verify:supabase` npm script | ADDED | `package.json` |
 | Test seed SQL | BUILT | `supabase/seed-test.sql` |
 | Migration verification SQL | BUILT | `supabase/verify-migrations.sql` |
+| TypeScript types generated | DONE | `src/lib/supabase/types.ts` — from live schema |
+| tsc --noEmit | PASSING | 0 errors after alias fix |
 | Unit tests (U1–U3) | PASSING | 40/40 pass without Supabase credentials |
-| Live DB tests (T1–T15) | SKIP-READY | Skip cleanly until credentials + migrations are in place |
+| Live DB tests (T1–T15) | SKIP-READY | Skip cleanly — live DB reachable from user machine only |
 
 **How to activate live tests:**
 1. Open APSA's Supabase project (Seoul region)
@@ -61,7 +63,7 @@
 |---|---|---|
 | Supabase client — browser | BUILT | `src/lib/supabase/client.ts` |
 | Supabase client — server/admin | BUILT | `src/lib/supabase/server.ts` |
-| Database type definitions | BUILT | `src/lib/supabase/types.ts` |
+| Database type definitions | LIVE | `src/lib/supabase/types.ts` — generated from live schema |
 | Migration 001: auth_profiles | WRITTEN | `supabase/migrations/001_auth_profiles.sql` |
 | Migration 002: organizations | WRITTEN | `supabase/migrations/002_organizations.sql` |
 | Migration 003: roles_permissions | WRITTEN + SEEDED | `supabase/migrations/003_roles_permissions.sql` |
@@ -608,32 +610,32 @@
 
 ### 28. Database
 
-**Status:** `PARTIAL` — 8 migrations written and reviewed; not yet applied to the live APSA Supabase project.
+**Status:** `PARTIAL` — 8 migrations applied and verified against the live APSA Supabase project; domain entity tables not yet written.
 
 **What exists today:**
-- `supabase/migrations/001–008_*.sql` — 8 migration files covering: auth profiles, organizations, roles/permissions, workspaces, locations, memberships, deferred RLS policies, and audit logs.
-- All tables have RLS enabled. Write paths blocked for JWT clients (service role only). Cross-tenant integrity enforced by DB triggers. Last-owner protection at DB level with advisory lock concurrency guard.
-- `@supabase/supabase-js` is added to `package.json`.
-- `src/lib/supabase/types.ts` is hand-authored scaffolding — **must be replaced** with `supabase gen types typescript` after migrations are applied.
-- Supabase project exists: Seoul region, `laykheangma95-ops/Apsa-hub`.
+- `supabase/migrations/001–008_*.sql` — 8 migration files applied to live Supabase (Seoul region). 9 tables confirmed: profiles, organizations, roles, permissions, role_permissions, workspaces, locations, memberships, audit_logs.
+- All 9 tables have RLS enabled (verified via `pg_class.relrowsecurity = true`). Write paths blocked for JWT clients. Cross-tenant integrity enforced by DB triggers. Last-owner protection at DB level with advisory lock concurrency guard.
+- 5 system roles seeded (OWNER, MANAGER, CASHIER, SALES, CUSTOMER_SERVICE), 37 permissions seeded.
+- `@supabase/supabase-js` installed.
+- `src/lib/supabase/types.ts` generated from live schema — covers all 9 tables, all enums, and SYSTEM_ROLE_IDS constants.
 
-**Not yet done:** Migrations not applied to live project. 20+ domain tables (Customer, Product, Order, etc.) not yet written. All domain data still in mock arrays.
+**Not yet done:** 20+ domain tables (Customer, Product, Order, etc.) not yet written. All domain data still in mock arrays.
 
-**Repository evidence:** `supabase/migrations/`, `package.json` (@supabase/supabase-js), `src/lib/supabase/`.
+**Repository evidence:** `supabase/migrations/`, `package.json`, `src/lib/supabase/types.ts`.
 
 **Source-of-truth doc:** ARCHITECTURE.md (PostgreSQL/Supabase), DATA_MODEL.md, MVP_ROADMAP.md Phase 1
 
 **Owner:** Claude Code
 
-**Dependencies:** Project owner must apply migrations (requires Supabase service-role credentials)
+**Dependencies:** None (live DB is ready for next domain migrations)
 
-**Next action:** Project owner applies migrations 001–008 to the live APSA Supabase project. Regenerate types. Then implement remaining domain entity migrations per DATA_MODEL.md.
+**Next action:** Implement remaining domain entity migrations per DATA_MODEL.md: Customer, CustomerIdentity, Product, ProductVariant, InventoryMovement, Order, OrderItem, Payment, Refund, Delivery, Conversation, ConnectedChannel, Message.
 
 ---
 
 ### 29. Row-Level Security (RLS)
 
-**Status:** `PARTIAL` — RLS policies written in migrations; not yet applied or live-tested against real Supabase.
+**Status:** `PARTIAL` — RLS policies applied and live-verified on the APSA Supabase project; domain entity tables pending.
 
 **What exists today:**
 - All 8 migration files have `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
@@ -643,17 +645,17 @@
 - Role_permissions: System mappings readable by authenticated users; org-specific mappings require membership (migration 007). FIX: Custom org role mappings no longer leak to members of other orgs.
 - Audit logs: SELECT requires `org.read` permission (via has_audit_access() function). Only Owner and Manager can read. FIX: Cashier, Sales, Customer Service cannot read audit logs.
 
-**Not yet done:** RLS policies not verified against live project. Future domain tables (Customer, Order, etc.) need RLS added when their migrations are written.
+**Verified (2026-09-03):** All 9 tables show `relrowsecurity = true` in live DB. System roles (5) and permissions (37) confirmed via SQL Editor. Future domain tables (Customer, Order, etc.) need RLS when their migrations are written.
 
-**Repository evidence:** `supabase/migrations/002–008_*.sql`.
+**Repository evidence:** `supabase/migrations/002–008_*.sql`, `supabase/verify-migrations.sql`.
 
 **Source-of-truth doc:** SECURITY.md (RLS on every table), ARCHITECTURE.md, PERMISSIONS_MATRIX.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Live Supabase project (migrations applied)
+**Dependencies:** None for current tables (live and verified)
 
-**Next action:** Apply migrations. Verify RLS via Supabase Dashboard → Policies. Run integration tests to confirm org A cannot read org B data.
+**Next action:** Extend RLS to every new domain table as migrations are written. Run live integration tests (T1–T15) from a machine with Supabase network access to confirm cross-org isolation.
 
 ---
 
