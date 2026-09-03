@@ -100,14 +100,15 @@ function BusinessHome() {
         ) : null}
 
         {summary && !isEmpty ? (
-          <div className="space-y-6 px-4 py-4">
-            <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
+          <div className="stack-section px-4 py-5 pb-[var(--space-screen-bottom)]">
+            <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
               <p className="text-label text-text-secondary">{t("home.revenue")}</p>
               <p className="text-financial-lg mt-1 text-text-primary">
                 {formatMoney(summary.revenue)}
               </p>
               <Sparkline series={summary.revenueSeries} tone="success" />
             </section>
+
 
             {/* Needs attention comes before metrics, always. */}
             <section aria-labelledby="attention-heading">
