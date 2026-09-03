@@ -8,7 +8,7 @@ import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
 import { homeSummaries } from "@/lib/mock/home";
 import { orders, nextOrderSequence } from "@/lib/mock/orders";
-import { couriers, shops, staff, activeShopId } from "@/lib/mock/shop";
+import { couriers, shops, staff, activeShopId, workspaces } from "@/lib/mock/shop";
 import {
   customerEvents,
   customerNotes,
@@ -39,6 +39,7 @@ import type {
   Product,
   Shop,
   Staff,
+  WorkspaceSummary,
 } from "@/types";
 
 const LATENCY = 180;
@@ -456,4 +457,78 @@ export async function applyDeliveryAction(
     action === "mark_delivered" ? "delivered" : action === "return_to_shop" ? "cancelled" : "in_transit";
   void deliveryId;
   return resolve(next, 220);
+}
+
+/* ---------------------------------------------------------------------------
+ * Phase 5 — workspaces, team and mock invitations.
+ * All in-memory. No invitation is ever delivered.
+ * ------------------------------------------------------------------------- */
+
+let teamMembers: Staff[] = [...staff];
+let workspaceList: WorkspaceSummary[] = workspaces.map((w) => ({ ...w }));
+
+export async function getWorkspaces(): Promise<WorkspaceSummary[]> {
+  return resolve(workspaceList.map((w) => ({ ...w })));
+}
+
+export async function switchWorkspace(id: string): Promise<WorkspaceSummary> {
+  workspaceList = workspaceList.map((w) => ({ ...w, active: w.id === id }));
+  const next = workspaceList.find((w) => w.id === id) ?? workspaceList[0]!;
+  return resolve({ ...next }, 220);
+}
+
+export async function getTeam(): Promise<Staff[]> {
+  return resolve(teamMembers.map((m) => ({ ...m })));
+}
+
+export interface InviteStaffInput {
+  name: string;
+  contact: string;
+  role: StaffRole;
+}
+
+/** Mock invite. Owner can never be granted through this flow. */
+export async function inviteStaff(input: InviteStaffInput): Promise<Staff> {
+  if (input.role === "owner") throw new Error(PERMISSION_DENIED);
+  const isEmail = input.contact.includes("@");
+  const member: Staff = {
+    id: `staff-${Date.now()}`,
+    name: input.name,
+    role: input.role,
+    companion: "minto",
+    status: "invited",
+    shopId: activeShopId,
+    invitedAt: new Date().toISOString(),
+    ...(isEmail ? { email: input.contact } : { phone: input.contact }),
+  };
+  teamMembers = [...teamMembers, member];
+  return resolve({ ...member }, 260);
+}
+
+function isFinalOwner(id: string): boolean {
+  const member = teamMembers.find((m) => m.id === id);
+  if (!member || member.role !== "owner") return false;
+  return teamMembers.filter((m) => m.role === "owner").length <= 1;
+}
+
+export async function changeStaffRole(id: string, role: StaffRole): Promise<Staff> {
+  if (isFinalOwner(id) || role === "owner") throw new Error(PERMISSION_DENIED);
+  teamMembers = teamMembers.map((m) => (m.id === id ? { ...m, role } : m));
+  const member = teamMembers.find((m) => m.id === id)!;
+  return resolve({ ...member }, 220);
+}
+
+export async function removeStaff(id: string): Promise<string> {
+  if (isFinalOwner(id)) throw new Error(PERMISSION_DENIED);
+  teamMembers = teamMembers.filter((m) => m.id !== id);
+  return resolve(id, 220);
+}
+
+export async function resendInvite(id: string): Promise<string> {
+  return resolve(id, 200);
+}
+
+export async function cancelInvite(id: string): Promise<string> {
+  teamMembers = teamMembers.filter((m) => m.id !== id);
+  return resolve(id, 200);
 }
