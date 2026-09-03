@@ -2,7 +2,7 @@
 
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-03 (rev 2)
 **Branch:** `claude/apsa-build-status-7bueea`
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
@@ -275,55 +275,55 @@
 
 ### 14. Orders List
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `CLAUDE_CODE`
 
-**What exists today:** No orders list route exists (`app.orders.$id.tsx` exists but `app.orders.tsx` does not). Order data model and mock data are complete.
+**What exists today:** No orders list route exists (`app.orders.$id.tsx` exists but `app.orders.tsx` does not). `getOrders` mock API function exists and returns a sorted array. The screen itself has not been built by Lovable.
 
-**Repository evidence:** Routes listing — no `app.orders.tsx` found. `src/lib/api/index.ts#getOrders` exists and returns a sorted order array.
+**Repository evidence:** Routes listing — no `app.orders.tsx` found. `src/lib/api/index.ts#getOrders` returns sorted mock orders.
 
 **Source-of-truth doc:** APSA_MASTER_PLAN.md (orders list view), UX_FLOWS.md, MVP_ROADMAP.md Phase 7
 
-**Owner:** Lovable (build the screen); Claude Code (real backend)
+**Owner:** Claude Code (route + real backend query behind the existing API boundary)
 
-**Dependencies:** Order data model (exists in mock form)
+**Dependencies:** Authentication, Order domain, Database
 
-**Next action:** Lovable — build `/app/orders` route with filterable orders list (status filter, channel filter, date range, search by code/customer). Link each row to `app.orders.$id`.
+**Next action:** Claude Code — build `/app/orders` route with filterable orders list (status filter, channel filter, date range, search by code/customer) and wire to real Supabase query. Link each row to existing `app.orders.$id`.
 
 ---
 
 ### 15. Customers List
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `CLAUDE_CODE`
 
-**What exists today:** No customers list route exists (`app.customers.$id.tsx` exists but `app.customers.tsx` does not). Customer data model and mock data are complete. `searchCustomers` API exists.
+**What exists today:** No customers list route exists (`app.customers.$id.tsx` exists but `app.customers.tsx` does not). `getCustomers` and `searchCustomers` mock API functions exist. The screen itself has not been built by Lovable.
 
-**Repository evidence:** Routes listing — no `app.customers.tsx` found. `src/lib/api/index.ts#getCustomers` and `#searchCustomers` exist.
+**Repository evidence:** Routes listing — no `app.customers.tsx` found. `src/lib/api/index.ts#getCustomers`, `#searchCustomers` return mock data.
 
 **Source-of-truth doc:** APSA_MASTER_PLAN.md, UX_FLOWS.md, MVP_ROADMAP.md Phase 6
 
-**Owner:** Lovable (build the screen); Claude Code (real backend)
+**Owner:** Claude Code (route + real backend query behind the existing API boundary)
 
-**Dependencies:** Customer data model (exists in mock form)
+**Dependencies:** Authentication, Customer domain, Database
 
-**Next action:** Lovable — build `/app/customers` route with searchable/filterable customers list. Link each row to `app.customers.$id`.
+**Next action:** Claude Code — build `/app/customers` route with searchable/filterable customers list wired to real Supabase query. Link each row to existing `app.customers.$id`.
 
 ---
 
 ### 16. Products
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `CLAUDE_CODE`
 
-**What exists today:** No products route exists. Product data model, mock data (`src/lib/mock/products.ts`), and `getProducts` API exist. POS uses products but there is no standalone products management screen.
+**What exists today:** No products route exists. Product type, mock data (`src/lib/mock/products.ts`), and `getProducts` / `getRecentProducts` / `getPosProducts` API functions exist. POS uses products via the mock API but there is no standalone product management screen.
 
-**Repository evidence:** Routes listing — no `app.products.tsx` or `app.products.$id.tsx`. `src/lib/mock/products.ts`, `src/lib/api/index.ts#getProducts`.
+**Repository evidence:** Routes listing — no `app.products.tsx` or `app.products.$id.tsx`. `src/lib/mock/products.ts`, `src/lib/api/index.ts#getProducts`, `#getPosProducts`.
 
 **Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant), MVP_ROADMAP.md Phase 5, APSA_MASTER_PLAN.md
 
-**Owner:** Lovable (build screen); Claude Code (real backend with variant model)
+**Owner:** Claude Code (route + Product/ProductVariant domain + real backend persistence)
 
-**Dependencies:** Product data model
+**Dependencies:** Authentication, Product domain, Database, Inventory ledger (ProductVariant stock must come from InventoryMovement, not a mutable field)
 
-**Next action:** Lovable — build `/app/products` list + create/edit product screens with variant support, price, SKU, category, barcode.
+**Next action:** Claude Code — build `/app/products` list + create/edit product screens with variant support, price (integer minor units), SKU, category, barcode. Implement Product + ProductVariant tables. Never add a mutable `stock` column — balance comes from InventoryMovement ledger.
 
 ---
 
@@ -365,19 +365,19 @@
 
 ### 19. Delivery Management
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `CLAUDE_CODE`
 
-**What exists today:** Delivery detail screen exists (`app.deliveries.$id.tsx`). No delivery list/management screen exists. Mock couriers list and delivery arrangement exist in API layer.
+**What exists today:** Delivery detail screen exists (`app.deliveries.$id.tsx`). No delivery list/management screen exists. Mock couriers list and `arrangeDelivery` / `applyDeliveryAction` API functions exist. The list screen has not been built by Lovable.
 
-**Repository evidence:** Routes listing — `app.deliveries.$id.tsx` only, no `app.deliveries.tsx`. `src/lib/api/index.ts#arrangeDelivery`, `src/lib/api/index.ts#getCouriers`.
+**Repository evidence:** Routes listing — `app.deliveries.$id.tsx` only, no `app.deliveries.tsx`. `src/lib/api/index.ts#arrangeDelivery`, `#getCouriers`, `#applyDeliveryAction`.
 
 **Source-of-truth doc:** APSA_MASTER_PLAN.md (delivery management), MVP_ROADMAP.md Phase 13
 
-**Owner:** Lovable (delivery list screen); Claude Code (real delivery domain, COD tracking)
+**Owner:** Claude Code (route + Delivery domain + real backend with COD settlement tracking)
 
-**Dependencies:** Order domain, Delivery domain model
+**Dependencies:** Authentication, Order domain, Delivery domain, Database
 
-**Next action:** Lovable — build `/app/deliveries` list with status filter (in_transit, delivered, failed, etc.). Claude Code — implement Delivery table with COD settlement tracking.
+**Next action:** Claude Code — build `/app/deliveries` list route with status filter (in_transit, delivered, failed, etc.) wired to real Supabase query. Implement Delivery table with COD settlement tracking and DeliveryEvent history.
 
 ---
 
@@ -401,19 +401,19 @@
 
 ### 21. Settings
 
-**Status:** `NOT_BUILT`
+**Status:** `CLAUDE_CODE`
 
 **What exists today:** Nothing. No settings route, no settings screen, no organization settings.
 
-**Repository evidence:** No `app.settings.tsx` in routes listing.
+**Repository evidence:** No `app.settings.tsx` in routes listing. No settings-related types or mock data.
 
 **Source-of-truth doc:** APSA_MASTER_PLAN.md (business settings, channel connections), UX_FLOWS.md
 
-**Owner:** Lovable (settings screens); Claude Code (connected channels, organization profile persistence)
+**Owner:** Claude Code (route + organization profile persistence, connected channel management, preference storage)
 
-**Dependencies:** Authentication, Organization domain, ConnectedChannel model
+**Dependencies:** Authentication, Organization domain, ConnectedChannel model, Database
 
-**Next action:** Lovable — build settings screens: organization profile, connected channels (placeholder until providers are integrated), localization preference, notification preferences.
+**Next action:** Claude Code — build `/app/settings` screens: organization profile edit, connected channels management (with placeholder state until providers are integrated), localization preference, notification preferences. All settings must persist via real API, not localStorage.
 
 ---
 
@@ -423,15 +423,15 @@
 
 **What exists today:** Nothing. No onboarding flow, no organization creation wizard, no channel connection wizard, no staff invite flow from onboarding.
 
-**Repository evidence:** No onboarding route in routes listing.
+**Repository evidence:** No onboarding route in routes listing. No onboarding-related types or mock data.
 
 **Source-of-truth doc:** MVP_ROADMAP.md Phase 1 (engineering foundation includes org creation), APSA_MASTER_PLAN.md
 
-**Owner:** Lovable (onboarding UI); Claude Code (org creation, first-run logic)
+**Owner:** Claude Code (org creation API, first-run detection logic, invitation token flow, channel connection setup)
 
-**Dependencies:** Authentication, Organization/Workspace creation domain
+**Dependencies:** Authentication, Organization/Workspace creation domain, Database, Membership domain
 
-**Next action:** Lovable — design and build onboarding flow: create org → create first workspace → invite first staff → connect first channel.
+**Next action:** Claude Code — implement org creation API and first-run detection (redirect to onboarding if no organization exists for the authenticated user). Build onboarding route: create org → create first workspace → invite first staff → connect first channel. Onboarding is gated by authentication being complete first.
 
 ---
 
@@ -1125,16 +1125,12 @@ After Lovable completes the Product Polish Pass and Landing Page redesign, Claud
 
 ### What Is Still Reserved for Lovable
 
-Before Claude Code productionizes, Lovable must complete:
+Lovable's remaining deliverables before Claude Code productionizes are exactly two:
 
-1. **Product Polish Pass** — motion, micro-interactions, empty states, error states, pull-to-refresh consistency, Khmer font rendering, mobile edge cases
-2. **Landing Page redesign** — final brand identity, real imagery, visual polish
-3. **Orders List screen** (`/app/orders`) — filterable list linking to existing order detail
-4. **Customers List screen** (`/app/customers`) — searchable list linking to existing customer 360
-5. **Products screen** (`/app/products`) — create/edit product with variants
-6. **Delivery Management list** (`/app/deliveries`) — list of all deliveries with status filter
-7. **Settings screens** — organization profile, connected channels (placeholder UI), preferences
-8. **Onboarding flow** — org creation → workspace → staff invite → channel connect wizard
+1. **Product Polish Pass** — motion, micro-interactions, empty states, error states, pull-to-refresh consistency, Khmer font rendering, mobile edge cases across all existing screens
+2. **Final Landing Page redesign** — final brand identity, real imagery, visual polish
+
+All other missing screens (Orders List, Customers List, Products, Delivery Management list, Settings, Onboarding) are classified `CLAUDE_CODE` or `NOT_BUILT` and are the responsibility of Claude Code to build end-to-end once the backend exists.
 
 ---
 
@@ -1184,7 +1180,7 @@ Structured logging on all endpoints (request ID, user ID, org ID, action, durati
 | **No database** | No DB, no Supabase, no migrations | ARCHITECTURE.md: PostgreSQL/Supabase | Critical — entire backend is missing |
 | **`Product.stock` is mutable integer** | `src/types/index.ts` line ~89 | DATA_MODEL.md: inventory is ledger-based, never mutable integer | High — anti-pattern that will cause data loss; fix before writing any migration |
 | **`Channel` is closed 4-value union** | `types/index.ts`: `"facebook" \| "instagram" \| "telegram" \| "pos"` | DATA_MODEL.md: OrderSource is an open enum | Low — easy to extend; note for migration design |
-| **`currentRole` hardcoded** | `lib/api/index.ts`: `export const currentRole: StaffRole = "manager"` | PERMISSIONS_MATRIX.md: role derived from authenticated session | Critical — every user is a manager in current code |
+| **`currentRole` hardcoded** | `lib/api/index.ts`: `export const currentRole: StaffRole = "manager"` | PERMISSIONS_MATRIX.md: role derived from authenticated session | Acceptable for prototype/mock — it is intentional scaffolding. Must never become production authorization truth. Production server-side AuthorizationService must derive role from the authenticated session, never from a constant. |
 | **Permissions are frontend-only** | `lib/permissions.ts`: pure function, no server enforcement | SECURITY.md: security is not frontend visibility | Critical — any authenticated user can call any endpoint |
 | **No `organization_id` on any record** | All types lack org scoping | SECURITY.md: tenant isolation non-negotiable | Critical — multi-tenancy impossible without this |
 | **`SocialIdentity` ≠ `CustomerIdentity`** | `SocialIdentity { channel, handle }` (no merge history) | DATA_MODEL.md: CustomerIdentity with merge history, primary flag | Medium — functional for prototype; needs richer model for production |
@@ -1197,7 +1193,7 @@ Structured logging on all endpoints (request ID, user ID, org ID, action, durati
 
 2. **No tenant isolation exists.** All mock data is shared in-memory. When a real database is added, if RLS is not implemented correctly from the start, every organization will see every other organization's data. This is the highest-severity production risk.
 
-3. **Permissions are frontend-only.** The `permissionsFor()` function controls only what the UI shows. There is no server-side enforcement. Any caller who bypasses the UI can perform any action regardless of role.
+3. **`currentRole = "manager"` is acceptable prototype scaffolding, not a bug.** The mock API intentionally assumes a manager role so all UI flows are exercisable during prototyping. However, this constant must never survive into production. Production server-side authorization must derive role from the authenticated session token; the frontend `permissionsFor()` function controls only what the UI shows and has no security value until a real AuthorizationService enforces the same rules server-side.
 
 4. **`Product.stock` is a mutable integer.** The spec (DATA_MODEL.md) requires a ledger-based inventory model. If a migration is written with `stock integer` on the products table, it will be expensive to migrate later and will cause stock drift under concurrent updates.
 
