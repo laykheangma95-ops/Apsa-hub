@@ -19,7 +19,7 @@ export function StaffRow({ member, onOpen }: StaffRowProps) {
       type="button"
       onClick={() => onOpen(member)}
       className={cn(
-        "flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left transition-colors",
+        "press flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left",
         isOwner
           ? "border-action-primary/40 bg-action-primary-soft"
           : "border-border-default bg-surface-primary",
