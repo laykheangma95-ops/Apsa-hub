@@ -24,14 +24,38 @@
 
 ---
 
-## Repository Snapshot (as of inspection)
+## Repository Snapshot (as of 2026-09-03 — Production Foundation Sprint)
 
-**Stack found:** TanStack Start + Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Router + TanStack Query + i18next + Radix UI + recharts  
-**Database:** NONE — no Supabase, no Postgres, no ORM, no migrations  
-**Auth:** NONE — no auth library, no session management, no login route  
-**Backend APIs:** NONE — `server.ts` is SSR handler only, not an API server  
-**Data layer:** Pure in-memory mock data in `src/lib/mock/` consumed via `src/lib/api/index.ts`  
-**Routes:** 10 routes: `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
+**Stack found:** TanStack Start + Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Router + TanStack Query + i18next + Radix UI + recharts + @supabase/supabase-js  
+**Database:** MIGRATIONS WRITTEN — 7 migration files in `supabase/migrations/`. Awaiting Supabase project provisioning by project owner.  
+**Auth:** FOUNDATION BUILT — Supabase client architecture, server-side session validation, membership verification. Awaiting Supabase project to activate.  
+**Backend APIs:** NONE YET — server auth layer built; API route handlers are next sprint.  
+**Data layer:** Still mock — production repositories are next (mock not ripped out; UI unbroken).  
+**Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
+
+### Production Foundation Added (2026-09-03)
+
+| Area | Status | Files |
+|---|---|---|
+| Supabase client — browser | BUILT | `src/lib/supabase/client.ts` |
+| Supabase client — server/admin | BUILT | `src/lib/supabase/server.ts` |
+| Database type definitions | BUILT | `src/lib/supabase/types.ts` |
+| Migration 001: auth_profiles | WRITTEN | `supabase/migrations/001_auth_profiles.sql` |
+| Migration 002: organizations | WRITTEN | `supabase/migrations/002_organizations.sql` |
+| Migration 003: workspaces | WRITTEN | `supabase/migrations/003_workspaces.sql` |
+| Migration 004: locations | WRITTEN | `supabase/migrations/004_locations.sql` |
+| Migration 005: memberships | WRITTEN | `supabase/migrations/005_memberships.sql` |
+| Migration 006: roles+permissions | WRITTEN + SEEDED | `supabase/migrations/006_roles_permissions.sql` |
+| Migration 007: audit_logs | WRITTEN | `supabase/migrations/007_audit_logs.sql` |
+| RLS policies | IN MIGRATIONS | All 9 tables have RLS enabled + policies |
+| Session validation | BUILT | `src/server/auth/session.ts` |
+| Membership verification | BUILT | `src/server/auth/membership.ts` |
+| Authorization service | BUILT | `src/server/auth/authorization.ts` |
+| Audit log service | BUILT | `src/server/auth/audit.ts` |
+| Domain types (tenancy) | ADDED | `src/types/index.ts` (appended, no breaking changes) |
+| Tenant isolation tests | WRITTEN | `src/tests/tenant-isolation.test.ts` |
+| Env var template | CREATED | `.env.example` |
+| Supabase setup guide | CREATED | `supabase/README.md` |
 
 ---
 
