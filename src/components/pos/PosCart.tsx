@@ -160,7 +160,7 @@ export function PosCart({
             <button
               type="button"
               onClick={onPickCustomer}
-              className="tap-target flex w-full items-center gap-2 rounded-xl border border-border-default bg-surface-primary px-3 text-left text-body text-text-primary"
+              className="press tap-target flex w-full items-center gap-2 rounded-xl border border-border-default bg-surface-primary px-3 text-left text-body text-text-primary"
             >
               <UserPlus className="size-4 shrink-0 text-text-secondary" aria-hidden />
               {t("pos.customer.add")}
@@ -201,7 +201,7 @@ export function PosCart({
                     aria-pressed={discount.mode === mode}
                     onClick={() => onDiscountChange({ ...discount, mode, value: 0 })}
                     className={cn(
-                      "tap-target flex-1 rounded-full border text-label transition-colors",
+                      "press tap-target flex-1 rounded-full border text-label transition-colors",
                       discount.mode === mode
                         ? "border-action-primary bg-action-primary text-text-on-action"
                         : "border-border-strong bg-surface-primary text-text-primary",
@@ -239,7 +239,7 @@ export function PosCart({
         </div>
       </div>
 
-      <div className="sticky bottom-0 space-y-2 border-t border-border-default bg-surface-primary pt-3">
+      <div className="sticky bottom-0 space-y-1.5 border-t border-border-default bg-surface-primary pt-3">
         <div className="flex items-center justify-between">
           <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
           <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
@@ -262,7 +262,7 @@ export function PosCart({
           </span>
         </div>
         <Button
-          className="tap-target w-full"
+          className="press tap-target elevation-action mt-1 h-12 w-full"
           disabled={approvalRequired || offline || totals.itemCount === 0}
           onClick={onCheckout}
         >

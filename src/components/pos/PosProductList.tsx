@@ -66,7 +66,7 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
                 onClick={() => onSelect(product)}
                 disabled={disabled}
                 aria-label={label}
-                className="tap-target flex h-full w-full flex-col gap-2 rounded-2xl border border-border-default bg-surface-primary p-2 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
+                className="press tap-target flex h-full w-full flex-col gap-2 rounded-2xl border border-border-default bg-surface-primary p-2 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
               >
                 <Thumb product={product} size="lg" />
                 <span className="text-body-sm line-clamp-2 text-text-primary">{name}</span>
@@ -111,7 +111,7 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
               onClick={() => onSelect(product)}
               disabled={disabled}
               aria-label={label}
-              className="tap-target flex shrink-0 items-center justify-center rounded-xl bg-action-primary-soft px-3 text-action-primary transition-colors hover:bg-action-primary hover:text-text-on-action disabled:opacity-40"
+              className="press tap-target flex shrink-0 items-center justify-center rounded-xl bg-action-primary-soft px-3 text-action-primary transition-colors hover:bg-action-primary hover:text-text-on-action disabled:opacity-40"
             >
               <Plus className="size-5" aria-hidden />
             </button>

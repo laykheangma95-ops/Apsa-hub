@@ -333,11 +333,27 @@
   padding: var(--space-card);
 }
 
-
 @utility tap-target {
   min-height: 44px;
   min-width: 44px;
 }
+
+/* Immediate, restrained press feedback for frequent merchant actions. */
+@utility press {
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  &:active {
+    transform: scale(0.98);
+  }
+}
+
+/* Hairline separators that start after the leading avatar/thumb column. */
+@utility divider-inset {
+  box-shadow: inset 0 -1px 0 0 var(--border-default);
+}
+
 
 @layer base {
   * {
