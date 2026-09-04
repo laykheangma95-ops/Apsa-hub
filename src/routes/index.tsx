@@ -153,7 +153,7 @@ function Landing() {
           <LanguageToggle className="text-text-secondary" />
 
           <Button asChild size="sm" className="tap-target hidden md:inline-flex">
-            <Link to="/app">{t("landing.nav.start")}</Link>
+            <Link to="/sign-up">{t("landing.nav.start")}</Link>
           </Button>
 
           <button
@@ -189,7 +189,7 @@ function Landing() {
               ))}
             </ul>
             <Button asChild size="sm" className="tap-target mt-4 w-full">
-              <Link to="/app" onClick={() => setMobileOpen(false)}>
+              <Link to="/sign-up" onClick={() => setMobileOpen(false)}>
                 {t("landing.nav.start")}
               </Link>
             </Button>
@@ -211,7 +211,7 @@ function Landing() {
             <p className="text-body mt-4 max-w-md opacity-85">{t("landing.hero.lead")}</p>
             <div className="mt-7 flex flex-wrap gap-3">
               <Button asChild size="lg" variant="secondary" className="tap-target press">
-                <Link to="/app">
+                <Link to="/sign-up">
                   {t("landing.hero.primary")}
                   <ArrowRight className="ml-1.5 size-4" aria-hidden />
                 </Link>
@@ -547,7 +547,7 @@ function Landing() {
           </h2>
           <p className="text-body max-w-lg opacity-80">{t("landing.apsi.body")}</p>
           <Button asChild size="lg" className="tap-target press mt-2">
-            <Link to="/app">
+            <Link to="/sign-up">
               {t("landing.apsi.action")}
               <ArrowRight className="ml-1.5 size-4" aria-hidden />
             </Link>
@@ -564,7 +564,7 @@ function Landing() {
           <h2 id="cta-heading" className="text-h1">{t("landing.cta.title")}</h2>
           <p className="text-body mt-3 opacity-90">{t("landing.cta.body")}</p>
           <Button asChild size="lg" variant="secondary" className="tap-target press mt-6">
-            <Link to="/app">
+            <Link to="/sign-up">
               {t("landing.cta.action")}
               <ArrowRight className="ml-1.5 size-4" aria-hidden />
             </Link>

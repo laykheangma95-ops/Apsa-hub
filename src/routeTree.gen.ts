@@ -15,6 +15,7 @@ import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
 import { Route as OnboardingRouteImport } from './routes/onboarding'
 import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
@@ -53,6 +54,11 @@ const OnboardingRoute = OnboardingRouteImport.update({
 const SignInRoute = SignInRouteImport.update({
   id: '/sign-in',
   path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignUpRoute = SignUpRouteImport.update({
+  id: '/sign-up',
+  path: '/sign-up',
   getParentRoute: () => rootRouteImport,
 } as any)
 const VerifyEmailRoute = VerifyEmailRouteImport.update({
@@ -108,6 +114,7 @@ export interface FileRoutesByFullPath {
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -124,6 +131,7 @@ export interface FileRoutesByTo {
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -142,6 +150,7 @@ export interface FileRoutesById {
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -161,6 +170,7 @@ export interface FileRouteTypes {
     | '/design'
     | '/onboarding'
     | '/sign-in'
+    | '/sign-up'
     | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
@@ -177,6 +187,7 @@ export interface FileRouteTypes {
     | '/design'
     | '/onboarding'
     | '/sign-in'
+    | '/sign-up'
     | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
@@ -194,6 +205,7 @@ export interface FileRouteTypes {
     | '/design'
     | '/onboarding'
     | '/sign-in'
+    | '/sign-up'
     | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
@@ -212,6 +224,7 @@ export interface RootRouteChildren {
   DesignRoute: typeof DesignRoute
   OnboardingRoute: typeof OnboardingRoute
   SignInRoute: typeof SignInRoute
+  SignUpRoute: typeof SignUpRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
 }
 
@@ -257,6 +270,13 @@ declare module '@tanstack/react-router' {
       path: '/sign-in'
       fullPath: '/sign-in'
       preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-up': {
+      id: '/sign-up'
+      path: '/sign-up'
+      fullPath: '/sign-up'
+      preLoaderRoute: typeof SignUpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/verify-email': {
@@ -366,6 +386,7 @@ const rootRouteChildren: RootRouteChildren = {
   DesignRoute: DesignRoute,
   OnboardingRoute: OnboardingRoute,
   SignInRoute: SignInRoute,
+  SignUpRoute: SignUpRoute,
   VerifyEmailRoute: VerifyEmailRoute,
 }
 export const routeTree = rootRouteImport
