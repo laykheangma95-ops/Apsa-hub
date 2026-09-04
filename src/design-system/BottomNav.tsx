@@ -97,10 +97,10 @@ export function BottomNav({
                 aria-label={t("nav.resolve")}
                 aria-haspopup="dialog"
                 aria-expanded={resolveOpen}
-                className="press-tactile glass-panel tap-target -mt-4 flex size-[54px] flex-col items-center justify-center rounded-[20px] text-action-primary active:bg-action-primary-soft"
+                title={t("nav.resolve")}
+                className="press-tactile glass-panel tap-target -mt-5 flex size-[52px] items-center justify-center rounded-[18px] text-action-primary active:bg-action-primary-soft"
               >
-                <Sparkles className="size-5" aria-hidden />
-                <span className="chip-text mt-0.5 leading-none">{t("nav.resolve")}</span>
+                <Sparkles className="size-6" aria-hidden />
               </button>
             </div>
           ) : null}
