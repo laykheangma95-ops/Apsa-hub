@@ -33,9 +33,14 @@ type MembershipRow = {
 
 type MockError = { status?: number; message?: string } | null;
 
-const cookieStore = new Map<string, string>();
+// Model the real HTTP lifecycle: getCookie reads request cookies only, while
+// setCookie/deleteCookie mutate response state and are not visible to getCookie
+// during the same request.
+const requestCookies = new Map<string, string>();
+const responseSetCookies = new Map<string, string>();
 const setCookieCalls: string[] = [];
 const deleteCookieCalls: string[] = [];
+let getCookieCalls = 0;
 
 let currentUser: MockUser;
 let membershipRows: MembershipRow[];
@@ -44,9 +49,11 @@ let signInError: MockError;
 let refreshError: MockError;
 
 function resetScenario() {
-  cookieStore.clear();
+  requestCookies.clear();
+  responseSetCookies.clear();
   setCookieCalls.length = 0;
   deleteCookieCalls.length = 0;
+  getCookieCalls = 0;
 
   currentUser = {
     id: "user-1",
@@ -80,13 +87,16 @@ mock.module("@tanstack/react-start", () => ({
 }));
 
 mock.module("@tanstack/react-start/server", () => ({
-  getCookie: (name: string) => cookieStore.get(name),
+  getCookie: (name: string) => {
+    getCookieCalls += 1;
+    return requestCookies.get(name);
+  },
   setCookie: (name: string, value: string) => {
-    cookieStore.set(name, value);
+    responseSetCookies.set(name, value);
     setCookieCalls.push(name);
   },
   deleteCookie: (name: string) => {
-    cookieStore.delete(name);
+    responseSetCookies.delete(name);
     deleteCookieCalls.push(name);
   },
 }));
@@ -109,8 +119,8 @@ mock.module("@/lib/supabase/server", () => ({
   createServerClient: () => ({
     auth: {
       getUser: async () => ({
-        data: { user: cookieStore.get("sb-access-token") ? currentUser : null },
-        error: cookieStore.get("sb-access-token") ? null : { message: "missing access token" },
+        data: { user: requestCookies.get("sb-access-token") ? currentUser : null },
+        error: requestCookies.get("sb-access-token") ? null : { message: "missing access token" },
       }),
     },
   }),
@@ -156,15 +166,18 @@ beforeEach(() => {
 });
 
 describe("sign-in flow runtime", () => {
-  it("signs in a verified user with an active membership and redirects to /app", async () => {
+  it("signs in a verified user with an active membership and redirects to /app without rereading response cookies", async () => {
     const result = await signInFn({
       data: { email: "owner@example.com", password: "secret123" },
     });
 
     expect(result).toEqual({ ok: true, redirectTo: "/app" });
     expect(setCookieCalls).toEqual([COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN]);
-    expect(cookieStore.get(COOKIE_ACCESS_TOKEN)).toBe("access-token");
-    expect(cookieStore.get(COOKIE_REFRESH_TOKEN)).toBe("refresh-token");
+    expect(responseSetCookies.get(COOKIE_ACCESS_TOKEN)).toBe("access-token");
+    expect(responseSetCookies.get(COOKIE_REFRESH_TOKEN)).toBe("refresh-token");
+    expect(requestCookies.has(COOKIE_ACCESS_TOKEN)).toBe(false);
+    expect(requestCookies.has(COOKIE_REFRESH_TOKEN)).toBe(false);
+    expect(getCookieCalls).toBe(0);
     expect(deleteCookieCalls).toHaveLength(0);
   });
 
@@ -217,8 +230,8 @@ describe("sign-in flow runtime", () => {
 
     expect(result).toEqual({ ok: true, redirectTo: "/access-denied" });
     expect(deleteCookieCalls).toEqual([COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN]);
-    expect(cookieStore.has(COOKIE_ACCESS_TOKEN)).toBe(false);
-    expect(cookieStore.has(COOKIE_REFRESH_TOKEN)).toBe(false);
+    expect(responseSetCookies.has(COOKIE_ACCESS_TOKEN)).toBe(false);
+    expect(responseSetCookies.has(COOKIE_REFRESH_TOKEN)).toBe(false);
   });
 
   it("clears auth cookies before the /app guard redirects revoked members to /access-denied", async () => {
@@ -229,8 +242,8 @@ describe("sign-in flow runtime", () => {
         created_at: "2026-09-04T00:00:00.000Z",
       },
     ];
-    cookieStore.set(COOKIE_ACCESS_TOKEN, "access-token");
-    cookieStore.set(COOKIE_REFRESH_TOKEN, "refresh-token");
+    requestCookies.set(COOKIE_ACCESS_TOKEN, "access-token");
+    requestCookies.set(COOKIE_REFRESH_TOKEN, "refresh-token");
 
     const result = await checkAppGuardFn();
 
