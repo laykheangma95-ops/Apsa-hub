@@ -325,33 +325,16 @@ export interface Customer360 {
 }
 
 export async function getCustomer360(id: string): Promise<Customer360> {
-  const customer = customers.find((c) => c.id === id);
-  if (!customer) throw new Error(`Customer ${id} not found`);
-  return resolve({
-    customer,
-    orders: orders
-      .filter((o) => o.customerId === id)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    events: [...(customerEvents[id] ?? [])].sort((a, b) => b.at.localeCompare(a.at)),
-    notes: customerNotes
-      .filter((n) => n.customerId === id)
-      .sort((a, b) => b.at.localeCompare(a.at)),
-    activeConversationId: conversations.find((c) => c.customerId === id)?.id ?? null,
-  });
+  const { getCustomer360Fn } = await import("@/api/customers");
+  const result = await getCustomer360Fn({ data: { id } });
+  // Cast: service returns the same shape the UI expects (Customer360).
+  return result as unknown as Customer360;
 }
 
-/** Mock note creation. Returns the note; nothing is persisted. */
 export async function addCustomerNote(customerId: string, body: string): Promise<CustomerNote> {
-  return resolve(
-    {
-      id: `cn-new-${Date.now()}`,
-      customerId,
-      body,
-      staffName: staff[0]?.name ?? "Staff",
-      at: new Date().toISOString(),
-    },
-    200,
-  );
+  const { addCustomerNoteFn } = await import("@/api/customers");
+  const note = await addCustomerNoteFn({ data: { customerId, body } });
+  return note as unknown as CustomerNote;
 }
 
 export interface RecordPaymentInput {

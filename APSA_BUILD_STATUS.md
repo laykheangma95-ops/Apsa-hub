@@ -2,8 +2,8 @@
 
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
-**Last updated:** 2026-09-03
-**Branch:** `claude/apsa-production-foundation-sneozb` (production blockers fixed)
+**Last updated:** 2026-09-04
+**Branch:** `claude/apsa-customer-production-k9jk50` (Customer domain productionized)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -24,16 +24,18 @@
 
 ---
 
-## Repository Snapshot (as of 2026-09-03 — Production Foundation Sprint)
+## Repository Snapshot (as of 2026-09-04 — Customer Domain Sprint)
 
 **Stack found:** TanStack Start + Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Router + TanStack Query + i18next + Radix UI + recharts + @supabase/supabase-js  
-**Database:** MIGRATIONS WRITTEN — 8 migration files in `supabase/migrations/`. Awaiting Supabase project provisioning by project owner.  
+**Database:** MIGRATIONS WRITTEN — 16 migration files in `supabase/migrations/` (001–016). Awaiting Supabase project provisioning by project owner to apply.  
 **Auth:** FOUNDATION BUILT — Supabase client architecture, server-side session validation, membership verification. Awaiting Supabase project to activate.  
-**Backend APIs:** NONE YET — server auth layer built; API route handlers are next sprint.  
-**Data layer:** Still mock — production repositories are next (mock not ripped out; UI unbroken).  
+**Customer Backend:** BUILT — server repository, service, and TanStack Start server functions. Customer 360 UI connected to real server functions (mock replaced).  
+**Other Data layers:** Still mock — inbox, orders, products, delivery, POS use mock data; mock not ripped out; UI unbroken.  
 **Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
 
 ### Production Foundation Added (2026-09-03)
+
+> See prior branch `claude/apsa-production-foundation-sneozb` for detail.
 
 | Area | Status | Files |
 |---|---|---|
@@ -192,19 +194,55 @@
 
 ### 8. Customer 360
 
-**Status:** `PARTIAL`
+**Status:** `PARTIAL` → **Customer persistence READY** (migration written; apply to activate)
 
-**What exists today:** Full customer profile screen at `src/routes/app.customers.$id.tsx`. Shows customer info, lifetime spend, order count, social identities, address, tags, notes, order history timeline, customer events, active conversation link.
+**What exists today:** Full customer profile screen at `src/routes/app.customers.$id.tsx`. Shows customer info, lifetime spend, order count, social identities, address, tags, notes, order history timeline, customer events, active conversation link. **Customer domain is now backed by a real server layer** — `getCustomer360` and `addCustomerNote` in `src/lib/api/index.ts` call TanStack Start server functions that hit real Supabase tables. Orders and events remain empty (`never[]`) until those domains are productionized — no mock data injected for those.
 
-**Repository evidence:** `src/routes/app.customers.$id.tsx`, `src/lib/api/index.ts#getCustomer360`, `src/lib/api/index.ts#addCustomerNote`, `src/design-system/CustomerSummaryCard.tsx`, `src/design-system/Timeline.tsx`
+**Customer domain backend built (2026-09-04):**
 
-**Source-of-truth doc:** DATA_MODEL.md (Customer, CustomerIdentity, CustomerEvent), UX_FLOWS.md (Customer 360), MVP_ROADMAP.md Phase 15
+| Area | Status | Files |
+|---|---|---|
+| Migration 011: customers | WRITTEN | `supabase/migrations/011_customers.sql` |
+| Migration 012: customer_identities | WRITTEN | `supabase/migrations/012_customer_identities.sql` |
+| Migration 013: customer_notes | WRITTEN | `supabase/migrations/013_customer_notes.sql` |
+| Migration 014: customer_tags | WRITTEN | `supabase/migrations/014_customer_tags.sql` |
+| Migration 015: customer_addresses | WRITTEN | `supabase/migrations/015_customer_addresses.sql` |
+| Migration 016: customer_permissions | WRITTEN + SEEDED | `supabase/migrations/016_customer_permissions.sql` |
+| Customer repository | BUILT | `src/server/customers/repository.ts` |
+| Customer service | BUILT | `src/server/customers/service.ts` |
+| Customer server functions | BUILT | `src/api/customers.ts` |
+| Customer domain types | BUILT | `src/server/customers/types.ts` |
+| Customer 360 API wired | CONNECTED | `src/lib/api/index.ts` (`getCustomer360`, `addCustomerNote`) |
+| Customer domain tests | WRITTEN (28 tests) | `src/tests/customer-domain.test.ts` |
 
-**Owner:** Claude Code (real customer DB, identity merge, consent); Lovable (Polish Pass)
+**Security guarantees implemented:**
+- `organization_id` never trusted from client — resolved from active DB membership in `resolveAuthContext()`
+- Dual-layer isolation: RLS policies on all 6 new tables + application-level `organization_id` filter on every query
+- `customers.export` action uses `auditLogRequired()` (fail-closed) — export blocked if audit fails to persist
+- Service-role key never in client bundle — all server-only modules dynamically imported inside handler bodies
+- Identity deduplication: `UNIQUE INDEX ON (organization_id, provider, provider_user_id)` prevents duplicate linking
+- Cross-org identity guard: DB trigger `check_customer_identity_org_integrity()` enforces same-org constraint
+- No auto-merge: identity resolution is exact match only on `(organization_id, provider, provider_user_id)`
 
-**Dependencies:** Authentication, Customer domain with CustomerIdentity model, Conversation domain
+**Activation required:**
+- Apply migrations 011–016 to live Supabase project (`supabase db push` or Supabase dashboard)
+- After applying, run `supabase gen types typescript` to regenerate `src/lib/supabase/types.ts` and remove `as any` casts in repository.ts
 
-**Next action:** Claude Code — implement Customer table + CustomerIdentity table (universal identity model, not per-channel duplicates). Customer merge/link API required before production.
+**Build state (2026-09-04):**
+- `tsc --noEmit`: PASSES
+- `bun run build`: SUCCEEDS
+- `bun test src/tests/`: 195 tests pass, 0 fail
+- Client bundle scan for secrets: CLEAN (no service-role key present)
+
+**Repository evidence:** `src/routes/app.customers.$id.tsx`, `src/api/customers.ts`, `src/server/customers/`, `supabase/migrations/011_*.sql`–`016_*.sql`, `src/lib/api/index.ts#getCustomer360`, `src/design-system/CustomerSummaryCard.tsx`
+
+**Source-of-truth doc:** DATA_MODEL.md (Customer, CustomerIdentity), PERMISSIONS_MATRIX.md, SECURITY.md, UX_FLOWS.md (Customer 360), MVP_ROADMAP.md Phase 15
+
+**Owner:** Claude Code (backend complete); Lovable (Polish Pass)
+
+**Dependencies:** Supabase project credentials for migration application
+
+**Next action:** Project owner — apply migrations 011–016 to Supabase project. Then: Claude Code — implement Conversation → Customer linking once Conversation domain is productionized.
 
 ---
 
