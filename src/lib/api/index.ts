@@ -48,6 +48,16 @@ function resolve<T>(value: T, ms = LATENCY): Promise<T> {
   return new Promise((r) => setTimeout(() => r(value), ms));
 }
 
+/**
+ * Returns true for RFC-4122 UUID strings (production customer IDs).
+ * Non-UUID IDs (e.g. "cus-1") are mock IDs from the Inbox/Orders flows that
+ * are not yet productionized. They bypass the server function validator so UUID
+ * validation is never weakened — mock IDs simply never reach the server boundary.
+ */
+function isProductionId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 export interface ConversationFilter {
   status?: ConversationStatus | "all";
   channel?: Conversation["channel"] | "all";
@@ -325,13 +335,41 @@ export interface Customer360 {
 }
 
 export async function getCustomer360(id: string): Promise<Customer360> {
+  if (!isProductionId(id)) {
+    // Non-UUID mock ID (e.g. "cus-1") — use in-memory mock data.
+    // The server function UUID validator is not weakened; mock IDs never reach it.
+    // This bridge exists until Inbox/Orders are productionized and emit real UUIDs.
+    const customer = customers.find((c) => c.id === id);
+    if (!customer) throw new Error(`Customer ${id} not found`);
+    return resolve({
+      customer,
+      orders: orders
+        .filter((o) => o.customerId === id)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      events: customerEvents[id] ?? [],
+      notes: customerNotes.filter((n) => n.customerId === id),
+      activeConversationId: null,
+    });
+  }
   const { getCustomer360Fn } = await import("@/api/customers");
   const result = await getCustomer360Fn({ data: { id } });
-  // Cast: service returns the same shape the UI expects (Customer360).
   return result as unknown as Customer360;
 }
 
 export async function addCustomerNote(customerId: string, body: string): Promise<CustomerNote> {
+  if (!isProductionId(customerId)) {
+    // Non-UUID mock ID — return an in-memory note; not persisted.
+    return resolve(
+      {
+        id: `cn-${Date.now()}`,
+        customerId,
+        body,
+        staffName: "Staff",
+        at: new Date().toISOString(),
+      },
+      200,
+    );
+  }
   const { addCustomerNoteFn } = await import("@/api/customers");
   const note = await addCustomerNoteFn({ data: { customerId, body } });
   return note as unknown as CustomerNote;

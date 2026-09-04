@@ -68,14 +68,18 @@ export interface CustomerProfile {
   id: string;
   nameKm: string;
   nameEn: string;
+  /** Empty string when caller lacks customers.view_sensitive. */
   phone: string;
   identities: SocialIdentity[];
   tags: string[];
+  /** Absent when caller lacks customers.view_sensitive. */
   address?: Address;
   orderCount: number;
   lifetimeSpend: Money;
   lastPurchaseAt?: string;
   companion: CompanionColor;
+  /** Server-authoritative sensitive-field visibility flag. */
+  sensitiveVisible: boolean;
 }
 
 export interface CustomerNote {
@@ -115,20 +119,27 @@ export async function getCustomer360(
     throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
   }
 
-  // Use the default address if present.
-  const defaultAddress = addresses.find((a) => a.is_default) ?? addresses[0];
+  // Sensitive fields (phone, address) are only returned to callers with customers.view_sensitive.
+  // This is the server-side enforcement — UI checks sensitiveVisible, never trusts a client role.
+  const sensitiveVisible = ctx.can("customers.view_sensitive");
+
+  // Use the default address if present and the caller has sensitive access.
+  const defaultAddress = sensitiveVisible
+    ? (addresses.find((a) => a.is_default) ?? addresses[0])
+    : undefined;
 
   const profile: CustomerProfile = {
     id: customer.id,
     nameKm: customer.display_name,
     nameEn: customer.display_name,
-    phone: customer.primary_phone ?? "",
+    phone: sensitiveVisible ? (customer.primary_phone ?? "") : "",
     identities: toSocialIdentities(identities),
     tags: tags.map((t) => t.name),
     ...(defaultAddress ? { address: toAddress(defaultAddress) } : {}),
     orderCount: 0,
     lifetimeSpend: { amount: 0, currency: "USD" },
     companion: deriveCompanion(customer.id),
+    sensitiveVisible,
   };
 
   const notes: CustomerNote[] = rawNotes.map((n) => ({
@@ -276,5 +287,11 @@ export async function exportCustomers(
     reason: "bulk export",
   });
 
-  return repo.listCustomers(ctx.organizationId, { status: "active" });
+  const rows = await repo.listCustomers(ctx.organizationId, { status: "active" });
+
+  // Strip PII (phone, email) when caller lacks customers.export_sensitive (owner only).
+  if (!ctx.can("customers.export_sensitive")) {
+    return rows.map((r) => ({ ...r, primary_phone: null, primary_email: null }));
+  }
+  return rows;
 }

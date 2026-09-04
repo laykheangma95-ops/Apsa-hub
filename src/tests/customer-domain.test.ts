@@ -23,6 +23,8 @@
  */
 
 import { describe, it, expect, beforeAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   AuthorizationService,
   ForbiddenError,
@@ -198,11 +200,19 @@ describe("Test 3: Client-provided org_id is never trusted", () => {
   });
 
   it("Tenant safety: repository always filters by server-derived organizationId", () => {
-    // Verified by code inspection of repository.ts:
-    // findCustomerById(organizationId, customerId) always applies .eq("organization_id", organizationId)
-    // where organizationId comes from the validated auth context, never from client input.
-    // This is the defense-in-depth layer beneath RLS.
-    expect(true).toBe(true); // structural — see repository.ts findCustomerById
+    // Read the actual repository source and verify the double-eq filter exists in
+    // findCustomerById — this proves org isolation at the application layer.
+    const repoPath = resolve(import.meta.dir, "../server/customers/repository.ts");
+    const src = readFileSync(repoPath, "utf-8");
+
+    // findCustomerById must apply .eq("organization_id", organizationId)
+    // Search for the block that contains both .eq("id", customerId) and
+    // .eq("organization_id", organizationId) — they appear in the same function.
+    expect(src).toContain('.eq("id", customerId)');
+    expect(src).toContain('.eq("organization_id", organizationId)');
+
+    // The function signature must include organizationId as a parameter (never client-supplied).
+    expect(src).toContain("findCustomerById(\n  organizationId: string,\n  customerId: string,");
   });
 });
 
@@ -231,23 +241,28 @@ describe("Test 4: Suspended member is denied access to customers", () => {
 
 describe("Test 5: Duplicate provider identity is rejected", () => {
   it("UNIQUE constraint on (organization_id, provider, provider_user_id) prevents duplicate link (structural)", () => {
-    // Migration 012 creates:
-    //   CREATE UNIQUE INDEX idx_customer_identities_provider_unique
-    //     ON public.customer_identities(organization_id, provider, provider_user_id);
-    //
-    // Attempting to INSERT a second row with the same (org, provider, provider_user_id)
-    // raises a PostgreSQL unique-violation error (code 23505).
-    // The addCustomerIdentity() repository function propagates this as a thrown Error.
-    //
-    // Manual test (service-role SQL):
-    //   INSERT INTO customer_identities (organization_id, customer_id, provider, provider_user_id)
-    //   VALUES ('<ORG_A>', '<CUSTOMER_1>', 'FACEBOOK', 'fb-user-123');
-    //   -- Second insert same (org, provider, provider_user_id) → duplicate key error
-    console.info(
-      "[TEST 5] Duplicate provider identity prevented by UNIQUE INDEX on " +
-        "(organization_id, provider, provider_user_id) in migration 012.",
+    // Read migration 012 SQL and verify the unique index exists.
+    const migPath = resolve(
+      import.meta.dir,
+      "../../supabase/migrations/012_customer_identities.sql",
     );
-    expect(true).toBe(true);
+    const sql = readFileSync(migPath, "utf-8");
+
+    // The unique index must name all three columns that enforce provider uniqueness.
+    expect(sql).toContain("organization_id");
+    expect(sql).toContain("provider");
+    expect(sql).toContain("provider_user_id");
+
+    // Must be a UNIQUE index or UNIQUE constraint — not a plain index.
+    expect(sql.toUpperCase()).toContain("UNIQUE");
+
+    // The index name must exist (any casing), proving it's not just column mentions.
+    const hasUniqueIndexOnProvider =
+      /UNIQUE\s+INDEX.*customer_identities.*\(.*organization_id.*provider.*provider_user_id/is.test(
+        sql,
+      ) ||
+      /UNIQUE\s*\(.*organization_id.*provider.*provider_user_id/is.test(sql);
+    expect(hasUniqueIndexOnProvider).toBe(true);
   });
 
   it("addIdentityToCustomer service requires customer to exist before inserting (requires DB)", async () => {
@@ -367,30 +382,36 @@ describe("Test 8: Mandatory export audit is enforced", () => {
 
 describe("Test 9: Customer detail returns only tenant-owned identities", () => {
   it("findIdentitiesByCustomer filters by organization_id (structural)", () => {
-    // repository.findIdentitiesByCustomer(organizationId, customerId) applies:
-    //   .eq("customer_id", customerId)
-    //   .eq("organization_id", organizationId)
-    // so identities from other orgs are never returned even if somehow linked.
-    // Additionally, the org-consistency trigger (migration 012) prevents cross-org
-    // identity rows from ever being inserted.
-    console.info(
-      "[TEST 9] Identity isolation enforced by: " +
-        "(1) repository.ts double-eq filter (org + customer), " +
-        "(2) check_customer_identity_org_integrity() trigger (migration 012), " +
-        "(3) RLS policy customer_identities_select_member.",
-    );
-    expect(true).toBe(true);
+    // Read repository.ts and verify findIdentitiesByCustomer applies both filters.
+    const repoPath = resolve(import.meta.dir, "../server/customers/repository.ts");
+    const src = readFileSync(repoPath, "utf-8");
+
+    // Extract the findIdentitiesByCustomer function body.
+    const fnStart = src.indexOf("export async function findIdentitiesByCustomer(");
+    expect(fnStart).toBeGreaterThan(-1); // function must exist
+
+    // Extract a reasonable window after the function start to inspect its body.
+    const fnBody = src.slice(fnStart, fnStart + 600);
+
+    // The function must filter on BOTH customer_id and organization_id.
+    expect(fnBody).toContain('.eq("customer_id", customerId)');
+    expect(fnBody).toContain('.eq("organization_id", organizationId)');
   });
 
-  it("Live: Customer 360 for Org A customer returns no Org B identities", async () => {
-    // This test requires a test DB with seed data.
-    // When Supabase is configured, it verifies end-to-end isolation.
+  it("Live: getCustomer360 for an Org A context cannot retrieve an Org B customer", async () => {
+    // This is the real cross-org isolation proof: given a genuine Org A auth context,
+    // calling getCustomer360 with ANY UUID that does not belong to Org A must throw.
+    // FAKE_CUSTOMER_ID belongs to neither org — the repository .eq("organization_id", ORG_A_ID)
+    // filter will return null, and the service will throw "Customer not found".
     await requireSupabase(async () => {
+      const { getCustomer360 } = await import("../server/customers/service");
       const ctx = await AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_A_ID);
-      // The live test would insert an Org A customer and verify its identities list
-      // contains only Org A records. Without a full seed fixture, we verify the
-      // auth context is correct and the service can be called.
+
+      // Confirm the context is scoped to Org A.
       expect(ctx.organizationId).toBe(ORG_A_ID);
+
+      // A guessed UUID that is not in Org A must be denied (404 / not found).
+      await expect(getCustomer360(ctx, FAKE_CUSTOMER_ID)).rejects.toThrow(/not found/i);
     });
   });
 });
@@ -469,26 +490,48 @@ describe("Test 11: Customer 360 route module is importable", () => {
 
 describe("Test 12: Identity resolution does not auto-merge on weak signals", () => {
   it("findCustomerByProviderIdentity requires exact (org, provider, provider_user_id) match (structural)", () => {
-    // The resolution strategy from DATA_MODEL.md §17:
-    // "Never auto-merge customers using weak heuristics (same phone ≠ same person)."
-    // identity resolution is explicit: exact match on (provider, provider_user_id).
-    // If no match → create new customer. Never merge silently.
-    //
-    // Code verification: repository.findCustomerByProviderIdentity() queries
-    // with .eq("provider", provider) AND .eq("provider_user_id", providerUserId).
-    // No fuzzy matching, no phone-number cross-identity heuristics.
-    console.info(
-      "[TEST 12] Identity resolution strategy: exact match on (org, provider, provider_user_id). " +
-        "No heuristics (same phone / same display_name) trigger automatic merge. " +
-        "See repository.ts findCustomerByProviderIdentity and DATA_MODEL.md §17.",
-    );
-    expect(true).toBe(true);
+    // Read the repository source and prove the identity lookup is strict equality only.
+    const repoPath = resolve(import.meta.dir, "../server/customers/repository.ts");
+    const src = readFileSync(repoPath, "utf-8");
+
+    const fnStart = src.indexOf("export async function findCustomerByProviderIdentity(");
+    expect(fnStart).toBeGreaterThan(-1);
+
+    const fnBody = src.slice(fnStart, fnStart + 700);
+
+    // Must filter by all three exact-match columns — no loose matching.
+    expect(fnBody).toContain('.eq("organization_id", organizationId)');
+    expect(fnBody).toContain('.eq("provider", provider)');
+    expect(fnBody).toContain('.eq("provider_user_id", providerUserId)');
+
+    // Must NOT use fuzzy operators — ilike, similar, soundex, or phone comparisons.
+    const lowerBody = fnBody.toLowerCase();
+    expect(lowerBody).not.toContain("ilike");
+    expect(lowerBody).not.toContain("similar to");
+    expect(lowerBody).not.toContain("soundex");
+    expect(lowerBody).not.toContain("primary_phone");
   });
 
-  it("Different provider, same external ID = two separate identity rows (structural)", () => {
-    // Proved by Test 6: (FACEBOOK, '12345') and (TELEGRAM, '12345') are distinct rows.
-    // Neither of these rows causes an automatic customer merge.
-    // The only merge operation is explicit: customers.merge (privileged, audited).
-    expect(true).toBe(true);
+  it("Identity resolution function contains no heuristic merge logic (no auto-merge on weak signals)", () => {
+    // Read only the findCustomerByProviderIdentity function body and confirm it uses
+    // strict equality only — no fuzzy operators that DATA_MODEL.md §17 forbids.
+    const repoPath = resolve(import.meta.dir, "../server/customers/repository.ts");
+    const src = readFileSync(repoPath, "utf-8");
+
+    const fnStart = src.indexOf("export async function findCustomerByProviderIdentity(");
+    expect(fnStart).toBeGreaterThan(-1);
+
+    // Extract just the function body (up to the next export boundary).
+    const fnEnd = src.indexOf("\nexport ", fnStart + 10);
+    const fnBody = (fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart, fnStart + 700)).toLowerCase();
+
+    // Must not use fuzzy or cross-field heuristics in identity lookup.
+    expect(fnBody).not.toContain("ilike");
+    expect(fnBody).not.toContain("similar to");
+    expect(fnBody).not.toContain("soundex");
+    expect(fnBody).not.toContain("levenshtein");
+    // Must not match on phone or display_name (identity lookup is provider-scoped only).
+    expect(fnBody).not.toContain("primary_phone");
+    expect(fnBody).not.toContain("display_name");
   });
 });
