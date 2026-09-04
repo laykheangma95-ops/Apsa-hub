@@ -29,7 +29,16 @@ import type {
 } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const db = supabaseAdmin as any;
+let db = supabaseAdmin as any;
+
+/** Test-only override for exercising repository functions against a mocked query chain. */
+export function setProductRepositoryDbForTests(testDb: unknown): () => void {
+  const previousDb = db;
+  db = testDb;
+  return () => {
+    db = previousDb;
+  };
+}
 
 /** PostgREST "The result contains 0 rows" — returned by .single() on a genuine no-row. */
 const PGRST_NO_ROW = "PGRST116";

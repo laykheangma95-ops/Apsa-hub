@@ -915,125 +915,134 @@ describe("Test 21: Genuine not-found returns null for barcode/SKU lookups", () =
   });
 });
 
-// ── Test 22: Repository findProductById — PGRST116 vs real DB error ────────────
-//
-// The repository uses Supabase's .single() which returns either:
-//   error.code === "PGRST116" → no matching row (genuine not-found → null)
-//   error.code === anything else → a real DB/query failure (→ throw)
-//
-// This is tested as a pure-logic unit test (no DB required) by replicating the
-// decision logic, and via DB integration tests (skipped when no Supabase).
-// The API-layer tests (Tests 20 & 21) verify end-to-end propagation.
+type QueryResult = {
+  data: unknown;
+  error: { code?: string; message: string } | null;
+};
 
-describe("Test 22: Repository findProductById — PGRST116 vs real DB error", () => {
-  it("PGRST116 error code maps to null (genuine no-row, no throw)", () => {
-    // This is the decision logic inside findProductById after the fix.
-    // PGRST116 = "The result contains 0 rows" — Supabase returns this from .single()
-    // when no row matches the filter. It is NOT a query failure; return null.
-    const PGRST_NO_ROW = "PGRST116";
+function queryReturning(result: QueryResult) {
+  const query = {
+    select: () => query,
+    eq: () => query,
+    single: async () => result,
+    maybeSingle: async () => result,
+  };
+  return query;
+}
 
-    function resolveRow(
-      data: unknown,
-      error: { code?: string; message?: string } | null,
-    ): unknown {
-      if (error) {
-        if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
-        throw new Error(`findProductById: ${(error as { message?: string }).message ?? "unknown"}`);
-      }
-      return data ?? null;
-    }
+async function withRepositoryDb<T>(
+  testDb: { from: (table: string) => ReturnType<typeof queryReturning> },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const { setProductRepositoryDbForTests } = await import("../server/products/repository");
+  const restore = setProductRepositoryDbForTests(testDb);
+  try {
+    return await fn();
+  } finally {
+    restore();
+  }
+}
 
-    // Genuine no-row → null
-    expect(resolveRow(null, { code: "PGRST116", message: "The result contains 0 rows" })).toBeNull();
-    // Real DB error → throws
-    expect(() => resolveRow(null, { code: "23503", message: "connection timeout" })).toThrow(
-      "connection timeout",
-    );
-    // Row found → returns row
-    expect(resolveRow({ id: "p1" }, null)).toEqual({ id: "p1" });
-    // Null data with no error → null
-    expect(resolveRow(null, null)).toBeNull();
+// ── Test 22: Real repository functions — PGRST116 vs DB errors ───────────────
+
+describe("Test 22: Real repository functions distinguish no-row from DB errors", () => {
+  const noRow: QueryResult = {
+    data: null,
+    error: { code: "PGRST116", message: "The result contains 0 rows" },
+  };
+  const dbError: QueryResult = {
+    data: null,
+    error: { code: "XX000", message: "connection reset" },
+  };
+
+  it("findProductById returns null only for PGRST116", async () => {
+    const { findProductById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findProductById(ORG_A_ID, FAKE_PRODUCT_ID)).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findProductById(ORG_A_ID, FAKE_PRODUCT_ID)).rejects.toThrow(
+        "findProductById: connection reset",
+      );
+    });
   });
 
-  it("true product not-found returns null (DB integration)", async () => {
-    await requireSupabase(async () => {
-      const { findProductById } = await import("../server/products/repository");
-      const NONEXISTENT = "ffffffff-dead-beef-ffff-000000000001";
-      const result = await findProductById(ORG_A_ID, NONEXISTENT);
-      expect(result).toBeNull();
+  it("findCategoryById returns null only for PGRST116", async () => {
+    const { findCategoryById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findCategoryById(ORG_A_ID, "category-id")).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findCategoryById(ORG_A_ID, "category-id")).rejects.toThrow(
+        "findCategoryById: connection reset",
+      );
+    });
+  });
+
+  it("findVariantById returns null only for PGRST116", async () => {
+    const { findVariantById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findVariantById(ORG_A_ID, "variant-id")).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findVariantById(ORG_A_ID, "variant-id")).rejects.toThrow(
+        "findVariantById: connection reset",
+      );
     });
   });
 });
 
-// ── Test 23: Barcode/SKU lookup — second-query DB failures propagate ──────────
-//
-// lookupByBarcode / lookupBySku call two sequential repository queries:
-//   1. findVariantByBarcode / findVariantBySku  (variant lookup)
-//   2. findProductById                           (parent product lookup)
-//
-// If the second query fails with a real DB error, the fixed findProductById
-// throws instead of returning null. The service propagates the throw.
-// At the API layer, lookupByBarcodeFn / lookupBySkuFn propagate it to the
-// client. This test covers the full API-layer propagation.
+// ── Test 23: Real service lookup paths — second-query failures propagate ──────
 
-describe("Test 23: Barcode/SKU lookup — second-query DB failure propagates as error", () => {
-  it("lookupProductByBarcode propagates when second-query (findProductById) fails", async () => {
-    // Simulate: variant found by barcode, but subsequent product fetch fails with
-    // a DB error (e.g., connection reset). Before the fix, findProductById masked
-    // this as null and the service returned null (silent failure). After the fix,
-    // the error propagates through the service and server function to the client.
-    const secondQueryError = new Error("findProductById: connection reset");
+describe("Test 23: Real barcode/SKU service lookups propagate second-query DB failures", () => {
+  const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
+  const variant = { id: "variant-id", product_id: FAKE_PRODUCT_ID };
 
-    mock.module("@/api/products", () => ({
-      listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => { throw secondQueryError; },
-      lookupBySkuFn: async () => null,
-    }));
-
-    const { lookupProductByBarcode } = await import("../lib/api/index");
-    await expect(lookupProductByBarcode("bc-123")).rejects.toThrow(
-      "findProductById: connection reset",
-    );
+  it("lookupByBarcode throws when the parent-product query fails", async () => {
+    const { lookupByBarcode } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: (table) => queryReturning(
+        table === "product_variants"
+          ? { data: variant, error: null }
+          : { data: null, error: { code: "XX000", message: "connection reset" } },
+      ),
+    }, async () => {
+      await expect(lookupByBarcode(ctx, "bc-123")).rejects.toThrow(
+        "findProductById: connection reset",
+      );
+    });
   });
 
-  it("lookupProductBySku propagates when second-query (findProductById) fails", async () => {
-    const secondQueryError = new Error("findProductById: upstream timeout");
-
-    mock.module("@/api/products", () => ({
-      listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => null,
-      lookupBySkuFn: async () => { throw secondQueryError; },
-    }));
-
-    const { lookupProductBySku } = await import("../lib/api/index");
-    await expect(lookupProductBySku("SKU-001")).rejects.toThrow(
-      "findProductById: upstream timeout",
-    );
+  it("lookupBySku throws when the parent-product query fails", async () => {
+    const { lookupBySku } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: (table) => queryReturning(
+        table === "product_variants"
+          ? { data: variant, error: null }
+          : { data: null, error: { code: "XX000", message: "upstream timeout" } },
+      ),
+    }, async () => {
+      await expect(lookupBySku(ctx, "SKU-001")).rejects.toThrow(
+        "findProductById: upstream timeout",
+      );
+    });
   });
 
-  it("lookupProductByBarcode returns null when server confirms genuine not-found (null)", async () => {
-    // Genuine not-found: both variant and product genuinely absent.
-    // The server function returns null; the API layer passes it through.
-    mock.module("@/api/products", () => ({
-      listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => null,
-      lookupBySkuFn: async () => null,
-    }));
-
-    const { lookupProductByBarcode } = await import("../lib/api/index");
-    const result = await lookupProductByBarcode("nonexistent");
-    expect(result).toBeNull();
+  it("lookupByBarcode returns null for a genuine barcode miss", async () => {
+    const { lookupByBarcode } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: () => queryReturning({ data: null, error: null }),
+    }, async () => {
+      await expect(lookupByBarcode(ctx, "nonexistent-barcode")).resolves.toBeNull();
+    });
   });
 
-  it("lookupProductBySku returns null when server confirms genuine not-found (null)", async () => {
-    mock.module("@/api/products", () => ({
-      listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => null,
-      lookupBySkuFn: async () => null,
-    }));
-
-    const { lookupProductBySku } = await import("../lib/api/index");
-    const result = await lookupProductBySku("nonexistent-sku");
-    expect(result).toBeNull();
+  it("lookupBySku returns null for a genuine SKU miss", async () => {
+    const { lookupBySku } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: () => queryReturning({ data: null, error: null }),
+    }, async () => {
+      await expect(lookupBySku(ctx, "nonexistent-sku")).resolves.toBeNull();
+    });
   });
 });
