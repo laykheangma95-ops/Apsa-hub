@@ -1,22 +1,35 @@
 /**
- * Server-side Supabase client — SERVICE ROLE.
+ * Server-side Supabase utilities.
  *
  * NEVER import this file in any file that is bundled for the browser.
- * NEVER expose process.env.SUPABASE_SERVICE_ROLE_KEY to the client.
+ * NEVER expose SUPABASE_SERVICE_ROLE_KEY to the client.
  * NEVER use VITE_ prefix for SUPABASE_SERVICE_ROLE_KEY.
  *
- * This client bypasses RLS and must only be used from trusted server code
- * after application-layer authorization has already been verified.
+ * supabaseAdmin: service-role client that bypasses RLS. Use only after
+ * application-layer authorization has already been verified.
  *
- * TESTABILITY: supabaseAdmin is lazily initialized. The Supabase client is
- * not constructed until the first property access. Importing this module does
- * not throw even when credentials are absent, which allows unit tests that
+ * createServerClient: user-scoped client that respects RLS (defense-in-depth).
+ *
+ * createRefreshClient: anon-key client used exclusively for token refresh.
+ *
+ * TESTABILITY: supabaseAdmin is lazily initialized — importing this module
+ * never throws, even when credentials are absent, allowing unit tests that
  * never touch the DB to load auth modules without Supabase env vars.
- * Production code still fails immediately and clearly when credentials are
- * absent — at the point the client is first used, not at import time.
  */
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "./types";
+
+// ── Cookie names (shared with src/api/auth.ts) ────────────────────────────────
+export const COOKIE_ACCESS_TOKEN = "sb-access-token";
+export const COOKIE_REFRESH_TOKEN = "sb-refresh-token";
+
+export const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env["NODE_ENV"] === "production",
+  sameSite: "lax" as const,
+  path: "/",
+  maxAge: 60 * 60 * 24 * 7, // 7 days (refresh token lifetime)
+} as const;
 
 type AdminClient = ReturnType<typeof createClient<Database>>;
 
@@ -53,9 +66,9 @@ export const supabaseAdmin: AdminClient = new Proxy({} as AdminClient, {
 });
 
 /**
- * Create a Supabase client that impersonates the authenticated user via JWT.
- * This client still respects RLS — used when we want RLS as a defense-in-depth
- * layer on top of application-layer checks, without full service-role bypass.
+ * Create a user-scoped Supabase client authenticated via the caller's JWT.
+ * This client respects RLS and is appropriate for calling RPCs that use auth.uid().
+ * Never use this for privileged admin operations — use supabaseAdmin for those.
  */
 export function createServerClient(accessToken: string) {
   const url = process.env['VITE_SUPABASE_URL']!;
@@ -67,6 +80,22 @@ export function createServerClient(accessToken: string) {
         Authorization: `Bearer ${accessToken}`,
       },
     },
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+}
+
+/**
+ * Create an anonymous-key client used exclusively for token refresh.
+ * Does NOT carry a user JWT — call refreshSession({ refresh_token }) on it.
+ */
+export function createRefreshClient() {
+  const url = process.env['VITE_SUPABASE_URL']!;
+  const anonKey = process.env['VITE_SUPABASE_ANON_KEY']!;
+
+  return createClient<Database>(url, anonKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,

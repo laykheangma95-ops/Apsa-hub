@@ -10,7 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AccessDeniedRouteImport } from './routes/access-denied'
+import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
+import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppPosRouteImport } from './routes/app.pos'
@@ -25,40 +30,65 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AccessDeniedRoute = AccessDeniedRouteImport.update({
+  id: '/access-denied',
+  path: '/access-denied',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppRoute = AppRouteImport.update({
+  id: '/app',
+  path: '/app',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DesignRoute = DesignRouteImport.update({
   id: '/design',
   path: '/design',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AppIndexRoute = AppIndexRouteImport.update({
-  id: '/app/',
-  path: '/app/',
+const OnboardingRoute = OnboardingRouteImport.update({
+  id: '/onboarding',
+  path: '/onboarding',
   getParentRoute: () => rootRouteImport,
+} as any)
+const SignInRoute = SignInRouteImport.update({
+  id: '/sign-in',
+  path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppIndexRoute = AppIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppInboxRoute = AppInboxRouteImport.update({
-  id: '/app/inbox',
-  path: '/app/inbox',
-  getParentRoute: () => rootRouteImport,
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppPosRoute = AppPosRouteImport.update({
-  id: '/app/pos',
-  path: '/app/pos',
-  getParentRoute: () => rootRouteImport,
+  id: '/pos',
+  path: '/pos',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppTeamRoute = AppTeamRouteImport.update({
-  id: '/app/team',
-  path: '/app/team',
-  getParentRoute: () => rootRouteImport,
+  id: '/team',
+  path: '/team',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppCustomersIdRoute = AppCustomersIdRouteImport.update({
-  id: '/app/customers/$id',
-  path: '/app/customers/$id',
-  getParentRoute: () => rootRouteImport,
+  id: '/customers/$id',
+  path: '/customers/$id',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppDeliveriesIdRoute = AppDeliveriesIdRouteImport.update({
-  id: '/app/deliveries/$id',
-  path: '/app/deliveries/$id',
-  getParentRoute: () => rootRouteImport,
+  id: '/deliveries/$id',
+  path: '/deliveries/$id',
+  getParentRoute: () => AppRoute,
 } as any)
 const AppInboxIdRoute = AppInboxIdRouteImport.update({
   id: '/$id',
@@ -66,14 +96,19 @@ const AppInboxIdRoute = AppInboxIdRouteImport.update({
   getParentRoute: () => AppInboxRoute,
 } as any)
 const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
-  id: '/app/orders/$id',
-  path: '/app/orders/$id',
-  getParentRoute: () => rootRouteImport,
+  id: '/orders/$id',
+  path: '/orders/$id',
+  getParentRoute: () => AppRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/access-denied': typeof AccessDeniedRoute
+  '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
+  '/onboarding': typeof OnboardingRoute
+  '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
@@ -85,7 +120,11 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/access-denied': typeof AccessDeniedRoute
   '/design': typeof DesignRoute
+  '/onboarding': typeof OnboardingRoute
+  '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
@@ -98,7 +137,12 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/access-denied': typeof AccessDeniedRoute
+  '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
+  '/onboarding': typeof OnboardingRoute
+  '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
@@ -112,7 +156,12 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/access-denied'
+    | '/app'
     | '/design'
+    | '/onboarding'
+    | '/sign-in'
+    | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
     | '/app/team'
@@ -124,7 +173,11 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/access-denied'
     | '/design'
+    | '/onboarding'
+    | '/sign-in'
+    | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
     | '/app/team'
@@ -136,7 +189,12 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/access-denied'
+    | '/app'
     | '/design'
+    | '/onboarding'
+    | '/sign-in'
+    | '/verify-email'
     | '/app/inbox'
     | '/app/pos'
     | '/app/team'
@@ -149,14 +207,12 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AccessDeniedRoute: typeof AccessDeniedRoute
+  AppRoute: typeof AppRouteWithChildren
   DesignRoute: typeof DesignRoute
-  AppInboxRoute: typeof AppInboxRouteWithChildren
-  AppPosRoute: typeof AppPosRoute
-  AppTeamRoute: typeof AppTeamRoute
-  AppIndexRoute: typeof AppIndexRoute
-  AppCustomersIdRoute: typeof AppCustomersIdRoute
-  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
-  AppOrdersIdRoute: typeof AppOrdersIdRoute
+  OnboardingRoute: typeof OnboardingRoute
+  SignInRoute: typeof SignInRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -168,6 +224,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/access-denied': {
+      id: '/access-denied'
+      path: '/access-denied'
+      fullPath: '/access-denied'
+      preLoaderRoute: typeof AccessDeniedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/app': {
+      id: '/app'
+      path: '/app'
+      fullPath: '/app'
+      preLoaderRoute: typeof AppRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/design': {
       id: '/design'
       path: '/design'
@@ -175,47 +245,68 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DesignRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/onboarding': {
+      id: '/onboarding'
+      path: '/onboarding'
+      fullPath: '/onboarding'
+      preLoaderRoute: typeof OnboardingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/app/': {
       id: '/app/'
-      path: '/app'
+      path: '/'
       fullPath: '/app/'
       preLoaderRoute: typeof AppIndexRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/inbox': {
       id: '/app/inbox'
-      path: '/app/inbox'
+      path: '/inbox'
       fullPath: '/app/inbox'
       preLoaderRoute: typeof AppInboxRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/pos': {
       id: '/app/pos'
-      path: '/app/pos'
+      path: '/pos'
       fullPath: '/app/pos'
       preLoaderRoute: typeof AppPosRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/team': {
       id: '/app/team'
-      path: '/app/team'
+      path: '/team'
       fullPath: '/app/team'
       preLoaderRoute: typeof AppTeamRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/customers/$id': {
       id: '/app/customers/$id'
-      path: '/app/customers/$id'
+      path: '/customers/$id'
       fullPath: '/app/customers/$id'
       preLoaderRoute: typeof AppCustomersIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/deliveries/$id': {
       id: '/app/deliveries/$id'
-      path: '/app/deliveries/$id'
+      path: '/deliveries/$id'
       fullPath: '/app/deliveries/$id'
       preLoaderRoute: typeof AppDeliveriesIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
     '/app/inbox/$id': {
       id: '/app/inbox/$id'
@@ -226,10 +317,10 @@ declare module '@tanstack/react-router' {
     }
     '/app/orders/$id': {
       id: '/app/orders/$id'
-      path: '/app/orders/$id'
+      path: '/orders/$id'
       fullPath: '/app/orders/$id'
       preLoaderRoute: typeof AppOrdersIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof AppRoute
     }
   }
 }
@@ -246,9 +337,17 @@ const AppInboxRouteWithChildren = AppInboxRoute._addFileChildren(
   AppInboxRouteChildren,
 )
 
-const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
-  DesignRoute: DesignRoute,
+interface AppRouteChildren {
+  AppInboxRoute: typeof AppInboxRouteWithChildren
+  AppPosRoute: typeof AppPosRoute
+  AppTeamRoute: typeof AppTeamRoute
+  AppIndexRoute: typeof AppIndexRoute
+  AppCustomersIdRoute: typeof AppCustomersIdRoute
+  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
+  AppOrdersIdRoute: typeof AppOrdersIdRoute
+}
+
+const AppRouteChildren: AppRouteChildren = {
   AppInboxRoute: AppInboxRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppTeamRoute: AppTeamRoute,
@@ -256,6 +355,18 @@ const rootRouteChildren: RootRouteChildren = {
   AppCustomersIdRoute: AppCustomersIdRoute,
   AppDeliveriesIdRoute: AppDeliveriesIdRoute,
   AppOrdersIdRoute: AppOrdersIdRoute,
+}
+
+const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
+
+const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
+  AccessDeniedRoute: AccessDeniedRoute,
+  AppRoute: AppRouteWithChildren,
+  DesignRoute: DesignRoute,
+  OnboardingRoute: OnboardingRoute,
+  SignInRoute: SignInRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
