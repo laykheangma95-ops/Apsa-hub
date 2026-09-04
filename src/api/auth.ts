@@ -237,16 +237,21 @@ export const signInFn = createServerFn()
       accessToken: authData.session.access_token,
     };
 
-    // Cookies written in this response are for subsequent requests. Do not call
-    // getSessionFn() here: it reads only the incoming request Cookie header and
-    // therefore cannot observe cookies that were just set in this same request.
-    await writeSessionCookies(
-      authData.session.access_token,
-      authData.session.refresh_token,
-    );
-
     try {
       const routeResult = await resolveAuthenticatedRoute(authenticatedSession);
+
+      // Revoked access clears any existing response cookies in the resolver.
+      if (!routeResult.ok && routeResult.redirect === "/access-denied") {
+        return { ok: true, redirectTo: routeResult.redirect };
+      }
+
+      // These cookies are for subsequent requests. This handler must not call
+      // getSessionFn here because it reads only incoming request cookies.
+      await writeSessionCookies(
+        authData.session.access_token,
+        authData.session.refresh_token,
+      );
+
       return {
         ok: true,
         redirectTo: routeResult.ok ? "/app" : routeResult.redirect,
