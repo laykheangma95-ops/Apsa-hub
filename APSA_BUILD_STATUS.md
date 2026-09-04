@@ -3,7 +3,7 @@
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
 **Last updated:** 2026-09-04
-**Branch:** `claude/apsa-customer-production-k9jk50` (Customer domain productionized)
+**Branch:** `claude/apsa-product-production-le63ve` (Product domain productionized)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -24,13 +24,14 @@
 
 ---
 
-## Repository Snapshot (as of 2026-09-04 — Customer Domain Sprint)
+## Repository Snapshot (as of 2026-09-04 — Product Domain Sprint)
 
 **Stack found:** TanStack Start + Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Router + TanStack Query + i18next + Radix UI + recharts + @supabase/supabase-js  
-**Database:** MIGRATIONS WRITTEN — 16 migration files in `supabase/migrations/` (001–016). Awaiting Supabase project provisioning by project owner to apply.  
+**Database:** MIGRATIONS WRITTEN — 19 migration files in `supabase/migrations/` (001–019). Awaiting Supabase project provisioning by project owner to apply.  
 **Auth:** FOUNDATION BUILT — Supabase client architecture, server-side session validation, membership verification. Awaiting Supabase project to activate.  
 **Customer Backend:** BUILT — server repository, service, and TanStack Start server functions. Customer 360 UI connected to real server functions (mock replaced).  
-**Other Data layers:** Still mock — inbox, orders, products, delivery, POS use mock data; mock not ripped out; UI unbroken.  
+**Product Backend:** BUILT — server repository, service, and TanStack Start server functions. `getProducts()` and `getPosProducts()` try real server first with mock fallback; barcode/SKU lookup wired to real server; `Product.stock = null` in production path (inventory not connected — intentional, separate domain).  
+**Other Data layers:** Still mock — inbox, orders, delivery use mock data; mock not ripped out; UI unbroken.  
 **Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
 
 ### Production Foundation Added (2026-09-03)
@@ -197,6 +198,54 @@
 **Status:** `PARTIAL` → **Customer persistence READY** (migration written; apply to activate)
 
 **What exists today:** Full customer profile screen at `src/routes/app.customers.$id.tsx`. Shows customer info, lifetime spend, order count, social identities, address, tags, notes, order history timeline, customer events, active conversation link. **Customer domain is now backed by a real server layer** — `getCustomer360` and `addCustomerNote` in `src/lib/api/index.ts` call TanStack Start server functions that hit real Supabase tables. Orders and events remain empty (`never[]`) until those domains are productionized — no mock data injected for those.
+
+**Product domain backend built (2026-09-04):**
+
+| Area | Status | Files |
+|---|---|---|
+| Migration 017: product_categories | WRITTEN | `supabase/migrations/017_product_categories.sql` |
+| Migration 018: products + product_variants | WRITTEN | `supabase/migrations/018_products.sql` |
+| Migration 019: product_permissions | WRITTEN + SEEDED | `supabase/migrations/019_product_permissions.sql` |
+| Product repository | BUILT | `src/server/products/repository.ts` |
+| Product service | BUILT | `src/server/products/service.ts` |
+| Product server functions | BUILT | `src/api/products.ts` |
+| Product domain types | BUILT | `src/server/products/types.ts` |
+| POS + catalog wired to real server | CONNECTED | `src/lib/api/index.ts` (`getProducts`, `getPosProducts`, `lookupProductByBarcode`, `lookupProductBySku`) |
+| Product domain tests | WRITTEN (16 tests) | `src/tests/product-domain.test.ts` |
+
+**Security guarantees implemented:**
+- `organization_id` never trusted from client — resolved from active DB membership in `resolveAuthContext()`
+- Dual-layer isolation: RLS policies on all 3 new tables + application-level `organization_id` filter on every query
+- SKU/barcode uniqueness org-scoped: partial unique indexes `(organization_id, sku)` and `(organization_id, barcode)` where NOT NULL
+- Integer money enforced: `price_amount INTEGER NOT NULL CHECK >= 0`; zod validates `.int()` at server function boundary
+- Cost fields withheld unless caller has `products.view_cost` permission
+- Price/cost changes use best-effort `auditLog()` (non-fail-closed per spec)
+- Cross-org variant guard: DB trigger `check_variant_org_integrity()` ensures variant.organization_id === product.organization_id
+- `Product.stock` always `null` from server — inventory is a separate domain, not this service's concern
+- Barcode/SKU lookup: exact match only, empty string short-circuits to null (no fuzzy selection)
+- Service-role key never in client bundle — all server-only modules behind `createServerFn()`
+
+**Activation required:**
+- Apply migrations 017–019 to live Supabase project (`supabase db push` or Supabase dashboard)
+- After applying, run `supabase gen types typescript` to regenerate `src/lib/supabase/types.ts` and remove `as any` casts in product repository.ts
+
+**Build state (2026-09-04):**
+- `tsc --noEmit`: PASSES
+- `bun run build`: SUCCEEDS
+- `bun test src/tests/`: 232 tests pass, 0 fail
+- Client bundle scan for secrets: CLEAN (no service-role key present)
+
+**Repository evidence:** `src/api/products.ts`, `src/server/products/`, `supabase/migrations/017_*.sql`–`019_*.sql`, `src/lib/api/index.ts#getProducts`, `src/lib/pos-cart.ts#stockState`
+
+**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant, ProductCategory), PERMISSIONS_MATRIX.md §12, SECURITY.md, MVP_ROADMAP.md Phase 5
+
+**Owner:** Claude Code (backend complete); Lovable (product management UI)
+
+**Dependencies:** Supabase project credentials for migration application (017–019)
+
+**Next action:** Project owner — apply migrations 017–019. Then: Lovable — build `/app/products` management screens.
+
+---
 
 **Customer domain backend built (2026-09-04):**
 
@@ -374,19 +423,32 @@
 
 ### 16. Products
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `PARTIAL` — Backend BUILT; product management UI still Lovable-owned (not yet built)
 
-**What exists today:** No products route exists. Product data model, mock data (`src/lib/mock/products.ts`), and `getProducts` API exist. POS uses products but there is no standalone products management screen.
+**What exists today (backend — 2026-09-04):**
+- 3 new migrations (017–019): ProductCategory, Product, ProductVariant tables with integer money storage, org-scoped SKU/barcode unique indexes, RLS, cross-org trigger, 8 product.* permission keys seeded to roles
+- Server repository at `src/server/products/repository.ts` — org-scoped CRUD + batch variant fetch (no N+1)
+- Server service at `src/server/products/service.ts` — permission-aware, cost fields withheld unless `products.view_cost`, `Product.stock = null` always (inventory is separate domain)
+- Server functions at `src/api/products.ts` — 12 server functions, `org_id` never from client, zod-validated, integer money enforced
+- POS + product catalog wired: `getProducts()` and `getPosProducts()` try real server first, fall back to mock; barcode/SKU lookup wired to real server (`lookupProductByBarcode`, `lookupProductBySku`)
+- 16 tests at `src/tests/product-domain.test.ts`
+- `Product.stock` changed to `number | null` — null = inventory not connected (intentional); POS cart handles null stock as "no cap"
 
-**Repository evidence:** Routes listing — no `app.products.tsx` or `app.products.$id.tsx`. `src/lib/mock/products.ts`, `src/lib/api/index.ts#getProducts`.
+**What does NOT exist yet:**
+- `/app/products` list screen (Lovable)
+- Create/edit product screen (Lovable)
+- Variant management UI (Lovable)
+- Category management UI (Lovable)
 
-**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant), MVP_ROADMAP.md Phase 5, APSA_MASTER_PLAN.md
+**Repository evidence:** `src/server/products/`, `src/api/products.ts`, `src/tests/product-domain.test.ts`, `supabase/migrations/017_*.sql`–`019_*.sql`, `src/lib/api/index.ts#getProducts`, `src/lib/api/index.ts#lookupProductByBarcode`
 
-**Owner:** Lovable (build screen); Claude Code (real backend with variant model)
+**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant, ProductCategory), PERMISSIONS_MATRIX.md §12, MVP_ROADMAP.md Phase 5
 
-**Dependencies:** Product data model
+**Owner:** Claude Code (backend complete); Lovable (product management screens)
 
-**Next action:** Lovable — build `/app/products` list + create/edit product screens with variant support, price, SKU, category, barcode.
+**Dependencies:** Supabase project credentials for migration application (017–019)
+
+**Next action:** Project owner — apply migrations 017–019. Then: Lovable — build `/app/products` list + create/edit screens with variant support. Claude Code — implement Inventory ledger domain (separate sprint).
 
 ---
 
@@ -394,17 +456,17 @@
 
 **Status:** `NOT_BUILT`
 
-**What exists today:** `Product.stock` field exists as a mutable integer in `src/types/index.ts` (anti-pattern per DATA_MODEL.md). No inventory management screen exists. No ledger-based inventory model exists.
+**What exists today:** `Product.stock` is now `number | null` in `src/types/index.ts` — changed during Product productionization. In the production server path, service always returns `stock: null` (inventory not connected). POS cart treats `null` as "no quantity cap" until ledger is connected. No inventory management screen. No InventoryMovement ledger. No DB tables for inventory yet.
 
-**Repository evidence:** `src/types/index.ts#Product.stock` (integer field), no inventory routes, no InventoryMovement type.
+**Repository evidence:** `src/types/index.ts#Product.stock` (now `number | null`), `src/lib/pos-cart.ts#stockState` (handles null), no inventory routes, no InventoryMovement type.
 
 **Source-of-truth doc:** DATA_MODEL.md (Inventory as ledger — InventoryMovement table; NEVER mutable integer), APSA_MASTER_PLAN.md (inventory ledger)
 
 **Owner:** Claude Code (ledger model); Lovable (adjustment UI after model exists)
 
-**Dependencies:** Product domain, Authentication
+**Dependencies:** Product domain (BUILT), Authentication
 
-**Next action:** Claude Code — implement InventoryMovement ledger (never update `stock` directly). Lovable — build inventory adjustment and history UI after ledger model is confirmed.
+**Next action:** Claude Code — implement InventoryMovement ledger (20x migration). `Product.stock` must remain `null` in the Product service until the ledger domain is connected. Lovable — build inventory adjustment and history UI after ledger model is confirmed.
 
 ---
 
