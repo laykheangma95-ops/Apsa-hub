@@ -14,6 +14,7 @@ import { Route as AccessDeniedRouteImport } from './routes/access-denied'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
 import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as ShellPreviewRouteImport } from './routes/shell-preview'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
@@ -49,6 +50,11 @@ const DesignRoute = DesignRouteImport.update({
 const OnboardingRoute = OnboardingRouteImport.update({
   id: '/onboarding',
   path: '/onboarding',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShellPreviewRoute = ShellPreviewRouteImport.update({
+  id: '/shell-preview',
+  path: '/shell-preview',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SignInRoute = SignInRouteImport.update({
@@ -113,6 +119,7 @@ export interface FileRoutesByFullPath {
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
+  '/shell-preview': typeof ShellPreviewRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
@@ -130,6 +137,7 @@ export interface FileRoutesByTo {
   '/access-denied': typeof AccessDeniedRoute
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
+  '/shell-preview': typeof ShellPreviewRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
@@ -149,6 +157,7 @@ export interface FileRoutesById {
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
   '/onboarding': typeof OnboardingRoute
+  '/shell-preview': typeof ShellPreviewRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
@@ -169,6 +178,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/design'
     | '/onboarding'
+    | '/shell-preview'
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
@@ -186,6 +196,7 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/design'
     | '/onboarding'
+    | '/shell-preview'
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
@@ -204,6 +215,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/design'
     | '/onboarding'
+    | '/shell-preview'
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
@@ -223,6 +235,7 @@ export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   DesignRoute: typeof DesignRoute
   OnboardingRoute: typeof OnboardingRoute
+  ShellPreviewRoute: typeof ShellPreviewRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
@@ -263,6 +276,13 @@ declare module '@tanstack/react-router' {
       path: '/onboarding'
       fullPath: '/onboarding'
       preLoaderRoute: typeof OnboardingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shell-preview': {
+      id: '/shell-preview'
+      path: '/shell-preview'
+      fullPath: '/shell-preview'
+      preLoaderRoute: typeof ShellPreviewRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sign-in': {
@@ -385,6 +405,7 @@ const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   DesignRoute: DesignRoute,
   OnboardingRoute: OnboardingRoute,
+  ShellPreviewRoute: ShellPreviewRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
   VerifyEmailRoute: VerifyEmailRoute,
