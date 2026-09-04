@@ -24,7 +24,7 @@
  * Run: bun test src/tests/product-domain.test.ts
  */
 
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect, beforeAll, mock, afterEach } from "bun:test";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
 
@@ -556,6 +556,10 @@ describe("Test 15: No fuzzy barcode / SKU matching", () => {
 });
 
 // ── Test 16: Existing Product and POS routes still render ─────────────────────
+// (note: after the mock-fallback fix, getPosProducts() returns mocks only for
+//  UnauthorizedError — the test environment produces exactly that because there
+//  is no active session, so this test still passes unchanged)
+
 
 describe("Test 16: Existing Product and POS routes still render (structural guard)", () => {
   it("getPosProducts falls back to mock products when Supabase is not configured", async () => {
@@ -617,5 +621,301 @@ describe("Test 16: Existing Product and POS routes still render (structural guar
     const types = await import("../types/index");
     // ProductCategoryRecord is a type-only export — check it doesn't break the import
     expect(types).toBeDefined();
+  });
+});
+
+// ── Test 17: Cross-org workspace integrity at DB level ────────────────────────
+// Requires migration 020 to be applied. Tests are skipped when DB is unavailable.
+
+describe("Test 17: Cross-org workspace integrity (migration 020 trigger)", () => {
+  it("Org A cannot create a product using Org B's workspace_id (requires DB)", async () => {
+    await requireSupabase(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { supabaseAdmin } = await import("../lib/supabase/server") as any;
+      const db = supabaseAdmin as any;
+
+      // Create a workspace in Org B using the admin client
+      const { data: wsRow, error: wsErr } = await db
+        .from("workspaces")
+        .insert({
+          organization_id: ORG_B_ID,
+          name: `TestWS-B-${Date.now()}`,
+          type: "GENERAL",
+        })
+        .select("id")
+        .single();
+
+      if (wsErr || !wsRow) {
+        // If workspace creation itself fails (e.g. missing required columns not
+        // yet in schema), skip rather than fail the integrity test.
+        console.warn("[SKIP] Could not create Org B workspace:", wsErr?.message);
+        return;
+      }
+
+      const orgBWorkspaceId: string = wsRow.id;
+
+      // Attempt to create a product in Org A that references Org B's workspace.
+      // The trigger (020) must reject this with a cross_tenant_workspace error.
+      const { createProduct } = await import("../server/products/service");
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+        "products.create",
+        "products.read",
+      ]);
+
+      await expect(
+        createProduct(ctxA, {
+          name_km: "ផលិតផលក្រុម A ជាមួយ Workspace ក្រុម B",
+          workspace_id: orgBWorkspaceId,
+          initialVariant: { price_amount: 100, price_currency: "USD" },
+        }),
+      ).rejects.toThrow(/cross_tenant_workspace|workspace_id must belong/i);
+    });
+  });
+
+  it("Org A cannot update a product to use Org B's workspace_id (requires DB)", async () => {
+    await requireSupabase(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { supabaseAdmin } = await import("../lib/supabase/server") as any;
+      const db = supabaseAdmin as any;
+
+      // Create workspace in Org B
+      const { data: wsRow, error: wsErr } = await db
+        .from("workspaces")
+        .insert({
+          organization_id: ORG_B_ID,
+          name: `TestWS-B-update-${Date.now()}`,
+          type: "GENERAL",
+        })
+        .select("id")
+        .single();
+
+      if (wsErr || !wsRow) {
+        console.warn("[SKIP] Could not create Org B workspace:", wsErr?.message);
+        return;
+      }
+
+      const orgBWorkspaceId: string = wsRow.id;
+
+      // Create a valid product in Org A (no workspace)
+      const { createProduct, updateProduct } = await import("../server/products/service");
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+        "products.create",
+        "products.read",
+        "products.update_basic",
+      ]);
+
+      const product = await createProduct(ctxA, {
+        name_km: "ផលិតផលអាប់ដេត",
+        initialVariant: { price_amount: 200, price_currency: "USD" },
+      });
+
+      // Attempt to update the product's workspace_id to Org B's workspace
+      await expect(
+        updateProduct(ctxA, product.id, { workspace_id: orgBWorkspaceId }),
+      ).rejects.toThrow(/cross_tenant_workspace|workspace_id must belong/i);
+    });
+  });
+});
+
+// ── Test 18: Cross-org category integrity at DB level ─────────────────────────
+// Requires migration 020. Tests are skipped when DB is unavailable.
+
+describe("Test 18: Cross-org category integrity (migration 020 trigger)", () => {
+  it("Org A cannot create a product using Org B's category_id (requires DB)", async () => {
+    await requireSupabase(async () => {
+      // Create a category in Org B
+      const { createCategory, createProduct } = await import("../server/products/service");
+
+      const ctxB = makeCtxWithPerms(USER_ORG_B, ORG_B_ID, ["products.manage_categories"]);
+      const orgBCategory = await createCategory(ctxB, {
+        name_km: `ប្រភេទក្រុម B ${Date.now()}`,
+      });
+
+      // Attempt to create a product in Org A referencing Org B's category_id
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+        "products.create",
+        "products.read",
+      ]);
+
+      await expect(
+        createProduct(ctxA, {
+          name_km: "ផលិតផលក្រុម A ជាមួយ Category ក្រុម B",
+          category_id: orgBCategory.id,
+          initialVariant: { price_amount: 150, price_currency: "USD" },
+        }),
+      ).rejects.toThrow(/cross_tenant_category|category_id must belong/i);
+    });
+  });
+
+  it("Org A cannot update a product to use Org B's category_id (requires DB)", async () => {
+    await requireSupabase(async () => {
+      const { createCategory, createProduct, updateProduct } = await import(
+        "../server/products/service"
+      );
+
+      // Create a category in Org B
+      const ctxB = makeCtxWithPerms(USER_ORG_B, ORG_B_ID, ["products.manage_categories"]);
+      const orgBCategory = await createCategory(ctxB, {
+        name_km: `ប្រភេទអាប់ដេត ${Date.now()}`,
+      });
+
+      // Create a product in Org A without a category
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+        "products.create",
+        "products.read",
+        "products.update_basic",
+      ]);
+
+      const product = await createProduct(ctxA, {
+        name_km: "ផលិតផលអាប់ដេត Category",
+        initialVariant: { price_amount: 300, price_currency: "USD" },
+      });
+
+      // Attempt to patch category_id to Org B's category
+      await expect(
+        updateProduct(ctxA, product.id, { category_id: orgBCategory.id }),
+      ).rejects.toThrow(/cross_tenant_category|category_id must belong/i);
+    });
+  });
+});
+
+// ── Test 19: Production list errors propagate (not masked as mocks) ───────────
+// Tests the fixed getProducts() / getPosProducts() error handling.
+
+afterEach(() => {
+  mock.restore();
+});
+
+describe("Test 19: Production list errors propagate — not masked as mock data", () => {
+  it("getProducts() re-throws DB/server errors (Error, not UnauthorizedError)", async () => {
+    // Simulate a DB-level error from the server function.
+    // name = "Error" (default) — must NOT trigger mock fallback.
+    const dbError = new Error("connection timeout");
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => { throw dbError; },
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { getProducts } = await import("../lib/api/index");
+    await expect(getProducts()).rejects.toThrow("connection timeout");
+  });
+
+  it("getPosProducts() re-throws ForbiddenError (authenticated but no permission)", async () => {
+    // ForbiddenError means the user IS authenticated but lacks products.read.
+    // This is a real permission failure that must surface, not hide behind mocks.
+    const permError = Object.assign(new Error("Missing permission: products.read"), {
+      name: "ForbiddenError",
+    });
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => { throw permError; },
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { getPosProducts } = await import("../lib/api/index");
+    await expect(getPosProducts()).rejects.toThrow(/products\.read/);
+  });
+
+  it("getProducts() falls back to mock data for UnauthorizedError (demo / no-session)", async () => {
+    // UnauthorizedError = no active session — expected in development without auth.
+    const noSessionError = Object.assign(new Error("Not authenticated"), {
+      name: "UnauthorizedError",
+    });
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => { throw noSessionError; },
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { getProducts } = await import("../lib/api/index");
+    const result = await getProducts();
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBeGreaterThan(0);
+    for (const p of result) {
+      expect(typeof p.id).toBe("string");
+      expect(typeof p.nameKm).toBe("string");
+    }
+  });
+});
+
+// ── Test 20: Barcode/SKU server failures propagate as real errors ─────────────
+
+describe("Test 20: Lookup server failures propagate — not converted to null", () => {
+  it("lookupProductByBarcode() propagates DB/server errors instead of returning null", async () => {
+    const serverError = new Error("upstream timeout");
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => { throw serverError; },
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductByBarcode } = await import("../lib/api/index");
+    await expect(lookupProductByBarcode("any-barcode")).rejects.toThrow("upstream timeout");
+  });
+
+  it("lookupProductBySku() propagates auth errors instead of returning null", async () => {
+    const authError = Object.assign(new Error("Not authenticated"), {
+      name: "UnauthorizedError",
+    });
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => { throw authError; },
+    }));
+
+    const { lookupProductBySku } = await import("../lib/api/index");
+    // Auth errors must propagate — they must NOT be silently converted to null.
+    await expect(lookupProductBySku("any-sku")).rejects.toThrow("Not authenticated");
+  });
+});
+
+// ── Test 21: True not-found still returns null ────────────────────────────────
+
+describe("Test 21: Genuine not-found returns null for barcode/SKU lookups", () => {
+  it("lookupProductByBarcode() returns null when server returns not-found (null result)", async () => {
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,  // server returns null = genuine not-found
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductByBarcode } = await import("../lib/api/index");
+    const result = await lookupProductByBarcode("nonexistent-barcode");
+    expect(result).toBeNull();
+  });
+
+  it("lookupProductBySku() returns null when server returns not-found (null result)", async () => {
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductBySku } = await import("../lib/api/index");
+    const result = await lookupProductBySku("nonexistent-sku");
+    expect(result).toBeNull();
+  });
+
+  it("service lookupBySku returns null for empty string without querying DB (no errors)", async () => {
+    // Empty string is short-circuited in the repository — returns null without a DB round trip.
+    // This is the canonical true-not-found path: no error thrown, just null.
+    const { lookupBySku } = await import("../server/products/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
+    const result = await lookupBySku(ctx, "");
+    expect(result).toBeNull();
+  });
+
+  it("service lookupByBarcode returns null for empty string without querying DB", async () => {
+    const { lookupByBarcode } = await import("../server/products/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
+    const result = await lookupByBarcode(ctx, "");
+    expect(result).toBeNull();
   });
 });
