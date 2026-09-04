@@ -50,10 +50,10 @@ export function AppHeader({
   return (
     <header
       className={cn(
-        "px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)] pb-4",
+        "sticky top-0 z-30 px-4 pt-[calc(env(safe-area-inset-top)+0.5rem)] pb-3",
         gradient
           ? "gradient-brand rounded-b-3xl text-text-inverse"
-          : "border-b border-border-default bg-surface-primary text-text-primary",
+          : "glass-bar border-b border-[var(--glass-border)] text-text-primary",
         className,
       )}
     >
