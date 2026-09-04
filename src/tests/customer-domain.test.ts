@@ -203,7 +203,7 @@ describe("Test 3: Client-provided org_id is never trusted", () => {
     // Read the actual repository source and verify the double-eq filter exists in
     // findCustomerById — this proves org isolation at the application layer.
     const repoPath = resolve(import.meta.dir, "../server/customers/repository.ts");
-    const src = readFileSync(repoPath, "utf-8");
+    const src = readFileSync(repoPath, "utf-8").replace(/\r\n/g, "\n");
 
     // findCustomerById must apply .eq("organization_id", organizationId)
     // Search for the block that contains both .eq("id", customerId) and

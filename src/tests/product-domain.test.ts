@@ -65,6 +65,24 @@ async function requireSupabase<T>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
+/** Creates a service-role client only while a live integration test is running. */
+async function createLiveServiceRoleClient() {
+  const { createClient } = await import("@supabase/supabase-js");
+  const url = process.env["VITE_SUPABASE_URL"];
+  const serviceRoleKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];
+
+  if (!url || !serviceRoleKey) {
+    throw new Error("Live Supabase credentials are required for this test");
+  }
+
+  return createClient(url, serviceRoleKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+}
+
 async function expectForbidden(fn: () => Promise<unknown>): Promise<void> {
   try {
     await fn();
@@ -629,9 +647,7 @@ describe("Test 16: Existing Product and POS routes still render (structural guar
 describe("Test 17: Cross-org workspace integrity (migration 020 trigger)", () => {
   it("Org A cannot create a product using Org B's workspace_id (requires DB)", async () => {
     await requireSupabase(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { supabaseAdmin } = await import("../lib/supabase/server") as any;
-      const db = supabaseAdmin as any;
+      const db = await createLiveServiceRoleClient();
 
       // Create a workspace in Org B using the admin client
       const { data: wsRow, error: wsErr } = await db
@@ -673,9 +689,7 @@ describe("Test 17: Cross-org workspace integrity (migration 020 trigger)", () =>
 
   it("Org A cannot update a product to use Org B's workspace_id (requires DB)", async () => {
     await requireSupabase(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { supabaseAdmin } = await import("../lib/supabase/server") as any;
-      const db = supabaseAdmin as any;
+      const db = await createLiveServiceRoleClient();
 
       // Create workspace in Org B
       const { data: wsRow, error: wsErr } = await db

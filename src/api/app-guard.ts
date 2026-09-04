@@ -9,7 +9,7 @@
  * createServerFn (public) and getSessionFn (another safe server function).
  */
 import { createServerFn } from "@tanstack/react-start";
-import { getSessionFn } from "@/api/auth";
+import { clearAuthCookieFn, getSessionFn } from "@/api/auth";
 import type { ServerSession } from "@/api/auth";
 
 export type AppGuardResult =
@@ -43,6 +43,7 @@ export const checkAppGuardFn = createServerFn().handler(
     const membership = rawMembership as unknown as { organization_id: string; status: string };
 
     if (membership.status === "suspended" || membership.status === "removed") {
+      await clearAuthCookieFn();
       return { ok: false, redirect: "/access-denied" };
     }
 
