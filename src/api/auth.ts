@@ -111,7 +111,7 @@ function buildSessionResult(
 type MembershipRow = {
   organization_id: string;
   status: string;
-  created_at: string;
+  joined_at: string;
 };
 
 export type AuthenticatedRouteResult =
@@ -125,10 +125,10 @@ async function getMembershipRows(userId: string): Promise<{
   const { supabaseAdmin } = await import("@/lib/supabase/server");
   const { data, error } = await supabaseAdmin
     .from("memberships")
-    .select("organization_id, status, created_at")
+    .select("organization_id, status, joined_at")
     .eq("user_id", userId)
     .in("status", ["active", "suspended", "removed"])
-    .order("created_at", { ascending: true });
+    .order("joined_at", { ascending: true });
 
   return {
     data: (data ?? null) as MembershipRow[] | null,

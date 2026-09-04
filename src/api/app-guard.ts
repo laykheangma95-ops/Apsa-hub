@@ -31,10 +31,10 @@ export const checkAppGuardFn = createServerFn().handler(
 
     const { data: membershipRows, error } = await supabaseAdmin
       .from("memberships")
-      .select("organization_id, status, created_at")
+      .select("organization_id, status, joined_at")
       .eq("user_id", session.userId)
       .in("status", ["active", "suspended", "removed"])
-      .order("created_at", { ascending: true });
+      .order("joined_at", { ascending: true });
 
     if (error) {
       throw new Error(error.message);
