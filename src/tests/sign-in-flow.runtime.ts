@@ -265,4 +265,20 @@ describe("sign-in flow runtime", () => {
     expect(routeCode).toMatch(/disabled=\{loading\}/);
     expect(routeCode).toMatch(/className="w-full"/);
   });
+
+  it("returns a real error instead of fake success when membership resolution fails", async () => {
+    membershipError = { message: "Membership service unavailable" };
+
+    const result = await signInFn({
+      data: { email: "owner@example.com", password: "secret123" },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      code: "unexpected_error",
+      message: "Membership service unavailable",
+    });
+    expect(setCookieCalls).toHaveLength(0);
+    expect(deleteCookieCalls).toEqual([COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN]);
+  });
 });
