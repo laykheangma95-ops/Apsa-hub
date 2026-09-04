@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "bun test src/tests/",
+    "verify:supabase": "bun run scripts/verify-supabase-connection.ts",
     "typecheck": "tsc --noEmit"
   },
   "overrides": {
