@@ -10,12 +10,13 @@
  *   - Slug validation matches DB constraint: min 3 chars, [a-z0-9][a-z0-9-]+[a-z0-9].
  *
  * NEVER import supabaseAdmin or SUPABASE_SERVICE_ROLE_KEY from browser-bundled code.
- * The createServerFn mechanism (TanStack Start) handles server/client code splitting.
+ * createServerClient is imported dynamically inside the handler body — never at module
+ * scope — so @/lib/supabase/server (which also exports supabaseAdmin) never enters
+ * the client bundle through this file.
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSessionFn } from "@/api/auth";
-import { createServerClient } from "@/lib/supabase/server";
 
 // ── Slug validation schema — matches organizations_slug_format DB constraint ──
 // DB: CHECK (slug ~ '^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$')
@@ -92,6 +93,8 @@ export const createOrganizationFn = createServerFn()
     // 3. Call the RPC under the user's own JWT.
     //    The RPC uses auth.uid() — no founder_user_id parameter accepted.
     //    Service role is NOT used here — it would bypass the auth.uid() guard.
+    //    Dynamic import — keeps @/lib/supabase/server out of the client bundle.
+    const { createServerClient } = await import("@/lib/supabase/server");
     const userClient = createServerClient(session.accessToken);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

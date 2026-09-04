@@ -1,13 +1,15 @@
 /**
  * Server function for the /app route guard.
  *
- * This module exists to keep supabaseAdmin (service-role client) on the server side.
- * Importing supabaseAdmin directly in a route file would pull it into the client bundle.
- * Using createServerFn ensures TanStack Start's code splitting keeps server code server-only.
+ * supabaseAdmin (service-role client) is imported dynamically inside the handler
+ * body — never at module scope — so it never enters the client bundle regardless
+ * of how the bundler handles TanStack Start's createServerFn code splitting.
+ *
+ * This file itself is safe to statically import from routes: it only imports
+ * createServerFn (public) and getSessionFn (another safe server function).
  */
 import { createServerFn } from "@tanstack/react-start";
 import { getSessionFn } from "@/api/auth";
-import { supabaseAdmin } from "@/lib/supabase/server";
 import type { ServerSession } from "@/api/auth";
 
 export type AppGuardResult =
@@ -24,6 +26,9 @@ export const checkAppGuardFn = createServerFn().handler(
     if (!session.emailVerified) return { ok: false, redirect: "/verify-email" };
 
     // 3. Resolve first membership for this user.
+    //    Dynamic import — keeps supabaseAdmin (service-role) out of the client bundle.
+    const { supabaseAdmin } = await import("@/lib/supabase/server");
+
     const { data: rawMembership } = await supabaseAdmin
       .from("memberships")
       .select("organization_id, status")

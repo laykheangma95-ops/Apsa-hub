@@ -14,9 +14,8 @@
  *   - No service-role key in browser code
  *   - Email verification enforced independently here AND in createOrganizationFn
  *   - No client-supplied user_id, org_id, or role_id trusted for auth decisions
- *
- * NEVER import supabaseAdmin or SUPABASE_SERVICE_ROLE_KEY from browser-bundled code.
- * The createServerFn mechanism (TanStack Start) handles server/client code splitting.
+ *   - @/lib/supabase/server is imported dynamically inside handler bodies only —
+ *     never at module scope — so the service-role Proxy never enters the client bundle
  */
 import { createServerFn } from "@tanstack/react-start";
 import {
@@ -25,14 +24,28 @@ import {
   deleteCookie,
 } from "@tanstack/react-start/server";
 import { createClient } from "@supabase/supabase-js";
-import {
-  COOKIE_ACCESS_TOKEN,
-  COOKIE_REFRESH_TOKEN,
-  COOKIE_OPTIONS,
-  createServerClient,
-  createRefreshClient,
-} from "@/lib/supabase/server";
 import { z } from "zod";
+
+// ── Cookie constants — defined inline to avoid importing @/lib/supabase/server ─
+// Keeping these here means auth.ts carries no static dependency on the admin module.
+export const COOKIE_ACCESS_TOKEN = "sb-access-token";
+export const COOKIE_REFRESH_TOKEN = "sb-refresh-token";
+
+type CookieOptions = {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "lax";
+  path: string;
+  maxAge: number;
+};
+
+const COOKIE_OPTIONS: CookieOptions = {
+  httpOnly: true,
+  secure: process.env["NODE_ENV"] === "production",
+  sameSite: "lax",
+  path: "/",
+  maxAge: 60 * 60 * 24 * 7,
+};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -72,6 +85,11 @@ export const getSessionFn = createServerFn().handler(
     const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
 
     if (!accessToken || !refreshToken) return null;
+
+    // Dynamic import — keeps @/lib/supabase/server out of the client bundle.
+    const { createServerClient, createRefreshClient } = await import(
+      "@/lib/supabase/server"
+    );
 
     // Validate the access token via Supabase Auth API.
     const client = createServerClient(accessToken);
@@ -210,7 +228,7 @@ export const signUpFn = createServerFn()
       return { ok: false, code: "unexpected_error", message: error.message };
     }
 
-    // If Supabase issued a session immediately (e.g. email confirmation disabled),
+    // If Supabase issued a session immediately (email confirmation disabled),
     // set the session cookies so the user is logged in right away.
     if (authData.session) {
       writeSessionCookies(
@@ -231,6 +249,8 @@ export const signOutFn = createServerFn().handler(async (): Promise<void> => {
   // Revoke the server-side Supabase session (best effort — clears cookies regardless).
   if (accessToken) {
     try {
+      // Dynamic import — keeps @/lib/supabase/server out of the client bundle.
+      const { createServerClient } = await import("@/lib/supabase/server");
       const client = createServerClient(accessToken);
       await client.auth.signOut();
     } catch {
