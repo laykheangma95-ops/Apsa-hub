@@ -209,7 +209,20 @@ export type Database = {
       };
     };
     Views: { [_ in never]: never };
-    Functions: { [_ in never]: never };
+    Functions: {
+      create_organization_for_founder: {
+        Args: {
+          p_founder_user_id: string;
+          p_legal_name: string;
+          p_slug: string;
+          p_display_name?: string | null;
+          p_business_type?: string | null;
+          p_default_currency?: string;
+          p_timezone?: string;
+        };
+        Returns: string;
+      };
+    };
     Enums: {
       organization_status: OrganizationStatusEnum;
       workspace_type: WorkspaceTypeEnum;
