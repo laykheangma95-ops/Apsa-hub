@@ -336,8 +336,8 @@ describe("Test 3: Member cannot update another organization", () => {
     );
     if (ctx === null) return;
 
-    // Manager has org.update in their own org
-    expect(ctx.can("org.update")).toBe(true);
+    // Post-migration 010: canonical key is organization.update (was org.update)
+    expect(ctx.can("organization.update")).toBe(true);
 
     // But they cannot construct a context for Org B to call org.update there
     await expectForbidden(() =>
@@ -585,26 +585,28 @@ describe("Test 13: Concurrent owner mutations cannot leave zero owners", () => {
 });
 
 describe("Test 14: Audit log access respects org.read permission gate", () => {
-  it("Owner and Manager have org.read and can access audit logs", async () => {
+  it("Owner and Manager have organization.read and can access audit logs", async () => {
     const ownerCtx = await requireSupabase(() =>
       AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_A_ID),
     );
     if (ownerCtx === null) return;
-    expect(ownerCtx.can("org.read")).toBe(true);
+    // Post-migration 010: canonical key is organization.read (was org.read)
+    expect(ownerCtx.can("organization.read")).toBe(true);
 
     const managerCtx = await requireSupabase(() =>
       AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_A_ID),
     );
     if (managerCtx === null) return;
-    expect(managerCtx.can("org.read")).toBe(true);
+    expect(managerCtx.can("organization.read")).toBe(true);
   });
 
-  it("Cashier does NOT have org.read and cannot access audit logs", async () => {
+  it("Cashier does NOT have organization.read and cannot access audit logs", async () => {
     const cashierCtx = await requireSupabase(() =>
       AuthorizationService.forRequest(USER_ORG_A_CASHIER, ORG_A_ID),
     );
     if (cashierCtx === null) return;
-    expect(cashierCtx.can("org.read")).toBe(false);
+    // Post-migration 010: canonical key is organization.read (was org.read)
+    expect(cashierCtx.can("organization.read")).toBe(false);
   });
 
   it("RLS policy audit_logs_select_org_read_permission gates access via has_audit_access()", async () => {
