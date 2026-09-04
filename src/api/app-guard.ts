@@ -25,28 +25,40 @@ export const checkAppGuardFn = createServerFn().handler(
     // 2. Enforce email verification.
     if (!session.emailVerified) return { ok: false, redirect: "/verify-email" };
 
-    // 3. Resolve first membership for this user.
-    //    Dynamic import — keeps supabaseAdmin (service-role) out of the client bundle.
+    // 3. Resolve memberships server-side with the service-role client kept behind
+    //    a dynamic import so it never enters the browser bundle.
     const { supabaseAdmin } = await import("@/lib/supabase/server");
 
-    const { data: rawMembership } = await supabaseAdmin
+    const { data: membershipRows, error } = await supabaseAdmin
       .from("memberships")
-      .select("organization_id, status")
+      .select("organization_id, status, created_at")
       .eq("user_id", session.userId)
       .in("status", ["active", "suspended", "removed"])
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .single();
+      .order("created_at", { ascending: true });
 
-    if (!rawMembership) return { ok: false, redirect: "/onboarding" };
+    if (error) {
+      throw new Error(error.message);
+    }
 
-    const membership = rawMembership as unknown as { organization_id: string; status: string };
+    const memberships = (membershipRows ?? []) as Array<{
+      organization_id: string;
+      status: string;
+    }>;
 
-    if (membership.status === "suspended" || membership.status === "removed") {
+    const activeMembership = memberships.find((membership) => membership.status === "active");
+    if (activeMembership) {
+      return { ok: true, session, organizationId: activeMembership.organization_id };
+    }
+
+    const revokedMembership = memberships.find(
+      (membership) => membership.status === "suspended" || membership.status === "removed",
+    );
+
+    if (revokedMembership) {
       await clearAuthCookieFn();
       return { ok: false, redirect: "/access-denied" };
     }
 
-    return { ok: true, session, organizationId: membership.organization_id };
+    return { ok: false, redirect: "/onboarding" };
   },
 );

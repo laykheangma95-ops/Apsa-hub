@@ -18,11 +18,6 @@
  *     never at module scope — so the service-role Proxy never enters the client bundle
  */
 import { createServerFn } from "@tanstack/react-start";
-import {
-  getCookie,
-  setCookie,
-  deleteCookie,
-} from "@tanstack/react-start/server";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
@@ -64,6 +59,7 @@ export interface UnverifiedServerSession {
 }
 
 export type SessionResult = ServerSession | UnverifiedServerSession | null;
+export type AuthRedirect = "/app" | "/onboarding" | "/verify-email" | "/access-denied";
 
 type AuthUserLike = {
   id: string;
@@ -73,19 +69,20 @@ type AuthUserLike = {
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
 
-function writeSessionCookies(accessToken: string, refreshToken: string): void {
+async function writeSessionCookies(accessToken: string, refreshToken: string): Promise<void> {
+  const { setCookie } = await import("@tanstack/react-start/server");
   setCookie(COOKIE_ACCESS_TOKEN, accessToken, COOKIE_OPTIONS);
   setCookie(COOKIE_REFRESH_TOKEN, refreshToken, COOKIE_OPTIONS);
 }
 
-function clearSessionCookies(): void {
+async function clearSessionCookies(): Promise<void> {
+  const { deleteCookie } = await import("@tanstack/react-start/server");
   deleteCookie(COOKIE_ACCESS_TOKEN, { path: "/" });
   deleteCookie(COOKIE_REFRESH_TOKEN, { path: "/" });
 }
 
-export const clearAuthCookieFn = createServerFn().handler(async (): Promise<{ ok: true }> => {
-  clearSessionCookies();
-  return { ok: true };
+export const clearAuthCookieFn = createServerFn().handler(async (): Promise<void> => {
+  await clearSessionCookies();
 });
 
 function buildSessionResult(
@@ -111,6 +108,60 @@ function buildSessionResult(
   };
 }
 
+type MembershipRow = {
+  organization_id: string;
+  status: string;
+  created_at: string;
+};
+
+export type AuthenticatedRouteResult =
+  | { ok: true; organizationId: string }
+  | { ok: false; redirect: Exclude<AuthRedirect, "/app"> };
+
+async function getMembershipRows(userId: string): Promise<{
+  data: MembershipRow[] | null;
+  error: { message?: string } | null;
+}> {
+  const { supabaseAdmin } = await import("@/lib/supabase/server");
+  const { data, error } = await supabaseAdmin
+    .from("memberships")
+    .select("organization_id, status, created_at")
+    .eq("user_id", userId)
+    .in("status", ["active", "suspended", "removed"])
+    .order("created_at", { ascending: true });
+
+  return {
+    data: (data ?? null) as MembershipRow[] | null,
+    error: error ? { message: error.message } : null,
+  };
+}
+
+export async function resolveAuthenticatedRoute(
+  session: Exclude<SessionResult, null>,
+): Promise<AuthenticatedRouteResult> {
+  if (!session.emailVerified) return { ok: false, redirect: "/verify-email" };
+
+  const { data, error } = await getMembershipRows(session.userId);
+  if (error) {
+    await clearSessionCookies();
+    throw new Error(error.message ?? "Unable to resolve organization membership");
+  }
+
+  const memberships = data ?? [];
+  const activeMembership = memberships.find((membership) => membership.status === "active");
+  if (activeMembership) return { ok: true, organizationId: activeMembership.organization_id };
+
+  const revokedMembership = memberships.find(
+    (membership) => membership.status === "suspended" || membership.status === "removed",
+  );
+  if (revokedMembership) {
+    await clearSessionCookies();
+    return { ok: false, redirect: "/access-denied" };
+  }
+
+  return { ok: false, redirect: "/onboarding" };
+}
+
 // ── getSessionFn ─────────────────────────────────────────────────────────────
 //
 // Validates the cookie-based auth session on every protected request.
@@ -124,6 +175,7 @@ function buildSessionResult(
 
 export const getSessionFn = createServerFn().handler(
   async (): Promise<SessionResult> => {
+    const { getCookie } = await import("@tanstack/react-start/server");
     const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
     const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
 
@@ -150,13 +202,13 @@ export const getSessionFn = createServerFn().handler(
 
     if (refreshError || !refreshData.session) {
       // Refresh failed — session fully expired, clear cookies.
-      clearSessionCookies();
+      await clearSessionCookies();
       return null;
     }
 
     const { session } = refreshData;
     // Write refreshed tokens back to cookies.
-    writeSessionCookies(session.access_token, session.refresh_token);
+    await writeSessionCookies(session.access_token, session.refresh_token);
 
     return buildSessionResult(session.user, session.access_token);
   },
@@ -173,7 +225,7 @@ export type SignInInput = z.infer<typeof SignInInput>;
 
 export interface SignInResult {
   ok: true;
-  emailVerified: boolean;
+  redirectTo: AuthRedirect;
 }
 
 export type SignInError =
@@ -202,15 +254,33 @@ export const signInFn = createServerFn()
       return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
     }
 
-    writeSessionCookies(
+    const authenticatedSession = buildSessionResult(
+      authData.session.user,
       authData.session.access_token,
-      authData.session.refresh_token,
     );
 
-    return {
-      ok: true,
-      emailVerified: Boolean(authData.user?.email_confirmed_at),
-    };
+    try {
+      const routeResult = await resolveAuthenticatedRoute(authenticatedSession);
+      if (!routeResult.ok && routeResult.redirect === "/access-denied") {
+        return { ok: true, redirectTo: routeResult.redirect };
+      }
+
+      await writeSessionCookies(
+        authData.session.access_token,
+        authData.session.refresh_token,
+      );
+
+      return { ok: true, redirectTo: routeResult.ok ? "/app" : routeResult.redirect };
+    } catch (error) {
+      return {
+        ok: false,
+        code: "unexpected_error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Sign-in succeeded but APSA could not load your access state.",
+      };
+    }
   });
 
 // ── signUpFn ──────────────────────────────────────────────────────────────────
@@ -264,7 +334,7 @@ export const signUpFn = createServerFn()
     // If Supabase issued a session immediately (email confirmation disabled),
     // set the session cookies so the user is logged in right away.
     if (authData.session) {
-      writeSessionCookies(
+      await writeSessionCookies(
         authData.session.access_token,
         authData.session.refresh_token,
       );
@@ -277,6 +347,7 @@ export const signUpFn = createServerFn()
 // ── signOutFn ─────────────────────────────────────────────────────────────────
 
 export const signOutFn = createServerFn().handler(async (): Promise<void> => {
+  const { getCookie } = await import("@tanstack/react-start/server");
   const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
 
   // Revoke the server-side Supabase session (best effort — clears cookies regardless).
@@ -291,7 +362,7 @@ export const signOutFn = createServerFn().handler(async (): Promise<void> => {
     }
   }
 
-  clearSessionCookies();
+  await clearSessionCookies();
 });
 
 // ── verifyEmailFn ─────────────────────────────────────────────────────────────
@@ -335,7 +406,7 @@ export const verifyEmailFn = createServerFn()
       return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
     }
 
-    writeSessionCookies(
+    await writeSessionCookies(
       authData.session.access_token,
       authData.session.refresh_token,
     );
