@@ -5,7 +5,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AppHeader, BottomSheet, Chip, ChipRow, ErrorState, ListSkeleton } from "@/design-system";
+import {
+  AppHeader,
+  BottomNav,
+  BottomSheet,
+  Chip,
+  ChipRow,
+  ErrorState,
+  ListSkeleton,
+} from "@/design-system";
 import { PosNotice } from "@/components/pos/PosNotice";
 import { PosCart } from "@/components/pos/PosCart";
 import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
@@ -162,7 +170,7 @@ function PosScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-surface-secondary pb-28 lg:pb-0">
+    <div className="min-h-screen bg-surface-secondary pb-48 lg:pb-0">
       <AppHeader
         title={t("pos.title")}
         subtitle={shopQuery.data ? localName(shopQuery.data, language) : undefined}
@@ -265,7 +273,7 @@ function PosScreen() {
       </div>
 
       {/* Mobile: total + checkout stay pinned above the fold. */}
-      <div className="surface-glass elevation-3 fixed inset-x-0 bottom-0 z-40 border-t border-border-default px-4 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] lg:hidden">
+      <div className="surface-glass elevation-3 fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.75rem)] z-40 border-t border-border-default px-4 pt-3 pb-3 lg:hidden">
         <div className="mx-auto grid max-w-[560px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
           <button
             type="button"
@@ -327,6 +335,8 @@ function PosScreen() {
         offline={offline}
         onCompleted={resetSale}
       />
+
+      <BottomNav workspace="business" />
     </div>
   );
 }

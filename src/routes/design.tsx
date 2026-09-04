@@ -13,6 +13,7 @@ import {
   ApsiIllustration,
   ApsiInsightCard,
   AttentionCard,
+  BottomNav,
   BottomSheet,
   ChannelBadge,
   ConversationRow,
@@ -136,7 +137,7 @@ function DesignReference() {
   const conversation = conversations[0]!;
 
   return (
-    <div className="min-h-screen bg-surface-primary text-text-primary">
+    <div className="min-h-screen bg-surface-primary pb-32 text-text-primary lg:pb-24">
       <header className="px-5 py-8">
         <div className="mx-auto flex w-full max-w-3xl items-start gap-3">
           <div className="flex-1">
@@ -305,6 +306,8 @@ function DesignReference() {
       <BottomSheet open={sheetOpen} onOpenChange={setSheetOpen} title={t("design.sheetTitle")}>
         <p className="text-body text-text-secondary">{t("design.sheetBody")}</p>
       </BottomSheet>
+
+      <BottomNav workspace="business" />
     </div>
   );
 }

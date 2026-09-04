@@ -242,7 +242,7 @@ function InboxLayout() {
         )}
       >
         {listPane}
-        {!threadOpen ? <div className="h-20 shrink-0 lg:hidden" aria-hidden /> : null}
+        {!threadOpen ? <div className="h-24 shrink-0 lg:hidden" aria-hidden /> : null}
       </div>
 
       <div
