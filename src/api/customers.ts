@@ -21,7 +21,7 @@ import type { AuthorizationContext } from "@/server/auth/authorization";
 
 async function resolveAuthContext(): Promise<AuthorizationContext> {
   const session = await getSessionFn();
-  if (!session) {
+  if (!session || !session.emailVerified) {
     const { UnauthorizedError } = await import("@/server/auth/authorization");
     throw new UnauthorizedError("Not authenticated");
   }

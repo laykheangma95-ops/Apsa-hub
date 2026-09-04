@@ -52,9 +52,24 @@ const COOKIE_OPTIONS: CookieOptions = {
 export interface ServerSession {
   userId: string;
   email: string;
-  emailVerified: boolean;
+  emailVerified: true;
   accessToken: string;
 }
+
+export interface UnverifiedServerSession {
+  userId: string;
+  email: string;
+  emailVerified: false;
+  accessToken: string;
+}
+
+export type SessionResult = ServerSession | UnverifiedServerSession | null;
+
+type AuthUserLike = {
+  id: string;
+  email?: string | null;
+  email_confirmed_at?: string | null;
+};
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
 
@@ -66,6 +81,34 @@ function writeSessionCookies(accessToken: string, refreshToken: string): void {
 function clearSessionCookies(): void {
   deleteCookie(COOKIE_ACCESS_TOKEN, { path: "/" });
   deleteCookie(COOKIE_REFRESH_TOKEN, { path: "/" });
+}
+
+export const clearAuthCookieFn = createServerFn().handler(async (): Promise<{ ok: true }> => {
+  clearSessionCookies();
+  return { ok: true };
+});
+
+function buildSessionResult(
+  user: AuthUserLike,
+  accessToken: string,
+): Exclude<SessionResult, null> {
+  const baseSession = {
+    userId: user.id,
+    email: user.email ?? "",
+    accessToken,
+  };
+
+  if (!user.email_confirmed_at) {
+    return {
+      ...baseSession,
+      emailVerified: false,
+    };
+  }
+
+  return {
+    ...baseSession,
+    emailVerified: true,
+  };
 }
 
 // ── getSessionFn ─────────────────────────────────────────────────────────────
@@ -80,7 +123,7 @@ function clearSessionCookies(): void {
 //   - Supabase auth API is unreachable (treated as unauthenticated)
 
 export const getSessionFn = createServerFn().handler(
-  async (): Promise<ServerSession | null> => {
+  async (): Promise<SessionResult> => {
     const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
     const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
 
@@ -96,12 +139,7 @@ export const getSessionFn = createServerFn().handler(
     const { data: { user }, error } = await client.auth.getUser();
 
     if (!error && user) {
-      return {
-        userId: user.id,
-        email: user.email ?? "",
-        emailVerified: Boolean(user.email_confirmed_at),
-        accessToken,
-      };
+      return buildSessionResult(user, accessToken);
     }
 
     // Access token invalid or expired — try refresh.
@@ -120,12 +158,7 @@ export const getSessionFn = createServerFn().handler(
     // Write refreshed tokens back to cookies.
     writeSessionCookies(session.access_token, session.refresh_token);
 
-    return {
-      userId: session.user.id,
-      email: session.user.email ?? "",
-      emailVerified: Boolean(session.user.email_confirmed_at),
-      accessToken: session.access_token,
-    };
+    return buildSessionResult(session.user, session.access_token);
   },
 );
 
