@@ -36,7 +36,10 @@
     "newOrder": "New order",
     "addProduct": "Add product",
     "scanBarcode": "Scan barcode",
-    "team": "Team"
+    "team": "Team",
+    "primary": "Main navigation",
+    "resolve": "Resolve",
+    "sales": "Sales"
   },
   "landing": {
     "head": {
@@ -768,5 +771,15 @@
       "title": "Could not load the team",
       "body": "Something went wrong. Try again."
     }
+  },
+  "resolve": {
+    "title": "Resolve",
+    "subtitle": "Find or fix something fast.",
+    "scanBarcode": "Scan barcode",
+    "findCustomer": "Find customer",
+    "findOrder": "Find order",
+    "checkPayment": "Check payment",
+    "trackDelivery": "Track delivery",
+    "comingSoon": "Coming soon"
   }
 }
