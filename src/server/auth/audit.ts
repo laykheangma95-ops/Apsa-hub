@@ -40,6 +40,7 @@ export type AuditAction =
   | "team.invite"
   | "team.remove"
   | "team.role_change"
+  | "org.create"
   | "org.update"
   | "org.ownership_transfer";
 

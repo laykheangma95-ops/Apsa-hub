@@ -2,8 +2,8 @@
 
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
-**Last updated:** 2026-09-03
-**Branch:** `claude/apsa-production-foundation-sneozb` (production blockers fixed)
+**Last updated:** 2026-09-04
+**Branch:** `claude/apsa-auth-org-onboarding-mu8cu5` (auth + onboarding sprint)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -31,7 +31,38 @@
 **Auth:** FOUNDATION BUILT — Supabase client architecture, server-side session validation, membership verification. Awaiting Supabase project to activate.  
 **Backend APIs:** NONE YET — server auth layer built; API route handlers are next sprint.  
 **Data layer:** Still mock — production repositories are next (mock not ripped out; UI unbroken).  
-**Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
+**Routes:** 17 routes: `/`, `/design`, `/auth`, `/auth/sign-in`, `/auth/sign-up`, `/auth/forgot-password`, `/auth/reset-password`, `/onboarding`, `/app` (layout guard), `/app/` (home), `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`
+
+### Auth & Onboarding Sprint Added (2026-09-04)
+
+| Area | Status | Files |
+|---|---|---|
+| Auth React context | BUILT | `src/lib/auth-context.tsx` |
+| Auth layout route | BUILT | `src/routes/auth.tsx` |
+| Sign-in page | BUILT | `src/routes/auth.sign-in.tsx` |
+| Sign-up page | BUILT | `src/routes/auth.sign-up.tsx` |
+| Forgot password page | BUILT | `src/routes/auth.forgot-password.tsx` |
+| Reset password page | BUILT | `src/routes/auth.reset-password.tsx` |
+| Protected app layout (auth guard) | BUILT | `src/routes/app.tsx` |
+| First-org onboarding | BUILT | `src/routes/onboarding.tsx` |
+| Atomic org creation (server) | BUILT | `src/server/org/create-organization.ts` |
+| Auth i18n keys (km + en) | ADDED | `src/locales/km.json`, `src/locales/en.json` |
+| Onboarding i18n keys (km + en) | ADDED | `src/locales/km.json`, `src/locales/en.json` |
+| Auth security tests (27 tests) | WRITTEN | `src/tests/auth-security.test.ts` |
+| Route tree updated | DONE | `src/routeTree.gen.ts` |
+| `org.create` audit action added | DONE | `src/server/auth/audit.ts` |
+
+**Security invariants verified by tests and code review:**
+- Session JWT validated server-side on every protected operation (`validateSession`)
+- `userId` always derived from JWT, never accepted from client body
+- OWNER role applied server-side; client cannot choose their role
+- Service-role key never in browser code (VITE_ prefix not used for it)
+- Partial org creation rolled back on any failure
+- Slug validated server-side; uppercase/special chars rejected
+- Suspended/removed membership redirects to sign-in (not just hidden)
+- Cross-org isolation: app route checks `user.id` against memberships table under RLS
+
+**Status: Auth flow wired, not live-tested against Supabase.** Requires Supabase project provisioning + migrations applied to activate. All unit tests pass (67 total, 27 new).
 
 ### Production Foundation Added (2026-09-03)
 

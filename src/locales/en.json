@@ -1,4 +1,59 @@
 {
+  "auth": {
+    "signIn": {
+      "title": "Sign in to APSA",
+      "subtitle": "Welcome back",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "forgot": "Forgot password?",
+      "noAccount": "Don't have an account?",
+      "createAccount": "Create account",
+      "error": "Invalid email or password"
+    },
+    "signUp": {
+      "title": "Create account",
+      "subtitle": "Join APSA",
+      "email": "Email",
+      "password": "Password",
+      "confirmPassword": "Confirm password",
+      "submit": "Create account",
+      "hasAccount": "Already have an account?",
+      "signIn": "Sign in",
+      "success": "Check your email",
+      "successBody": "We sent a verification link to {{email}}"
+    },
+    "forgotPassword": {
+      "title": "Reset password",
+      "subtitle": "Enter your email address",
+      "email": "Email",
+      "submit": "Send reset link",
+      "success": "Check your email",
+      "successBody": "We sent a password reset link to your email.",
+      "back": "Back to sign in"
+    },
+    "resetPassword": {
+      "title": "New password",
+      "subtitle": "Enter your new password",
+      "password": "New password",
+      "confirmPassword": "Confirm new password",
+      "submit": "Set new password"
+    }
+  },
+  "onboarding": {
+    "title": "Set up your business",
+    "subtitle": "You'll be up and running in minutes",
+    "businessName": "Business name",
+    "businessNamePlaceholder": "Your shop or business name",
+    "businessSlug": "Business URL",
+    "businessSlugHelp": "apsa.app/{{slug}}",
+    "currency": "Default currency",
+    "timezone": "Timezone",
+    "submit": "Create business",
+    "creating": "Setting up...",
+    "slugTaken": "This URL is already taken",
+    "error": "Could not create business"
+  },
   "brand": {
     "name": "APSA",
     "tagline": "One inbox. Every customer."
