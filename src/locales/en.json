@@ -28,6 +28,10 @@
   "nav": {
     "home": "Home",
     "inbox": "Inbox",
+    "resolve": "Resolve",
+    "sales": "Sales",
+    "stock": "Stock",
+    "primary": "Primary app navigation",
     "create": "Create",
     "orders": "Orders",
     "more": "More",
@@ -36,7 +40,124 @@
     "newOrder": "New order",
     "addProduct": "Add product",
     "scanBarcode": "Scan barcode",
-    "team": "Team"
+    "team": "Team",
+    "openResolve": "Open Resolve",
+    "openSales": "Open Sales",
+    "openMore": "Open More",
+    "availableNow": "Available now",
+    "opensExisting": "Opens existing",
+    "comingSoon": "Coming soon",
+    "retrySalesHub": "Sales activity did not load. Tap to try again.",
+    "openOrder": "Open order",
+    "resolveSheetTitle": "Resolve",
+    "resolveSheetLead": "Find or fix something fast",
+    "resolveSheetBody": "Use the fastest real tool we have today, and show coming-soon states where the workflow is not built yet.",
+    "salesSheetTitle": "Sales",
+    "salesSheetLead": "Transactions in one place",
+    "salesSheetBody": "Sales groups your live transaction entry points first, then recent orders, with honest placeholders for tools that are not ready yet.",
+    "salesRecent": "Recent transactions",
+    "salesRecentBody": "Open an order to review payment, delivery and return status without leaving the signed-in shell.",
+    "salesRecentEmpty": "Recent orders will appear here.",
+    "moreSheetTitle": "More",
+    "moreSheetLead": "Everything else, without crowding the tab bar",
+    "moreSheetBody": "Lower-frequency business tools live here so Home, Inbox and Sales can stay focused.",
+    "resolveGroups": {
+      "quickTools": "Quick tools"
+    },
+    "salesGroups": {
+      "start": "Start a transaction",
+      "manage": "Manage sales activity"
+    },
+    "moreGroups": {
+      "business": "Business tools",
+      "admin": "Admin and account"
+    },
+    "resolveActions": {
+      "scanBarcode": {
+        "label": "Scan barcode",
+        "description": "Camera barcode scanning is not in the app yet."
+      },
+      "findCustomer": {
+        "label": "Find customer",
+        "description": "Open Inbox and search by customer name or phone."
+      },
+      "findOrder": {
+        "label": "Find order",
+        "description": "A global order finder is not in the app yet."
+      },
+      "checkPayment": {
+        "label": "Check payment",
+        "description": "A payment lookup hub is not in the app yet."
+      },
+      "trackDelivery": {
+        "label": "Track delivery / shipment",
+        "description": "A shipment finder is not in the app yet."
+      }
+    },
+    "salesActions": {
+      "newSale": {
+        "label": "POS / New sale",
+        "description": "Open the live point-of-sale screen."
+      },
+      "newOrder": {
+        "label": "New order",
+        "description": "Open Inbox, then create the order from a real customer conversation."
+      },
+      "orders": {
+        "label": "Orders",
+        "description": "A full orders hub is not in the app yet."
+      },
+      "payments": {
+        "label": "Payments",
+        "description": "A dedicated payments hub is not in the app yet."
+      },
+      "delivery": {
+        "label": "Delivery",
+        "description": "A dedicated delivery hub is not in the app yet."
+      },
+      "returnsRefunds": {
+        "label": "Returns / Refunds",
+        "description": "A dedicated returns and refunds hub is not in the app yet."
+      }
+    },
+    "moreActions": {
+      "productsStock": {
+        "label": "Products / Stock",
+        "description": "A dedicated stock workspace is not in the app yet."
+      },
+      "customers": {
+        "label": "Customers",
+        "description": "A customer list hub is not in the app yet."
+      },
+      "analytics": {
+        "label": "Analytics",
+        "description": "A business analytics hub is not in the app yet."
+      },
+      "staffTeam": {
+        "label": "Staff / Team",
+        "description": "Open the live team management screen."
+      },
+      "promotionsCrm": {
+        "label": "Promotions / CRM",
+        "description": "A promotions and CRM hub is not in the app yet."
+      },
+      "locations": {
+        "label": "Locations",
+        "description": "A locations management hub is not in the app yet."
+      },
+      "integrations": {
+        "label": "Integrations",
+        "description": "An integrations hub is not in the app yet."
+      },
+      "settings": {
+        "label": "Settings",
+        "description": "Business settings are not in the app yet."
+      },
+      "profileAccount": {
+        "label": "Profile / account",
+        "description": "Profile and account settings are not in the app yet."
+      }
+    }
   },
   "landing": {
     "head": {
