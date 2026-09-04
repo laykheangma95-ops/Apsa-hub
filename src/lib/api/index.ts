@@ -129,8 +129,57 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
   return resolve(list);
 }
 
+/** Server product shape returned by listProductsFn / getProductDetailFn. */
+interface ServerProductItem {
+  id: string;
+  nameKm: string;
+  nameEn: string | null;
+  categoryId: string | null;
+  stock: null;
+  companion: Product["companion"];
+  variants: Array<{
+    id: string;
+    sku: string | null;
+    barcode: string | null;
+    price: { amount: number; currency: "USD" | "KHR" };
+    cost: { amount: number; currency: "USD" | "KHR" } | null;
+  }>;
+}
+
+const COMPANION_COLORS: Array<Product["companion"]> = ["nilo", "minto", "vela", "suri", "luma"];
+
+/** Map a server ProductDetail to the UI Product type.
+ * Uses the first active variant for sku/price/barcode.
+ * stock = null because inventory is a separate domain.
+ */
+function mapServerProductToUi(p: ServerProductItem): Product {
+  const firstVariant = p.variants[0];
+  const sum = p.id.slice(-12).split("").reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
+  const companion = COMPANION_COLORS[sum % COMPANION_COLORS.length]!;
+  const mapped: Product = {
+    id: p.id,
+    nameKm: p.nameKm,
+    nameEn: p.nameEn ?? p.nameKm,
+    sku: firstVariant?.sku ?? "",
+    price: firstVariant?.price ?? { amount: 0, currency: "USD" },
+    stock: null,
+    lowStockThreshold: 0,
+    companion,
+  };
+  if (firstVariant?.barcode) mapped.barcode = firstVariant.barcode;
+  if (p.categoryId) mapped.categoryId = p.categoryId;
+  if (firstVariant?.id) mapped.variantId = firstVariant.id;
+  return mapped;
+}
+
 export async function getProducts(): Promise<Product[]> {
-  return resolve(products);
+  try {
+    const { listProductsFn } = await import("@/api/products");
+    const serverProducts = await listProductsFn({ data: { status: "ACTIVE" } });
+    return (serverProducts as ServerProductItem[]).map(mapServerProductToUi);
+  } catch {
+    return resolve(products);
+  }
 }
 
 /** Recently sold products, shown first in the product picker. */
@@ -201,10 +250,46 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
   return resolve(order, 240);
 }
 
-/* ----------------------------- POS (mock only) ---------------------------- */
+/* ----------------------------- POS ---------------------------------------- */
 
 export async function getPosProducts(): Promise<Product[]> {
-  return resolve(products);
+  try {
+    const { listProductsFn } = await import("@/api/products");
+    const serverProducts = await listProductsFn({ data: { status: "ACTIVE" } });
+    return (serverProducts as ServerProductItem[]).map(mapServerProductToUi);
+  } catch {
+    return resolve(products);
+  }
+}
+
+/**
+ * Barcode lookup — org-scoped, exact match only.
+ * Returns null if not found or if the user is not authenticated.
+ */
+export async function lookupProductByBarcode(barcode: string): Promise<Product | null> {
+  try {
+    const { lookupByBarcodeFn } = await import("@/api/products");
+    const result = await lookupByBarcodeFn({ data: { barcode } });
+    if (!result) return null;
+    return mapServerProductToUi(result.product as ServerProductItem);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SKU lookup — org-scoped, exact match only.
+ * Returns null if not found or if the user is not authenticated.
+ */
+export async function lookupProductBySku(sku: string): Promise<Product | null> {
+  try {
+    const { lookupBySkuFn } = await import("@/api/products");
+    const result = await lookupBySkuFn({ data: { sku } });
+    if (!result) return null;
+    return mapServerProductToUi(result.product as ServerProductItem);
+  } catch {
+    return null;
+  }
 }
 
 export async function searchCustomers(query: string): Promise<Customer[]> {
