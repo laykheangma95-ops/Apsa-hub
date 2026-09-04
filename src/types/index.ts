@@ -170,6 +170,7 @@ export interface Customer {
   id: string;
   nameKm: string;
   nameEn: string;
+  /** Empty string when caller lacks customers.view_sensitive (server path). Undefined = mock path (always visible). */
   phone: string;
   identities: SocialIdentity[];
   tags: string[];
@@ -179,6 +180,11 @@ export interface Customer {
   lifetimeSpend: Money;
   lastPurchaseAt?: string;
   companion: CompanionColor;
+  /**
+   * Server-authoritative: true = caller has customers.view_sensitive; false = sensitive fields
+   * are hidden (phone is "", address is absent). Undefined on mock data path — treat as visible.
+   */
+  sensitiveVisible?: boolean;
 }
 
 export interface ProductVariantOption {
@@ -186,23 +192,47 @@ export interface ProductVariantOption {
   values: string[];
 }
 
+export type ProductStatus = "DRAFT" | "ACTIVE" | "ARCHIVED";
+
 export interface Product {
   id: string;
   nameKm: string;
   nameEn: string;
   sku: string;
   price: Money;
-  stock: number;
+  /**
+   * null when coming from the production server path — inventory is a separate domain.
+   * number when coming from the mock data path.
+   * UI should call availableStock() rather than reading this directly.
+   */
+  stock: number | null;
   lowStockThreshold: number;
   options?: ProductVariantOption[];
   companion: CompanionColor;
-  /** units held for confirmed-but-unfulfilled orders */
+  /** units held for confirmed-but-unfulfilled orders (mock path only) */
   reserved?: number;
   category?: ProductCategory;
   barcode?: string;
+  /** Present on the production path — the DB UUID of the category. */
+  categoryId?: string;
+  /** Present on the production path — the variant DB UUID. */
+  variantId?: string;
 }
 
+/** Legacy mock-data category union — kept for backward compatibility. */
 export type ProductCategory = "skincare" | "apparel" | "accessories" | "drinks";
+
+/** Production category record returned from the DB. */
+export interface ProductCategoryRecord {
+  id: string;
+  organizationId: string;
+  parentId: string | null;
+  nameKm: string;
+  nameEn: string | null;
+  sortOrder: number;
+  status: "ACTIVE" | "ARCHIVED";
+  createdAt: string;
+}
 
 export interface OrderItem {
   productId: string;

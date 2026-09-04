@@ -18,6 +18,7 @@
  */
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { checkAppGuardFn } from "@/api/app-guard";
+import { AppShell } from "@/design-system";
 
 export const Route = createFileRoute("/app")({
   beforeLoad: async () => {
@@ -37,5 +38,9 @@ export const Route = createFileRoute("/app")({
 });
 
 function AppLayout() {
-  return <Outlet />;
+  return (
+    <AppShell>
+      <Outlet />
+    </AppShell>
+  );
 }

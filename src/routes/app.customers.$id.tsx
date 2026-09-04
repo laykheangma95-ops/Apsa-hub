@@ -20,11 +20,10 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
-import { addCustomerNote, currentRole, getCustomer360 } from "@/lib/api";
+import { addCustomerNote, getCustomer360 } from "@/lib/api";
 import { fullTimestamp, initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, usd } from "@/lib/money";
-import { maskPhone, permissionsFor } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import type { CompanionColor, CustomerNote } from "@/types";
 
@@ -65,7 +64,6 @@ function Customer360Screen() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { language } = useLanguage();
-  const permissions = permissionsFor(currentRole);
 
   const [tab, setTab] = useState<Tab>("overview");
   const [noteDraft, setNoteDraft] = useState("");
@@ -80,6 +78,11 @@ function Customer360Screen() {
       setNoteDraft("");
     },
   });
+
+  // sensitiveVisible is server-authoritative: true = caller has customers.view_sensitive.
+  // undefined on the mock data path — treat as visible (mock data is development-only).
+  // Never use a hardcoded client-side role to decide this.
+  const sensitiveVisible = query.data?.customer.sensitiveVisible !== false;
 
   const back = () => navigate({ to: "/app/inbox" });
 
@@ -142,7 +145,7 @@ function Customer360Screen() {
             <div className="min-w-0 flex-1">
               <h1 className="text-h2 truncate text-text-primary">{displayName}</h1>
               <p className="text-body-sm tnum text-text-secondary">
-                {permissions.viewCustomerPhone ? customer.phone : maskPhone(customer.phone)}
+                {sensitiveVisible ? (customer.phone || "—") : t("customer360.hidden")}
               </p>
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 {customer.identities.map((identity) => (
@@ -156,9 +159,7 @@ function Customer360Screen() {
             <div>
               <p className="text-caption text-text-muted">{t("customer.spend")}</p>
               <p className="text-financial-lg text-text-primary">
-                {permissions.viewLifetimeSpend
-                  ? formatMoney(customer.lifetimeSpend)
-                  : t("customer360.hidden")}
+                {sensitiveVisible ? formatMoney(customer.lifetimeSpend) : t("customer360.hidden")}
               </p>
             </div>
             <div>
@@ -181,9 +182,7 @@ function Customer360Screen() {
             <SectionRows>
               <SectionRow
                 label={t("customer360.averageOrder")}
-                value={
-                  permissions.viewLifetimeSpend ? formatMoney(average) : t("customer360.hidden")
-                }
+                value={sensitiveVisible ? formatMoney(average) : t("customer360.hidden")}
               />
               <SectionRow
                 label={t("customer.lastPurchase")}
@@ -192,7 +191,7 @@ function Customer360Screen() {
               <SectionRow
                 label={t("delivery.address")}
                 value={
-                  permissions.viewCustomerAddress && customer.address
+                  sensitiveVisible && customer.address
                     ? [
                         customer.address.houseNo,
                         customer.address.street,
@@ -200,7 +199,7 @@ function Customer360Screen() {
                         customer.address.khan,
                         customer.address.city,
                       ].join(", ")
-                    : permissions.viewCustomerAddress
+                    : sensitiveVisible
                       ? t("delivery.noAddress")
                       : t("customer360.hidden")
                 }

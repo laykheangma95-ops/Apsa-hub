@@ -229,7 +229,7 @@ export function CreateOrderSheet({
 
               <div className="flex items-center justify-between gap-3">
                 <span className="text-label text-text-secondary">{t("createOrder.quantity")}</span>
-                <QuantityStepper value={quantity} onChange={setQuantity} max={product.stock} />
+                <QuantityStepper value={quantity} onChange={setQuantity} {...(product.stock != null ? { max: product.stock } : {})} />
               </div>
 
               <div className="flex items-center justify-between">

@@ -1,8 +1,10 @@
 export { ApsiIllustration, type ApsiPose } from "./ApsiIllustration";
 export { ApsiInsightCard } from "./ApsiInsightCard";
 export { AppHeader, LanguageToggle } from "./AppHeader";
+export { AppShell } from "./AppShell";
 export { AttentionCard } from "./AttentionCard";
-export { BottomNav } from "./BottomNav";
+export { BottomNav, SELLER_TABS, type NavTab } from "./BottomNav";
+export { ResolveSheet } from "./ResolveSheet";
 export { BottomSheet, type SheetSnap } from "./BottomSheet";
 export { ChannelBadge } from "./ChannelBadge";
 export { Chip, ChipRow } from "./Chip";

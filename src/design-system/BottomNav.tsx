@@ -1,13 +1,15 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Home, Inbox, Plus, ShoppingBag, Users } from "lucide-react";
+import { ChevronRight, Home, Inbox, MoreHorizontal, ShoppingBag, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { LucideIcon } from "lucide-react";
 import { getOrders } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import type { Order, Workspace } from "@/types";
 import { BottomSheet } from "./BottomSheet";
+import { ResolveSheet } from "./ResolveSheet";
 import {
   getBusinessNavConfig,
   resolveMobileNavActiveTab,
@@ -19,24 +21,70 @@ import {
   type MobileNavTabId,
 } from "./mobile-nav-config";
 
+export type NavTab = {
+  id: string;
+  labelKey: string;
+  icon: LucideIcon;
+  to: "/app" | "/app/inbox" | "/app/pos" | "/app/team";
+  exact?: boolean;
+};
+
+export const SELLER_TABS: { left: NavTab[]; right: NavTab[] } = {
+  left: [
+    { id: "home", labelKey: "nav.home", icon: Home, to: "/app", exact: true },
+    { id: "inbox", labelKey: "nav.inbox", icon: Inbox, to: "/app/inbox" },
+  ],
+  right: [
+    { id: "sales", labelKey: "nav.sales", icon: ShoppingBag, to: "/app/pos" },
+    { id: "more", labelKey: "nav.more", icon: MoreHorizontal, to: "/app/team" },
+  ],
+};
+
 interface BottomNavProps {
   workspace?: Workspace;
+  /** Kept for callers that own a create flow; the centre control is Resolve. */
   onCreate?: () => void;
+  tabs?: { left: NavTab[]; right: NavTab[] };
   className?: string;
   businessType?: BusinessNavVariant;
 }
-
-const desktopLinkClass =
-  "tap-target flex flex-1 flex-col items-center justify-center gap-1 px-1 py-2 text-caption text-text-secondary transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
 const sheetActionClass =
   "press flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
 const sheetSectionTitleClass = "text-caption px-1 pb-2 font-medium tracking-[0.02em] text-text-muted";
 
+const itemClass =
+  "press-tactile tap-target group relative flex flex-1 flex-col items-center justify-center gap-0.5 px-1 py-1.5 text-text-secondary";
+
+function TabItem({ tab }: { tab: NavTab }) {
+  const { t } = useTranslation();
+  const Icon = tab.icon;
+
+  return (
+    <Link
+      to={tab.to}
+      className={itemClass}
+      {...(tab.exact ? { activeOptions: { exact: true } } : {})}
+      activeProps={{ className: "text-action-primary", "data-active": "true" }}
+    >
+      <span className="relative flex items-center justify-center">
+        <span
+          aria-hidden
+          className="absolute -inset-x-3 -inset-y-1.5 scale-75 rounded-full bg-action-primary-soft opacity-0 transition-[opacity,transform] duration-[var(--dur-base)] ease-[var(--ease-spring)] group-data-[active=true]:scale-100 group-data-[active=true]:opacity-100"
+        />
+        <Icon className="relative size-[22px]" strokeWidth={2} aria-hidden />
+      </span>
+      <span className="chip-text relative transition-colors duration-[var(--dur-fast)] group-data-[active=true]:font-semibold">
+        {t(tab.labelKey)}
+      </span>
+    </Link>
+  );
+}
+
 export function BottomNav({
   workspace = "business",
-  onCreate,
+  tabs = SELLER_TABS,
   className,
   businessType = "online-seller",
 }: BottomNavProps) {
@@ -48,6 +96,7 @@ export function BottomNav({
   const isBusiness = workspace === "business";
 
   const [resolveOpen, setResolveOpen] = useState(false);
+  const [desktopResolveOpen, setDesktopResolveOpen] = useState(false);
   const [salesOpen, setSalesOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
 
@@ -79,63 +128,28 @@ export function BottomNav({
     <>
       <nav
         aria-label={t("nav.primary")}
-        className={cn(
-          "elevation-3 surface-glass fixed inset-x-0 bottom-0 z-40 hidden border-t border-border-default pb-[env(safe-area-inset-bottom)] lg:block",
-          className,
-        )}
+        className={cn("glass-bar fixed inset-x-0 bottom-0 z-40 hidden border-t border-[var(--glass-border)] pb-[env(safe-area-inset-bottom)] lg:block", className)}
       >
-        <div className="relative mx-auto flex max-w-[560px] items-stretch">
-          <Link
-            to="/app"
-            className={desktopLinkClass}
-            activeOptions={{ exact: true }}
-            activeProps={{ className: "text-action-primary" }}
-          >
-            <Home className="size-5" aria-hidden />
-            <span className="chip-text">{t("nav.home")}</span>
-          </Link>
-          <Link
-            to="/app/inbox"
-            className={desktopLinkClass}
-            activeProps={{ className: "text-action-primary" }}
-          >
-            <Inbox className="size-5" aria-hidden />
-            <span className="chip-text">{t("nav.inbox")}</span>
-          </Link>
-
-          <div className="flex w-16 shrink-0 justify-center">
+        <div className="relative mx-auto flex h-[var(--nav-height)] max-w-[560px] items-stretch px-1">
+          {tabs.left.map((tab) => (
+            <TabItem key={tab.id} tab={tab} />
+          ))}
+          <div className="flex flex-1 items-center justify-center">
             <button
               type="button"
-              onClick={onCreate}
-              aria-label={t("nav.create")}
-              disabled={!onCreate}
-              className={cn(
-                "absolute -top-5 flex size-14 items-center justify-center rounded-full text-text-on-action elevation-action transition-colors",
-                onCreate
-                  ? "bg-action-primary hover:bg-action-primary-hover active:bg-action-primary-pressed"
-                  : "bg-border-strong text-text-muted",
-              )}
+              onClick={() => setDesktopResolveOpen(true)}
+              aria-label={t("nav.resolve")}
+              aria-haspopup="dialog"
+              aria-expanded={desktopResolveOpen}
+              title={t("nav.resolve")}
+              className="press-tactile glass-panel tap-target -mt-5 flex size-[52px] items-center justify-center rounded-[18px] text-action-primary active:bg-action-primary-soft"
             >
-              <Plus className="size-6" aria-hidden />
+              <Sparkles className="size-6" aria-hidden />
             </button>
           </div>
-
-          <Link
-            to="/app/pos"
-            className={desktopLinkClass}
-            activeProps={{ className: "text-action-primary" }}
-          >
-            <ShoppingBag className="size-5" aria-hidden />
-            <span className="chip-text">{t("nav.sales")}</span>
-          </Link>
-          <Link
-            to="/app/team"
-            className={desktopLinkClass}
-            activeProps={{ className: "text-action-primary" }}
-          >
-            <Users className="size-5" aria-hidden />
-            <span className="chip-text">{t("nav.team")}</span>
-          </Link>
+          {tabs.right.map((tab) => (
+            <TabItem key={tab.id} tab={tab} />
+          ))}
         </div>
       </nav>
 
@@ -187,6 +201,8 @@ export function BottomNav({
         <SheetLead title={t("nav.resolveSheetLead")} body={t("nav.resolveSheetBody")} />
         <SheetGroupList groups={config.resolveGroups} onRoute={goTo} />
       </BottomSheet>
+
+      <ResolveSheet open={desktopResolveOpen} onOpenChange={setDesktopResolveOpen} />
 
       <BottomSheet
         open={salesOpen}

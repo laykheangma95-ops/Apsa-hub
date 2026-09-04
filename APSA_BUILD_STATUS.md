@@ -2,8 +2,8 @@
 
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
-**Last updated:** 2026-09-03
-**Branch:** `claude/apsa-production-foundation-sneozb` (production blockers fixed)
+**Last updated:** 2026-09-04
+**Branch:** `claude/apsa-product-production-le63ve` (Product domain productionized)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -24,22 +24,49 @@
 
 ---
 
-## Repository Snapshot (as of 2026-09-03 — Production Foundation Sprint)
+## Repository Snapshot (as of 2026-09-04 — Product Domain Sprint)
 
 **Stack found:** TanStack Start + Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Router + TanStack Query + i18next + Radix UI + recharts + @supabase/supabase-js  
-**Database:** MIGRATIONS WRITTEN — 8 migration files in `supabase/migrations/`. Awaiting Supabase project provisioning by project owner.  
+**Database:** MIGRATIONS WRITTEN — 19 migration files in `supabase/migrations/` (001–019). Awaiting Supabase project provisioning by project owner to apply.  
 **Auth:** FOUNDATION BUILT — Supabase client architecture, server-side session validation, membership verification. Awaiting Supabase project to activate.  
-**Backend APIs:** NONE YET — server auth layer built; API route handlers are next sprint.  
-**Data layer:** Still mock — production repositories are next (mock not ripped out; UI unbroken).  
+**Customer Backend:** BUILT — server repository, service, and TanStack Start server functions. Customer 360 UI connected to real server functions (mock replaced).  
+**Product Backend:** BUILT — server repository, service, and TanStack Start server functions. `getProducts()` and `getPosProducts()` try real server first with mock fallback; barcode/SKU lookup wired to real server; `Product.stock = null` in production path (inventory not connected — intentional, separate domain).  
+**Other Data layers:** Still mock — inbox, orders, delivery use mock data; mock not ripped out; UI unbroken.  
 **Routes:** 10 routes (unchanged): `/`, `/app`, `/app/inbox`, `/app/inbox/$id`, `/app/customers/$id`, `/app/deliveries/$id`, `/app/orders/$id`, `/app/pos`, `/app/team`, `/design`
 
+### Live Supabase Verification Tooling Added (2026-09-03)
+
+| Area | Status | Files |
+|---|---|---|
+| Connection probe script | BUILT | `scripts/verify-supabase-connection.ts` |
+| `verify:supabase` npm script | ADDED | `package.json` |
+| Test seed SQL | BUILT | `supabase/seed-test.sql` |
+| Migration verification SQL | BUILT | `supabase/verify-migrations.sql` |
+| TypeScript types generated | DONE | `src/lib/supabase/types.ts` — from live schema |
+| tsc --noEmit | PASSING | 0 errors after alias fix |
+| Unit tests (U1–U3) | PASSING | 40/40 pass without Supabase credentials |
+| Live DB tests (T1–T15) | SKIP-READY | Skip cleanly — live DB reachable from user machine only |
+
+**How to activate live tests:**
+1. Open APSA's Supabase project (Seoul region)
+2. Copy `.env.example` → `.env.local`, fill in `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+3. Apply migrations 001–008: `supabase db push` (or paste each file in SQL Editor)
+4. Run connection probe: `bun run verify:supabase`
+5. Run migration verification: paste `supabase/verify-migrations.sql` in SQL Editor
+6. Seed test data: paste `supabase/seed-test.sql` in SQL Editor (test project only), update UUIDs in `src/tests/tenant-isolation.test.ts`
+7. Run full integration tests: `bun test src/tests/tenant-isolation.test.ts`
+
+---
+
 ### Production Foundation Added (2026-09-03)
+
+> See prior branch `claude/apsa-production-foundation-sneozb` for detail.
 
 | Area | Status | Files |
 |---|---|---|
 | Supabase client — browser | BUILT | `src/lib/supabase/client.ts` |
 | Supabase client — server/admin | BUILT | `src/lib/supabase/server.ts` |
-| Database type definitions | BUILT | `src/lib/supabase/types.ts` |
+| Database type definitions | LIVE | `src/lib/supabase/types.ts` — generated from live schema |
 | Migration 001: auth_profiles | WRITTEN | `supabase/migrations/001_auth_profiles.sql` |
 | Migration 002: organizations | WRITTEN | `supabase/migrations/002_organizations.sql` |
 | Migration 003: roles_permissions | WRITTEN + SEEDED | `supabase/migrations/003_roles_permissions.sql` |
@@ -192,19 +219,103 @@
 
 ### 8. Customer 360
 
-**Status:** `PARTIAL`
+**Status:** `PARTIAL` → **Customer persistence READY** (migration written; apply to activate)
 
-**What exists today:** Full customer profile screen at `src/routes/app.customers.$id.tsx`. Shows customer info, lifetime spend, order count, social identities, address, tags, notes, order history timeline, customer events, active conversation link.
+**What exists today:** Full customer profile screen at `src/routes/app.customers.$id.tsx`. Shows customer info, lifetime spend, order count, social identities, address, tags, notes, order history timeline, customer events, active conversation link. **Customer domain is now backed by a real server layer** — `getCustomer360` and `addCustomerNote` in `src/lib/api/index.ts` call TanStack Start server functions that hit real Supabase tables. Orders and events remain empty (`never[]`) until those domains are productionized — no mock data injected for those.
 
-**Repository evidence:** `src/routes/app.customers.$id.tsx`, `src/lib/api/index.ts#getCustomer360`, `src/lib/api/index.ts#addCustomerNote`, `src/design-system/CustomerSummaryCard.tsx`, `src/design-system/Timeline.tsx`
+**Product domain backend built (2026-09-04):**
 
-**Source-of-truth doc:** DATA_MODEL.md (Customer, CustomerIdentity, CustomerEvent), UX_FLOWS.md (Customer 360), MVP_ROADMAP.md Phase 15
+| Area | Status | Files |
+|---|---|---|
+| Migration 017: product_categories | WRITTEN | `supabase/migrations/017_product_categories.sql` |
+| Migration 018: products + product_variants | WRITTEN | `supabase/migrations/018_products.sql` |
+| Migration 019: product_permissions | WRITTEN + SEEDED | `supabase/migrations/019_product_permissions.sql` |
+| Product repository | BUILT | `src/server/products/repository.ts` |
+| Product service | BUILT | `src/server/products/service.ts` |
+| Product server functions | BUILT | `src/api/products.ts` |
+| Product domain types | BUILT | `src/server/products/types.ts` |
+| POS + catalog wired to real server | CONNECTED | `src/lib/api/index.ts` (`getProducts`, `getPosProducts`, `lookupProductByBarcode`, `lookupProductBySku`) |
+| Product domain tests | WRITTEN (16 tests) | `src/tests/product-domain.test.ts` |
 
-**Owner:** Claude Code (real customer DB, identity merge, consent); Lovable (Polish Pass)
+**Security guarantees implemented:**
+- `organization_id` never trusted from client — resolved from active DB membership in `resolveAuthContext()`
+- Dual-layer isolation: RLS policies on all 3 new tables + application-level `organization_id` filter on every query
+- SKU/barcode uniqueness org-scoped: partial unique indexes `(organization_id, sku)` and `(organization_id, barcode)` where NOT NULL
+- Integer money enforced: `price_amount INTEGER NOT NULL CHECK >= 0`; zod validates `.int()` at server function boundary
+- Cost fields withheld unless caller has `products.view_cost` permission
+- Price/cost changes use best-effort `auditLog()` (non-fail-closed per spec)
+- Cross-org variant guard: DB trigger `check_variant_org_integrity()` ensures variant.organization_id === product.organization_id
+- `Product.stock` always `null` from server — inventory is a separate domain, not this service's concern
+- Barcode/SKU lookup: exact match only, empty string short-circuits to null (no fuzzy selection)
+- Service-role key never in client bundle — all server-only modules behind `createServerFn()`
 
-**Dependencies:** Authentication, Customer domain with CustomerIdentity model, Conversation domain
+**Activation required:**
+- Apply migrations 017–019 to live Supabase project (`supabase db push` or Supabase dashboard)
+- After applying, run `supabase gen types typescript` to regenerate `src/lib/supabase/types.ts` and remove `as any` casts in product repository.ts
 
-**Next action:** Claude Code — implement Customer table + CustomerIdentity table (universal identity model, not per-channel duplicates). Customer merge/link API required before production.
+**Build state (2026-09-04):**
+- `tsc --noEmit`: PASSES
+- `bun run build`: SUCCEEDS
+- `bun test src/tests/`: 232 tests pass, 0 fail
+- Client bundle scan for secrets: CLEAN (no service-role key present)
+
+**Repository evidence:** `src/api/products.ts`, `src/server/products/`, `supabase/migrations/017_*.sql`–`019_*.sql`, `src/lib/api/index.ts#getProducts`, `src/lib/pos-cart.ts#stockState`
+
+**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant, ProductCategory), PERMISSIONS_MATRIX.md §12, SECURITY.md, MVP_ROADMAP.md Phase 5
+
+**Owner:** Claude Code (backend complete); Lovable (product management UI)
+
+**Dependencies:** Supabase project credentials for migration application (017–019)
+
+**Next action:** Project owner — apply migrations 017–019. Then: Lovable — build `/app/products` management screens.
+
+---
+
+**Customer domain backend built (2026-09-04):**
+
+| Area | Status | Files |
+|---|---|---|
+| Migration 011: customers | WRITTEN | `supabase/migrations/011_customers.sql` |
+| Migration 012: customer_identities | WRITTEN | `supabase/migrations/012_customer_identities.sql` |
+| Migration 013: customer_notes | WRITTEN | `supabase/migrations/013_customer_notes.sql` |
+| Migration 014: customer_tags | WRITTEN | `supabase/migrations/014_customer_tags.sql` |
+| Migration 015: customer_addresses | WRITTEN | `supabase/migrations/015_customer_addresses.sql` |
+| Migration 016: customer_permissions | WRITTEN + SEEDED | `supabase/migrations/016_customer_permissions.sql` |
+| Customer repository | BUILT | `src/server/customers/repository.ts` |
+| Customer service | BUILT | `src/server/customers/service.ts` |
+| Customer server functions | BUILT | `src/api/customers.ts` |
+| Customer domain types | BUILT | `src/server/customers/types.ts` |
+| Customer 360 API wired | CONNECTED | `src/lib/api/index.ts` (`getCustomer360`, `addCustomerNote`) |
+| Customer domain tests | WRITTEN (28 tests) | `src/tests/customer-domain.test.ts` |
+
+**Security guarantees implemented:**
+- `organization_id` never trusted from client — resolved from active DB membership in `resolveAuthContext()`
+- Dual-layer isolation: RLS policies on all 6 new tables + application-level `organization_id` filter on every query
+- `customers.export` action uses `auditLogRequired()` (fail-closed) — export blocked if audit fails to persist
+- Service-role key never in client bundle — all server-only modules dynamically imported inside handler bodies
+- Identity deduplication: `UNIQUE INDEX ON (organization_id, provider, provider_user_id)` prevents duplicate linking
+- Cross-org identity guard: DB trigger `check_customer_identity_org_integrity()` enforces same-org constraint
+- No auto-merge: identity resolution is exact match only on `(organization_id, provider, provider_user_id)`
+
+**Activation required:**
+- Apply migrations 011–016 to live Supabase project (`supabase db push` or Supabase dashboard)
+- After applying, run `supabase gen types typescript` to regenerate `src/lib/supabase/types.ts` and remove `as any` casts in repository.ts
+
+**Build state (2026-09-04):**
+- `tsc --noEmit`: PASSES
+- `bun run build`: SUCCEEDS
+- `bun test src/tests/`: 195 tests pass, 0 fail
+- Client bundle scan for secrets: CLEAN (no service-role key present)
+
+**Repository evidence:** `src/routes/app.customers.$id.tsx`, `src/api/customers.ts`, `src/server/customers/`, `supabase/migrations/011_*.sql`–`016_*.sql`, `src/lib/api/index.ts#getCustomer360`, `src/design-system/CustomerSummaryCard.tsx`
+
+**Source-of-truth doc:** DATA_MODEL.md (Customer, CustomerIdentity), PERMISSIONS_MATRIX.md, SECURITY.md, UX_FLOWS.md (Customer 360), MVP_ROADMAP.md Phase 15
+
+**Owner:** Claude Code (backend complete); Lovable (Polish Pass)
+
+**Dependencies:** Supabase project credentials for migration application
+
+**Next action:** Project owner — apply migrations 011–016 to Supabase project. Then: Claude Code — implement Conversation → Customer linking once Conversation domain is productionized.
 
 ---
 
@@ -336,19 +447,32 @@
 
 ### 16. Products
 
-**Status:** `LOVABLE_REMAINING`
+**Status:** `PARTIAL` — Backend BUILT; product management UI still Lovable-owned (not yet built)
 
-**What exists today:** No products route exists. Product data model, mock data (`src/lib/mock/products.ts`), and `getProducts` API exist. POS uses products but there is no standalone products management screen.
+**What exists today (backend — 2026-09-04):**
+- 3 new migrations (017–019): ProductCategory, Product, ProductVariant tables with integer money storage, org-scoped SKU/barcode unique indexes, RLS, cross-org trigger, 8 product.* permission keys seeded to roles
+- Server repository at `src/server/products/repository.ts` — org-scoped CRUD + batch variant fetch (no N+1)
+- Server service at `src/server/products/service.ts` — permission-aware, cost fields withheld unless `products.view_cost`, `Product.stock = null` always (inventory is separate domain)
+- Server functions at `src/api/products.ts` — 12 server functions, `org_id` never from client, zod-validated, integer money enforced
+- POS + product catalog wired: `getProducts()` and `getPosProducts()` try real server first, fall back to mock; barcode/SKU lookup wired to real server (`lookupProductByBarcode`, `lookupProductBySku`)
+- 16 tests at `src/tests/product-domain.test.ts`
+- `Product.stock` changed to `number | null` — null = inventory not connected (intentional); POS cart handles null stock as "no cap"
 
-**Repository evidence:** Routes listing — no `app.products.tsx` or `app.products.$id.tsx`. `src/lib/mock/products.ts`, `src/lib/api/index.ts#getProducts`.
+**What does NOT exist yet:**
+- `/app/products` list screen (Lovable)
+- Create/edit product screen (Lovable)
+- Variant management UI (Lovable)
+- Category management UI (Lovable)
 
-**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant), MVP_ROADMAP.md Phase 5, APSA_MASTER_PLAN.md
+**Repository evidence:** `src/server/products/`, `src/api/products.ts`, `src/tests/product-domain.test.ts`, `supabase/migrations/017_*.sql`–`019_*.sql`, `src/lib/api/index.ts#getProducts`, `src/lib/api/index.ts#lookupProductByBarcode`
 
-**Owner:** Lovable (build screen); Claude Code (real backend with variant model)
+**Source-of-truth doc:** DATA_MODEL.md (Product, ProductVariant, ProductCategory), PERMISSIONS_MATRIX.md §12, MVP_ROADMAP.md Phase 5
 
-**Dependencies:** Product data model
+**Owner:** Claude Code (backend complete); Lovable (product management screens)
 
-**Next action:** Lovable — build `/app/products` list + create/edit product screens with variant support, price, SKU, category, barcode.
+**Dependencies:** Supabase project credentials for migration application (017–019)
+
+**Next action:** Project owner — apply migrations 017–019. Then: Lovable — build `/app/products` list + create/edit screens with variant support. Claude Code — implement Inventory ledger domain (separate sprint).
 
 ---
 
@@ -356,17 +480,17 @@
 
 **Status:** `NOT_BUILT`
 
-**What exists today:** `Product.stock` field exists as a mutable integer in `src/types/index.ts` (anti-pattern per DATA_MODEL.md). No inventory management screen exists. No ledger-based inventory model exists.
+**What exists today:** `Product.stock` is now `number | null` in `src/types/index.ts` — changed during Product productionization. In the production server path, service always returns `stock: null` (inventory not connected). POS cart treats `null` as "no quantity cap" until ledger is connected. No inventory management screen. No InventoryMovement ledger. No DB tables for inventory yet.
 
-**Repository evidence:** `src/types/index.ts#Product.stock` (integer field), no inventory routes, no InventoryMovement type.
+**Repository evidence:** `src/types/index.ts#Product.stock` (now `number | null`), `src/lib/pos-cart.ts#stockState` (handles null), no inventory routes, no InventoryMovement type.
 
 **Source-of-truth doc:** DATA_MODEL.md (Inventory as ledger — InventoryMovement table; NEVER mutable integer), APSA_MASTER_PLAN.md (inventory ledger)
 
 **Owner:** Claude Code (ledger model); Lovable (adjustment UI after model exists)
 
-**Dependencies:** Product domain, Authentication
+**Dependencies:** Product domain (BUILT), Authentication
 
-**Next action:** Claude Code — implement InventoryMovement ledger (never update `stock` directly). Lovable — build inventory adjustment and history UI after ledger model is confirmed.
+**Next action:** Claude Code — implement InventoryMovement ledger (20x migration). `Product.stock` must remain `null` in the Product service until the ledger domain is connected. Lovable — build inventory adjustment and history UI after ledger model is confirmed.
 
 ---
 
@@ -586,32 +710,32 @@
 
 ### 28. Database
 
-**Status:** `PARTIAL` — 8 migrations written and reviewed; not yet applied to the live APSA Supabase project.
+**Status:** `PARTIAL` — 8 migrations applied and verified against the live APSA Supabase project; domain entity tables not yet written.
 
 **What exists today:**
-- `supabase/migrations/001–008_*.sql` — 8 migration files covering: auth profiles, organizations, roles/permissions, workspaces, locations, memberships, deferred RLS policies, and audit logs.
-- All tables have RLS enabled. Write paths blocked for JWT clients (service role only). Cross-tenant integrity enforced by DB triggers. Last-owner protection at DB level with advisory lock concurrency guard.
-- `@supabase/supabase-js` is added to `package.json`.
-- `src/lib/supabase/types.ts` is hand-authored scaffolding — **must be replaced** with `supabase gen types typescript` after migrations are applied.
-- Supabase project exists: Seoul region, `laykheangma95-ops/Apsa-hub`.
+- `supabase/migrations/001–008_*.sql` — 8 migration files applied to live Supabase (Seoul region). 9 tables confirmed: profiles, organizations, roles, permissions, role_permissions, workspaces, locations, memberships, audit_logs.
+- All 9 tables have RLS enabled (verified via `pg_class.relrowsecurity = true`). Write paths blocked for JWT clients. Cross-tenant integrity enforced by DB triggers. Last-owner protection at DB level with advisory lock concurrency guard.
+- 5 system roles seeded (OWNER, MANAGER, CASHIER, SALES, CUSTOMER_SERVICE), 37 permissions seeded.
+- `@supabase/supabase-js` installed.
+- `src/lib/supabase/types.ts` generated from live schema — covers all 9 tables, all enums, and SYSTEM_ROLE_IDS constants.
 
-**Not yet done:** Migrations not applied to live project. 20+ domain tables (Customer, Product, Order, etc.) not yet written. All domain data still in mock arrays.
+**Not yet done:** 20+ domain tables (Customer, Product, Order, etc.) not yet written. All domain data still in mock arrays.
 
-**Repository evidence:** `supabase/migrations/`, `package.json` (@supabase/supabase-js), `src/lib/supabase/`.
+**Repository evidence:** `supabase/migrations/`, `package.json`, `src/lib/supabase/types.ts`.
 
 **Source-of-truth doc:** ARCHITECTURE.md (PostgreSQL/Supabase), DATA_MODEL.md, MVP_ROADMAP.md Phase 1
 
 **Owner:** Claude Code
 
-**Dependencies:** Project owner must apply migrations (requires Supabase service-role credentials)
+**Dependencies:** None (live DB is ready for next domain migrations)
 
-**Next action:** Project owner applies migrations 001–008 to the live APSA Supabase project. Regenerate types. Then implement remaining domain entity migrations per DATA_MODEL.md.
+**Next action:** Implement remaining domain entity migrations per DATA_MODEL.md: Customer, CustomerIdentity, Product, ProductVariant, InventoryMovement, Order, OrderItem, Payment, Refund, Delivery, Conversation, ConnectedChannel, Message.
 
 ---
 
 ### 29. Row-Level Security (RLS)
 
-**Status:** `PARTIAL` — RLS policies written in migrations; not yet applied or live-tested against real Supabase.
+**Status:** `PARTIAL` — RLS policies applied and live-verified on the APSA Supabase project; domain entity tables pending.
 
 **What exists today:**
 - All 8 migration files have `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
@@ -621,17 +745,17 @@
 - Role_permissions: System mappings readable by authenticated users; org-specific mappings require membership (migration 007). FIX: Custom org role mappings no longer leak to members of other orgs.
 - Audit logs: SELECT requires `org.read` permission (via has_audit_access() function). Only Owner and Manager can read. FIX: Cashier, Sales, Customer Service cannot read audit logs.
 
-**Not yet done:** RLS policies not verified against live project. Future domain tables (Customer, Order, etc.) need RLS added when their migrations are written.
+**Verified (2026-09-03):** All 9 tables show `relrowsecurity = true` in live DB. System roles (5) and permissions (37) confirmed via SQL Editor. Future domain tables (Customer, Order, etc.) need RLS when their migrations are written.
 
-**Repository evidence:** `supabase/migrations/002–008_*.sql`.
+**Repository evidence:** `supabase/migrations/002–008_*.sql`, `supabase/verify-migrations.sql`.
 
 **Source-of-truth doc:** SECURITY.md (RLS on every table), ARCHITECTURE.md, PERMISSIONS_MATRIX.md
 
 **Owner:** Claude Code
 
-**Dependencies:** Live Supabase project (migrations applied)
+**Dependencies:** None for current tables (live and verified)
 
-**Next action:** Apply migrations. Verify RLS via Supabase Dashboard → Policies. Run integration tests to confirm org A cannot read org B data.
+**Next action:** Extend RLS to every new domain table as migrations are written. Run live integration tests (T1–T15) from a machine with Supabase network access to confirm cross-org isolation.
 
 ---
 

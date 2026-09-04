@@ -82,8 +82,21 @@
   --elevation-action: 0 8px 20px -6px rgba(37, 99, 217, 0.35);
 
   /* Glass — sheets, floating nav and overlays only. Never on content cards. */
-  --surface-glass: rgba(255, 255, 255, 0.86);
+  --surface-glass: rgba(255, 255, 255, 0.78);
   --surface-glass-blur: 18px;
+  --surface-glass-saturate: 150%;
+  --glass-border: rgba(255, 255, 255, 0.6);
+  --glass-sheen: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.12) 42%,
+    rgba(247, 250, 255, 0.06) 100%
+  );
+  --glass-inner-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.75);
+
+  /* Mobile shell */
+  --nav-height: 60px;
+  --space-nav-clearance: calc(var(--nav-height) + env(safe-area-inset-bottom) + 1rem);
 
   /* Spacing rhythm — one scale for every screen */
   --space-section: 1.25rem;
@@ -314,8 +327,44 @@
 /* Glass is for sheets, floating nav and overlays. Never a content card. */
 @utility surface-glass {
   background-color: var(--surface-glass);
-  backdrop-filter: blur(var(--surface-glass-blur));
-  -webkit-backdrop-filter: blur(var(--surface-glass-blur));
+  backdrop-filter: blur(var(--surface-glass-blur)) saturate(var(--surface-glass-saturate));
+}
+
+/* Refined liquid glass: translucency + delicate border + inner highlight. */
+@utility glass-panel {
+  background-image: var(--glass-sheen);
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(var(--surface-glass-blur)) saturate(var(--surface-glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-inner-highlight), var(--elevation-2);
+}
+
+@utility glass-bar {
+  background-image: var(--glass-sheen);
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(var(--surface-glass-blur)) saturate(var(--surface-glass-saturate));
+  box-shadow: var(--glass-inner-highlight), var(--elevation-3);
+}
+
+/* Native-feeling press: quick scale + brightness, no bounce. */
+@utility press-tactile {
+  transition:
+    transform var(--dur-fast) var(--ease-spring),
+    filter var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  &:active {
+    transform: scale(0.94);
+    filter: brightness(0.97);
+  }
+}
+
+@utility safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* One spacing rhythm across every screen */

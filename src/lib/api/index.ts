@@ -48,6 +48,16 @@ function resolve<T>(value: T, ms = LATENCY): Promise<T> {
   return new Promise((r) => setTimeout(() => r(value), ms));
 }
 
+/**
+ * Returns true for RFC-4122 UUID strings (production customer IDs).
+ * Non-UUID IDs (e.g. "cus-1") are mock IDs from the Inbox/Orders flows that
+ * are not yet productionized. They bypass the server function validator so UUID
+ * validation is never weakened — mock IDs simply never reach the server boundary.
+ */
+function isProductionId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 export interface ConversationFilter {
   status?: ConversationStatus | "all";
   channel?: Conversation["channel"] | "all";
@@ -119,8 +129,81 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
   return resolve(list);
 }
 
+/** Server product shape returned by listProductsFn / getProductDetailFn. */
+interface ServerProductItem {
+  id: string;
+  nameKm: string;
+  nameEn: string | null;
+  categoryId: string | null;
+  stock: null;
+  companion: Product["companion"];
+  variants: Array<{
+    id: string;
+    sku: string | null;
+    barcode: string | null;
+    price: { amount: number; currency: "USD" | "KHR" };
+    cost: { amount: number; currency: "USD" | "KHR" } | null;
+  }>;
+}
+
+const COMPANION_COLORS: Array<Product["companion"]> = ["nilo", "minto", "vela", "suri", "luma"];
+
+/** Map a server ProductDetail to the UI Product type.
+ * Uses the first active variant for sku/price/barcode.
+ * stock = null because inventory is a separate domain.
+ */
+function mapServerProductToUi(p: ServerProductItem): Product {
+  const firstVariant = p.variants[0];
+  const sum = p.id.slice(-12).split("").reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
+  const companion = COMPANION_COLORS[sum % COMPANION_COLORS.length]!;
+  const mapped: Product = {
+    id: p.id,
+    nameKm: p.nameKm,
+    nameEn: p.nameEn ?? p.nameKm,
+    sku: firstVariant?.sku ?? "",
+    price: firstVariant?.price ?? { amount: 0, currency: "USD" },
+    stock: null,
+    lowStockThreshold: 0,
+    companion,
+  };
+  if (firstVariant?.barcode) mapped.barcode = firstVariant.barcode;
+  if (p.categoryId) mapped.categoryId = p.categoryId;
+  if (firstVariant?.id) mapped.variantId = firstVariant.id;
+  return mapped;
+}
+
+/**
+ * Returns true for errors that are expected in development / demo mode and
+ * should trigger a mock-data fallback:
+ *   - UnauthorizedError: no active session (running without auth in dev/demo).
+ *   - TanStack Start runtime not found: server function called outside the HTTP
+ *     runtime (e.g. bun test, Storybook). This never occurs in production
+ *     because the server function middleware is always active there.
+ *
+ * All other errors — DB failures, ForbiddenError, 5xx responses — must
+ * propagate so production failures are visible rather than silently hidden
+ * behind mock data.
+ */
+function isDemoModeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  // No active session — expected in development without auth.
+  if (err.name === "UnauthorizedError") return true;
+  // TanStack Start server function called outside its runtime (test / Storybook).
+  if (err.message.includes("No Start context") || err.message.includes("AsyncLocalStorage")) {
+    return true;
+  }
+  return false;
+}
+
 export async function getProducts(): Promise<Product[]> {
-  return resolve(products);
+  try {
+    const { listProductsFn } = await import("@/api/products");
+    const serverProducts = await listProductsFn({ data: { status: "ACTIVE" } });
+    return (serverProducts as ServerProductItem[]).map(mapServerProductToUi);
+  } catch (err) {
+    if (isDemoModeError(err)) return resolve(products);
+    throw err;
+  }
 }
 
 /** Recently sold products, shown first in the product picker. */
@@ -191,10 +274,41 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
   return resolve(order, 240);
 }
 
-/* ----------------------------- POS (mock only) ---------------------------- */
+/* ----------------------------- POS ---------------------------------------- */
 
 export async function getPosProducts(): Promise<Product[]> {
-  return resolve(products);
+  try {
+    const { listProductsFn } = await import("@/api/products");
+    const serverProducts = await listProductsFn({ data: { status: "ACTIVE" } });
+    return (serverProducts as ServerProductItem[]).map(mapServerProductToUi);
+  } catch (err) {
+    if (isDemoModeError(err)) return resolve(products);
+    throw err;
+  }
+}
+
+/**
+ * Barcode lookup — org-scoped, exact match only.
+ * Returns null only for genuine not-found.
+ * Auth, permission, DB, and server errors propagate as real errors.
+ */
+export async function lookupProductByBarcode(barcode: string): Promise<Product | null> {
+  const { lookupByBarcodeFn } = await import("@/api/products");
+  const result = await lookupByBarcodeFn({ data: { barcode } });
+  if (!result) return null;
+  return mapServerProductToUi(result.product as ServerProductItem);
+}
+
+/**
+ * SKU lookup — org-scoped, exact match only.
+ * Returns null only for genuine not-found.
+ * Auth, permission, DB, and server errors propagate as real errors.
+ */
+export async function lookupProductBySku(sku: string): Promise<Product | null> {
+  const { lookupBySkuFn } = await import("@/api/products");
+  const result = await lookupBySkuFn({ data: { sku } });
+  if (!result) return null;
+  return mapServerProductToUi(result.product as ServerProductItem);
 }
 
 export async function searchCustomers(query: string): Promise<Customer[]> {
@@ -325,33 +439,44 @@ export interface Customer360 {
 }
 
 export async function getCustomer360(id: string): Promise<Customer360> {
-  const customer = customers.find((c) => c.id === id);
-  if (!customer) throw new Error(`Customer ${id} not found`);
-  return resolve({
-    customer,
-    orders: orders
-      .filter((o) => o.customerId === id)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    events: [...(customerEvents[id] ?? [])].sort((a, b) => b.at.localeCompare(a.at)),
-    notes: customerNotes
-      .filter((n) => n.customerId === id)
-      .sort((a, b) => b.at.localeCompare(a.at)),
-    activeConversationId: conversations.find((c) => c.customerId === id)?.id ?? null,
-  });
+  if (!isProductionId(id)) {
+    // Non-UUID mock ID (e.g. "cus-1") — use in-memory mock data.
+    // The server function UUID validator is not weakened; mock IDs never reach it.
+    // This bridge exists until Inbox/Orders are productionized and emit real UUIDs.
+    const customer = customers.find((c) => c.id === id);
+    if (!customer) throw new Error(`Customer ${id} not found`);
+    return resolve({
+      customer,
+      orders: orders
+        .filter((o) => o.customerId === id)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      events: customerEvents[id] ?? [],
+      notes: customerNotes.filter((n) => n.customerId === id),
+      activeConversationId: null,
+    });
+  }
+  const { getCustomer360Fn } = await import("@/api/customers");
+  const result = await getCustomer360Fn({ data: { id } });
+  return result as unknown as Customer360;
 }
 
-/** Mock note creation. Returns the note; nothing is persisted. */
 export async function addCustomerNote(customerId: string, body: string): Promise<CustomerNote> {
-  return resolve(
-    {
-      id: `cn-new-${Date.now()}`,
-      customerId,
-      body,
-      staffName: staff[0]?.name ?? "Staff",
-      at: new Date().toISOString(),
-    },
-    200,
-  );
+  if (!isProductionId(customerId)) {
+    // Non-UUID mock ID — return an in-memory note; not persisted.
+    return resolve(
+      {
+        id: `cn-${Date.now()}`,
+        customerId,
+        body,
+        staffName: "Staff",
+        at: new Date().toISOString(),
+      },
+      200,
+    );
+  }
+  const { addCustomerNoteFn } = await import("@/api/customers");
+  const note = await addCustomerNoteFn({ data: { customerId, body } });
+  return note as unknown as CustomerNote;
 }
 
 export interface RecordPaymentInput {

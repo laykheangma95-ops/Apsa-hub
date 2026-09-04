@@ -44,14 +44,24 @@ export function addToCart(lines: CartLine[], line: CartLine): CartLine[] {
   if (!existing) return [...lines, line];
   return lines.map((l) =>
     l.key === line.key
-      ? { ...l, quantity: Math.min(l.stock, l.quantity + line.quantity) }
+      ? {
+          ...l,
+          // When stock = 0 (unlimited — inventory not yet connected), don't cap.
+          quantity: l.stock === 0 ? l.quantity + line.quantity : Math.min(l.stock, l.quantity + line.quantity),
+        }
       : l,
   );
 }
 
 export function setQuantity(lines: CartLine[], key: string, quantity: number): CartLine[] {
   return lines.map((l) =>
-    l.key === key ? { ...l, quantity: Math.max(1, Math.min(l.stock, quantity)) } : l,
+    l.key === key
+      ? {
+          ...l,
+          // When stock = 0 (unlimited), allow any positive quantity.
+          quantity: l.stock === 0 ? Math.max(1, quantity) : Math.max(1, Math.min(l.stock, quantity)),
+        }
+      : l,
   );
 }
 
@@ -101,12 +111,18 @@ export function needsManagerApproval(
 export type StockState = "available" | "low_stock" | "out_of_stock";
 
 export function stockState(product: Product): StockState {
+  // null = production path, inventory domain not yet connected — show as available.
+  if (product.stock == null) return "available";
   if (product.stock <= 0) return "out_of_stock";
   if (product.stock <= product.lowStockThreshold) return "low_stock";
   return "available";
 }
 
-/** Units physically present minus units held for confirmed orders. */
+/** Units available for sale.
+ * Returns 0 (meaning "unlimited" for the cart) when inventory is not connected (stock == null).
+ * CartLine.stock stores this value; 0 means no cap.
+ */
 export function availableStock(product: Product): number {
+  if (product.stock == null) return 0; // inventory not yet connected — no cap in cart
   return Math.max(0, product.stock - (product.reserved ?? 0));
 }
