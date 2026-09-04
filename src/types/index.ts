@@ -170,6 +170,7 @@ export interface Customer {
   id: string;
   nameKm: string;
   nameEn: string;
+  /** Empty string when caller lacks customers.view_sensitive (server path). Undefined = mock path (always visible). */
   phone: string;
   identities: SocialIdentity[];
   tags: string[];
@@ -179,6 +180,11 @@ export interface Customer {
   lifetimeSpend: Money;
   lastPurchaseAt?: string;
   companion: CompanionColor;
+  /**
+   * Server-authoritative: true = caller has customers.view_sensitive; false = sensitive fields
+   * are hidden (phone is "", address is absent). Undefined on mock data path — treat as visible.
+   */
+  sensitiveVisible?: boolean;
 }
 
 export interface ProductVariantOption {
