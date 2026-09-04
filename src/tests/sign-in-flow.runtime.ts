@@ -28,7 +28,7 @@ type MockUser = {
 type MembershipRow = {
   organization_id: string;
   status: "active" | "suspended" | "removed";
-  created_at: string;
+  joined_at: string;
 };
 
 type MockError = { status?: number; message?: string } | null;
@@ -36,6 +36,43 @@ type MockError = { status?: number; message?: string } | null;
 // Model the real HTTP lifecycle: getCookie reads request cookies only, while
 // setCookie/deleteCookie mutate response state and are not visible to getCookie
 // during the same request.
+// ── Schema guard ─────────────────────────────────────────────────────────────
+// Reads the real column list straight out of the migration that owns the table,
+// so the mock cannot drift from the live schema.
+function schemaColumns(table: string): Set<string> {
+  const migrationsDir = path.resolve(process.cwd(), "supabase/migrations");
+  const createTable = new RegExp(
+    `CREATE TABLE (?:IF NOT EXISTS )?public\\.${table}\\s*\\(([\\s\\S]*?)\\n\\);`,
+  );
+
+  for (const file of fs.readdirSync(migrationsDir).sort()) {
+    const match = fs.readFileSync(path.join(migrationsDir, file), "utf-8").match(createTable);
+    if (!match) continue;
+
+    return new Set(
+      match[1]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("--"))
+        .map((line) => line.split(/\s+/)[0])
+        .filter((column) => /^[a-z_]+$/.test(column)),
+    );
+  }
+
+  throw new Error(`No migration defines public.${table}`);
+}
+
+function assertColumnsExist(table: string, columns: string[]): void {
+  const known = schemaColumns(table);
+  const unknown = columns.filter((column) => column !== "*" && !known.has(column));
+
+  if (unknown.length > 0) {
+    throw new Error(
+      `column ${table}.${unknown[0]} does not exist (schema has: ${[...known].join(", ")})`,
+    );
+  }
+}
+
 const requestCookies = new Map<string, string>();
 const responseSetCookies = new Map<string, string>();
 const setCookieCalls: string[] = [];
@@ -65,7 +102,7 @@ function resetScenario() {
     {
       organization_id: "org-1",
       status: "active",
-      created_at: "2026-09-04T00:00:00.000Z",
+      joined_at: "2026-09-04T00:00:00.000Z",
     },
   ];
 
@@ -133,14 +170,21 @@ mock.module("@/lib/supabase/server", () => ({
     },
   }),
   supabaseAdmin: {
-    from: () => ({
-      select: () => ({
+    from: (table: string) => ({
+      select: (columns: string) => ({
         eq: () => ({
           in: () => ({
-            order: async () => ({
-              data: membershipRows,
-              error: membershipError,
-            }),
+            order: async (orderColumn: string) => {
+              // Guard against querying columns that do not exist in the live schema.
+              // The previous permissive mock accepted any column name, so
+              // `memberships.created_at` (the real column is `joined_at`) passed
+              // every test and only failed against the production database.
+              assertColumnsExist(table, [
+                ...columns.split(",").map((column) => column.trim()),
+                orderColumn,
+              ]);
+              return { data: membershipRows, error: membershipError };
+            },
           }),
         }),
       }),
@@ -220,7 +264,7 @@ describe("sign-in flow runtime", () => {
       {
         organization_id: "org-1",
         status: "removed",
-        created_at: "2026-09-04T00:00:00.000Z",
+        joined_at: "2026-09-04T00:00:00.000Z",
       },
     ];
 
@@ -239,7 +283,7 @@ describe("sign-in flow runtime", () => {
       {
         organization_id: "org-1",
         status: "suspended",
-        created_at: "2026-09-04T00:00:00.000Z",
+        joined_at: "2026-09-04T00:00:00.000Z",
       },
     ];
     requestCookies.set(COOKIE_ACCESS_TOKEN, "access-token");
