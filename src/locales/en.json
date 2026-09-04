@@ -889,5 +889,24 @@
       "title": "Could not load the team",
       "body": "Something went wrong. Try again."
     }
+  },
+  "onboarding": {
+    "title": "Create your business",
+    "subtitle": "APSA needs one business workspace before you can start selling.",
+    "nameLabel": "Business name",
+    "namePlaceholder": "Angkor Coffee",
+    "nameHint": "This is what your team and your customers will see.",
+    "slugLabel": "Business address",
+    "slugPlaceholder": "angkor-coffee",
+    "slugHint": "Lowercase letters, numbers and hyphens. Used in your APSA links.",
+    "submit": "Create business",
+    "submitting": "Creating your business",
+    "errors": {
+      "nameRequired": "Enter your business name.",
+      "slugRequired": "Enter a business address.",
+      "slugFormat": "Use 3 to 63 characters: lowercase letters, numbers and hyphens only.",
+      "slugTaken": "That business address is already taken. Please choose another one.",
+      "generic": "We could not create your business right now. Please try again."
+    }
   }
 }
