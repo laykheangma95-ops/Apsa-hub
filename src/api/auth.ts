@@ -230,23 +230,23 @@ export const signInFn = createServerFn()
       return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
     }
 
+    const authenticatedSession: ServerSession = {
+      userId: authData.session.user.id,
+      email: authData.session.user.email ?? "",
+      emailVerified: Boolean(authData.session.user.email_confirmed_at),
+      accessToken: authData.session.access_token,
+    };
+
+    // Cookies written in this response are for subsequent requests. Do not call
+    // getSessionFn() here: it reads only the incoming request Cookie header and
+    // therefore cannot observe cookies that were just set in this same request.
     await writeSessionCookies(
       authData.session.access_token,
       authData.session.refresh_token,
     );
 
-    const session = await getSessionFn();
-    if (!session) {
-      await clearSessionCookies();
-      return {
-        ok: false,
-        code: "unexpected_error",
-        message: "Sign-in succeeded but the APSA session could not be established.",
-      };
-    }
-
     try {
-      const routeResult = await resolveAuthenticatedRoute(session);
+      const routeResult = await resolveAuthenticatedRoute(authenticatedSession);
       return {
         ok: true,
         redirectTo: routeResult.ok ? "/app" : routeResult.redirect,
@@ -261,7 +261,6 @@ export const signInFn = createServerFn()
             : "Sign-in succeeded but APSA could not load your access state.",
       };
     }
-
   });
 
 // ── signUpFn ──────────────────────────────────────────────────────────────────
