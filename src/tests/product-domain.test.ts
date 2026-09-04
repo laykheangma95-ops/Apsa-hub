@@ -556,20 +556,19 @@ describe("Test 15: No fuzzy barcode / SKU matching", () => {
 });
 
 // ── Test 16: Existing Product and POS routes still render ─────────────────────
-// (note: after the mock-fallback fix, getPosProducts() returns mocks only for
-//  UnauthorizedError — the test environment produces exactly that because there
-//  is no active session, so this test still passes unchanged)
-
+// In bun test, calling a TanStack Start server function without the HTTP runtime
+// throws an error containing "No Start context" (not UnauthorizedError). The
+// isDemoModeError guard matches this TanStack runtime-absent error and returns
+// mock data. UnauthorizedError is NOT in the fallback — it propagates.
 
 describe("Test 16: Existing Product and POS routes still render (structural guard)", () => {
   it("getPosProducts falls back to mock products when Supabase is not configured", async () => {
-    // This tests the fallback path in src/lib/api/index.ts
+    // This tests the fallback path in src/lib/api/index.ts.
+    // In bun test the TanStack Start server function throws "No Start context",
+    // which isDemoModeError recognises as a test-runtime-absent condition and
+    // returns mock data. UnauthorizedError is NOT part of this path.
     const { getPosProducts } = await import("../lib/api/index");
-    // When the server function import fails (e.g., in test environment without
-    // a Supabase session), getPosProducts returns mock data.
     const result = await getPosProducts();
-    // In the test environment (no session), it falls back to mock products.
-    // Mock products have a numeric stock value.
     expect(Array.isArray(result)).toBe(true);
     expect(result.length).toBeGreaterThan(0);
     // Each product has the required UI-type fields
@@ -819,8 +818,11 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     await expect(getPosProducts()).rejects.toThrow(/products\.read/);
   });
 
-  it("getProducts() falls back to mock data for UnauthorizedError (demo / no-session)", async () => {
-    // UnauthorizedError = no active session — expected in development without auth.
+  it("getProducts() propagates UnauthorizedError — auth failure must surface, not hide behind mocks", async () => {
+    // UnauthorizedError means no valid session. A real auth/backend outage can
+    // produce this in production, so it must propagate as an error — not silently
+    // return mock products. Only the TanStack "No Start context" error (impossible
+    // in production) is allowed to trigger mock fallback.
     const noSessionError = Object.assign(new Error("Not authenticated"), {
       name: "UnauthorizedError",
     });
@@ -832,14 +834,7 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     }));
 
     const { getProducts } = await import("../lib/api/index");
-    const result = await getProducts();
-
-    expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThan(0);
-    for (const p of result) {
-      expect(typeof p.id).toBe("string");
-      expect(typeof p.nameKm).toBe("string");
-    }
+    await expect(getProducts()).rejects.toThrow("Not authenticated");
   });
 });
 
@@ -916,6 +911,129 @@ describe("Test 21: Genuine not-found returns null for barcode/SKU lookups", () =
     const { lookupByBarcode } = await import("../server/products/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
     const result = await lookupByBarcode(ctx, "");
+    expect(result).toBeNull();
+  });
+});
+
+// ── Test 22: Repository findProductById — PGRST116 vs real DB error ────────────
+//
+// The repository uses Supabase's .single() which returns either:
+//   error.code === "PGRST116" → no matching row (genuine not-found → null)
+//   error.code === anything else → a real DB/query failure (→ throw)
+//
+// This is tested as a pure-logic unit test (no DB required) by replicating the
+// decision logic, and via DB integration tests (skipped when no Supabase).
+// The API-layer tests (Tests 20 & 21) verify end-to-end propagation.
+
+describe("Test 22: Repository findProductById — PGRST116 vs real DB error", () => {
+  it("PGRST116 error code maps to null (genuine no-row, no throw)", () => {
+    // This is the decision logic inside findProductById after the fix.
+    // PGRST116 = "The result contains 0 rows" — Supabase returns this from .single()
+    // when no row matches the filter. It is NOT a query failure; return null.
+    const PGRST_NO_ROW = "PGRST116";
+
+    function resolveRow(
+      data: unknown,
+      error: { code?: string; message?: string } | null,
+    ): unknown {
+      if (error) {
+        if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+        throw new Error(`findProductById: ${(error as { message?: string }).message ?? "unknown"}`);
+      }
+      return data ?? null;
+    }
+
+    // Genuine no-row → null
+    expect(resolveRow(null, { code: "PGRST116", message: "The result contains 0 rows" })).toBeNull();
+    // Real DB error → throws
+    expect(() => resolveRow(null, { code: "23503", message: "connection timeout" })).toThrow(
+      "connection timeout",
+    );
+    // Row found → returns row
+    expect(resolveRow({ id: "p1" }, null)).toEqual({ id: "p1" });
+    // Null data with no error → null
+    expect(resolveRow(null, null)).toBeNull();
+  });
+
+  it("true product not-found returns null (DB integration)", async () => {
+    await requireSupabase(async () => {
+      const { findProductById } = await import("../server/products/repository");
+      const NONEXISTENT = "ffffffff-dead-beef-ffff-000000000001";
+      const result = await findProductById(ORG_A_ID, NONEXISTENT);
+      expect(result).toBeNull();
+    });
+  });
+});
+
+// ── Test 23: Barcode/SKU lookup — second-query DB failures propagate ──────────
+//
+// lookupByBarcode / lookupBySku call two sequential repository queries:
+//   1. findVariantByBarcode / findVariantBySku  (variant lookup)
+//   2. findProductById                           (parent product lookup)
+//
+// If the second query fails with a real DB error, the fixed findProductById
+// throws instead of returning null. The service propagates the throw.
+// At the API layer, lookupByBarcodeFn / lookupBySkuFn propagate it to the
+// client. This test covers the full API-layer propagation.
+
+describe("Test 23: Barcode/SKU lookup — second-query DB failure propagates as error", () => {
+  it("lookupProductByBarcode propagates when second-query (findProductById) fails", async () => {
+    // Simulate: variant found by barcode, but subsequent product fetch fails with
+    // a DB error (e.g., connection reset). Before the fix, findProductById masked
+    // this as null and the service returned null (silent failure). After the fix,
+    // the error propagates through the service and server function to the client.
+    const secondQueryError = new Error("findProductById: connection reset");
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => { throw secondQueryError; },
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductByBarcode } = await import("../lib/api/index");
+    await expect(lookupProductByBarcode("bc-123")).rejects.toThrow(
+      "findProductById: connection reset",
+    );
+  });
+
+  it("lookupProductBySku propagates when second-query (findProductById) fails", async () => {
+    const secondQueryError = new Error("findProductById: upstream timeout");
+
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => { throw secondQueryError; },
+    }));
+
+    const { lookupProductBySku } = await import("../lib/api/index");
+    await expect(lookupProductBySku("SKU-001")).rejects.toThrow(
+      "findProductById: upstream timeout",
+    );
+  });
+
+  it("lookupProductByBarcode returns null when server confirms genuine not-found (null)", async () => {
+    // Genuine not-found: both variant and product genuinely absent.
+    // The server function returns null; the API layer passes it through.
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductByBarcode } = await import("../lib/api/index");
+    const result = await lookupProductByBarcode("nonexistent");
+    expect(result).toBeNull();
+  });
+
+  it("lookupProductBySku returns null when server confirms genuine not-found (null)", async () => {
+    mock.module("@/api/products", () => ({
+      listProductsFn: async () => [],
+      lookupByBarcodeFn: async () => null,
+      lookupBySkuFn: async () => null,
+    }));
+
+    const { lookupProductBySku } = await import("../lib/api/index");
+    const result = await lookupProductBySku("nonexistent-sku");
     expect(result).toBeNull();
   });
 });

@@ -173,22 +173,23 @@ function mapServerProductToUi(p: ServerProductItem): Product {
 }
 
 /**
- * Returns true for errors that are expected in development / demo mode and
- * should trigger a mock-data fallback:
- *   - UnauthorizedError: no active session (running without auth in dev/demo).
+ * Returns true ONLY for errors that are structurally impossible in production:
  *   - TanStack Start runtime not found: server function called outside the HTTP
  *     runtime (e.g. bun test, Storybook). This never occurs in production
  *     because the server function middleware is always active there.
  *
- * All other errors — DB failures, ForbiddenError, 5xx responses — must
+ * UnauthorizedError (no session) is NOT a demo-mode fallback: a real auth or
+ * backend outage can produce it in production, so it must propagate as an error
+ * rather than be silently hidden behind mock data.
+ *
+ * All other errors — DB failures, ForbiddenError, UnauthorizedError, 5xx — must
  * propagate so production failures are visible rather than silently hidden
  * behind mock data.
  */
 function isDemoModeError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  // No active session — expected in development without auth.
-  if (err.name === "UnauthorizedError") return true;
   // TanStack Start server function called outside its runtime (test / Storybook).
+  // This is structurally impossible in production where the middleware is always active.
   if (err.message.includes("No Start context") || err.message.includes("AsyncLocalStorage")) {
     return true;
   }

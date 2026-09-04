@@ -31,6 +31,9 @@ import type {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const db = supabaseAdmin as any;
 
+/** PostgREST "The result contains 0 rows" — returned by .single() on a genuine no-row. */
+const PGRST_NO_ROW = "PGRST116";
+
 // ── Product Categories ─────────────────────────────────────────────────────────
 
 export async function listCategories(
@@ -62,8 +65,11 @@ export async function findCategoryById(
     .eq("organization_id", organizationId)
     .single();
 
-  if (error || !data) return null;
-  return data as ProductCategoryRow;
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`findCategoryById: ${(error as { message: string }).message}`);
+  }
+  return data ? (data as ProductCategoryRow) : null;
 }
 
 export async function createCategory(
@@ -134,8 +140,11 @@ export async function findProductById(
     .eq("organization_id", organizationId)
     .single();
 
-  if (error || !data) return null;
-  return data as ProductRow;
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`findProductById: ${(error as { message: string }).message}`);
+  }
+  return data ? (data as ProductRow) : null;
 }
 
 export async function createProduct(
@@ -203,8 +212,11 @@ export async function findVariantById(
     .eq("organization_id", organizationId)
     .single();
 
-  if (error || !data) return null;
-  return data as ProductVariantRow;
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`findVariantById: ${(error as { message: string }).message}`);
+  }
+  return data ? (data as ProductVariantRow) : null;
 }
 
 /** Exact-match SKU lookup — org-scoped. No fuzzy matching. */
