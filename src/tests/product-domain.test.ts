@@ -556,20 +556,19 @@ describe("Test 15: No fuzzy barcode / SKU matching", () => {
 });
 
 // ── Test 16: Existing Product and POS routes still render ─────────────────────
-// (note: after the mock-fallback fix, getPosProducts() returns mocks only for
-//  UnauthorizedError — the test environment produces exactly that because there
-//  is no active session, so this test still passes unchanged)
-
+// In bun test, calling a TanStack Start server function without the HTTP runtime
+// throws an error containing "No Start context" (not UnauthorizedError). The
+// isDemoModeError guard matches this TanStack runtime-absent error and returns
+// mock data. UnauthorizedError is NOT in the fallback — it propagates.
 
 describe("Test 16: Existing Product and POS routes still render (structural guard)", () => {
   it("getPosProducts falls back to mock products when Supabase is not configured", async () => {
-    // This tests the fallback path in src/lib/api/index.ts
+    // This tests the fallback path in src/lib/api/index.ts.
+    // In bun test the TanStack Start server function throws "No Start context",
+    // which isDemoModeError recognises as a test-runtime-absent condition and
+    // returns mock data. UnauthorizedError is NOT part of this path.
     const { getPosProducts } = await import("../lib/api/index");
-    // When the server function import fails (e.g., in test environment without
-    // a Supabase session), getPosProducts returns mock data.
     const result = await getPosProducts();
-    // In the test environment (no session), it falls back to mock products.
-    // Mock products have a numeric stock value.
     expect(Array.isArray(result)).toBe(true);
     expect(result.length).toBeGreaterThan(0);
     // Each product has the required UI-type fields
@@ -819,8 +818,11 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     await expect(getPosProducts()).rejects.toThrow(/products\.read/);
   });
 
-  it("getProducts() falls back to mock data for UnauthorizedError (demo / no-session)", async () => {
-    // UnauthorizedError = no active session — expected in development without auth.
+  it("getProducts() propagates UnauthorizedError — auth failure must surface, not hide behind mocks", async () => {
+    // UnauthorizedError means no valid session. A real auth/backend outage can
+    // produce this in production, so it must propagate as an error — not silently
+    // return mock products. Only the TanStack "No Start context" error (impossible
+    // in production) is allowed to trigger mock fallback.
     const noSessionError = Object.assign(new Error("Not authenticated"), {
       name: "UnauthorizedError",
     });
@@ -832,14 +834,7 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     }));
 
     const { getProducts } = await import("../lib/api/index");
-    const result = await getProducts();
-
-    expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThan(0);
-    for (const p of result) {
-      expect(typeof p.id).toBe("string");
-      expect(typeof p.nameKm).toBe("string");
-    }
+    await expect(getProducts()).rejects.toThrow("Not authenticated");
   });
 });
 
@@ -917,5 +912,137 @@ describe("Test 21: Genuine not-found returns null for barcode/SKU lookups", () =
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
     const result = await lookupByBarcode(ctx, "");
     expect(result).toBeNull();
+  });
+});
+
+type QueryResult = {
+  data: unknown;
+  error: { code?: string; message: string } | null;
+};
+
+function queryReturning(result: QueryResult) {
+  const query = {
+    select: () => query,
+    eq: () => query,
+    single: async () => result,
+    maybeSingle: async () => result,
+  };
+  return query;
+}
+
+async function withRepositoryDb<T>(
+  testDb: { from: (table: string) => ReturnType<typeof queryReturning> },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const { setProductRepositoryDbForTests } = await import("../server/products/repository");
+  const restore = setProductRepositoryDbForTests(testDb);
+  try {
+    return await fn();
+  } finally {
+    restore();
+  }
+}
+
+// ── Test 22: Real repository functions — PGRST116 vs DB errors ───────────────
+
+describe("Test 22: Real repository functions distinguish no-row from DB errors", () => {
+  const noRow: QueryResult = {
+    data: null,
+    error: { code: "PGRST116", message: "The result contains 0 rows" },
+  };
+  const dbError: QueryResult = {
+    data: null,
+    error: { code: "XX000", message: "connection reset" },
+  };
+
+  it("findProductById returns null only for PGRST116", async () => {
+    const { findProductById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findProductById(ORG_A_ID, FAKE_PRODUCT_ID)).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findProductById(ORG_A_ID, FAKE_PRODUCT_ID)).rejects.toThrow(
+        "findProductById: connection reset",
+      );
+    });
+  });
+
+  it("findCategoryById returns null only for PGRST116", async () => {
+    const { findCategoryById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findCategoryById(ORG_A_ID, "category-id")).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findCategoryById(ORG_A_ID, "category-id")).rejects.toThrow(
+        "findCategoryById: connection reset",
+      );
+    });
+  });
+
+  it("findVariantById returns null only for PGRST116", async () => {
+    const { findVariantById } = await import("../server/products/repository");
+    await withRepositoryDb({ from: () => queryReturning(noRow) }, async () => {
+      await expect(findVariantById(ORG_A_ID, "variant-id")).resolves.toBeNull();
+    });
+    await withRepositoryDb({ from: () => queryReturning(dbError) }, async () => {
+      await expect(findVariantById(ORG_A_ID, "variant-id")).rejects.toThrow(
+        "findVariantById: connection reset",
+      );
+    });
+  });
+});
+
+// ── Test 23: Real service lookup paths — second-query failures propagate ──────
+
+describe("Test 23: Real barcode/SKU service lookups propagate second-query DB failures", () => {
+  const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read"]);
+  const variant = { id: "variant-id", product_id: FAKE_PRODUCT_ID };
+
+  it("lookupByBarcode throws when the parent-product query fails", async () => {
+    const { lookupByBarcode } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: (table) => queryReturning(
+        table === "product_variants"
+          ? { data: variant, error: null }
+          : { data: null, error: { code: "XX000", message: "connection reset" } },
+      ),
+    }, async () => {
+      await expect(lookupByBarcode(ctx, "bc-123")).rejects.toThrow(
+        "findProductById: connection reset",
+      );
+    });
+  });
+
+  it("lookupBySku throws when the parent-product query fails", async () => {
+    const { lookupBySku } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: (table) => queryReturning(
+        table === "product_variants"
+          ? { data: variant, error: null }
+          : { data: null, error: { code: "XX000", message: "upstream timeout" } },
+      ),
+    }, async () => {
+      await expect(lookupBySku(ctx, "SKU-001")).rejects.toThrow(
+        "findProductById: upstream timeout",
+      );
+    });
+  });
+
+  it("lookupByBarcode returns null for a genuine barcode miss", async () => {
+    const { lookupByBarcode } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: () => queryReturning({ data: null, error: null }),
+    }, async () => {
+      await expect(lookupByBarcode(ctx, "nonexistent-barcode")).resolves.toBeNull();
+    });
+  });
+
+  it("lookupBySku returns null for a genuine SKU miss", async () => {
+    const { lookupBySku } = await import("../server/products/service");
+    await withRepositoryDb({
+      from: () => queryReturning({ data: null, error: null }),
+    }, async () => {
+      await expect(lookupBySku(ctx, "nonexistent-sku")).resolves.toBeNull();
+    });
   });
 });
