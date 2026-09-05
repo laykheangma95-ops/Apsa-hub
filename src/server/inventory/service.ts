@@ -17,12 +17,15 @@
  * Permission mapping by movement_type (PERMISSIONS_MATRIX.md §13):
  *   initial, restock  -> inventory.receive_stock
  *   manual_adjustment -> inventory.adjust (mandatory audit — see audit.ts)
- *   sale, return      -> inventory.adjust for now. The Order domain does not
- *                        exist yet; once it does, Order's own service will call
- *                        recordMovement() from a server-verified Order context
- *                        rather than requiring a human to hold inventory.adjust
- *                        for every sale. Not changing this without the Order
- *                        integration actually landing would be scope creep.
+ *   sale, return      -> inventory.adjust, and that is now the CORRECT answer
+ *                        rather than a placeholder. Order-driven sales and
+ *                        releases do not come through this function at all:
+ *                        transition_order_status_v1 (migration 026) writes them
+ *                        inside the order's own transaction, authorized by
+ *                        orders.confirm / orders.cancel. So anything reaching
+ *                        recordMovement() with 'sale' or 'return' is a HUMAN
+ *                        editing the ledger by hand, outside an order — which
+ *                        is exactly the authority inventory.adjust names.
  *
  * Never import this file from browser-bundled code.
  */

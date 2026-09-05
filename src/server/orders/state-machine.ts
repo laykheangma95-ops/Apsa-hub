@@ -41,11 +41,13 @@
  * all three require the Payment Records domain (Phase 8) to mean anything, and
  * a status that no code can reach is a status that lies to whoever reads it.
  *
- * ── FUTURE INVENTORY TRIGGER POINT ───────────────────────────────────────────
+ * ── INVENTORY INTEGRATION POINT (WIRED) ──────────────────────────────────────
  *
- * See STOCK_CONSUMING_TRANSITION / STOCK_RELEASING_TRANSITION below. Nothing in
- * this phase calls the Inventory domain; the point is identified, exported and
- * asserted by tests so the integration lands in exactly one place.
+ * See STOCK_CONSUMING_TRANSITION / STOCK_RELEASING_TRANSITION below. Both are
+ * now implemented — not here and not in the service, but inside
+ * transition_order_status_v1 (migration 026), so the status change and the
+ * ledger movements it implies commit together or not at all. These constants
+ * remain the single, testable description of WHICH transitions move stock.
  */
 
 // ── Status vocabularies (must match migration 023's enums exactly) ────────────
@@ -159,10 +161,12 @@ export const TERMINAL_LIFECYCLE_STATUSES: readonly OrderLifecycleStatus[] = [
   "cancelled",
 ];
 
-// ── The future Inventory integration point ────────────────────────────────────
+// ── The Inventory integration point (wired — migration 026) ───────────────────
 //
 // Exported as data rather than described only in prose so that a test can
-// assert it, and so the integration has one unambiguous place to attach.
+// assert it, and so the integration has exactly one place it attaches. Nothing
+// in TypeScript reads these to decide what to write: the database does the
+// writing. They are the specification the SQL is checked against.
 
 /**
  * The transition at which an order commits stock.
@@ -182,37 +186,62 @@ export const TERMINAL_LIFECYCLE_STATUSES: readonly OrderLifecycleStatus[] = [
  * else. It is also the one transition both channels share: a POS sale confirms
  * at checkout, a chat order when the merchant accepts it.
  *
- * NOT WIRED IN THIS PHASE. When it is, confirmOrder() writes one
- * inventory_movements row per line (movement_type 'sale', quantity_delta
- * -quantity, reference_type 'order', reference_id the order id) in the same
- * transaction as the status change.
+ * IMPLEMENTED IN THE DATABASE (migration 026). transition_order_status_v1
+ * writes one inventory_movements row per line — movement_type 'sale',
+ * quantity_delta -order_items.quantity, reference ('order_item',
+ * order_items.id) — in the same transaction as the status change. It is
+ * deliberately not written from TypeScript: a second call from the service
+ * could crash between the two writes and leave a confirmed order with
+ * untouched stock, with no way to tell afterwards which of the two is right.
+ *
+ * The reference is the LINE, not the order, because one order may contain two
+ * lines of the same variant, and an order-level reference would make migration
+ * 021's idempotency index swallow the second one.
  */
 export const STOCK_CONSUMING_TRANSITION = {
   axis: "lifecycle",
   from: "draft",
   to: "confirmed",
-  plannedMovementType: "sale",
-  implemented: false,
+  movementType: "sale",
+  /** Negative delta: units leave. Magnitude is the persisted order_items.quantity. */
+  deltaSign: -1,
+  referenceType: "order_item",
+  implemented: true,
+  /** Where the write actually happens — not the service, not the repository. */
+  implementedIn: "supabase/migrations/026_order_inventory_integration.sql",
+  /** The Order permission that authorizes it. inventory.adjust is NOT required. */
+  permission: "orders.confirm",
 } as const;
 
 /**
  * The mirror of the above: cancelling a confirmed order releases the units it
- * was holding. Migration 021's idempotency index already keys on
- * (organization_id, variant_id, movement_type, reference_type, reference_id),
- * so this 'return' movement coexists with the original 'sale' for the same
- * order rather than colliding with it.
+ * was holding. Migration 021's idempotency index keys on (organization_id,
+ * variant_id, movement_type, reference_type, reference_id), so this 'return'
+ * movement coexists with the original 'sale' for the same line rather than
+ * colliding with it — the ledger keeps both, because a compensating entry is
+ * not an erasure.
  *
  * A draft -> cancelled cancellation releases nothing, because a draft never
- * consumed anything.
+ * consumed anything. That is not a special case in the SQL: it simply matches
+ * neither branch.
  *
- * NOT WIRED IN THIS PHASE.
+ * IMPLEMENTED IN THE DATABASE (migration 026), and only for lines that really
+ * did consume stock — an order confirmed before that migration shipped has no
+ * 'sale' rows, and inventing a restock for it would create units that never
+ * existed.
  */
 export const STOCK_RELEASING_TRANSITION = {
   axis: "lifecycle",
   from: "confirmed",
   to: "cancelled",
-  plannedMovementType: "return",
-  implemented: false,
+  movementType: "return",
+  /** Positive delta: units come back. Magnitude is the persisted order_items.quantity. */
+  deltaSign: 1,
+  referenceType: "order_item",
+  implemented: true,
+  implementedIn: "supabase/migrations/026_order_inventory_integration.sql",
+  /** The Order permission that authorizes it. inventory.adjust is NOT required. */
+  permission: "orders.cancel",
 } as const;
 
 // ── Query helpers ─────────────────────────────────────────────────────────────

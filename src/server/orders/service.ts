@@ -30,13 +30,23 @@
  * arithmetic occurs on any monetary value in this file — the only arithmetic is
  * in SQL, on BIGINTs.
  *
- * ── FUTURE INVENTORY TRIGGER POINT ───────────────────────────────────────────
+ * ── INVENTORY INTEGRATION (WIRED, AND DELIBERATELY NOT FROM HERE) ────────────
  *
- * transitionLifecycleStatus() to `confirmed` is where stock will be consumed,
- * and to `cancelled` from `confirmed` is where it will be released. Both are
- * marked inline below and exported as data from ./state-machine
- * (STOCK_CONSUMING_TRANSITION / STOCK_RELEASING_TRANSITION). Nothing in this
- * phase calls the Inventory domain.
+ * transitionLifecycleStatus() to `confirmed` consumes stock, and from
+ * `confirmed` to `cancelled` releases it. Neither writes the ledger from this
+ * file. Both movements are written by transition_order_status_v1 (migration
+ * 026) inside the SAME transaction as the status change, because the failure
+ * this prevents has no recovery: an application that transitions the order and
+ * then calls the Inventory domain can crash between the two calls and leave a
+ * confirmed order whose stock never moved, with nothing in either record to say
+ * which one is wrong.
+ *
+ * This file therefore does NOT import @/server/inventory. That is an
+ * authorization property as much as a structural one — going through
+ * inventory/service.ts would demand `inventory.adjust` from every cashier who
+ * confirms a sale. The human action is the order transition (orders.confirm /
+ * orders.cancel); the movement is its trusted consequence. Manual stock
+ * adjustments keep their own permission and their mandatory audit, untouched.
  *
  * Never import this file from browser-bundled code.
  */
@@ -418,15 +428,20 @@ function transitionFailureToError(result: { status: string; current?: string }):
 /**
  * Move the order's lifecycle status.
  *
- * *** FUTURE INVENTORY TRIGGER POINT ***
- *   to === "confirmed"  → consume stock (one 'sale' movement per line)
- *   from "confirmed" to "cancelled" → release it (one 'return' movement per line)
- * Neither is wired in this phase. See ./state-machine
- * (STOCK_CONSUMING_TRANSITION / STOCK_RELEASING_TRANSITION) and migration 023.
- * When implemented, the movements must be written in the SAME transaction as
- * the status change — i.e. inside transition_order_status_v1, not as a second
- * call from here, or a crash between the two would leave stock and orders
- * disagreeing with no way to tell which is right.
+ * *** INVENTORY CONSEQUENCE (written by the DB, in the same transaction) ***
+ *   draft -> confirmed              one 'sale'   movement per line (-quantity)
+ *   confirmed -> cancelled          one 'return' movement per consumed line (+quantity)
+ *   draft -> cancelled              nothing: a draft never consumed anything
+ *
+ * The quantity is always the PERSISTED order_items.quantity. There is no
+ * quantity parameter on this function, on the repository call, or on the RPC —
+ * a caller has no way to state how much stock to move, only which order to
+ * transition. Stock availability is not checked: APSA's ledger permits a
+ * negative derived balance and this phase deliberately does not introduce a
+ * reservation or oversell policy (see migration 026).
+ *
+ * See ./state-machine (STOCK_CONSUMING_TRANSITION / STOCK_RELEASING_TRANSITION)
+ * for the authoritative description, and migration 026 for the implementation.
  */
 export async function transitionLifecycleStatus(
   ctx: AuthorizationContext,
@@ -461,25 +476,20 @@ export async function transitionLifecycleStatus(
 
   if (result.status !== "success") throw transitionFailureToError(result);
 
-  if (to === "cancelled") {
-    await bestEffortAudit(ctx, {
-      action: "orders.cancel",
-      resourceType: "orders",
-      resourceId: orderId,
-      beforeJson: { lifecycle_status: from },
-      afterJson: { lifecycle_status: to },
-      ...(reason ? { reason } : {}),
-    });
-  } else {
-    await bestEffortAudit(ctx, {
-      action: "orders.update",
-      resourceType: "orders",
-      resourceId: orderId,
-      beforeJson: { lifecycle_status: from },
-      afterJson: { lifecycle_status: to },
-      ...(reason ? { reason } : {}),
-    });
-  }
+  // The RPC reports how many inventory movements its transaction wrote. Record
+  // it on the order's audit entry so the stock consequence of a lifecycle
+  // change is legible from the order's own trail, without inventing a second
+  // audit action for something no human performed.
+  const stockMovements = result.stock_movements ?? 0;
+
+  await bestEffortAudit(ctx, {
+    action: to === "cancelled" ? "orders.cancel" : "orders.update",
+    resourceType: "orders",
+    resourceId: orderId,
+    beforeJson: { lifecycle_status: from },
+    afterJson: { lifecycle_status: to, inventory_movements_written: stockMovements },
+    ...(reason ? { reason } : {}),
+  });
 
   return requireDetail(ctx.organizationId, orderId);
 }

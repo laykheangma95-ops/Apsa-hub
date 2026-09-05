@@ -119,6 +119,15 @@ export interface TransitionRpcResult {
   axis?: string;
   from?: string;
   to?: string;
+  /**
+   * How many inventory_movements rows the transition wrote in its own
+   * transaction (migration 026). Non-zero only for the two stock transitions:
+   * draft -> confirmed ('sale' per line) and confirmed -> cancelled ('return'
+   * per previously consumed line). Reported for the audit trail — it is an
+   * OUTCOME of the transaction, not an instruction to it, and nothing in
+   * TypeScript can influence it.
+   */
+  stock_movements?: number;
 }
 
 /** Filter/pagination options for listing orders. All optional; all org-scoped by the repository. */
