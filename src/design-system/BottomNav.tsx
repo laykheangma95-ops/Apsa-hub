@@ -52,7 +52,8 @@ interface BottomNavProps {
 const sheetActionClass =
   "press flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
-const sheetSectionTitleClass = "text-caption px-1 pb-2 font-medium tracking-[0.02em] text-text-muted";
+const sheetSectionTitleClass =
+  "text-caption px-1 pb-2 font-medium tracking-[0.02em] text-text-muted";
 
 const itemClass =
   "press-tactile tap-target group relative flex flex-1 flex-col items-center justify-center gap-0.5 px-1 py-1.5 text-text-secondary";
@@ -112,7 +113,7 @@ export function BottomNav({
     setMoreOpen(false);
   }
 
-  function goTo(to: "/app" | "/app/inbox" | "/app/pos" | "/app/team") {
+  function goTo(to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") {
     closeAllSheets();
     void navigate({ to });
   }
@@ -128,7 +129,10 @@ export function BottomNav({
     <>
       <nav
         aria-label={t("nav.primary")}
-        className={cn("glass-bar fixed inset-x-0 bottom-0 z-40 hidden border-t border-[var(--glass-border)] pb-[env(safe-area-inset-bottom)] lg:block", className)}
+        className={cn(
+          "glass-bar fixed inset-x-0 bottom-0 z-40 hidden border-t border-[var(--glass-border)] pb-[env(safe-area-inset-bottom)] lg:block",
+          className,
+        )}
       >
         <div className="relative mx-auto flex h-[var(--nav-height)] max-w-[560px] items-stretch px-1">
           {tabs.left.map((tab) => (
@@ -242,7 +246,7 @@ interface MobileTabProps {
   resolveOpen: boolean;
   salesOpen: boolean;
   moreOpen: boolean;
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team") => void;
+  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
   onOpenResolve: () => void;
   onOpenSales: () => void;
   onOpenMore: () => void;
@@ -318,13 +322,7 @@ function MobileTab({
   return (
     <button
       type="button"
-      onClick={
-        tab.id === "resolve"
-          ? onOpenResolve
-          : tab.id === "sales"
-            ? onOpenSales
-            : onOpenMore
-      }
+      onClick={tab.id === "resolve" ? onOpenResolve : tab.id === "sales" ? onOpenSales : onOpenMore}
       className={buttonClass}
       aria-expanded={tab.id === "resolve" ? resolveOpen : tab.id === "sales" ? salesOpen : moreOpen}
       aria-label={
@@ -354,7 +352,7 @@ function SheetGroupList({
   onRoute,
 }: {
   groups: readonly MobileNavSheetGroup[];
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team") => void;
+  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
 }) {
   const { t } = useTranslation();
 
@@ -379,7 +377,7 @@ function SheetAction({
   onRoute,
 }: {
   action: MobileNavActionConfig;
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team") => void;
+  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
 }) {
   const { t } = useTranslation();
   const disabled = action.availability === "coming-soon";
@@ -479,10 +477,7 @@ function RecentOrders({
       {loading ? (
         <div className="mt-3 space-y-2">
           {[0, 1, 2].map((index) => (
-            <div
-              key={index}
-              className="h-[72px] animate-pulse rounded-2xl bg-surface-secondary"
-            />
+            <div key={index} className="h-[72px] animate-pulse rounded-2xl bg-surface-secondary" />
           ))}
         </div>
       ) : null}

@@ -404,7 +404,14 @@
     "accepted": "Courier accepted",
     "picked_up": "Picked up",
     "active": "Active",
-    "invited": "Invite pending"
+    "invited": "Invite pending",
+    "draft": "Draft",
+    "completed": "Completed",
+    "unpaid": "Unpaid",
+    "pending": "Pending",
+    "unfulfilled": "Not yet fulfilled",
+    "processing": "Processing",
+    "fulfilled": "Fulfilled"
   },
   "channel": {
     "facebook": "Facebook",
@@ -749,6 +756,83 @@
       "body": "Choose a courier. APSA records it for you — no courier is contacted.",
       "submit": "Create delivery",
       "done": "Delivery arranged"
+    },
+    "lifecycle": "Status",
+    "axis": {
+      "lifecycle": "Order",
+      "payment": "Payment",
+      "fulfillment": "Fulfilment"
+    },
+    "historyEntry": "{{axis}}: {{status}}",
+    "confirmOrder": "Confirm order",
+    "confirming": "Confirming…",
+    "confirmedNotice": "Order confirmed",
+    "cancelling": "Cancelling…",
+    "cancelledNotice": "Order cancelled",
+    "stockConsequence_one": "{{count}} unit moved in stock for this order",
+    "stockConsequence_other": "{{count}} units moved in stock for this order",
+    "cancelSheet": {
+      "title": "Cancel this order?",
+      "body": "If stock was already committed, it is put back automatically.",
+      "reason": "Reason (optional)",
+      "submit": "Cancel order"
+    },
+    "error": {
+      "stale": {
+        "title": "This order just changed",
+        "body": "Someone updated it while you were viewing. Refresh to see the latest status."
+      },
+      "invalid": {
+        "title": "That's not possible right now",
+        "body": "This order can't move to that status from where it is."
+      }
+    }
+  },
+  "orderList": {
+    "title": "Orders",
+    "subtitle": "Every order, newest first",
+    "newOrder": "New order",
+    "empty": {
+      "title": "No orders yet",
+      "body": "Orders you create will show up here."
+    },
+    "error": {
+      "title": "Orders didn't load",
+      "body": "Check your connection and try again."
+    },
+    "hasCustomer": "Linked customer",
+    "noCustomer": "No customer"
+  },
+  "orderCreate": {
+    "title": "New order",
+    "source": "Source",
+    "product": "Product",
+    "searchProducts": "Search products",
+    "noProducts": "No product matched that search.",
+    "change": "Change product",
+    "quantity": "Quantity",
+    "unitPrice": "Unit price",
+    "discount": "Discount",
+    "customer": "Customer",
+    "customerNone": "No customer",
+    "chooseCustomer": "Choose customer",
+    "searchCustomers": "Search customers",
+    "noCustomers": "No customer matched that search.",
+    "noPhone": "Phone not shown",
+    "subtotal": "Subtotal",
+    "total": "Estimated total",
+    "totalNote": "The final price is set by the server when the order is created.",
+    "submit": "Create order",
+    "creating": "Creating order",
+    "created": "Order {{code}} created",
+    "createdBody": "It was created as a draft. Confirm it to commit stock.",
+    "error": {
+      "title": "The order wasn't created",
+      "body": "Nothing was saved. Try again."
+    },
+    "permission": {
+      "title": "You can't apply a discount",
+      "body": "Ask an owner or manager to apply a discount."
     }
   },
   "delivery": {

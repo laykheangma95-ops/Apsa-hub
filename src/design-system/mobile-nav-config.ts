@@ -37,7 +37,7 @@ export interface MobileNavActionConfig {
   descriptionKey: string;
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
-  to?: "/app" | "/app/inbox" | "/app/pos" | "/app/team";
+  to?: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders";
 }
 
 export interface MobileNavSheetGroup {
@@ -137,7 +137,8 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           labelKey: "nav.salesActions.orders.label",
           descriptionKey: "nav.salesActions.orders.description",
           icon: Package,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/orders",
         },
         {
           id: "payments",

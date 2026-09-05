@@ -146,7 +146,16 @@ export type StatusKey =
   | "low_stock"
   | "out_of_stock"
   | "active"
-  | "invited";
+  | "invited"
+  // Production Order domain (src/server/orders/state-machine.ts). Distinct
+  // vocabulary from the mock statuses above — see that file for why.
+  | "draft"
+  | "completed"
+  | "unpaid"
+  | "pending"
+  | "unfulfilled"
+  | "processing"
+  | "fulfilled";
 
 export type CompanionColor = "nilo" | "minto" | "vela" | "suri" | "luma";
 
@@ -241,15 +250,36 @@ export interface OrderItem {
   variant?: string;
   quantity: number;
   unitPrice: Money;
+  /** Present on the production path — the variant DB UUID. */
+  variantId?: string;
+  /** Present on the production path — catalog SKU snapshot at sale time. */
+  sku?: string | null;
+  /** Present on the production path — server-computed line total. */
+  lineTotal?: Money;
 }
 
+/**
+ * `pending_payment` .. `partially_refunded` are the legacy mock vocabulary.
+ * `unpaid` / `pending` are the production Order domain's payment axis
+ * (src/server/orders/state-machine.ts) — a different, narrower vocabulary
+ * kept alongside the mock one rather than merged into it (see that file for
+ * why "pending_payment" was not adopted as-is).
+ */
 export type PaymentStatus =
   | "pending_payment"
   | "partially_paid"
   | "paid"
   | "failed"
   | "refunded"
-  | "partially_refunded";
+  | "partially_refunded"
+  | "unpaid"
+  | "pending";
+
+/**
+ * `confirmed` .. `returned` are the legacy mock vocabulary (courier-granularity
+ * states). `unfulfilled` / `processing` / `fulfilled` are the production
+ * Order domain's fulfillment axis — see src/server/orders/state-machine.ts.
+ */
 export type FulfillmentStatus =
   | "confirmed"
   | "packing"
@@ -257,15 +287,33 @@ export type FulfillmentStatus =
   | "in_transit"
   | "delivered"
   | "cancelled"
-  | "returned";
+  | "returned"
+  | "unfulfilled"
+  | "processing"
+  | "fulfilled";
+
+/** The production Order domain's lifecycle axis — absent from the mock model. */
+export type OrderLifecycleStatus = "draft" | "confirmed" | "completed" | "cancelled";
 
 /** Where the order came from. POS and manual entry are not social channels. */
 export type OrderSource = Channel | "manual";
 
+/** One entry in an order's immutable status-change trail (production path only). */
+export interface OrderStatusHistoryEntry {
+  id: string;
+  axis: "lifecycle" | "payment" | "fulfillment";
+  fromStatus: string;
+  toStatus: string;
+  changedBy: string | null;
+  reason: string | null;
+  changedAt: string;
+}
+
 export interface Order {
   id: string;
   code: string;
-  customerId: string;
+  /** null on the production path when the order has no linked customer. */
+  customerId: string | null;
   channel: Channel;
   items: OrderItem[];
   subtotal: Money;
@@ -280,6 +328,12 @@ export interface Order {
   staffId?: string;
   /** mock permission flag — some orders are not visible to this role */
   restricted?: boolean;
+  /** Present on the production path — the order's lifecycle-axis status. */
+  lifecycleStatus?: OrderLifecycleStatus;
+  /** Present on the production path — the order's immutable status trail. */
+  statusHistory?: OrderStatusHistoryEntry[];
+  /** Present on the production path — the DB UUID of the location, if any. */
+  locationId?: string | null;
 }
 
 /** Business-language event kinds. Never raw machine names in the UI. */
@@ -317,19 +371,10 @@ export interface PaymentRecord {
 }
 
 export type DeliveryStatus =
-  | "requested"
-  | "accepted"
-  | "picked_up"
-  | "in_transit"
-  | "delivered"
-  | "failed"
-  | "cancelled";
+  "requested" | "accepted" | "picked_up" | "in_transit" | "delivered" | "failed" | "cancelled";
 
 export type DeliveryFailureReason =
-  | "customer_unavailable"
-  | "wrong_address"
-  | "customer_rejected"
-  | "courier_issue";
+  "customer_unavailable" | "wrong_address" | "customer_rejected" | "courier_issue";
 
 export interface DeliveryEvent {
   id: string;
@@ -382,7 +427,6 @@ export interface CustomerEvent {
   context?: string;
 }
 
-
 export type MessageDirection = "inbound" | "outbound" | "system";
 export type DeliveryState = "sending" | "sent" | "delivered" | "read" | "failed";
 
@@ -395,12 +439,7 @@ export interface Message {
 }
 
 export type ConversationStatus =
-  | "unread"
-  | "needs_reply"
-  | "follow_up"
-  | "waiting_customer"
-  | "order_created"
-  | "closed";
+  "unread" | "needs_reply" | "follow_up" | "waiting_customer" | "order_created" | "closed";
 
 export interface Conversation {
   id: string;
@@ -443,7 +482,6 @@ export interface WorkspaceSummary {
   role: StaffRole;
   active: boolean;
 }
-
 
 export type PaymentMethod = "cash" | "khqr" | "bank_transfer" | "cod";
 

@@ -159,12 +159,46 @@ export async function getCustomer360(
   };
 }
 
+/**
+ * Lightweight, PII-gated row for list contexts (e.g. an order-create customer
+ * picker) that need a name and an id but not the full Customer 360 profile.
+ *
+ * Same gating rule as CustomerProfile above: phone is only ever populated for
+ * a caller holding customers.view_sensitive. This is enforced HERE, not in the
+ * UI — a browser role check would not be authorization (ARCHITECTURE.md:
+ * "Service/application layer is authoritative for authorization").
+ */
+export interface CustomerListItem {
+  id: string;
+  nameKm: string;
+  nameEn: string;
+  /** "" when the caller lacks customers.view_sensitive, or when none is on file. */
+  phone: string;
+  status: CustomerRow["status"];
+  /** Server-authoritative sensitive-field visibility flag — same meaning as CustomerProfile's. */
+  sensitiveVisible: boolean;
+}
+
+/** Pure mapper — kept separate from the DB call so the gating rule is unit-testable without a DB. */
+export function toCustomerListItem(row: CustomerRow, sensitiveVisible: boolean): CustomerListItem {
+  return {
+    id: row.id,
+    nameKm: row.display_name,
+    nameEn: row.display_name,
+    phone: sensitiveVisible ? (row.primary_phone ?? "") : "",
+    status: row.status,
+    sensitiveVisible,
+  };
+}
+
 export async function listCustomers(
   ctx: AuthorizationContext,
   opts: { limit?: number; offset?: number; status?: "active" | "archived" } = {},
-): Promise<CustomerRow[]> {
+): Promise<CustomerListItem[]> {
   ctx.require("customers.read");
-  return repo.listCustomers(ctx.organizationId, opts);
+  const rows = await repo.listCustomers(ctx.organizationId, opts);
+  const sensitiveVisible = ctx.can("customers.view_sensitive");
+  return rows.map((row) => toCustomerListItem(row, sensitiveVisible));
 }
 
 export async function createCustomer(
@@ -237,12 +271,7 @@ export async function addCustomerNote(
     throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
   }
 
-  const note = await repo.createCustomerNote(
-    ctx.organizationId,
-    customerId,
-    ctx.userId,
-    trimmed,
-  );
+  const note = await repo.createCustomerNote(ctx.organizationId, customerId, ctx.userId, trimmed);
 
   return {
     id: note.id,
@@ -275,9 +304,7 @@ export async function addIdentityToCustomer(
   return repo.addCustomerIdentity(ctx.organizationId, customerId, input);
 }
 
-export async function exportCustomers(
-  ctx: AuthorizationContext,
-): Promise<CustomerRow[]> {
+export async function exportCustomers(ctx: AuthorizationContext): Promise<CustomerRow[]> {
   ctx.require("customers.export");
 
   // Mandatory audit — blocks the export if the audit record fails to persist.
