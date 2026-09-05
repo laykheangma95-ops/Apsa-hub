@@ -87,6 +87,88 @@
 
 ---
 
+### Cambodian Language Intent Engine Added (2026-09-05)
+
+Deterministic Khmer / romanized-Khmer / mixed-language intent detection for inbound
+customer messages. Domain layer only — no UI redesign, no provider calls, no order creation.
+
+| Area | Status | Files |
+|---|---|---|
+| Chat normalization (Khmer digits, emoji, repeats, fused scripts) | BUILT | `src/lib/intent/normalize.ts` |
+| Commerce lexicon (Khmer, romanized Khmer, English token groups) | BUILT | `src/lib/intent/lexicon.ts` |
+| Longest-match scanner + number classification | BUILT | `src/lib/intent/scan.ts` |
+| Multi-item grouping | BUILT | `src/lib/intent/items.ts` |
+| Confidence model, primary intent, suggested actions | BUILT | `src/lib/intent/detect.ts` |
+| Bounded multi-message context window | BUILT | `src/lib/intent/context.ts` |
+| Catalog variant resolution (never guesses) | BUILT | `src/lib/intent/catalog.ts` |
+| Module documentation | BUILT | `src/lib/intent/README.md` |
+| Suggested-action i18n keys (km + en) | ADDED | `src/locales/km.json`, `src/locales/en.json` — `conversation.intent.*` |
+| Cambodia-first test corpus (225 cases) | BUILT | `src/tests/fixtures/khmer-commerce-corpus.ts` |
+| Intent tests (284 tests) | PASSING | `src/tests/khmer-intent.test.ts` |
+
+**Design constraints honoured:** Khmer is first-class, not a translation layer. The
+customer's original message is never rewritten. Suggested actions are identifiers rendered
+through i18next — no hard-coded user-facing strings. `[Prepare order]` is surfaced only at
+sufficiently strong intent; interest, negation, change of mind, and hesitation suppress it.
+Phone numbers and addresses are flagged, never extracted or expanded. No payment or delivery
+execution is triggered.
+
+**Not wired into UI.** The Conversation screen is Lovable-owned; connecting the suggestion
+strip is a separate, coordinated step.
+
+---
+
+### Conversation Smart Actions + Conversation → Order Integration (2026-09-05)
+
+Wires the intent engine above into the production Conversation screen as a compact
+suggestion strip, and adds a new "Prepare Order" flow that drafts and confirms orders
+through the existing, unmodified production Order Domain. Payment domain untouched.
+
+| Area | Status | Files |
+|---|---|---|
+| Engine → Smart Action mapping, priority, customer-linkage override | BUILT | `src/lib/conversation/smart-actions.ts` |
+| Suggestion strip (1 primary + ≤2 secondary, near composer) | BUILT | `src/components/inbox/SmartActionStrip.tsx` |
+| Prepare Order review → Create Draft → Confirm (real Order Domain) / Create Order (mock, unchanged semantics) | BUILT | `src/components/inbox/PrepareOrderSheet.tsx` |
+| Conversation screen wiring (Smart Actions, Prepare Order, repeat-order lookup) | BUILT | `src/routes/app.inbox.$id.tsx` |
+| Order → Conversation provenance (`source_conversation_ref`, opaque, never a FK, never content) | BUILT | `supabase/migrations/030_order_conversation_source.sql`, `src/server/orders/{types,repository,service}.ts`, `src/api/orders.ts`, `src/lib/api/index.ts` |
+| Repeat-order lookup bridge (production customer) | ADDED | `src/lib/api/index.ts#getMostRecentRealOrderForCustomer` |
+| Smart Action + prepareOrder i18n keys (km + en) | ADDED | `src/locales/km.json`, `src/locales/en.json` — `conversation.intent.{stripTitleOne,stripTitleMany,actions.view_customer,actions.repeat_order,prompts}`, `conversation.prepareOrder.*` |
+| Integration tests (43 cases: mapping, prefill, security, provenance, regression) | PASSING | `src/tests/conversation-smart-actions.test.ts` |
+
+**Existing Message → Order flow (`CreateOrderSheet.tsx`, Lovable-owned) is completely
+untouched** — zero lines changed. Prepare Order is an additive surface, gated only by a
+Smart Action tap, so the original mock flow's behavior and regression risk are unaffected.
+
+**Design constraints honoured:** No parallel order logic — Prepare Order calls the same
+`createOrder`/`transitionLifecycleStatus` service functions POS and the real Order routes
+already use. No client-computed price, total, or stock consequence. A production draft can
+only be created when both the linked customer and every resolved product/variant are real
+UUIDs; otherwise (today: always, since Conversation itself has no production backend yet —
+see below) the existing mock `createOrder()` path runs unchanged. Catalog ambiguity is never
+guessed: 0 or 2+ matching products always require the merchant to pick or search. "Edit" on an
+already-created draft cancels it (a real, supported transition) rather than patching it, since
+the Order Domain deliberately has no arbitrary-update path.
+
+**Known gap, flagged rather than silently built around (CORRECTIONS.md §5.4):** the
+Conversation/Inbox domain has **no production backend** — `getConversation()` in
+`src/lib/api/index.ts` is 100% mock, with no server function, no UUID conversation ids, and no
+`isProductionId` branch of its own (unlike Customer/Product/Order, which all already have one).
+This phase does not build that backend — out of scope, and Conversation is Lovable-owned. The
+practical effect: every conversation's customer id is a mock id today, so the "production UUID
+Conversation" branch of the new code (real Order Domain calls, `source_conversation_ref`
+threading) is implemented and unit-tested against fabricated UUIDs, but is not yet reachable
+end-to-end from the live Conversation screen. It activates automatically, with no further
+changes needed here, once Inbox is productionized and starts emitting real conversation/customer
+ids — the same `isProductionId()` convention Customer 360 and the real Order/Delivery reads
+already use.
+
+**Owner:** Claude Code (this integration, the Order Domain provenance field). Lovable
+still owns the Conversation screen's visual design — this phase added one new compact
+strip and one new bottom sheet, matching existing design-system components, without
+touching Conversation's existing layout, copy, or the mock Message → Order flow.
+
+---
+
 ## PRODUCT / UX
 
 ---
@@ -167,17 +249,28 @@
 
 **Status:** `PARTIAL`
 
-**What exists today:** `CreateOrderSheet` component inside conversation view allows selecting products, quantities, setting discount, arranging delivery, and confirming order from within the inbox context. Mock API `createOrder` enforces an order approval limit (orders over $500 throw `permission_denied`).
+**What exists today:** Two parallel paths, deliberately kept separate. (1) The original
+`CreateOrderSheet` — Lovable-owned, single-item, mock `createOrder` only, untouched by this
+phase. (2) New: a Smart-Action-triggered `PrepareOrderSheet` that reads the Cambodian intent
+engine's suggestion, lets the merchant review/correct a multi-item draft, and creates it
+through the real production Order Domain (`createRealOrder` → `confirmRealOrder`) whenever the
+linked customer and every resolved product/variant are real UUIDs — falling back to the same
+mock `createOrder()` otherwise, so today (Conversation has no production backend yet) it behaves
+identically to path (1) for anyone who reaches it via a Smart Action.
 
-**Repository evidence:** `src/components/inbox/CreateOrderSheet.tsx`, `src/lib/api/index.ts#createOrder`, `src/lib/api/index.ts#ORDER_APPROVAL_LIMIT_CENTS`
+**Repository evidence:** `src/components/inbox/CreateOrderSheet.tsx` (unchanged),
+`src/components/inbox/PrepareOrderSheet.tsx`, `src/components/inbox/SmartActionStrip.tsx`,
+`src/lib/conversation/smart-actions.ts`, `src/lib/api/index.ts#createOrder` (mock),
+`src/lib/api/index.ts#createRealOrder`/`confirmRealOrder` (production), `src/lib/intent/`
+(Cambodian language intent detection, now wired into the Conversation screen)
 
 **Source-of-truth doc:** APSA_MASTER_PLAN.md (signature workflow: Message → Customer → Order → Payment → Delivery), MVP_ROADMAP.md Phase 12
 
-**Owner:** Claude Code (real order creation API, permission enforcement server-side); Lovable (Polish Pass)
+**Owner:** Claude Code (real order creation API, permission enforcement server-side, Smart Action integration); Lovable (Polish Pass, and `CreateOrderSheet`'s own visual design, untouched)
 
-**Dependencies:** Authentication, Order domain, Product/Inventory domain, Permission system
+**Dependencies:** Authentication, Order domain, Product/Inventory domain, Permission system, Conversation/Inbox production backend (not yet built — see the Smart Actions entry above)
 
-**Next action:** Claude Code — implement `POST /api/orders` with server-side permission check (not just mock limit), linked to conversation context and real inventory deduction.
+**Next action:** Productionize Conversation/Inbox (real conversation ids, real customer linkage) so the already-wired production branch of Prepare Order activates end-to-end. Until then, POS and the real Order routes remain the only way to exercise `createRealOrder` in practice.
 
 ---
 

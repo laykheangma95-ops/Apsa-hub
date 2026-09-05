@@ -534,6 +534,66 @@
       "payment": "Record payment",
       "delivery": "Arrange delivery",
       "view": "View order"
+    },
+    "intent": {
+      "label": "Suggested actions",
+      "detected": "Detected from the customer's message",
+      "needsProduct": "Confirm which product the customer means",
+      "actions": {
+        "prepare_order": "Prepare order",
+        "check_stock": "Check stock",
+        "send_price": "Send price",
+        "view_product": "View product",
+        "ask_quantity": "Ask quantity",
+        "ask_variant": "Ask which one",
+        "ask_address": "Ask address",
+        "delivery_info": "Delivery info",
+        "save_contact": "Save to customer",
+        "send_photo": "Send photo",
+        "confirm_change": "Confirm change",
+        "view_customer": "View customer",
+        "repeat_order": "Repeat order"
+      },
+      "stripTitleOne": "Suggested next action",
+      "stripTitleMany": "Suggested next actions",
+      "prompts": {
+        "quantity": "How many would you like?",
+        "variant": "Which one would you like — color or size?",
+        "address": "Could you share your delivery address?"
+      }
+    },
+    "prepareOrder": {
+      "title": "Prepare order",
+      "reviewTitle": "Review order",
+      "customer": "Customer",
+      "item": "Item {{index}}",
+      "remove": "Remove",
+      "changeProduct": "Change",
+      "searchProducts": "Search products",
+      "multipleMatches": "A few products match — choose one",
+      "noMatches": "No catalog match yet — search for the product",
+      "quantity": "Quantity",
+      "estimatedTotal": "Estimated total",
+      "estimatedNote": "Final pricing is confirmed by the server when the draft is created.",
+      "createDraft": "Create Draft Order",
+      "createOrder": "Create Order",
+      "creating": "Creating…",
+      "draftCreated": "Order {{code}} created",
+      "confirmOrder": "Confirm order",
+      "confirming": "Confirming…",
+      "confirmed": "Order confirmed",
+      "edit": "Edit",
+      "viewOrder": "View order",
+      "discardDraft": "Discard and edit again",
+      "resolveItemsFirst": "Choose a product for every item before creating the order",
+      "error": {
+        "title": "This order didn't go through",
+        "body": "Check the items and try again."
+      },
+      "permission": {
+        "title": "You can't create this order",
+        "body": "Ask an owner or manager for order permission."
+      }
     }
   },
   "createOrder": {
