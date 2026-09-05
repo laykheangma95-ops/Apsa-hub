@@ -15,6 +15,7 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { ConversationError, databaseError } from "./errors";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import type {
   ConversationRow,
@@ -34,10 +35,8 @@ const db = supabaseAdmin as any;
 export interface ListConversationsOptions {
   status?: ConversationStatusRow;
   provider?: ConversationProvider;
-  /** Matches on last_message_preview only — customer name/phone matching is done by the service layer. */
+  /** Bound SQL search across previews and non-sensitive customer display names. */
   previewQuery?: string;
-  /** Restrict to conversations linked to one of these customer ids (used by search). */
-  customerIds?: string[];
   limit?: number;
   /** Opaque cursor from a previous page's nextCursor. */
   cursor?: string;
@@ -63,8 +62,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * into a raw PostgREST `.or()` filter string below — a client could hand back
  * an arbitrary base64 payload, not necessarily one this server produced. Only
  * accept a decoded value that looks like the (timestamp, uuid) pair
- * encodeCursor actually produces; anything else is treated as "no cursor"
- * rather than trusted into a filter string.
+ * encodeCursor actually produces; invalid input is rejected before any filter construction.
  */
 function decodeCursor(cursor: string): { lastMessageAt: string; id: string } | null {
   try {
@@ -73,28 +71,16 @@ function decodeCursor(cursor: string): { lastMessageAt: string; id: string } | n
     if (sep === -1) return null;
     const lastMessageAt = raw.slice(0, sep);
     const id = raw.slice(sep + 1);
-    if (!ISO_TIMESTAMP_RE.test(lastMessageAt) || !UUID_RE.test(id)) return null;
+    if (
+      !ISO_TIMESTAMP_RE.test(lastMessageAt) ||
+      !Number.isFinite(Date.parse(lastMessageAt)) ||
+      !UUID_RE.test(id)
+    )
+      return null;
     return { lastMessageAt, id };
   } catch {
     return null;
   }
-}
-
-/**
- * Escapes a free-text search term for safe interpolation into a PostgREST
- * `.or()` filter expression, where `,`, `(`, `)` are structural syntax (they
- * separate/group conditions) — an unescaped one could let a caller inject an
- * additional filter clause into their own already-authorized query. This is
- * NOT a tenant-isolation bypass (every call site here still ANDs in the
- * server-derived organization_id filter), but input should never be trusted
- * into a raw filter string regardless.
- */
-function escapeOrFilterValue(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/,/g, "\\,")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)");
 }
 
 /**
@@ -105,45 +91,42 @@ function escapeOrFilterValue(value: string): string {
 export async function listConversations(
   organizationId: string,
   opts: ListConversationsOptions = {},
+  userId: string,
 ): Promise<ConversationPage> {
-  const limit = Math.min(opts.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
+  const limit = Math.max(1, Math.min(opts.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT));
 
   let query = db
-    .from("conversations")
+    .rpc("conversation_inbox_rows", {
+      p_org: organizationId,
+      p_user: userId,
+      p_search: opts.previewQuery ?? null,
+    })
     .select("*")
     .eq("organization_id", organizationId)
     .order("last_message_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(limit + 1);
 
-  if (opts.status) query = query.eq("status", opts.status);
+  if (opts.status === "unread") query = query.gt("unread_count", 0);
+  else if (opts.status) query = query.eq("status", opts.status);
   if (opts.provider) query = query.eq("provider", opts.provider);
-
-  // Search matches EITHER the last-message preview OR a linked customer
-  // (customerIds is pre-resolved by the service layer via name/phone match).
-  // These two must combine with OR, never a separate AND'd ilike() alongside them.
-  if (opts.previewQuery && opts.customerIds && opts.customerIds.length > 0) {
-    const escaped = escapeOrFilterValue(opts.previewQuery);
-    query = query.or(
-      `last_message_preview.ilike.%${escaped}%,customer_id.in.(${opts.customerIds.join(",")})`,
-    );
-  } else if (opts.previewQuery) {
-    query = query.ilike("last_message_preview", `%${opts.previewQuery}%`);
-  } else if (opts.customerIds && opts.customerIds.length > 0) {
-    query = query.in("customer_id", opts.customerIds);
-  }
 
   if (opts.cursor) {
     const decoded = decodeCursor(opts.cursor);
-    if (decoded) {
+    if (!decoded) throw new ConversationError("invalid_cursor");
+    const anchor = await findConversationById(organizationId, decoded.id, userId);
+    if (!anchor) throw new ConversationError("invalid_cursor");
+    if (new Date(anchor.last_message_at).getTime() !== new Date(decoded.lastMessageAt).getTime())
+      throw new ConversationError("stale_state");
+    {
       query = query.or(
-        `last_message_at.lt.${decoded.lastMessageAt},and(last_message_at.eq.${decoded.lastMessageAt},id.lt.${decoded.id})`,
+        `last_message_at.lt.${anchor.last_message_at},and(last_message_at.eq.${anchor.last_message_at},id.lt.${decoded.id})`,
       );
     }
   }
 
   const { data, error } = await query;
-  if (error) throw new Error(`listConversations: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
 
   const rows = (data ?? []) as ConversationRow[];
   const hasMore = rows.length > limit;
@@ -159,58 +142,50 @@ export async function listConversations(
 /** Counts per status for the inbox filter chips, ignoring the status filter itself. */
 export async function countConversationsByStatus(
   organizationId: string,
+  userId: string,
 ): Promise<Record<string, number>> {
-  const { data, error } = await db
-    .from("conversations")
-    .select("status")
-    .eq("organization_id", organizationId);
-
-  if (error)
-    throw new Error(`countConversationsByStatus: ${(error as { message: string }).message}`);
-
-  const rows = (data ?? []) as { status: ConversationStatusRow }[];
-  const counts: Record<string, number> = { all: rows.length };
-  for (const row of rows) {
-    counts[row.status] = (counts[row.status] ?? 0) + 1;
-  }
-  return counts;
+  const { data, error } = await db.rpc("conversation_counts", {
+    p_org: organizationId,
+    p_user: userId,
+  });
+  if (error) throw databaseError(error);
+  return data ?? {};
 }
 
 export async function findConversationById(
   organizationId: string,
   conversationId: string,
+  userId: string,
 ): Promise<ConversationRow | null> {
   const { data, error } = await db
-    .from("conversations")
+    .rpc("conversation_inbox_rows", { p_org: organizationId, p_user: userId })
     .select("*")
     .eq("id", conversationId)
     .eq("organization_id", organizationId)
     .single();
 
-  if (error || !data) return null;
-  return data as ConversationRow;
+  if (error && error.code !== "PGRST116") throw databaseError(error);
+  if (!data) return null;
+  return (Array.isArray(data) ? data[0] : data) as ConversationRow;
 }
 
+/** Internal trusted adapter entry; never accepts a browser-provided Customer UUID. */
 export async function createConversation(
   organizationId: string,
   input: {
     provider: ConversationProvider;
     provider_conversation_id: string;
-    customer_id?: string | null;
-    workspace_id?: string | null;
-    status?: ConversationStatusRow;
+    provider_identity_id?: string;
   },
 ): Promise<ConversationRow> {
-  const { data, error } = await db
-    .from("conversations")
-    .insert({ organization_id: organizationId, ...input })
-    .select()
-    .single();
-
-  if (error || !data) {
-    throw new Error(`createConversation: ${(error as { message?: string })?.message ?? "no data"}`);
-  }
-  return data as ConversationRow;
+  const { data, error } = await db.rpc("ensure_provider_conversation", {
+    p_org: organizationId,
+    p_provider: input.provider,
+    p_reference: input.provider_conversation_id,
+    p_identity: input.provider_identity_id ?? null,
+  });
+  if (error || !data) throw databaseError(error);
+  return (Array.isArray(data) ? data[0] : data) as ConversationRow;
 }
 
 export async function updateConversationStatus(
@@ -226,25 +201,65 @@ export async function updateConversationStatus(
     .select()
     .single();
 
-  if (error) throw new Error(`updateConversationStatus: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
   return data ? (data as ConversationRow) : null;
 }
 
-/** Idempotent: setting unread_count to 0 repeatedly is a safe no-op on repeat calls. */
+/** The browser supplies only an actually displayed message ID, never a count or timestamp. */
 export async function markConversationRead(
   organizationId: string,
   conversationId: string,
-): Promise<ConversationRow | null> {
-  const { data, error } = await db
-    .from("conversations")
-    .update({ unread_count: 0 })
-    .eq("id", conversationId)
-    .eq("organization_id", organizationId)
-    .select()
-    .single();
+  userId: string,
+  messageId: string,
+): Promise<void> {
+  const { error } = await db.rpc("mark_conversation_read", {
+    p_org: organizationId,
+    p_user: userId,
+    p_conversation: conversationId,
+    p_message: messageId,
+  });
+  if (error) throw databaseError(error);
+}
 
-  if (error) throw new Error(`markConversationRead: ${(error as { message: string }).message}`);
-  return data ? (data as ConversationRow) : null;
+export async function isActiveAssignee(organizationId: string, userId: string): Promise<boolean> {
+  const { data, error } = await db
+    .from("memberships")
+    .select("user_id")
+    .eq("organization_id", organizationId)
+    .eq("user_id", userId)
+    .eq("status", "active")
+    .maybeSingle();
+  if (error) throw databaseError(error);
+  return Boolean(data);
+}
+
+/** Profile IDs are restricted by active organization membership before lookup. */
+export async function findStaffDisplayNames(
+  organizationId: string,
+  userIds: string[],
+): Promise<Map<string, string>> {
+  if (userIds.length === 0) return new Map();
+  const { data: members, error: memberError } = await db
+    .from("memberships")
+    .select("user_id")
+    .eq("organization_id", organizationId)
+    .eq("status", "active")
+    .in("user_id", userIds);
+  if (memberError) throw databaseError(memberError);
+  if (!members?.length) return new Map();
+  const { data, error } = await db
+    .from("profiles")
+    .select("id, display_name")
+    .in(
+      "id",
+      members.map((member: { user_id: string }) => member.user_id),
+    );
+  if (error) throw databaseError(error);
+  return new Map(
+    (data ?? [])
+      .filter((profile: { display_name: string | null }) => profile.display_name)
+      .map((profile: { id: string; display_name: string }) => [profile.id, profile.display_name]),
+  );
 }
 
 /** assignedUserId = null unassigns. Cross-tenant/active-membership check happens in the DB trigger (migration 031). */
@@ -252,16 +267,21 @@ export async function assignConversation(
   organizationId: string,
   conversationId: string,
   assignedUserId: string | null,
+  expectedUserId: string | null,
 ): Promise<ConversationRow | null> {
-  const { data, error } = await db
+  let query = db
     .from("conversations")
     .update({ assigned_user_id: assignedUserId })
     .eq("id", conversationId)
-    .eq("organization_id", organizationId)
-    .select()
-    .single();
+    .eq("organization_id", organizationId);
+  query =
+    expectedUserId === null
+      ? query.is("assigned_user_id", null)
+      : query.eq("assigned_user_id", expectedUserId);
+  const { data, error } = await query.select().maybeSingle();
+  if (!error && !data) throw new ConversationError("stale_state");
 
-  if (error) throw new Error(`assignConversation: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
   return data ? (data as ConversationRow) : null;
 }
 
@@ -291,7 +311,7 @@ export async function listRecentMessages(
     .order("id", { ascending: false })
     .limit(boundedLimit);
 
-  if (error) throw new Error(`listRecentMessages: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
 
   return ((data ?? []) as MessageRow[]).reverse();
 }
@@ -310,7 +330,8 @@ export async function findMessageCursor(
     .eq("organization_id", organizationId)
     .single();
 
-  if (error || !data) return null;
+  if (error && error.code !== "PGRST116") throw databaseError(error);
+  if (!data) return null;
   return { occurredAt: data.occurred_at as string, id: data.id as string };
 }
 
@@ -348,7 +369,7 @@ export async function listMessagesBefore(
   }
 
   const { data, error } = await query;
-  if (error) throw new Error(`listMessagesBefore: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
 
   const rows = (data ?? []) as MessageRow[];
   const hasMore = rows.length > boundedLimit;
@@ -361,35 +382,38 @@ export async function listMessagesBefore(
   };
 }
 
+export interface IngestMessageInput {
+  direction: MessageDirectionRow;
+  sender_type: MessageSenderType;
+  body: string;
+  sender_user_id?: string | null;
+  sender_provider_identity_id?: string | null;
+  message_type?: MessageContentType;
+  provider_message_id: string;
+  occurred_at: string;
+  attachments?: Record<string, unknown>[] | null;
+}
+/** Retries return the original row; conflicting reuse of a reference is stale_state. */
 export async function createMessage(
   organizationId: string,
   conversationId: string,
-  input: {
-    direction: MessageDirectionRow;
-    sender_type: MessageSenderType;
-    body: string;
-    sender_user_id?: string | null;
-    message_type?: MessageContentType;
-    provider_message_id?: string | null;
-    occurred_at?: string;
-    attachments?: Record<string, unknown> | null;
-    metadata?: Record<string, unknown> | null;
-  },
+  input: IngestMessageInput,
 ): Promise<MessageRow> {
-  const { data, error } = await db
-    .from("messages")
-    .insert({
-      organization_id: organizationId,
-      conversation_id: conversationId,
-      ...input,
-    })
-    .select()
-    .single();
-
-  if (error || !data) {
-    throw new Error(`createMessage: ${(error as { message?: string })?.message ?? "no data"}`);
-  }
-  return data as MessageRow;
+  const { data, error } = await db.rpc("ingest_conversation_message", {
+    p_org: organizationId,
+    p_conversation: conversationId,
+    p_reference: input.provider_message_id,
+    p_direction: input.direction,
+    p_sender: input.sender_type,
+    p_body: input.body,
+    p_occurred_at: input.occurred_at,
+    p_sender_user: input.sender_user_id ?? null,
+    p_sender_identity: input.sender_provider_identity_id ?? null,
+    p_type: input.message_type ?? "text",
+    p_attachments: input.attachments ?? null,
+  });
+  if (error || !data) throw databaseError(error);
+  return (Array.isArray(data) ? data[0] : data) as MessageRow;
 }
 
 // ── Customer display-name batch lookup (avoids N+1 in the Inbox list) ──────────
@@ -406,25 +430,8 @@ export async function findCustomerDisplayNames(
     .eq("organization_id", organizationId)
     .in("id", customerIds);
 
-  if (error) throw new Error(`findCustomerDisplayNames: ${(error as { message: string }).message}`);
+  if (error) throw databaseError(error);
 
   const rows = (data ?? []) as { id: string; display_name: string }[];
   return new Map(rows.map((row) => [row.id, row.display_name]));
-}
-
-/** Customer ids (org-scoped) whose name or phone matches the search query — used by conversation search. */
-export async function findCustomerIdsMatching(
-  organizationId: string,
-  query: string,
-): Promise<string[]> {
-  const escaped = escapeOrFilterValue(query);
-  const { data, error } = await db
-    .from("customers")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .or(`display_name.ilike.%${escaped}%,primary_phone.ilike.%${escaped}%`);
-
-  if (error) throw new Error(`findCustomerIdsMatching: ${(error as { message: string }).message}`);
-
-  return ((data ?? []) as { id: string }[]).map((row) => row.id);
 }

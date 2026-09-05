@@ -8,7 +8,8 @@
  * these with the generated Database["public"]["Tables"][...]["Row"] paths.
  */
 
-export type ConversationProvider = "FACEBOOK" | "INSTAGRAM" | "TELEGRAM";
+export type ConversationProvider =
+  "FACEBOOK" | "INSTAGRAM" | "TELEGRAM" | "WHATSAPP" | "TIKTOK" | "APSA_CONSUMER";
 
 /** Mirrors src/types/index.ts ConversationStatus exactly. */
 export type ConversationStatusRow =
@@ -45,6 +46,8 @@ export interface MessageRow {
   organization_id: string;
   conversation_id: string;
   provider_message_id: string | null;
+  sequence: number;
+  sender_provider_identity_id: string | null;
   direction: MessageDirectionRow;
   sender_type: MessageSenderType;
   sender_user_id: string | null;

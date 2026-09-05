@@ -36,6 +36,7 @@ export function ConversationRow({
 }: ConversationRowProps) {
   const { t } = useTranslation();
   const unread = conversation.unreadCount > 0;
+  const assignedName = assignedStaff?.name ?? conversation.assignedStaffName;
 
   return (
     <button
@@ -98,13 +99,13 @@ export function ConversationRow({
 
         <span className="mt-1.5 flex flex-wrap items-center gap-2">
           <StatusChip status={conversation.status} size="sm" />
-          {assignedStaff ? (
+          {assignedName ? (
             <span
               className="text-caption flex size-5 items-center justify-center rounded-full text-text-inverse"
-              style={{ backgroundColor: COMPANION_VAR[assignedStaff.companion] }}
-              title={assignedStaff.name}
+              style={{ backgroundColor: COMPANION_VAR[assignedStaff?.companion ?? "nilo"] }}
+              title={assignedName}
             >
-              {initials(assignedStaff.name)}
+              {initials(assignedName)}
             </span>
           ) : null}
         </span>

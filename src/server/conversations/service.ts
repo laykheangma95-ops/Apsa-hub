@@ -24,9 +24,9 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { ConversationError } from "./errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
-import * as customerRepo from "@/server/customers/repository";
 import type {
   ConversationProvider,
   ConversationRow,
@@ -44,6 +44,9 @@ const PROVIDER_TO_CHANNEL: Record<ConversationProvider, Channel> = {
   FACEBOOK: "facebook",
   INSTAGRAM: "instagram",
   TELEGRAM: "telegram",
+  WHATSAPP: "other",
+  TIKTOK: "other",
+  APSA_CONSUMER: "other",
 };
 
 const CHANNEL_TO_PROVIDER: Partial<Record<Channel, ConversationProvider>> = {
@@ -61,11 +64,14 @@ export interface ConversationSummary {
   /** Non-sensitive display name only, present when customerId is resolved. */
   customerName?: string;
   channel: Channel;
+  provider: ConversationProvider;
+  providerConversationId: string;
   lastMessage: string;
   lastMessageAt: string;
   unreadCount: number;
   status: ConversationStatusRow;
   assignedStaffId?: string;
+  assignedStaffName?: string;
 }
 
 export interface ConversationMessageSummary {
@@ -74,10 +80,15 @@ export interface ConversationMessageSummary {
   body: string;
   at: string;
   state?: MessageStateRow;
+  messageType: MessageRow["message_type"];
+  senderType: MessageRow["sender_type"];
+  providerMessageId: string | null;
 }
 
 export interface ConversationDetailResult extends ConversationSummary {
   messages: ConversationMessageSummary[];
+  nextBeforeId: string | null;
+  readThroughMessageId: string | null;
 }
 
 export interface ConversationListPage {
@@ -91,6 +102,9 @@ function toMessageSummary(row: MessageRow): ConversationMessageSummary {
     direction: row.direction,
     body: row.body,
     at: row.occurred_at,
+    messageType: row.message_type,
+    senderType: row.sender_type,
+    providerMessageId: row.provider_message_id,
   };
   if (row.state) summary.state = row.state;
   return summary;
@@ -99,11 +113,14 @@ function toMessageSummary(row: MessageRow): ConversationMessageSummary {
 function toConversationSummary(
   row: ConversationRow,
   customerName: string | undefined,
+  staffName?: string,
 ): ConversationSummary {
   const summary: ConversationSummary = {
     id: row.id,
     customerId: row.customer_id ?? "",
     channel: PROVIDER_TO_CHANNEL[row.provider],
+    provider: row.provider,
+    providerConversationId: row.provider_conversation_id,
     lastMessage: row.last_message_preview ?? "",
     lastMessageAt: row.last_message_at,
     unreadCount: row.unread_count,
@@ -111,6 +128,7 @@ function toConversationSummary(
   };
   if (customerName !== undefined) summary.customerName = customerName;
   if (row.assigned_user_id) summary.assignedStaffId = row.assigned_user_id;
+  if (staffName) summary.assignedStaffName = staffName;
   return summary;
 }
 
@@ -137,11 +155,6 @@ export async function listConversations(
   ctx.require("messages.read");
 
   const trimmedQuery = input.query?.trim();
-  let customerIds: string[] | undefined;
-  if (trimmedQuery) {
-    customerIds = await repo.findCustomerIdsMatching(ctx.organizationId, trimmedQuery);
-  }
-
   const provider =
     input.channel && input.channel !== "all" ? CHANNEL_TO_PROVIDER[input.channel] : undefined;
 
@@ -156,20 +169,27 @@ export async function listConversations(
   if (input.status && input.status !== "all") params.status = input.status;
   if (provider) params.provider = provider;
   if (trimmedQuery) params.previewQuery = trimmedQuery;
-  if (customerIds) params.customerIds = customerIds;
   if (input.limit !== undefined) params.limit = input.limit;
   if (input.cursor !== undefined) params.cursor = input.cursor;
 
-  const page = await repo.listConversations(ctx.organizationId, params);
+  const page = await repo.listConversations(ctx.organizationId, params, ctx.userId);
 
   const resolvedCustomerIds = page.rows
     .map((row) => row.customer_id)
     .filter((id): id is string => Boolean(id));
   const names = await repo.findCustomerDisplayNames(ctx.organizationId, resolvedCustomerIds);
+  const staffNames = await repo.findStaffDisplayNames(
+    ctx.organizationId,
+    page.rows.flatMap((row) => (row.assigned_user_id ? [row.assigned_user_id] : [])),
+  );
 
   return {
     conversations: page.rows.map((row) =>
-      toConversationSummary(row, row.customer_id ? names.get(row.customer_id) : undefined),
+      toConversationSummary(
+        row,
+        row.customer_id ? names.get(row.customer_id) : undefined,
+        row.assigned_user_id ? staffNames.get(row.assigned_user_id) : undefined,
+      ),
     ),
     nextCursor: page.nextCursor,
   };
@@ -179,18 +199,43 @@ export async function listConversationCounts(
   ctx: AuthorizationContext,
 ): Promise<Record<string, number>> {
   ctx.require("messages.read");
-  return repo.countConversationsByStatus(ctx.organizationId);
+  return repo.countConversationsByStatus(ctx.organizationId, ctx.userId);
 }
 
 async function requireOwnedConversation(
   ctx: AuthorizationContext,
   conversationId: string,
 ): Promise<ConversationRow> {
-  const conversation = await repo.findConversationById(ctx.organizationId, conversationId);
+  const conversation = await repo.findConversationById(
+    ctx.organizationId,
+    conversationId,
+    ctx.userId,
+  );
   if (!conversation) {
-    throw Object.assign(new Error("Conversation not found"), { statusCode: 404 });
+    throw new ConversationError("conversation_not_found");
   }
   return conversation;
+}
+
+async function summarize(
+  ctx: AuthorizationContext,
+  conversation: ConversationRow,
+): Promise<ConversationSummary> {
+  const [names, staffNames] = await Promise.all([
+    repo.findCustomerDisplayNames(
+      ctx.organizationId,
+      conversation.customer_id ? [conversation.customer_id] : [],
+    ),
+    repo.findStaffDisplayNames(
+      ctx.organizationId,
+      conversation.assigned_user_id ? [conversation.assigned_user_id] : [],
+    ),
+  ]);
+  return toConversationSummary(
+    conversation,
+    conversation.customer_id ? names.get(conversation.customer_id) : undefined,
+    conversation.assigned_user_id ? staffNames.get(conversation.assigned_user_id) : undefined,
+  );
 }
 
 export async function getConversationDetail(
@@ -201,16 +246,20 @@ export async function getConversationDetail(
 
   const conversation = await requireOwnedConversation(ctx, conversationId);
 
-  const [messages, customer] = await Promise.all([
-    repo.listRecentMessages(ctx.organizationId, conversationId, DETAIL_MESSAGE_WINDOW),
-    conversation.customer_id
-      ? customerRepo.findCustomerById(ctx.organizationId, conversation.customer_id)
-      : Promise.resolve(null),
+  const [messages, summary] = await Promise.all([
+    repo.listMessagesBefore(ctx.organizationId, conversationId, null, DETAIL_MESSAGE_WINDOW),
+    summarize(ctx, conversation),
   ]);
 
   return {
-    ...toConversationSummary(conversation, customer?.display_name),
-    messages: messages.map(toMessageSummary),
+    ...summary,
+    messages: messages.rows.map(toMessageSummary),
+    nextBeforeId: messages.nextBeforeId,
+    readThroughMessageId:
+      messages.rows.reduce<import("./types").MessageRow | null>(
+        (latest, row) => (!latest || row.sequence > latest.sequence ? row : latest),
+        null,
+      )?.id ?? null,
   };
 }
 
@@ -224,13 +273,18 @@ export async function listConversationMessages(
   ctx: AuthorizationContext,
   conversationId: string,
   input: ListMessagesInput = {},
-): Promise<{ messages: ConversationMessageSummary[]; nextBeforeId: string | null }> {
+): Promise<{
+  messages: ConversationMessageSummary[];
+  nextBeforeId: string | null;
+  readThroughMessageId: string | null;
+}> {
   ctx.require("messages.read");
   await requireOwnedConversation(ctx, conversationId);
 
   let before: { occurredAt: string; id: string } | null = null;
   if (input.beforeId) {
     before = await repo.findMessageCursor(ctx.organizationId, conversationId, input.beforeId);
+    if (!before) throw new ConversationError("invalid_cursor");
   }
 
   const page = await repo.listMessagesBefore(
@@ -243,6 +297,11 @@ export async function listConversationMessages(
   return {
     messages: page.rows.map(toMessageSummary),
     nextBeforeId: page.nextBeforeId,
+    readThroughMessageId:
+      page.rows.reduce<MessageRow | null>(
+        (latest, row) => (!latest || row.sequence > latest.sequence ? row : latest),
+        null,
+      )?.id ?? null,
   };
 }
 
@@ -250,19 +309,14 @@ export async function listConversationMessages(
 export async function markConversationRead(
   ctx: AuthorizationContext,
   conversationId: string,
+  messageId?: string,
 ): Promise<ConversationSummary> {
   ctx.require("messages.read");
   await requireOwnedConversation(ctx, conversationId);
 
-  const updated = await repo.markConversationRead(ctx.organizationId, conversationId);
-  if (!updated) {
-    throw Object.assign(new Error("Conversation not found"), { statusCode: 404 });
-  }
-
-  const customerName = updated.customer_id
-    ? (await customerRepo.findCustomerById(ctx.organizationId, updated.customer_id))?.display_name
-    : undefined;
-  return toConversationSummary(updated, customerName);
+  if (!messageId) throw new ConversationError("message_not_found");
+  await repo.markConversationRead(ctx.organizationId, conversationId, ctx.userId, messageId);
+  return summarize(ctx, await requireOwnedConversation(ctx, conversationId));
 }
 
 const STATUS_PERMISSION: Record<ConversationStatusRow, string> = {
@@ -279,18 +333,17 @@ export async function updateConversationStatus(
   conversationId: string,
   status: ConversationStatusRow,
 ): Promise<ConversationSummary> {
+  if (!STATUS_PERMISSION[status]) throw new ConversationError("invalid_reference");
   ctx.require(STATUS_PERMISSION[status]);
+  ctx.require("messages.read");
   await requireOwnedConversation(ctx, conversationId);
 
   const updated = await repo.updateConversationStatus(ctx.organizationId, conversationId, status);
   if (!updated) {
-    throw Object.assign(new Error("Conversation not found"), { statusCode: 404 });
+    throw new ConversationError("conversation_not_found");
   }
 
-  const customerName = updated.customer_id
-    ? (await customerRepo.findCustomerById(ctx.organizationId, updated.customer_id))?.display_name
-    : undefined;
-  return toConversationSummary(updated, customerName);
+  return summarize(ctx, await requireOwnedConversation(ctx, conversationId));
 }
 
 /**
@@ -311,15 +364,60 @@ export async function assignConversation(
     ctx.require("messages.assign");
   }
 
-  await requireOwnedConversation(ctx, conversationId);
+  ctx.require("messages.read");
 
-  const updated = await repo.assignConversation(ctx.organizationId, conversationId, assignedUserId);
+  const current = await requireOwnedConversation(ctx, conversationId);
+  if (
+    assignedUserId === null &&
+    current.assigned_user_id !== null &&
+    current.assigned_user_id !== ctx.userId
+  )
+    ctx.require("messages.assign");
+  if (assignedUserId !== null && !(await repo.isActiveAssignee(ctx.organizationId, assignedUserId)))
+    throw new ConversationError("invalid_assignment");
+  const updated = await repo.assignConversation(
+    ctx.organizationId,
+    conversationId,
+    assignedUserId,
+    current.assigned_user_id,
+  );
   if (!updated) {
-    throw Object.assign(new Error("Conversation not found"), { statusCode: 404 });
+    throw new ConversationError("conversation_not_found");
   }
 
-  const customerName = updated.customer_id
-    ? (await customerRepo.findCustomerById(ctx.organizationId, updated.customer_id))?.display_name
-    : undefined;
-  return toConversationSummary(updated, customerName);
+  return summarize(ctx, await requireOwnedConversation(ctx, conversationId));
+}
+
+/** Server-only future adapter contract. Browser API intentionally exposes neither provider IDs nor Customer UUID writes. */
+export async function ensureProviderConversation(
+  ctx: AuthorizationContext,
+  input: Parameters<typeof repo.createConversation>[1],
+): Promise<ConversationSummary> {
+  ctx.require("messages.reply");
+  ctx.require("messages.read");
+  const row = await repo.createConversation(ctx.organizationId, input);
+  const resolved = await requireOwnedConversation(ctx, row.id);
+  const names = await repo.findCustomerDisplayNames(
+    ctx.organizationId,
+    resolved.customer_id ? [resolved.customer_id] : [],
+  );
+  return toConversationSummary(
+    resolved,
+    resolved.customer_id ? names.get(resolved.customer_id) : undefined,
+  );
+}
+
+export async function ingestProviderMessage(
+  ctx: AuthorizationContext,
+  conversationId: string,
+  input: repo.IngestMessageInput,
+): Promise<ConversationMessageSummary> {
+  ctx.require("messages.reply");
+  ctx.require("messages.read");
+  await requireOwnedConversation(ctx, conversationId);
+  const row = await repo.createMessage(ctx.organizationId, conversationId, {
+    ...input,
+    sender_user_id: input.sender_type === "staff" ? ctx.userId : null,
+  });
+  return toMessageSummary(row);
 }
