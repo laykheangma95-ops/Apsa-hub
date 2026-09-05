@@ -661,6 +661,9 @@
     "total": "Total",
     "checkout": "Checkout",
     "completeSale": "Complete sale",
+    "confirmSale": "Confirm sale",
+    "confirming": "Confirming…",
+    "draftPendingBody": "Confirm to commit stock and complete the sale.",
     "markPaid": "Mark as paid",
     "paymentMethod": "Payment method",
     "method": {
@@ -709,6 +712,9 @@
         "body": "Try another name or phone number, or create a new customer."
       }
     },
+    "variant": {
+      "chooseOne": "Choose a variant"
+    },
     "empty": {
       "title": "No products yet",
       "body": "Add products to your catalogue to start selling."
@@ -721,12 +727,21 @@
       "title": "Payment could not be recorded",
       "body": "Nothing was charged. Try again."
     },
+    "orderError": {
+      "title": "This sale didn't go through",
+      "body": "Nothing was saved. Try again."
+    },
+    "permission": {
+      "title": "You can't complete this sale",
+      "body": "Ask an owner or manager for order permission."
+    },
     "success": {
       "title": "Sale complete",
       "newSale": "New sale",
       "viewReceipt": "View receipt",
       "viewOrder": "View order",
-      "codNote": "Collect payment when the order is delivered."
+      "codNote": "Collect payment when the order is delivered.",
+      "unpaidNote": "Payment hasn't been recorded yet. Record it once it's collected."
     }
   },
   "order": {

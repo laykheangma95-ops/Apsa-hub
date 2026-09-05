@@ -235,6 +235,7 @@ interface ServerProductItem {
     id: string;
     sku: string | null;
     barcode: string | null;
+    name: string;
     price: { amount: number; currency: "USD" | "KHR" };
     cost: { amount: number; currency: "USD" | "KHR" } | null;
   }>;
@@ -242,9 +243,16 @@ interface ServerProductItem {
 
 const COMPANION_COLORS: Array<Product["companion"]> = ["nilo", "minto", "vela", "suri", "luma"];
 
-/** Map a server ProductDetail to the UI Product type.
- * Uses the first active variant for sku/price/barcode.
+/**
+ * Map a server ProductDetail to the UI Product type.
+ * Uses the first ACTIVE variant for sku/price/barcode/variantId — the
+ * merchant-facing default when no explicit choice is needed.
  * stock = null because inventory is a separate domain.
+ *
+ * When the product has more than one ACTIVE variant, the full list is also
+ * exposed as `productionVariants` so callers (POS, order-create) can require
+ * an explicit choice instead of silently selling whichever variant happens to
+ * be first — see ProductionVariant's own comment in src/types/index.ts.
  */
 function mapServerProductToUi(p: ServerProductItem): Product {
   const firstVariant = p.variants[0];
@@ -266,6 +274,14 @@ function mapServerProductToUi(p: ServerProductItem): Product {
   if (firstVariant?.barcode) mapped.barcode = firstVariant.barcode;
   if (p.categoryId) mapped.categoryId = p.categoryId;
   if (firstVariant?.id) mapped.variantId = firstVariant.id;
+  if (p.variants.length > 1) {
+    mapped.productionVariants = p.variants.map((v) => ({
+      variantId: v.id,
+      name: v.name || v.sku || v.id,
+      sku: v.sku ?? "",
+      price: v.price,
+    }));
+  }
   return mapped;
 }
 
@@ -409,10 +425,69 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
   return mapServerProductToUi(result.product as ServerProductItem);
 }
 
+/**
+ * Deterministic cosmetic color, matching src/server/customers/service.ts's own
+ * deriveCompanion exactly, so a customer created here shows the same color
+ * later on Customer 360 (which computes it server-side from the same id).
+ * Never used for anything but UI decoration.
+ */
+function deriveCustomerCompanion(customerId: string): Customer["companion"] {
+  const sum = customerId
+    .slice(-12)
+    .split("")
+    .reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return COMPANION_COLORS[sum % COMPANION_COLORS.length]!;
+}
+
+/**
+ * Maps a production customer-list row (already PII-gated server-side by
+ * listCustomers()) into the UI's `Customer` shape. orderCount/lifetimeSpend/
+ * tags/identities have no honest value from this lightweight read — see
+ * OrderCustomerOption's own comment — so they are zeroed/emptied rather than
+ * guessed; nothing in the POS UI reads them for a production customer.
+ */
+function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
+  return {
+    id: row.id,
+    nameKm: row.nameKm,
+    nameEn: row.nameEn,
+    phone: row.phone,
+    identities: [],
+    tags: [],
+    orderCount: 0,
+    lifetimeSpend: usd(0),
+    companion: deriveCustomerCompanion(row.id),
+    sensitiveVisible: row.sensitiveVisible,
+  };
+}
+
+/**
+ * Production-first customer search for the POS customer picker. Reuses the
+ * exact same production read as the Manual Order create flow
+ * (listRealCustomers -> listCustomersFn) and filters client-side, same as
+ * CreateRealOrderSheet's customerList — there is no server search endpoint,
+ * only a bounded list. Falls back to in-memory mock data only in demo-mode
+ * contexts (see isDemoModeError's own comment) — once a real backend is
+ * reachable, an org with zero real customers sees an empty result, not mock
+ * rows, same precedent as getProducts()/getPosProducts().
+ */
 export async function searchCustomers(query: string): Promise<Customer[]> {
   const q = query.trim().toLowerCase();
-  if (!q) return resolve(customers.slice(0, 4), 80);
   const digits = q.replace(/\s/g, "");
+  try {
+    const rows = await listRealCustomers();
+    const mapped = rows.map(mapOrderCustomerOptionToUi);
+    if (!q) return mapped.slice(0, 4);
+    return mapped.filter(
+      (c) =>
+        c.nameKm.toLowerCase().includes(q) ||
+        c.nameEn.toLowerCase().includes(q) ||
+        c.phone.replace(/\s/g, "").includes(digits),
+    );
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+  }
+  if (!q) return resolve(customers.slice(0, 4), 80);
   return resolve(
     customers.filter(
       (c) =>
@@ -429,8 +504,36 @@ export interface QuickCustomerInput {
   phone: string;
 }
 
-/** Mock quick-create. Nothing is persisted beyond this session's return value. */
+/**
+ * Production-first quick-create for the POS customer picker. Reuses the
+ * existing Customer domain's createCustomerFn (customers.create — granted to
+ * every staff role) rather than inventing a parallel identity/creation path.
+ * Falls back to an in-memory mock customer only in demo-mode contexts (see
+ * isDemoModeError's own comment) — a real backend failure (permission, DB,
+ * validation) propagates as a real error instead of being hidden.
+ */
 export async function createQuickCustomer(input: QuickCustomerInput): Promise<Customer> {
+  try {
+    const { createCustomerFn } = await import("@/api/customers");
+    const row = await createCustomerFn({
+      data: { display_name: input.name, primary_phone: input.phone },
+    });
+    const created = row as { id: string; display_name: string; primary_phone: string | null };
+    return {
+      id: created.id,
+      nameKm: created.display_name,
+      nameEn: created.display_name,
+      phone: created.primary_phone ?? input.phone,
+      identities: [],
+      tags: [],
+      orderCount: 0,
+      lifetimeSpend: usd(0),
+      companion: deriveCustomerCompanion(created.id),
+      sensitiveVisible: true,
+    };
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+  }
   const customer: Customer = {
     id: `cus-new-${Date.now()}`,
     nameKm: input.name,

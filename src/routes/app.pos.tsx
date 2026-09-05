@@ -50,7 +50,8 @@ export const Route = createFileRoute("/app/pos")({
       { property: "og:title", content: "Point of Sale — APSA" },
       {
         property: "og:description",
-        content: "A Khmer-first point of sale for Cambodian merchants — cart, discounts and payments.",
+        content:
+          "A Khmer-first point of sale for Cambodian merchants — cart, discounts and payments.",
       },
     ],
   }),
@@ -117,17 +118,29 @@ function PosScreen() {
   const totals = calculateCartTotals(lines, discount);
   const approvalRequired = needsManagerApproval(discount, totals);
 
-  function addProduct(product: Product, variant: string | undefined, quantity: number) {
+  function addProduct(
+    product: Product,
+    variant: string | undefined,
+    quantity: number,
+    variantId?: string,
+  ) {
+    // Production line price: the chosen variant's own price when one was
+    // explicitly picked, otherwise the product's default (single-variant
+    // production products, or the mock path). Never guessed independently of
+    // which variant is actually being added — see PosVariantSheet.
+    const chosenVariant = product.productionVariants?.find((v) => v.variantId === variantId);
+    const unitPrice = chosenVariant?.price ?? product.price;
     setLines((current) =>
       addToCart(current, {
-        key: lineKey(product.id, variant),
+        key: lineKey(product.id, variantId ?? variant),
         productId: product.id,
+        ...(variantId ? { variantId } : {}),
         nameKm: product.nameKm,
         nameEn: product.nameEn,
-        sku: product.sku,
+        sku: chosenVariant?.sku || product.sku,
         ...(variant ? { variant } : {}),
         quantity,
-        unitPrice: product.price,
+        unitPrice,
         stock: Math.max(1, availableStock(product)),
       }),
     );
@@ -135,11 +148,15 @@ function PosScreen() {
   }
 
   function selectProduct(product: Product) {
-    if (product.options?.length) {
+    // A product needs an explicit choice when the mock prototype's option
+    // matrix is present, or when the production catalog returned more than
+    // one ACTIVE variant (see ProductionVariant's own comment) — never guess
+    // between them.
+    if (product.options?.length || (product.productionVariants?.length ?? 0) > 1) {
       setVariantProduct(product);
       return;
     }
-    addProduct(product, undefined, 1);
+    addProduct(product, undefined, 1, product.variantId);
   }
 
   function resetSale() {
@@ -228,11 +245,7 @@ function PosScreen() {
 
             <ChipRow label={t("pos.categories")} className="-mx-4 px-4">
               {CATEGORIES.map((value) => (
-                <Chip
-                  key={value}
-                  selected={category === value}
-                  onClick={() => setCategory(value)}
-                >
+                <Chip key={value} selected={category === value} onClick={() => setCategory(value)}>
                   {t(`pos.category.${value}`)}
                 </Chip>
               ))}

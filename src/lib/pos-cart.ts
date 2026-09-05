@@ -10,6 +10,8 @@ export interface CartLine {
   /** stable line key: product id + variant */
   key: string;
   productId: string;
+  /** Present on the production path — the variant DB UUID an order line prices/consumes. */
+  variantId?: string;
   nameKm: string;
   nameEn: string;
   sku: string;
@@ -47,7 +49,10 @@ export function addToCart(lines: CartLine[], line: CartLine): CartLine[] {
       ? {
           ...l,
           // When stock = 0 (unlimited — inventory not yet connected), don't cap.
-          quantity: l.stock === 0 ? l.quantity + line.quantity : Math.min(l.stock, l.quantity + line.quantity),
+          quantity:
+            l.stock === 0
+              ? l.quantity + line.quantity
+              : Math.min(l.stock, l.quantity + line.quantity),
         }
       : l,
   );
@@ -59,7 +64,8 @@ export function setQuantity(lines: CartLine[], key: string, quantity: number): C
       ? {
           ...l,
           // When stock = 0 (unlimited), allow any positive quantity.
-          quantity: l.stock === 0 ? Math.max(1, quantity) : Math.max(1, Math.min(l.stock, quantity)),
+          quantity:
+            l.stock === 0 ? Math.max(1, quantity) : Math.max(1, Math.min(l.stock, quantity)),
         }
       : l,
   );

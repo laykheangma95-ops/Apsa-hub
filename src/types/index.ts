@@ -228,6 +228,28 @@ export interface Product {
   categoryId?: string;
   /** Present on the production path — the variant DB UUID. */
   variantId?: string;
+  /**
+   * Present on the production path ONLY when the product has more than one
+   * ACTIVE variant — the full sellable list (POS/order-create must let the
+   * merchant choose explicitly rather than defaulting to the first one).
+   * A single-variant production product leaves this unset; `variantId`/`sku`/
+   * `price` above already describe its one variant.
+   */
+  productionVariants?: ProductionVariant[];
+}
+
+/**
+ * One row of the production Product domain's flat variant list
+ * (src/server/products/service.ts ProductVariantDetail, PII/cost already
+ * stripped). Unlike the mock ProductVariantOption model there is no
+ * name/values attribute matrix — a real variant is just a priced, named SKU.
+ */
+export interface ProductionVariant {
+  variantId: string;
+  /** Free-text variant name as recorded on the product (e.g. "Red / L"). */
+  name: string;
+  sku: string;
+  price: Money;
 }
 
 /** Legacy mock-data category union — kept for backward compatibility. */
