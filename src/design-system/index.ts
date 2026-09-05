@@ -1,5 +1,23 @@
 export { ApsiIllustration, type ApsiPose } from "./ApsiIllustration";
-export * from "./mascot";
+export {
+  Mascot,
+  MascotMoment,
+  MASCOT_STATES,
+  MASCOT_STATE_KEYS,
+  isMascotAllowed,
+  COMPANION_MEANING,
+  COMPANION_TOKEN,
+  COMPANION_URL,
+  companionSource,
+  resolveMascotSource,
+  type MascotProps,
+  type MascotState,
+  type MascotStateSpec,
+  type MascotSurface,
+  type CompanionName,
+  type MascotMediaKind,
+  type MascotSource,
+} from "./mascot";
 export { ApsiInsightCard } from "./ApsiInsightCard";
 export { AppHeader, LanguageToggle } from "./AppHeader";
 export { AppShell } from "./AppShell";
