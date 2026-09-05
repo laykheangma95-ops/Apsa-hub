@@ -1,4 +1,5 @@
 export { ApsiIllustration, type ApsiPose } from "./ApsiIllustration";
+export * from "./mascot";
 export { ApsiInsightCard } from "./ApsiInsightCard";
 export { AppHeader, LanguageToggle } from "./AppHeader";
 export { AppShell } from "./AppShell";
