@@ -16,7 +16,7 @@ export interface MascotProps {
   withCompanion?: boolean;
   /** Accessible label. Empty string (default) marks the mascot decorative. */
   alt?: string;
-  className?: string;
+  className?: string | undefined;
 }
 
 function Frame({ source, size, alt }: { source: MascotSource; size: number; alt: string }) {
