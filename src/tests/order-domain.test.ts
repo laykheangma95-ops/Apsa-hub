@@ -201,6 +201,8 @@ function executableSql(sql: string): string {
 const ordersMigration = () => readSource("supabase/migrations/023_orders.sql");
 const rpcMigration = () => readSource("supabase/migrations/024_order_rpc.sql");
 const permsMigration = () => readSource("supabase/migrations/025_order_permissions.sql");
+const conversationSourceMigration = () =>
+  readSource("supabase/migrations/030_order_conversation_source.sql");
 
 // ── Mock repository DB ────────────────────────────────────────────────────────
 //
@@ -1542,6 +1544,8 @@ describe("Test 21: Permission vocabulary", () => {
 });
 
 describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
+  const conversationOverload =
+    "public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT, TEXT)";
   const entryPoints = [
     {
       name: "create_order_v1",
@@ -1593,6 +1597,31 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       expect(grantIdx).toBeGreaterThan(revokeIdx);
     });
   }
+
+  it("migration 030 comments the new overload by its unambiguous identity", () => {
+    const sql = executableSql(conversationSourceMigration());
+    expect(sql).toContain(`COMMENT ON FUNCTION ${conversationOverload} IS`);
+    expect(sql).not.toMatch(/COMMENT ON FUNCTION public\.create_order_v1\s+IS/);
+  });
+
+  it("migration 030 revokes the new overload from PUBLIC and both JWT roles", () => {
+    expect(executableSql(conversationSourceMigration())).toContain(
+      `REVOKE EXECUTE ON FUNCTION ${conversationOverload}\n  FROM PUBLIC, anon, authenticated;`,
+    );
+  });
+
+  it("migration 030 grants the new overload only to service_role", () => {
+    const sql = executableSql(conversationSourceMigration());
+    expect(sql).toContain(`GRANT EXECUTE ON FUNCTION ${conversationOverload}\n  TO service_role;`);
+    expect(sql).not.toMatch(/GRANT EXECUTE[^;]*TO[^;]*\b(?:PUBLIC|anon|authenticated)\b/);
+  });
+
+  it("migration 030 revokes before granting the server role", () => {
+    const sql = executableSql(conversationSourceMigration());
+    expect(sql.indexOf(`REVOKE EXECUTE ON FUNCTION ${conversationOverload}`)).toBeLessThan(
+      sql.indexOf(`GRANT EXECUTE ON FUNCTION ${conversationOverload}`),
+    );
+  });
 
   it("allocate_order_number stays unreachable — revoked, and granted to nobody", () => {
     const sql = rpcMigration();
