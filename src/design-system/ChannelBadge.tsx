@@ -1,4 +1,4 @@
-import { Facebook, Instagram, Send, Store, type LucideIcon } from "lucide-react";
+import { Facebook, Instagram, Send, Store, MessageCircle, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { Channel } from "@/types";
@@ -8,6 +8,7 @@ const ICONS: Record<Channel, LucideIcon> = {
   instagram: Instagram,
   telegram: Send,
   pos: Store,
+  other: MessageCircle,
 };
 
 const COLOR_VAR: Record<Channel, string> = {
@@ -15,6 +16,7 @@ const COLOR_VAR: Record<Channel, string> = {
   instagram: "var(--channel-instagram)",
   telegram: "var(--channel-telegram)",
   pos: "var(--channel-pos)",
+  other: "var(--text-secondary)",
 };
 
 interface ChannelBadgeProps {
@@ -35,7 +37,11 @@ export function ChannelBadge({ channel, withLabel = false, className }: ChannelB
       title={label}
     >
       <Icon className="size-3.5 shrink-0" style={{ color: COLOR_VAR[channel] }} aria-hidden />
-      {withLabel ? <span className="chip-text">{label}</span> : <span className="sr-only">{label}</span>}
+      {withLabel ? (
+        <span className="chip-text">{label}</span>
+      ) : (
+        <span className="sr-only">{label}</span>
+      )}
     </span>
   );
 }

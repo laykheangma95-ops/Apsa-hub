@@ -32,6 +32,7 @@ const SOURCE_TO_ORDER_SOURCE: Record<OrderSourceDb, OrderSource> = {
 
 const CHANNEL_TO_SOURCE_DB: Record<Channel, OrderSourceDb> = {
   pos: "POS",
+  other: "MANUAL",
   facebook: "FACEBOOK",
   instagram: "INSTAGRAM",
   telegram: "TELEGRAM",
@@ -46,7 +47,7 @@ export function channelToSourceDb(channel: Channel): OrderSourceDb {
 }
 
 /** True when a source maps to a renderable ChannelBadge Channel (i.e. not "manual"). */
-export function isChannelSource(source: OrderSource): source is Channel {
+export function isChannelSource(source: OrderSource): source is Exclude<Channel, "other"> {
   return source !== "manual";
 }
 
