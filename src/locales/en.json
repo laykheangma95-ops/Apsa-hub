@@ -411,7 +411,8 @@
     "pending": "Pending",
     "unfulfilled": "Not yet fulfilled",
     "processing": "Processing",
-    "fulfilled": "Fulfilled"
+    "fulfilled": "Fulfilled",
+    "preparing": "Preparing"
   },
   "channel": {
     "facebook": "Facebook",
@@ -701,6 +702,7 @@
     "actions": "What you can do",
     "recordPayment": "Record payment",
     "arrangeDelivery": "Arrange delivery",
+    "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
     "markReady": "Mark as ready",
     "startReturn": "Start return",
@@ -843,9 +845,13 @@
     "deniedBody": "Ask the shop owner for permission to view deliveries.",
     "courier": "Courier",
     "tracking": "Tracking number",
+    "noTracking": "No tracking number yet",
     "fee": "Delivery fee",
     "forOrder": "For order",
     "viewOrder": "View order",
+    "orderFulfillment": "Order fulfillment",
+    "created": "Created",
+    "updated": "Last updated",
     "address": "Delivery address",
     "noAddress": "No address on file",
     "progress": "Progress",
@@ -865,7 +871,64 @@
     "reschedule": "Reschedule",
     "returnToShop": "Return to shop",
     "markDelivered": "Mark as delivered",
-    "actionDone": "Delivery updated"
+    "actionDone": "Delivery updated",
+    "startPreparing": "Start preparing",
+    "markReady": "Mark ready",
+    "markInTransit": "Mark in transit",
+    "markFailed": "Mark as failed",
+    "cancelDelivery": "Cancel delivery",
+    "updating": "Updating…",
+    "cancelSheet": {
+      "title": "Cancel this delivery?",
+      "body": "The order goes back to unfulfilled. Inventory already consumed is not restored — you can create a replacement delivery afterwards.",
+      "reason": "Reason",
+      "submit": "Cancel delivery"
+    },
+    "failSheet": {
+      "title": "Mark delivery as failed?",
+      "body": "Record why the courier could not complete this delivery.",
+      "reason": "Reason",
+      "submit": "Mark as failed"
+    },
+    "create": {
+      "title": "Create delivery",
+      "providerName": "Courier / provider name",
+      "providerNamePlaceholder": "e.g. J&T, VET, Capital, Grab Express",
+      "providerKey": "Provider reference (optional)",
+      "trackingNumber": "Tracking number (optional)",
+      "cod": "Cash on delivery",
+      "codHint": "Operational only — this never marks the order as paid.",
+      "submit": "Create delivery",
+      "creating": "Creating delivery…",
+      "created": "Delivery created",
+      "createdBody": "The order now shows as processing until this delivery is completed.",
+      "error": {
+        "title": "The delivery wasn't created",
+        "body": "Nothing was saved. Check the details and try again."
+      },
+      "permission": {
+        "title": "You can't create a delivery",
+        "body": "Ask the shop owner for permission to create deliveries."
+      },
+      "invalidOrder": {
+        "title": "This order isn't ready for delivery",
+        "body": "Only a confirmed order with an open fulfillment can get a delivery."
+      },
+      "duplicateActive": {
+        "title": "This order already has an active delivery",
+        "body": "Cancel or complete the existing delivery before creating another."
+      }
+    },
+    "error": {
+      "stale": {
+        "title": "This delivery just changed",
+        "body": "Someone updated it while you were viewing. Refresh to see the latest status."
+      },
+      "invalid": {
+        "title": "That's not possible right now",
+        "body": "This delivery can't move to that status from where it is."
+      }
+    }
   },
   "customer360": {
     "title": "Customer",
