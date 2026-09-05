@@ -1311,9 +1311,36 @@ describe("Test 27: Reconciliation buckets", () => {
         method: "cash",
         currency: "USD",
         status: "refunded",
+        // reverse_payment_v1/refund_payment_v1 never touch verification_state
+        // (migration 035) — a refunded payment can still carry the trust
+        // level it had before it was refunded. This row is the reason
+        // managerVerified must gate on status = 'paid': it must NOT count
+        // toward managerVerified below, since that money is no longer live.
         verification_state: "manager_verified",
         payment_count: 1,
         amount_minor_total: 1000,
+      },
+      {
+        organization_id: ORG_A_ID,
+        method: "bank_transfer",
+        currency: "USD",
+        status: "reversed",
+        // Same reasoning as the refunded row above: a reversed payment can
+        // still carry a stale 'staff_confirmed' trust level. This is the
+        // exact regression case for the bug found in PR #30 review — this
+        // row's 5000 must NOT appear in expectedRevenue or staffConfirmedOnly.
+        verification_state: "staff_confirmed",
+        payment_count: 1,
+        amount_minor_total: 5000,
+      },
+      {
+        organization_id: ORG_A_ID,
+        method: "khqr",
+        currency: "USD",
+        status: "failed",
+        verification_state: "mismatch",
+        payment_count: 1,
+        amount_minor_total: 700,
       },
     ]);
 
@@ -1322,15 +1349,30 @@ describe("Test 27: Reconciliation buckets", () => {
       () => getReconciliationSummary(ctx),
     );
 
+    // expectedRevenue = pending + paid + refunded only. Excludes the 5000
+    // 'reversed' row and the 700 'failed' row entirely — see the field's own
+    // documentation on ReconciliationSummary for why.
     expect(summary!.expectedRevenue.amount.amount).toBe(2000 + 500 + 300 + 150 + 900 + 1000);
     expect(summary!.paid.amount.amount).toBe(2500);
-    expect(summary!.bankVerified.amount.amount).toBe(500);
-    expect(summary!.staffConfirmedOnly.amount.amount).toBe(2000);
-    // needs_review = duplicate_suspected (150) + pending&unverified (300 khqr + 900 cod)
-    expect(summary!.needsReview.amount.amount).toBe(150 + 300 + 900);
-    expect(summary!.duplicateSuspected.amount.amount).toBe(150);
-    expect(summary!.codUnsettled.amount.amount).toBe(900);
+    expect(summary!.pending.amount.amount).toBe(300 + 150 + 900);
+    expect(summary!.failed.amount.amount).toBe(700);
+    expect(summary!.reversed.amount.amount).toBe(5000);
     expect(summary!.refunded.amount.amount).toBe(1000);
+
+    // Trust-tier buckets only count CURRENTLY LIVE money (status = 'paid').
+    // The refunded manager_verified row (1000) and the reversed
+    // staff_confirmed row (5000) must be excluded from both.
+    expect(summary!.bankVerified.amount.amount).toBe(500);
+    expect(summary!.managerVerified.amount.amount).toBe(0);
+    expect(summary!.staffConfirmedOnly.amount.amount).toBe(2000);
+
+    // needs_review = duplicate_suspected (150) + mismatch (700, still live —
+    // 'failed' is not excluded, only 'reversed'/'refunded' are) +
+    // pending&unverified (300 khqr + 900 cod)
+    expect(summary!.needsReview.amount.amount).toBe(150 + 700 + 300 + 900);
+    expect(summary!.duplicateSuspected.amount.amount).toBe(150);
+    expect(summary!.mismatch.amount.amount).toBe(700);
+    expect(summary!.codUnsettled.amount.amount).toBe(900);
   });
 
   it("two currencies never sum into one bucket", async () => {
@@ -1434,5 +1476,219 @@ describe("Test 30: No client-trusted organizationId or userId parameter", () => 
         expect(src).not.toContain("@/server/payments");
       }
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SENSITIVE REFERENCE WITHHOLDING (PR #30 review — Blocker 1 fix)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 31: payment_events metadata never leaks a withheld reference", () => {
+  it("a caller without payments.view_provider_reference sees both the top-level field AND event metadata redacted", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    // payments.read only — deliberately NOT payments.view_provider_reference.
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: "ABA-SECRET-REF-999",
+            verification_state: "duplicate_suspected",
+          }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "duplicate_flagged",
+              amount_minor: null,
+              currency: null,
+              from_verification: null,
+              to_verification: null,
+              actor_user_id: USER_ORG_A,
+              reason: "Reference matches another active payment in this organization",
+              metadata: { reference: "ABA-SECRET-REF-999" },
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+            {
+              id: "evt-2",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "correction",
+              amount_minor: null,
+              currency: null,
+              from_verification: null,
+              to_verification: null,
+              actor_user_id: USER_ORG_A,
+              reason: "Typo fix",
+              metadata: {
+                before: { reference: "OLD-REF", note: null },
+                after: { reference: "ABA-SECRET-REF-999", note: null },
+              },
+              created_at: "2026-09-05T00:01:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    // Top-level field: withheld (pre-existing behavior).
+    expect(detail.reference).toBeNull();
+
+    // Event metadata: must ALSO be withheld — this is the bug found in review.
+    const duplicateEvent = detail.events.find((e) => e.eventType === "duplicate_flagged");
+    expect(duplicateEvent?.metadata).toEqual({ reference: null });
+
+    const correctionEvent = detail.events.find((e) => e.eventType === "correction");
+    expect(correctionEvent?.metadata).toEqual({
+      before: { reference: null, note: null },
+      after: { reference: null, note: null },
+    });
+
+    // The reason string (non-reference prose) is untouched.
+    expect(duplicateEvent?.reason).toContain("Reference matches another active payment");
+  });
+
+  it("a caller WITH payments.view_provider_reference sees the reference in both places", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS, "OWNER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: "ABA-SECRET-REF-999",
+            verification_state: "duplicate_suspected",
+          }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "duplicate_flagged",
+              amount_minor: null,
+              currency: null,
+              from_verification: null,
+              to_verification: null,
+              actor_user_id: USER_ORG_A,
+              reason: "Reference matches another active payment in this organization",
+              metadata: { reference: "ABA-SECRET-REF-999" },
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.reference).toBe("ABA-SECRET-REF-999");
+    expect(detail.events[0]?.metadata).toEqual({ reference: "ABA-SECRET-REF-999" });
+  });
+
+  it("redaction is name-pattern based, so it also covers future/unanticipated metadata shapes", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow(),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "bank_verified",
+              amount_minor: null,
+              currency: null,
+              from_verification: "unverified",
+              to_verification: "bank_verified",
+              actor_user_id: null,
+              reason: null,
+              // Hypothetical future bank-adapter metadata shape (see
+              // src/server/payments/integrations.ts#outcomeToVerificationTarget)
+              // — not one of today's hardcoded event types, but the same
+              // name-pattern redaction must still catch it.
+              metadata: {
+                providerReference: "BANK-XYZ-001",
+                conflictingReference: "BANK-XYZ-002",
+                nested: { list: [{ reference: "NESTED-REF" }] },
+                amount: 1000,
+              },
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.events[0]?.metadata).toEqual({
+      providerReference: null,
+      conflictingReference: null,
+      nested: { list: [{ reference: null }] },
+      amount: 1000,
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DUPLICATE-REFERENCE CONCURRENCY (PR #30 review — Blocker 3 fix)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 32: record_payment_v1 serializes duplicate-reference detection", () => {
+  it("SQL: an advisory lock keyed on (organization_id, reference) is taken before the EXISTS check", () => {
+    const sql = executableSql(rpcMigration());
+    const fnStart = sql.indexOf("CREATE OR REPLACE FUNCTION public.record_payment_v1");
+    const fnEnd = sql.indexOf("CREATE OR REPLACE FUNCTION public.attach_payment_evidence_v1");
+    const fnBody = sql.slice(fnStart, fnEnd);
+
+    expect(fnBody).toContain("pg_advisory_xact_lock");
+    expect(fnBody).toContain("v_lock_key");
+    // The lock key must be derived from BOTH organization_id and the
+    // reference — a lock keyed on reference alone would serialize unrelated
+    // organizations against each other for no reason.
+    expect(fnBody).toMatch(/hashtext\(p_organization_id::TEXT \|\| ':' \|\| v_reference\)/);
+
+    const lockIdx = fnBody.indexOf("pg_advisory_xact_lock");
+    const existsIdx = fnBody.indexOf("SELECT EXISTS");
+    expect(lockIdx).toBeGreaterThan(0);
+    expect(existsIdx).toBeGreaterThan(lockIdx);
+  });
+
+  it("SQL: the lock is transaction-scoped (xact), not session-scoped, so it can never leak past this call", () => {
+    const sql = executableSql(rpcMigration());
+    expect(sql).not.toMatch(/pg_advisory_lock\(/); // only the _xact_ variant should appear
+    expect(sql).toContain("pg_advisory_xact_lock");
+  });
+
+  it("SQL: the lock is skipped when no reference is supplied (no unnecessary serialization)", () => {
+    const sql = executableSql(rpcMigration());
+    const fnStart = sql.indexOf("CREATE OR REPLACE FUNCTION public.record_payment_v1");
+    const fnEnd = sql.indexOf("CREATE OR REPLACE FUNCTION public.attach_payment_evidence_v1");
+    const fnBody = sql.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/IF v_reference IS NOT NULL THEN\s*\n\s*v_lock_key := hashtext/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERMISSION VOCABULARY ALIGNMENT (PR #30 review — Blocker 4 fix)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 33: payments.verify/reverse/reconcile are recorded in PERMISSIONS_MATRIX.md", () => {
+  it("PERMISSIONS_MATRIX.md §17 lists all three keys migration 036 seeds beyond the original matrix", () => {
+    const matrix = readSource("PERMISSIONS_MATRIX.md");
+    const section17Start = matrix.indexOf("# 17. PAYMENTS");
+    const section18Start = matrix.indexOf("# 18. FINANCIALS");
+    const section = matrix.slice(section17Start, section18Start);
+
+    expect(section).toContain("`payments.verify`");
+    expect(section).toContain("`payments.reverse`");
+    expect(section).toContain("`payments.reconcile`");
   });
 });

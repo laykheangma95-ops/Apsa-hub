@@ -43,7 +43,11 @@
 -- DUPLICATE REFERENCE: a reference collision with another active (non-
 -- reversed) payment in the same organization is suspicious, not impossible.
 -- The payment is still recorded, but starts flagged duplicate_suspected
--- rather than unverified, and a 'duplicate_flagged' event explains why.
+-- rather than unverified, and a 'duplicate_flagged' event explains why. The
+-- check+insert is serialized per (organization_id, reference) by a
+-- transaction-scoped advisory lock, so two genuinely concurrent calls with
+-- the same reference cannot both observe "no duplicate" before either
+-- commits — see the lock immediately before the EXISTS check below.
 
 CREATE OR REPLACE FUNCTION public.record_payment_v1(
   p_organization_id UUID,
@@ -67,6 +71,7 @@ DECLARE
   v_idempotency_key TEXT := NULLIF(trim(p_idempotency_key), '');
   v_duplicate       BOOLEAN := false;
   v_initial_state   public.payment_verification_state;
+  v_lock_key        BIGINT;
 BEGIN
   IF p_organization_id IS NULL THEN
     RAISE EXCEPTION 'record_payment_v1: organization_id is required';
@@ -88,7 +93,26 @@ BEGIN
     RETURN jsonb_build_object('status', 'order_not_found');
   END IF;
 
+  -- CONCURRENCY: the duplicate-reference EXISTS check below and the INSERT
+  -- that follows it are two separate statements, not one atomic operation —
+  -- without serialization, two truly concurrent calls carrying the SAME
+  -- reference could each run the EXISTS check before either has committed,
+  -- so both would see "no duplicate" and neither would be flagged
+  -- duplicate_suspected. A transaction-scoped advisory lock keyed on
+  -- (organization_id, reference) forces a second concurrent call for the
+  -- same pair to wait for the first to commit, so it then reliably observes
+  -- the first's row. The lock is released automatically at COMMIT/ROLLBACK
+  -- (pg_advisory_XACT_lock, not the session-scoped variant) — same pattern as
+  -- create_organization_for_founder's per-founder lock in migration 009.
+  -- Skipped entirely when there is no reference to deduplicate against.
+  -- hashtext() (not hashtextextended, which is Postgres-internal and not a
+  -- guaranteed-stable public API) is the long-established, documented way to
+  -- turn an arbitrary string into an int4 for exactly this purpose; the
+  -- implicit int4 -> int8 widen satisfies pg_advisory_xact_lock(bigint).
   IF v_reference IS NOT NULL THEN
+    v_lock_key := hashtext(p_organization_id::TEXT || ':' || v_reference);
+    PERFORM pg_advisory_xact_lock(v_lock_key);
+
     SELECT EXISTS (
       SELECT 1 FROM public.payments
       WHERE organization_id = p_organization_id

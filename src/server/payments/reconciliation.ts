@@ -25,26 +25,65 @@ export interface ReconciliationBucket {
 
 export interface ReconciliationSummary {
   currency: Currency;
-  /** All payments ever recorded, regardless of status/verification. */
+  /**
+   * DEFINITION (documented explicitly — see task history for why this needed
+   * clarifying): the gross value of payment claims that either arrived or are
+   * still awaiting a verdict — `status IN ('pending', 'paid', 'refunded')`.
+   *
+   * EXCLUDES `reversed` — a reversed payment was voided before or instead of
+   * settling; it never became revenue and must not inflate this figure.
+   *
+   * EXCLUDES `failed` — a `failed` payment is the result of a `mismatch`
+   * verification (see ./state-machine#resultingPaymentStatus): the claim was
+   * specifically found NOT to hold up. Like `reversed`, it never became real
+   * money and does not belong in an "expected" figure.
+   *
+   * INCLUDES `refunded` (gross, pre-refund) — a refunded payment genuinely
+   * arrived and settled as `paid` before later being returned. Excluding it
+   * here would erase the fact that the sale happened; instead, subtract the
+   * `refunded` bucket from this figure to get a NET expected-revenue number.
+   * This is a deliberate choice, not an oversight — see the `refunded` field.
+   */
   expectedRevenue: ReconciliationBucket;
   paid: ReconciliationBucket;
   pending: ReconciliationBucket;
   failed: ReconciliationBucket;
   reversed: ReconciliationBucket;
+  /**
+   * Gross amount later returned via refund_payment_v1 (partial or full).
+   * Already included in `expectedRevenue` (see its definition above) — this
+   * bucket exists so a consumer can compute `expectedRevenue - refunded` for
+   * a NET figure. Do not add this to `expectedRevenue` again.
+   */
   refunded: ReconciliationBucket;
-  /** verification_state = 'bank_verified'. */
+  /**
+   * verification_state = 'bank_verified' AND status = 'paid' — i.e. money
+   * that is CURRENTLY live at this trust tier. A payment that was
+   * bank-verified and later reversed or refunded is deliberately excluded:
+   * it no longer represents money the organization holds, so counting it
+   * here would overstate current bank-verified funds.
+   */
   bankVerified: ReconciliationBucket;
-  /** verification_state = 'manager_verified'. */
+  /** Same "currently live" rule as bankVerified, for verification_state = 'manager_verified'. */
   managerVerified: ReconciliationBucket;
-  /** verification_state = 'staff_confirmed' and never escalated further. */
+  /**
+   * Same "currently live" rule as bankVerified, for verification_state =
+   * 'staff_confirmed' — i.e. confirmed by a human with no higher escalation,
+   * and not since reversed or refunded.
+   */
   staffConfirmedOnly: ReconciliationBucket;
   /** method = 'cod' and status = 'pending' — collected in the field, not yet settled. */
   codUnsettled: ReconciliationBucket;
-  /** verification_state IN ('mismatch', 'duplicate_suspected'), or pending+unverified. */
+  /**
+   * Currently-actionable review items only: verification_state IN
+   * ('mismatch', 'duplicate_suspected'), or pending+unverified — EXCLUDING
+   * any payment already reversed or refunded, since voiding or refunding it
+   * already resolved whatever needed reviewing.
+   */
   needsReview: ReconciliationBucket;
-  /** verification_state = 'duplicate_suspected' specifically. */
+  /** verification_state = 'duplicate_suspected' and not since reversed/refunded. */
   duplicateSuspected: ReconciliationBucket;
-  /** verification_state = 'mismatch' specifically. */
+  /** verification_state = 'mismatch' and not since reversed/refunded. */
   mismatch: ReconciliationBucket;
 }
 
@@ -99,7 +138,13 @@ export async function getReconciliationSummary(
   for (const row of rows) {
     const summary = summaryFor(row.currency as Currency);
 
-    addToBucket(summary.expectedRevenue, row);
+    // expectedRevenue: pending + paid + refunded only. 'reversed' was voided
+    // and never became revenue; 'failed' is the status a 'mismatch'
+    // verification always produces (see state-machine#resultingPaymentStatus)
+    // and equally never became real money. See the field's own doc comment.
+    if (row.status === "pending" || row.status === "paid" || row.status === "refunded") {
+      addToBucket(summary.expectedRevenue, row);
+    }
 
     switch (row.status) {
       case "paid":
@@ -119,27 +164,40 @@ export async function getReconciliationSummary(
         break;
     }
 
-    switch (row.verification_state) {
-      case "bank_verified":
-        addToBucket(summary.bankVerified, row);
-        break;
-      case "manager_verified":
-        addToBucket(summary.managerVerified, row);
-        break;
-      case "staff_confirmed":
-        addToBucket(summary.staffConfirmedOnly, row);
-        break;
-      case "duplicate_suspected":
-        addToBucket(summary.duplicateSuspected, row);
-        addToBucket(summary.needsReview, row);
-        break;
-      case "mismatch":
-        addToBucket(summary.mismatch, row);
-        addToBucket(summary.needsReview, row);
-        break;
-      case "unverified":
-        if (row.status === "pending") addToBucket(summary.needsReview, row);
-        break;
+    // "Currently live" gate: reverse_payment_v1 / refund_payment_v1 never
+    // touch verification_state (migration 035), so a reversed or refunded
+    // payment can still carry a verification_state of 'staff_confirmed',
+    // 'bank_verified', 'mismatch', etc. from before it was voided/returned.
+    // None of the trust-tier or review buckets below should count that money
+    // — it no longer exists as a live balance and nothing about it still
+    // "needs review". Excluding both statuses here is what fixes the bug
+    // where a reversed/refunded payment inflated bankVerified/
+    // managerVerified/staffConfirmedOnly/needsReview/duplicateSuspected/mismatch.
+    const isLive = row.status !== "reversed" && row.status !== "refunded";
+
+    if (isLive) {
+      switch (row.verification_state) {
+        case "bank_verified":
+          addToBucket(summary.bankVerified, row);
+          break;
+        case "manager_verified":
+          addToBucket(summary.managerVerified, row);
+          break;
+        case "staff_confirmed":
+          addToBucket(summary.staffConfirmedOnly, row);
+          break;
+        case "duplicate_suspected":
+          addToBucket(summary.duplicateSuspected, row);
+          addToBucket(summary.needsReview, row);
+          break;
+        case "mismatch":
+          addToBucket(summary.mismatch, row);
+          addToBucket(summary.needsReview, row);
+          break;
+        case "unverified":
+          if (row.status === "pending") addToBucket(summary.needsReview, row);
+          break;
+      }
     }
 
     if (row.method === "cod" && row.status === "pending") {

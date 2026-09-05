@@ -148,7 +148,39 @@ function mapPayment(row: PaymentRow, canViewReference: boolean): PaymentSummary 
   };
 }
 
-function mapEvent(row: PaymentEventRow): PaymentEventDetail {
+/**
+ * Any object key whose name contains "reference" (case-insensitive) is
+ * treated as capable of carrying a raw bank/KHQR reference value and is
+ * redacted. This is deliberately name-pattern-based rather than an allowlist
+ * of today's known event shapes: `payment_events.metadata` is a free-form
+ * JSONB column that different event types (and future ones — e.g. a bank
+ * adapter's `providerReference`/`conflictingReference`, migration 035's
+ * `duplicate_flagged` and `correction` events' `reference`/`before.reference`/
+ * `after.reference`) can populate with different key names, and the
+ * withholding guarantee must hold for shapes this file's author did not
+ * anticipate, not just the ones that exist today.
+ */
+const REFERENCE_KEY_PATTERN = /reference/i;
+
+function redactReferenceValues(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) {
+    return value.map(redactReferenceValues);
+  }
+  if (value !== null && typeof value === "object") {
+    const redacted: Record<string, JsonValue> = {};
+    for (const [key, child] of Object.entries(value)) {
+      redacted[key] = REFERENCE_KEY_PATTERN.test(key) ? null : redactReferenceValues(child);
+    }
+    return redacted;
+  }
+  return value;
+}
+
+function mapEvent(row: PaymentEventRow, canViewReference: boolean): PaymentEventDetail {
+  // PostgREST already deserialized this from JSONB — it is JSON-safe by
+  // construction; the DB row type just isn't narrowed that precisely.
+  const rawMetadata = row.metadata as JsonValue | null;
+
   return {
     id: row.id,
     eventType: row.event_type,
@@ -160,9 +192,13 @@ function mapEvent(row: PaymentEventRow): PaymentEventDetail {
     toVerification: row.to_verification,
     actorUserId: row.actor_user_id,
     reason: row.reason,
-    // PostgREST already deserialized this from JSONB — it is JSON-safe by
-    // construction; the DB row type just isn't narrowed that precisely.
-    metadata: row.metadata as JsonValue | null,
+    // The top-level `reference` field on PaymentSummary is withheld unless
+    // the caller holds payments.view_provider_reference — event metadata
+    // must never be a side door around that same restriction (a
+    // 'duplicate_flagged' event's metadata carries the raw reference, and a
+    // 'correction' event's metadata carries both the old and new reference).
+    metadata:
+      canViewReference || rawMetadata === null ? rawMetadata : redactReferenceValues(rawMetadata),
     createdAt: row.created_at,
   };
 }
@@ -654,7 +690,7 @@ async function loadDetail(
 
   return {
     ...mapPayment(payment, canViewReference),
-    events: events.map(mapEvent),
+    events: events.map((row) => mapEvent(row, canViewReference)),
     evidence: evidence.map((row) => mapEvidence(row, canViewReference)),
   };
 }

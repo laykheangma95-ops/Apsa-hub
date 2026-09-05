@@ -120,7 +120,14 @@ yet except what the uploader explicitly supplies.
 
 `reference` and evidence `storage_ref` are withheld (returned as `null`) from any
 caller who lacks `payments.view_provider_reference` — the same withholding pattern
-the Product domain uses for cost fields.
+the Product domain uses for cost fields. This withholding also applies to
+`payment_events[].metadata`: a `duplicate_flagged` event's metadata carries the raw
+colliding reference and a `correction` event's metadata carries the before/after
+reference values, so `mapEvent()` redacts any object key matching `/reference/i`
+(recursively, at any nesting depth) whenever the caller lacks
+`payments.view_provider_reference` — a name-pattern redaction rather than an allowlist
+of today's known event shapes, so it also covers metadata a future bank-adapter
+integration might add (e.g. `providerReference`, `conflictingReference`).
 
 ---
 
@@ -152,6 +159,16 @@ uniqueness constraint on `reference` — a resent screenshot or a re-quoted KHQR
 a normal occurrence, and rejecting it outright would block a legitimate sale. A flagged
 duplicate is later resolved through `verify_payment_v1`
 (`duplicate_suspected → unverified | staff_confirmed | manager_verified | mismatch`).
+
+**Concurrency:** the duplicate-reference `EXISTS` check and the `INSERT` are two
+separate statements — without serialization, two genuinely concurrent calls carrying
+the same reference could each see "no duplicate" before either commits.
+`record_payment_v1` takes a transaction-scoped advisory lock
+(`pg_advisory_xact_lock(hashtext(organization_id || ':' || reference))`) immediately
+before the check, so a second concurrent call for the same `(organization_id,
+reference)` pair waits for the first to commit and then reliably observes its row —
+same pattern as `create_organization_for_founder`'s per-founder lock (migration 009).
+Skipped entirely when no reference is supplied.
 
 ---
 
@@ -213,7 +230,10 @@ service-role bypass could defeat.
   migrations 019/022/025/027). `payments.confirm`/`payments.override` (migration
   003) are pre-existing, unrelated keys — `payments.confirm` remains the Order
   domain's own payment-axis permission; `payments.override` is left in place but
-  superseded going forward by `payments.override_status`.
+  superseded going forward by `payments.override_status`. All nine keys in this
+  table — including `payments.verify`, `payments.reverse` and `payments.reconcile`,
+  which this phase introduces beyond the original matrix — are now recorded in
+  `PERMISSIONS_MATRIX.md` §17 itself, not only here.
 
 ---
 
@@ -249,6 +269,27 @@ buckets: expected revenue, paid, pending, failed, reversed, refunded, bank-verif
 manager-verified, staff-confirmed-only, COD-unsettled, needs-review (mismatch +
 duplicate-suspected + pending-and-unverified), duplicate-suspected, and mismatch.
 Two currencies are never summed together (no implicit exchange rate).
+
+**Bucket definitions, stated precisely (each is also documented inline on
+`ReconciliationSummary` in the source):**
+
+- **`expectedRevenue`** = `status IN ('pending', 'paid', 'refunded')`. Excludes
+  `reversed` (voided before/instead of settling — never became revenue) and `failed`
+  (the status a `mismatch` verification always produces — the claim was found not to
+  hold up, so it never became real money either). **Includes `refunded`, gross**: a
+  refunded payment genuinely arrived and settled as `paid` before later being returned,
+  so excluding it would erase that the sale happened. `refunded` is reported as its own
+  bucket precisely so a consumer can compute `expectedRevenue - refunded` for a NET
+  figure — do not add `refunded` into `expectedRevenue` a second time.
+- **`bankVerified` / `managerVerified` / `staffConfirmedOnly`** = the matching
+  `verification_state`, but **only while `status = 'paid'`**. `reverse_payment_v1` and
+  `refund_payment_v1` never touch `verification_state` (migration 035), so a reversed or
+  refunded payment can still carry e.g. `verification_state = 'bank_verified'` from
+  before it was voided/returned — these trust-tier buckets deliberately exclude that
+  money because it is no longer a live balance.
+- **`needsReview` / `duplicateSuspected` / `mismatch`** = the matching
+  `verification_state`, excluding any payment already `reversed` or `refunded` — voiding
+  or refunding a payment already resolved whatever needed reviewing about it.
 
 **No dashboard UI exists yet.** This is backend capability only, using neutral
 labels ("needs review") rather than accusatory ones, per `SECURITY.md`'s guidance

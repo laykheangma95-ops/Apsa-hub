@@ -354,8 +354,14 @@ BEGIN
 END;
 $$;
 
+-- BEFORE INSERT OR UPDATE (not INSERT-only): payment_evidence has no exposed
+-- UPDATE path today, but extracted_amount_minor/extracted_reference/
+-- extracted_at are explicitly schema-ready for a future OCR/extraction
+-- writer (see the table's own comment above) — this trigger must already be
+-- in place so that future writer cannot introduce a cross-tenant row via
+-- UPDATE without a schema change being needed here.
 CREATE TRIGGER payment_evidence_integrity_check
-  BEFORE INSERT ON public.payment_evidence
+  BEFORE INSERT OR UPDATE ON public.payment_evidence
   FOR EACH ROW EXECUTE FUNCTION public.check_payment_evidence_integrity();
 
 -- ── Row-Level Security ────────────────────────────────────────────────────────
