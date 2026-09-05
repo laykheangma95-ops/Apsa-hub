@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -15,7 +15,7 @@ import {
   ListSkeleton,
 } from "@/design-system";
 
-import { getConversationCounts, getConversations, getCustomers, getStaff } from "@/lib/api";
+import { getConversationCounts, getConversationPage, getCustomers, getStaff } from "@/api/inbox";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { usePullToRefresh } from "@/hooks/use-pull-to-refresh";
@@ -68,9 +68,12 @@ function InboxLayout() {
   const [channel, setChannel] = useState<ChannelFilter>("all");
   const [query, setQuery] = useState("");
 
-  const conversationsQuery = useQuery({
+  const conversationsQuery = useInfiniteQuery({
     queryKey: ["conversations", status, channel, query],
-    queryFn: () => getConversations({ status, channel, query }),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      getConversationPage({ status, channel, query, ...(pageParam ? { cursor: pageParam } : {}) }),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
   });
   const countsQuery = useQuery({
     queryKey: ["conversation-counts"],
@@ -85,7 +88,14 @@ function InboxLayout() {
 
   const { containerRef, pull, refreshing, threshold } = usePullToRefresh(refresh);
 
-  const conversations = conversationsQuery.data ?? [];
+  const conversations = [
+    ...new Map(
+      (conversationsQuery.data?.pages.flatMap((page) => page.conversations) ?? []).map((row) => [
+        row.id,
+        row,
+      ]),
+    ).values(),
+  ];
   const counts = countsQuery.data ?? {};
 
   const listPane = (
@@ -231,6 +241,16 @@ function InboxLayout() {
                 );
               })}
             </ul>
+            {conversationsQuery.hasNextPage ? (
+              <button
+                type="button"
+                className="tap-target w-full text-text-primary"
+                disabled={conversationsQuery.isFetchingNextPage}
+                onClick={() => void conversationsQuery.fetchNextPage()}
+              >
+                {t("inbox.loadMore")}
+              </button>
+            ) : null}
           </>
         )}
       </div>

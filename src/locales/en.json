@@ -418,7 +418,8 @@
     "facebook": "Facebook",
     "instagram": "Instagram",
     "telegram": "Telegram",
-    "pos": "In store"
+    "pos": "In store",
+    "other": "Other channel"
   },
   "money": {
     "approx": "≈ {{value}}",
@@ -488,7 +489,8 @@
     "selectPrompt": {
       "title": "Pick a conversation",
       "body": "Choose someone on the left and the thread opens here."
-    }
+    },
+    "loadMore": "Load more"
   },
   "conversation": {
     "back": "Back to inbox",
@@ -594,7 +596,11 @@
         "title": "You can't create this order",
         "body": "Ask an owner or manager for order permission."
       }
-    }
+    },
+    "loadEarlier": "Load earlier messages",
+    "operationFailed": "The conversation could not be updated. Refresh and try again.",
+    "providerPending": "Sending will be available when this channel is connected.",
+    "unresolvedCustomer": "Unlinked customer"
   },
   "createOrder": {
     "title": "Create order",

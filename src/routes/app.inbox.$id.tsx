@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ImagePlus, MessageSquareQuote, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -20,12 +20,15 @@ import { PrepareOrderSheet } from "@/components/inbox/PrepareOrderSheet";
 import { SmartActionStrip } from "@/components/inbox/SmartActionStrip";
 import {
   getConversation,
+  getOlderConversationMessages,
+  markRealConversationRead,
+  updateRealConversationStatus,
   getCustomer,
   getCustomerOrders,
   getMostRecentRealOrderForCustomer,
   getProducts,
   isProductionId,
-} from "@/lib/api";
+} from "@/api/inbox";
 import {
   buildSmartActionSuggestion,
   toPrepareOrderItems,
@@ -80,7 +83,15 @@ const SAVED_REPLY_KEYS = ["greeting", "price", "stock", "delivery"] as const;
 
 function ConversationScreen() {
   const { id } = Route.useParams();
+  const activeIdRef = useRef(id);
+  activeIdRef.current = id;
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [operationError, setOperationError] = useState(false);
+  const [olderMessages, setOlderMessages] = useState<Message[]>([]);
+  const [olderCursor, setOlderCursor] = useState<string | null | undefined>();
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [savingStatus, setSavingStatus] = useState(false);
   const { t } = useTranslation();
   const { language } = useLanguage();
 
@@ -108,7 +119,9 @@ function ConversationScreen() {
     enabled: Boolean(conversation?.customerId),
   });
   const customer = customerQuery.data;
-  const displayName = customer ? localName(customer, language) : "…";
+  const displayName = customer
+    ? localName(customer, language)
+    : (conversation?.customerName ?? t("conversation.unresolvedCustomer"));
 
   // Catalog for Smart Action variant resolution (§ PRODUCT / VARIANT
   // RESOLUTION) and for the Prepare Order review step. Same production/mock
@@ -119,7 +132,14 @@ function ConversationScreen() {
   });
   const products = productsQuery.data ?? [];
 
-  const messages = [...(conversation?.messages ?? []), ...appended];
+  const messages = [
+    ...new Map(
+      [...olderMessages, ...(conversation?.messages ?? []), ...appended].map((message) => [
+        message.id,
+        message,
+      ]),
+    ).values(),
+  ];
   const currentStatus = status ?? conversation?.status ?? "needs_reply";
 
   // Deterministic, client-side only — never a security decision (§
@@ -143,6 +163,9 @@ function ConversationScreen() {
 
   useEffect(() => {
     setAppended([]);
+    setOlderMessages([]);
+    setOlderCursor(undefined);
+    setOperationError(false);
     setStatus(null);
     setDraft("");
     setLastOrder(null);
@@ -152,11 +175,72 @@ function ConversationScreen() {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
 
+  useEffect(() => {
+    const messageId = conversation?.readThroughMessageId;
+    if (!isProductionId(id) || !messageId) return;
+    let active = true;
+    void markRealConversationRead(id, messageId)
+      .then(() => {
+        if (active) {
+          void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+          void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+        }
+      })
+      .catch(() => {
+        if (active) setOperationError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, conversation?.readThroughMessageId, queryClient]);
+
+  async function loadOlder() {
+    const cursor = olderCursor === undefined ? conversation?.nextBeforeId : olderCursor;
+    if (!cursor || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await getOlderConversationMessages(id, cursor);
+      if (activeIdRef.current !== id) return;
+      setOlderMessages((rows) => [...page.messages, ...rows]);
+      setOlderCursor(page.nextBeforeId);
+      if (page.readThroughMessageId) {
+        await markRealConversationRead(id, page.readThroughMessageId);
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+        void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+      }
+    } catch {
+      setOperationError(true);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  async function changeStatus(value: ConversationStatus) {
+    if (savingStatus) return;
+    setSavingStatus(true);
+    try {
+      if (isProductionId(id)) await updateRealConversationStatus(id, value);
+      if (activeIdRef.current !== id) return;
+      setStatus(value);
+      setStatusOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+    } catch {
+      setOperationError(true);
+    } finally {
+      setSavingStatus(false);
+    }
+  }
+
   function append(message: Message) {
     setAppended((list) => [...list, message]);
   }
 
   function send(body: string) {
+    if (isProductionId(id)) {
+      setDraft(body);
+      return;
+    }
     const text = body.trim();
     if (!text) return;
     append({
@@ -302,6 +386,16 @@ function ConversationScreen() {
           <EmptyState title={t("conversation.empty.title")} body={t("conversation.empty.body")} />
         ) : null}
 
+        {operationError ? (
+          <p role="alert" className="px-4 text-text-secondary">
+            {t("conversation.operationFailed")}
+          </p>
+        ) : null}
+        {(olderCursor === undefined ? conversation?.nextBeforeId : olderCursor) ? (
+          <Button variant="outline" disabled={loadingOlder} onClick={() => void loadOlder()}>
+            {t("conversation.loadEarlier")}
+          </Button>
+        ) : null}
         <div className="space-y-2">
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
@@ -338,12 +432,22 @@ function ConversationScreen() {
           <Button
             className="press tap-target elevation-action h-12 w-full"
             disabled={!customer}
-            onClick={() => setOrderOpen(true)}
+            onClick={() => {
+              if (isProductionId(id)) {
+                setPrepareItems([]);
+                setPrepareOpen(true);
+              } else setOrderOpen(true);
+            }}
           >
             {t("conversation.createOrder")}
           </Button>
         </div>
 
+        {isProductionId(id) ? (
+          <p className="px-4 pt-2 text-caption text-text-secondary">
+            {t("conversation.providerPending")}
+          </p>
+        ) : null}
         <form
           className="flex items-end gap-1.5 px-3 pt-2"
           onSubmit={(event) => {
@@ -376,7 +480,7 @@ function ConversationScreen() {
           <button
             type="submit"
             aria-label={t("conversation.send")}
-            disabled={draft.trim().length === 0}
+            disabled={isProductionId(id) || draft.trim().length === 0}
             className="press tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
           >
             <Send className="size-5" aria-hidden />
@@ -391,14 +495,12 @@ function ConversationScreen() {
         snap="peek"
       >
         <ul className="space-y-2">
-          {STATUSES.map((value) => (
+          {STATUSES.filter((value) => !isProductionId(id) || value !== "unread").map((value) => (
             <li key={value}>
               <button
                 type="button"
-                onClick={() => {
-                  setStatus(value);
-                  setStatusOpen(false);
-                }}
+                disabled={savingStatus}
+                onClick={() => void changeStatus(value)}
                 aria-pressed={currentStatus === value}
                 className={cn(
                   "tap-target flex w-full items-center rounded-xl border px-4 text-left",

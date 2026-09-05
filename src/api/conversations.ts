@@ -131,19 +131,24 @@ export const listConversationMessagesFn = createServerFn()
 
 // ── markConversationReadFn ─────────────────────────────────────────────────────
 
-export const markConversationReadFn = createServerFn()
+export const markConversationReadFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
-    z.object({ conversationId: z.string().uuid("Invalid conversation ID") }).parse(data),
+    z
+      .object({
+        conversationId: z.string().uuid("Invalid conversation ID"),
+        messageId: z.string().uuid(),
+      })
+      .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markConversationRead } = await import("@/server/conversations/service");
-    return markConversationRead(authCtx, data.conversationId);
+    return markConversationRead(authCtx, data.conversationId, data.messageId);
   });
 
 // ── updateConversationStatusFn ─────────────────────────────────────────────────
 
-export const updateConversationStatusFn = createServerFn()
+export const updateConversationStatusFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -160,7 +165,7 @@ export const updateConversationStatusFn = createServerFn()
 
 // ── assignConversationFn ───────────────────────────────────────────────────────
 
-export const assignConversationFn = createServerFn()
+export const assignConversationFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

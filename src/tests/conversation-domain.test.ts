@@ -405,7 +405,7 @@ describe("Test 10: Mapped message shape matches the intent engine's ContextMessa
     const src = readFileSync(servicePath, "utf-8");
     expect(src).toContain("DETAIL_MESSAGE_WINDOW");
     expect(src).toMatch(
-      /listRecentMessages\(ctx\.organizationId, conversationId, DETAIL_MESSAGE_WINDOW\)/,
+      /listMessagesBefore\(ctx\.organizationId, conversationId, null, DETAIL_MESSAGE_WINDOW\)/,
     );
   });
 
@@ -435,13 +435,15 @@ describe("Test 11: Mock Inbox/Conversation data path is untouched", () => {
 
 // ── Test 12: Idempotent read-state ─────────────────────────────────────────────
 
-describe("Test 12: markConversationRead is a plain idempotent update", () => {
-  it("repository.markConversationRead sets unread_count to a literal 0, not an increment/decrement", () => {
+describe("Test 12: markConversationRead uses an authoritative per-user marker", () => {
+  it("repository.markConversationRead delegates the viewed message and user to its RPC", () => {
     const repoPath = resolve(import.meta.dir, "../server/conversations/repository.ts");
     const src = readFileSync(repoPath, "utf-8");
     const fnStart = src.indexOf("export async function markConversationRead(");
     const fnEnd = src.indexOf("\n}", fnStart);
     const fnBody = src.slice(fnStart, fnEnd);
-    expect(fnBody).toContain("unread_count: 0");
+    expect(fnBody).toContain('db.rpc("mark_conversation_read"');
+    expect(fnBody).toContain("p_user: userId");
+    expect(fnBody).not.toContain("unread_count: 0");
   });
 });
