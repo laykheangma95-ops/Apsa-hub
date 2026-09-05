@@ -87,6 +87,11 @@ export interface PaymentEventDetail {
   fromVerification: PaymentVerificationState | null;
   toVerification: PaymentVerificationState | null;
   actorUserId: string | null;
+  /**
+   * Free text. Withheld only where it literally contains a reference value
+   * already known to belong to this payment, unless the caller holds
+   * payments.view_provider_reference — see redactKnownReferencesFromText.
+   */
   reason: string | null;
   metadata: JsonValue | null;
   createdAt: string;
@@ -114,6 +119,11 @@ export interface PaymentSummary {
   verificationState: PaymentVerificationState;
   /** Withheld (null) unless the caller holds payments.view_provider_reference. */
   reference: string | null;
+  /**
+   * Free text. Withheld only where it literally contains a reference value
+   * already known to belong to this payment, unless the caller holds
+   * payments.view_provider_reference — see redactKnownReferencesFromText.
+   */
   note: string | null;
   recordedBy: string | null;
   createdAt: string;
@@ -131,7 +141,68 @@ function toMoney(amount: number, currency: string): Money {
   return { amount, currency: currency as Currency };
 }
 
-function mapPayment(row: PaymentRow, canViewReference: boolean): PaymentSummary {
+/**
+ * Minimum length before an already-known reference value is eligible for
+ * redaction out of free text. APSA's real bank/KHQR references are never
+ * this short; the floor exists only so a pathologically short reference
+ * value could never turn into a broad substring match against ordinary
+ * words/numbers in an unrelated note.
+ */
+const MIN_REDACTABLE_KNOWN_REFERENCE_LENGTH = 4;
+
+/**
+ * Collects the raw reference value(s) already known to exist on THIS
+ * specific payment — its own `reference` column, plus any of its evidence
+ * rows' OCR-extracted reference. Never a scan of arbitrary text; this is
+ * exactly the same withheld value `reference`/`extractedReference` already
+ * refuse to return directly.
+ */
+function collectKnownReferences(
+  primary: string | null,
+  extras: ReadonlyArray<string | null> = [],
+): ReadonlySet<string> {
+  const known = new Set<string>();
+  if (primary) known.add(primary);
+  for (const extra of extras) {
+    if (extra) known.add(extra);
+  }
+  return known;
+}
+
+/**
+ * Removes exact, literal occurrences of already-known reference values from
+ * free text, replacing each with "[withheld]". Deliberately NOT a regex over
+ * arbitrary numbers/patterns — it only ever removes a string this payment's
+ * OWN structured data already told us is a sensitive reference (via
+ * `String.prototype.split`/`join`, so no regex special-character handling is
+ * even needed), so ordinary notes/reasons ("2nd installment", "table 4",
+ * "typo fix") are completely unaffected unless they happen to literally
+ * contain this specific payment's own reference value.
+ */
+function redactKnownReferencesFromText(
+  text: string | null,
+  knownReferences: ReadonlySet<string>,
+): string | null {
+  if (text === null) return null;
+  let redacted = text;
+  for (const reference of knownReferences) {
+    if (reference.length < MIN_REDACTABLE_KNOWN_REFERENCE_LENGTH) continue;
+    if (redacted.includes(reference)) {
+      redacted = redacted.split(reference).join("[withheld]");
+    }
+  }
+  return redacted;
+}
+
+function mapPayment(
+  row: PaymentRow,
+  canViewReference: boolean,
+  extraKnownReferences: ReadonlyArray<string | null> = [],
+): PaymentSummary {
+  const knownReferences = canViewReference
+    ? collectKnownReferences(null)
+    : collectKnownReferences(row.reference, extraKnownReferences);
+
   return {
     id: row.id,
     organizationId: row.organization_id,
@@ -141,7 +212,7 @@ function mapPayment(row: PaymentRow, canViewReference: boolean): PaymentSummary 
     status: row.status,
     verificationState: row.verification_state,
     reference: canViewReference ? row.reference : null,
-    note: row.note,
+    note: redactKnownReferencesFromText(row.note, knownReferences),
     recordedBy: row.recorded_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -176,7 +247,11 @@ function redactReferenceValues(value: JsonValue): JsonValue {
   return value;
 }
 
-function mapEvent(row: PaymentEventRow, canViewReference: boolean): PaymentEventDetail {
+function mapEvent(
+  row: PaymentEventRow,
+  canViewReference: boolean,
+  knownReferences: ReadonlySet<string>,
+): PaymentEventDetail {
   // PostgREST already deserialized this from JSONB — it is JSON-safe by
   // construction; the DB row type just isn't narrowed that precisely.
   const rawMetadata = row.metadata as JsonValue | null;
@@ -191,7 +266,12 @@ function mapEvent(row: PaymentEventRow, canViewReference: boolean): PaymentEvent
     fromVerification: row.from_verification,
     toVerification: row.to_verification,
     actorUserId: row.actor_user_id,
-    reason: row.reason,
+    // A manager/owner can freely type this payment's own raw reference into
+    // a free-text reason ("confirmed via bank, ref ABA123...") — that must
+    // not become a side door around the SAME field's own withholding.
+    reason: canViewReference
+      ? row.reason
+      : redactKnownReferencesFromText(row.reason, knownReferences),
     // The top-level `reference` field on PaymentSummary is withheld unless
     // the caller holds payments.view_provider_reference — event metadata
     // must never be a side door around that same restriction (a
@@ -688,9 +768,14 @@ async function loadDetail(
     repo.listPaymentEvidence(ctx.organizationId, paymentId),
   ]);
 
+  const extractedReferences = evidence.map((row) => row.extracted_reference);
+  const knownReferences = canViewReference
+    ? collectKnownReferences(null)
+    : collectKnownReferences(payment.reference, extractedReferences);
+
   return {
-    ...mapPayment(payment, canViewReference),
-    events: events.map((row) => mapEvent(row, canViewReference)),
+    ...mapPayment(payment, canViewReference, extractedReferences),
+    events: events.map((row) => mapEvent(row, canViewReference, knownReferences)),
     evidence: evidence.map((row) => mapEvidence(row, canViewReference)),
   };
 }

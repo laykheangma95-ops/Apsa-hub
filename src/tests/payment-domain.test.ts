@@ -1692,3 +1692,233 @@ describe("Test 33: payments.verify/reverse/reconcile are recorded in PERMISSIONS
     expect(section).toContain("`payments.reconcile`");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SENSITIVE REFERENCE WITHHOLDING VIA FREE TEXT (final hardening — PR #30)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 34: a known reference cannot be recovered through free-text note/reason", () => {
+  it("a caller without payments.view_provider_reference does not see the reference inside payments.note", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: "ABA-SECRET-REF-999",
+            note: "Customer paid via ABA-SECRET-REF-999, please confirm with bank.",
+          }),
+          payment_events: emptyEvents,
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.reference).toBeNull();
+    expect(detail.note).toBe("Customer paid via [withheld], please confirm with bank.");
+    expect(detail.note).not.toContain("ABA-SECRET-REF-999");
+  });
+
+  it("a caller without payments.view_provider_reference does not see the reference inside payment_events.reason", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({ reference: "ABA-SECRET-REF-999" }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "manual_confirm",
+              amount_minor: null,
+              currency: null,
+              from_verification: "unverified",
+              to_verification: "staff_confirmed",
+              actor_user_id: USER_ORG_A,
+              reason: "Confirmed by phone with the bank teller, reference ABA-SECRET-REF-999.",
+              metadata: null,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.events[0]?.reason).toBe(
+      "Confirmed by phone with the bank teller, reference [withheld].",
+    );
+    expect(detail.events[0]?.reason).not.toContain("ABA-SECRET-REF-999");
+  });
+
+  it("also scrubs an evidence-extracted reference out of note/reason, not just the payment's own reference column", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: null,
+            note: "OCR read KHQR-EVID-REF-777 off the slip.",
+          }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "evidence_attached",
+              amount_minor: null,
+              currency: null,
+              from_verification: null,
+              to_verification: null,
+              actor_user_id: USER_ORG_A,
+              reason: "Screenshot shows KHQR-EVID-REF-777 clearly.",
+              metadata: null,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: rows([
+            {
+              id: "ev-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              evidence_type: "screenshot",
+              storage_ref: "evidence/org-a/ev-1.png",
+              extracted_amount_minor: null,
+              extracted_reference: "KHQR-EVID-REF-777",
+              extracted_at: "2026-09-05T00:00:00.000Z",
+              uploaded_by: USER_ORG_A,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.note).toBe("OCR read [withheld] off the slip.");
+    expect(detail.events[0]?.reason).toBe("Screenshot shows [withheld] clearly.");
+  });
+
+  it("a caller WITH payments.view_provider_reference sees note/reason completely unmodified", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS, "OWNER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: "ABA-SECRET-REF-999",
+            note: "Customer paid via ABA-SECRET-REF-999, please confirm with bank.",
+          }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "manual_confirm",
+              amount_minor: null,
+              currency: null,
+              from_verification: "unverified",
+              to_verification: "staff_confirmed",
+              actor_user_id: USER_ORG_A,
+              reason: "Confirmed by phone with the bank teller, reference ABA-SECRET-REF-999.",
+              metadata: null,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.reference).toBe("ABA-SECRET-REF-999");
+    expect(detail.note).toBe("Customer paid via ABA-SECRET-REF-999, please confirm with bank.");
+    expect(detail.events[0]?.reason).toBe(
+      "Confirmed by phone with the bank teller, reference ABA-SECRET-REF-999.",
+    );
+  });
+
+  it("ordinary non-sensitive note/reason text is never altered, even for a caller without payments.view_provider_reference", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({
+            reference: "ABA-SECRET-REF-999",
+            note: "2nd installment, customer asked for table 4, will collect balance next week.",
+          }),
+          payment_events: rows([
+            {
+              id: "evt-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              event_type: "manual_confirm",
+              amount_minor: null,
+              currency: null,
+              from_verification: "unverified",
+              to_verification: "staff_confirmed",
+              actor_user_id: USER_ORG_A,
+              reason: "Typo fix on the recorded amount, unrelated to reference.",
+              metadata: null,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+          payment_evidence: emptyEvidence,
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    expect(detail.note).toBe(
+      "2nd installment, customer asked for table 4, will collect balance next week.",
+    );
+    expect(detail.events[0]?.reason).toBe(
+      "Typo fix on the recorded amount, unrelated to reference.",
+    );
+  });
+
+  it("listPayments also withholds the reference from note (using only the payment's own reference column)", async () => {
+    const { listPayments } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const [summary] = await withPaymentDb(
+      {
+        tables: {
+          payments: rows([
+            {
+              id: PAYMENT_ID,
+              organization_id: ORG_A_ID,
+              order_id: ORDER_ID,
+              method: "cash",
+              currency: "USD",
+              amount_minor: 1000,
+              status: "pending",
+              verification_state: "unverified",
+              reference: "ABA-SECRET-REF-999",
+              idempotency_key: null,
+              note: "Paid ABA-SECRET-REF-999 in full.",
+              recorded_by: USER_ORG_A,
+              created_at: "2026-09-05T00:00:00.000Z",
+              updated_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+        },
+      },
+      () => listPayments(ctx),
+    );
+
+    expect(summary!.reference).toBeNull();
+    expect(summary!.note).toBe("Paid [withheld] in full.");
+  });
+});
