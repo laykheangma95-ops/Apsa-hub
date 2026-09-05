@@ -478,11 +478,29 @@ export async function cancelRealOrder(orderId: string, reason?: string): Promise
   return mapOrderDetailToUi(detail);
 }
 
+/**
+ * Row shape for the create-order flow's optional customer picker.
+ *
+ * Deliberately NOT the full mock `Customer` type (identities/tags/orderCount/
+ * lifetimeSpend/companion do not exist for a production list read and have no
+ * honest value to fill in here) — a small, explicit, typed server->UI shape
+ * instead of a cast. `phone` is already PII-gated server-side by
+ * listCustomers() (src/server/customers/service.ts): "" means either no
+ * phone on file or the caller lacks customers.view_sensitive — the UI cannot
+ * tell which and must not guess, and never decides this itself.
+ */
+export interface OrderCustomerOption {
+  id: string;
+  nameKm: string;
+  nameEn: string;
+  phone: string;
+  sensitiveVisible: boolean;
+}
+
 /** Lightweight customer list for the create-order flow's optional customer picker. */
-export async function listRealCustomers(): Promise<Customer[]> {
+export async function listRealCustomers(): Promise<OrderCustomerOption[]> {
   const { listCustomersFn } = await import("@/api/customers");
-  const rows = await listCustomersFn({ data: { limit: 100, status: "active" } });
-  return rows as unknown as Customer[];
+  return listCustomersFn({ data: { limit: 100, status: "active" } });
 }
 
 export interface DeliveryDetail {

@@ -22,13 +22,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
-import { createRealOrder, getProducts, listRealCustomers } from "@/lib/api";
+import {
+  createRealOrder,
+  getProducts,
+  listRealCustomers,
+  type OrderCustomerOption,
+} from "@/lib/api";
 import { classifyOrderError } from "@/lib/orders";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
-import type { Customer, Order, Product } from "@/types";
+import type { Order, Product } from "@/types";
 
 type OrderSourceDb = "POS" | "FACEBOOK" | "INSTAGRAM" | "TELEGRAM" | "MANUAL";
 
@@ -61,7 +66,7 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
   const [discountEnabled, setDiscountEnabled] = useState(false);
   const [discountCents, setDiscountCents] = useState(0);
   const [customerQuery, setCustomerQuery] = useState("");
-  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [customer, setCustomer] = useState<OrderCustomerOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
@@ -275,7 +280,7 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
                     {localName(customer, language)}
                   </span>
                   <span className="text-caption tnum block truncate text-text-muted">
-                    {customer.phone}
+                    {customer.phone || t("orderCreate.noPhone")}
                   </span>
                 </span>
                 <span className="text-label shrink-0 text-action-primary">
@@ -316,7 +321,7 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
                               {localName(c, language)}
                             </span>
                             <span className="text-caption tnum block truncate text-text-muted">
-                              {c.phone}
+                              {c.phone || t("orderCreate.noPhone")}
                             </span>
                           </span>
                         </button>

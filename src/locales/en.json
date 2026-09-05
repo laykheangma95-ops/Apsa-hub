@@ -818,6 +818,7 @@
     "chooseCustomer": "Choose customer",
     "searchCustomers": "Search customers",
     "noCustomers": "No customer matched that search.",
+    "noPhone": "Phone not shown",
     "subtotal": "Subtotal",
     "total": "Estimated total",
     "totalNote": "The final price is set by the server when the order is created.",

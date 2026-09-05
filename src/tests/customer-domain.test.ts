@@ -22,7 +22,7 @@
  * Run: bun test src/tests/customer-domain.test.ts
  */
 
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect, beforeAll, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -53,13 +53,10 @@ let supabaseConfigured = false;
 
 beforeAll(() => {
   supabaseConfigured =
-    Boolean(process.env["VITE_SUPABASE_URL"]) &&
-    Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
+    Boolean(process.env["VITE_SUPABASE_URL"]) && Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
 
   if (!supabaseConfigured) {
-    console.warn(
-      "[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
+    console.warn("[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
   }
 });
 
@@ -141,9 +138,7 @@ function makeCtxWithPermissions(
 describe("Test 1: Tenant isolation — Org A member cannot read Org B customer", () => {
   it("AuthorizationService rejects cross-org access at the authorization layer", async () => {
     await requireSupabase(async () => {
-      await expectForbidden(() =>
-        AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_B_ID),
-      );
+      await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_B_ID));
     });
   });
 
@@ -221,9 +216,7 @@ describe("Test 3: Client-provided org_id is never trusted", () => {
 describe("Test 4: Suspended member is denied access to customers", () => {
   it("AuthorizationService.forRequest rejects suspended users", async () => {
     await requireSupabase(async () => {
-      await expectForbidden(() =>
-        AuthorizationService.forRequest(USER_SUSPENDED, ORG_A_ID),
-      );
+      await expectForbidden(() => AuthorizationService.forRequest(USER_SUSPENDED, ORG_A_ID));
     });
   });
 
@@ -260,17 +253,14 @@ describe("Test 5: Duplicate provider identity is rejected", () => {
     const hasUniqueIndexOnProvider =
       /UNIQUE\s+INDEX.*customer_identities.*\(.*organization_id.*provider.*provider_user_id/is.test(
         sql,
-      ) ||
-      /UNIQUE\s*\(.*organization_id.*provider.*provider_user_id/is.test(sql);
+      ) || /UNIQUE\s*\(.*organization_id.*provider.*provider_user_id/is.test(sql);
     expect(hasUniqueIndexOnProvider).toBe(true);
   });
 
   it("addIdentityToCustomer service requires customer to exist before inserting (requires DB)", async () => {
     await requireSupabase(async () => {
       const { addIdentityToCustomer } = await import("../server/customers/service");
-      const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, [
-        "customers.update_basic",
-      ]);
+      const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, ["customers.update_basic"]);
       // FAKE_CUSTOMER_ID doesn't exist in the DB → findCustomerById returns null → 404 thrown.
       await expect(
         addIdentityToCustomer(ctx, FAKE_CUSTOMER_ID, {
@@ -318,10 +308,12 @@ describe("Test 7: Unauthorized role cannot export customers", () => {
   it("exportCustomers proceeds when caller has customers.export", async () => {
     const { exportCustomers } = await import("../server/customers/service");
     // Owner has customers.export
-    const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, [
-      "customers.read",
-      "customers.export",
-    ], "OWNER");
+    const ctx = makeCtxWithPermissions(
+      USER_ORG_A_OWNER,
+      ORG_A_ID,
+      ["customers.read", "customers.export"],
+      "OWNER",
+    );
 
     // Without a real DB, the audit write fails — but that's a connectivity issue,
     // not a permission issue. The ForbiddenError guard has already passed.
@@ -422,33 +414,25 @@ describe("Test 10: Invalid input is rejected at the validator layer", () => {
   it("createCustomer: empty display_name throws", async () => {
     const { createCustomer } = await import("../server/customers/service");
     const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, ["customers.create"]);
-    await expect(
-      createCustomer(ctx, { display_name: "" }),
-    ).rejects.toThrow();
+    await expect(createCustomer(ctx, { display_name: "" })).rejects.toThrow();
   });
 
   it("createCustomer: whitespace-only display_name throws", async () => {
     const { createCustomer } = await import("../server/customers/service");
     const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, ["customers.create"]);
-    await expect(
-      createCustomer(ctx, { display_name: "   " }),
-    ).rejects.toThrow();
+    await expect(createCustomer(ctx, { display_name: "   " })).rejects.toThrow();
   });
 
   it("addCustomerNote: empty body throws", async () => {
     const { addCustomerNote } = await import("../server/customers/service");
     const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, ["customers.add_note"]);
-    await expect(
-      addCustomerNote(ctx, FAKE_CUSTOMER_ID, ""),
-    ).rejects.toThrow();
+    await expect(addCustomerNote(ctx, FAKE_CUSTOMER_ID, "")).rejects.toThrow();
   });
 
   it("addCustomerNote: whitespace-only body throws", async () => {
     const { addCustomerNote } = await import("../server/customers/service");
     const ctx = makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, ["customers.add_note"]);
-    await expect(
-      addCustomerNote(ctx, FAKE_CUSTOMER_ID, "   "),
-    ).rejects.toThrow();
+    await expect(addCustomerNote(ctx, FAKE_CUSTOMER_ID, "   ")).rejects.toThrow();
   });
 
   it("Server function validator: invalid UUID is rejected before handler runs", async () => {
@@ -523,7 +507,9 @@ describe("Test 12: Identity resolution does not auto-merge on weak signals", () 
 
     // Extract just the function body (up to the next export boundary).
     const fnEnd = src.indexOf("\nexport ", fnStart + 10);
-    const fnBody = (fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart, fnStart + 700)).toLowerCase();
+    const fnBody = (
+      fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart, fnStart + 700)
+    ).toLowerCase();
 
     // Must not use fuzzy or cross-field heuristics in identity lookup.
     expect(fnBody).not.toContain("ilike");
@@ -533,5 +519,140 @@ describe("Test 12: Identity resolution does not auto-merge on weak signals", () 
     // Must not match on phone or display_name (identity lookup is provider-scoped only).
     expect(fnBody).not.toContain("primary_phone");
     expect(fnBody).not.toContain("display_name");
+  });
+});
+
+// ── Test 13: Real Order UI create-flow customer picker — PII gating ──────────
+//
+// PR #24 merge-blocker fix: listRealCustomers() (src/lib/api/index.ts) used to
+// cast the raw DB-shaped listCustomersFn() response straight to the mock UI
+// `Customer` type (`rows as unknown as Customer[]`), which (a) does not
+// actually have the fields the picker read (nameEn/nameKm/phone), risking a
+// crash on `.toLowerCase()`/`.replace()`, and (b) returned primary_phone to
+// ANY caller with customers.read, with no customers.view_sensitive gate —
+// unlike getCustomer360's CustomerProfile, which has always gated it.
+//
+// The fix adds toCustomerListItem() (pure) and wires it into listCustomers()
+// so gating happens server-side, once, for every caller of that function —
+// never as a browser role check.
+
+describe("Test 13: listCustomers()/CustomerListItem — production rows map correctly, PII stays gated", () => {
+  const ROW_WITH_PHONE = {
+    id: "cus-real-0000-0000-0000-000000000001",
+    organization_id: ORG_A_ID,
+    display_name: "Sok Dara",
+    primary_phone: "012 345 678",
+    primary_email: "sokdara@example.com",
+    status: "active" as const,
+    language: "km",
+    first_seen_at: "2026-01-01T00:00:00.000Z",
+    last_seen_at: "2026-08-01T00:00:00.000Z",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-08-01T00:00:00.000Z",
+  };
+
+  const ROW_WITHOUT_PHONE = {
+    ...ROW_WITH_PHONE,
+    id: "cus-real-0000-0000-0000-000000000002",
+    display_name: "Chan Sopheak",
+    primary_phone: null,
+  };
+
+  it("toCustomerListItem always returns a string `phone` — never undefined/null, so the picker's .replace()/.toLowerCase() never crashes", async () => {
+    const { toCustomerListItem } = await import("../server/customers/service");
+
+    expect(toCustomerListItem(ROW_WITH_PHONE, true).phone).toBe("012 345 678");
+    expect(typeof toCustomerListItem(ROW_WITH_PHONE, false).phone).toBe("string");
+    expect(typeof toCustomerListItem(ROW_WITHOUT_PHONE, true).phone).toBe("string");
+    expect(toCustomerListItem(ROW_WITHOUT_PHONE, true).phone).toBe("");
+  });
+
+  it("phone is populated ONLY when sensitiveVisible is true — never leaked to a caller without customers.view_sensitive", async () => {
+    const { toCustomerListItem } = await import("../server/customers/service");
+
+    const visible = toCustomerListItem(ROW_WITH_PHONE, true);
+    expect(visible.phone).toBe("012 345 678");
+    expect(visible.sensitiveVisible).toBe(true);
+
+    const hidden = toCustomerListItem(ROW_WITH_PHONE, false);
+    expect(hidden.phone).toBe("");
+    expect(hidden.sensitiveVisible).toBe(false);
+  });
+
+  it("a customer with no phone on file never renders 'null' or 'undefined' as a string", async () => {
+    const { toCustomerListItem } = await import("../server/customers/service");
+    const item = toCustomerListItem(ROW_WITHOUT_PHONE, true);
+    expect(item.phone).toBe("");
+    expect(item.phone).not.toBe("null");
+    expect(item.phone).not.toBe("undefined");
+  });
+
+  it("id and name are always present regardless of sensitiveVisible — a caller without customers.view_sensitive can still select a customer by name", async () => {
+    const { toCustomerListItem } = await import("../server/customers/service");
+    const item = toCustomerListItem(ROW_WITH_PHONE, false);
+    expect(item.id).toBe(ROW_WITH_PHONE.id);
+    expect(item.nameKm).toBe("Sok Dara");
+    expect(item.nameEn).toBe("Sok Dara");
+  });
+
+  it("listCustomers() requires customers.read and gates phone via ctx.can('customers.view_sensitive') end-to-end", async () => {
+    mock.module("@/server/customers/repository", () => ({
+      listCustomers: async () => [ROW_WITH_PHONE, ROW_WITHOUT_PHONE],
+    }));
+
+    const { listCustomers } = await import("../server/customers/service");
+
+    // No customers.read at all -> forbidden, before any row is touched.
+    await expectForbidden(() =>
+      listCustomers(makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, [])),
+    );
+
+    // customers.read WITHOUT customers.view_sensitive -> names visible, phones masked.
+    const restricted = await listCustomers(
+      makeCtxWithPermissions(USER_ORG_A_CASHIER, ORG_A_ID, ["customers.read"]),
+    );
+    expect(restricted).toHaveLength(2);
+    expect(restricted.every((c) => c.phone === "")).toBe(true);
+    expect(restricted.every((c) => c.sensitiveVisible === false)).toBe(true);
+    expect(restricted.map((c) => c.nameEn)).toEqual(["Sok Dara", "Chan Sopheak"]);
+
+    // customers.read WITH customers.view_sensitive -> the real phone is returned.
+    const full = await listCustomers(
+      makeCtxWithPermissions(USER_ORG_A_OWNER, ORG_A_ID, [
+        "customers.read",
+        "customers.view_sensitive",
+      ]),
+    );
+    expect(full.find((c) => c.id === ROW_WITH_PHONE.id)?.phone).toBe("012 345 678");
+    expect(full.find((c) => c.id === ROW_WITHOUT_PHONE.id)?.phone).toBe("");
+    expect(full.every((c) => c.sensitiveVisible === true)).toBe(true);
+  });
+
+  it("src/lib/api/index.ts no longer casts the response with `as unknown as Customer[]`", () => {
+    const apiPath = resolve(import.meta.dir, "../lib/api/index.ts");
+    const src = readFileSync(apiPath, "utf-8");
+    const fnStart = src.indexOf("export async function listRealCustomers");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fn = src.slice(fnStart, src.indexOf("\n}", fnStart));
+    expect(fn).not.toMatch(/as unknown as Customer/);
+    expect(fn).toMatch(/listCustomersFn/);
+  });
+
+  it("CreateRealOrderSheet no longer imports the mock Customer type for its picker state", () => {
+    const sheetPath = resolve(import.meta.dir, "../components/orders/CreateRealOrderSheet.tsx");
+    const src = readFileSync(sheetPath, "utf-8");
+    expect(src).toMatch(/OrderCustomerOption/);
+    expect(src).not.toMatch(/useState<Customer \| null>/);
+  });
+
+  it("order creation still sends only customerId — no phone/name/PII is forwarded to createOrderFn", () => {
+    const sheetPath = resolve(import.meta.dir, "../components/orders/CreateRealOrderSheet.tsx");
+    const src = readFileSync(sheetPath, "utf-8");
+    const call = src.slice(
+      src.indexOf("createRealOrder({"),
+      src.indexOf("});", src.indexOf("createRealOrder({")),
+    );
+    expect(call).toMatch(/customerId:\s*customer\?\.id\s*\?\?\s*null/);
+    expect(call).not.toMatch(/phone|nameKm|nameEn/);
   });
 });
