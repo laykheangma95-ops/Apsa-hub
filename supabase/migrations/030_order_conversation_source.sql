@@ -266,5 +266,16 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.create_order_v1 IS
+-- Migration 024's seven-argument function remains as a compatibility overload,
+-- so PostgreSQL requires the full identity argument list here.
+COMMENT ON FUNCTION public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT, TEXT) IS
   'Creates a draft order + lines atomically, pricing every line from product_variants. Adds an optional opaque source_conversation_ref (migration 030) for provenance only — never a relationship, never conversation content.';
+
+-- A newly-created overload receives EXECUTE for PUBLIC by default. Migration
+-- 024 secured only the original seven-argument identity, so secure this new
+-- entry point explicitly and keep the server's service-role path working.
+REVOKE EXECUTE ON FUNCTION public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT, TEXT)
+  FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT, TEXT)
+  TO service_role;
