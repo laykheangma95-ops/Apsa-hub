@@ -429,29 +429,68 @@ CREATE TRIGGER order_status_history_integrity_check
 
 -- ── Row-Level Security ────────────────────────────────────────────────────────
 --
--- SECURITY POSTURE (same as inventory_movements, migration 021, and for the
--- same reason): JWT clients get tenant-scoped READ only. They cannot INSERT,
--- UPDATE or DELETE.
+-- SECURITY POSTURE: JWT clients get NO access to these tables at all — not
+-- read, not write. Every Order operation goes through the server domain
+-- (src/server/orders/service.ts) using the service role, which bypasses RLS by
+-- design.
 --
--- Membership is not authorization. A Cashier holding a browser session belongs
--- to the tenant, but that says nothing about whether they may confirm an order,
--- mark it paid, or cancel it. If PostgREST accepted a direct write here, a
--- client could set lifecycle_status = 'confirmed' straight from the browser and
--- bypass EVERY control that makes this domain safe: the permission check, the
--- state machine's transition table, the status-history record, and — once the
--- Inventory integration lands — the stock movement that a confirmation is
--- supposed to cause. The state machine has to be unbypassable, so the only
--- write path is the server domain (src/server/orders/service.ts) via the
--- service role, which bypasses RLS by design.
+-- WHY WRITES ARE BLOCKED
+--   Membership is not authorization. A Cashier holding a browser session
+--   belongs to the tenant, but that says nothing about whether they may confirm
+--   an order, mark it paid, or cancel it. If PostgREST accepted a direct write
+--   here, a client could set lifecycle_status = 'confirmed' straight from the
+--   browser and bypass EVERY control that makes this domain safe: the
+--   permission check, the state machine's transition table, the status-history
+--   record, and — once the Inventory integration lands — the stock movement
+--   that a confirmation is supposed to cause. The state machine has to be
+--   unbypassable.
+--
+-- WHY READS ARE BLOCKED TOO
+--   An earlier draft of this migration allowed SELECT for any active member
+--   (USING public.is_active_member_of(organization_id)), mirroring products and
+--   customers. That was a permission bypass, for a reason specific to how APSA
+--   models roles.
+--
+--   The server requires `orders.read` before returning any order
+--   (src/server/orders/service.ts). is_active_member_of() checks membership and
+--   nothing else — it cannot see permissions. APSA supports CUSTOM ORG ROLES
+--   (migration 003: roles.organization_id IS NOT NULL, system_role IS NULL)
+--   whose permission set is whatever the organization assigns. A member holding
+--   a custom role WITHOUT orders.read would be refused by the server and then
+--   get the identical data by pointing any HTTP client at
+--   /rest/v1/orders?select=* with their own session token. Order rows carry
+--   revenue, margin-adjacent pricing, customer linkage and the full sales
+--   history of the business — precisely the data a restricted role is
+--   restricted from.
+--
+--   That every CURRENT system role happens to hold orders.read (migration 003)
+--   is not a defence: it makes the hole latent rather than absent, and it would
+--   open the day an organization creates its first restricted custom role. That
+--   is the worst possible failure mode — a permission model that silently stops
+--   being enforced at the moment someone first relies on it. Per CLAUDE.md the
+--   service layer is authoritative for authorization; a policy that grants more
+--   than the service does makes RLS the weakest link instead of defence in
+--   depth.
+--
+--   Blocking costs nothing today: no browser code reads these tables. Every
+--   Order read is a server function in src/api/orders.ts.
+--
+--   IF DIRECT CLIENT READS ARE EVER NEEDED (Realtime order boards, an offline
+--   POS cache), do NOT reach for is_active_member_of(). Use a permission-aware
+--   SECURITY DEFINER predicate, exactly as migration 008 does for audit_logs
+--   with public.has_audit_access() gating on 'org.read'. The equivalent here is
+--   a helper that checks 'orders.read' for auth.uid() in the row's
+--   organization, so RLS grants no more than the service layer does. Adding
+--   that is a deliberate change with its own tests, not a loosened policy.
 --
 -- Hard DELETE is blocked on all three tables: order history is financial
 -- history. Cancellation is a status, not a deletion.
 
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "orders_select_member"
+CREATE POLICY "orders_select_blocked"
   ON public.orders FOR SELECT
-  USING (public.is_active_member_of(organization_id));
+  USING (false);
 
 CREATE POLICY "orders_insert_blocked"
   ON public.orders FOR INSERT
@@ -467,9 +506,9 @@ CREATE POLICY "orders_no_delete"
 
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "order_items_select_member"
+CREATE POLICY "order_items_select_blocked"
   ON public.order_items FOR SELECT
-  USING (public.is_active_member_of(organization_id));
+  USING (false);
 
 CREATE POLICY "order_items_insert_blocked"
   ON public.order_items FOR INSERT
@@ -485,9 +524,9 @@ CREATE POLICY "order_items_no_delete"
 
 ALTER TABLE public.order_status_history ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "order_status_history_select_member"
+CREATE POLICY "order_status_history_select_blocked"
   ON public.order_status_history FOR SELECT
-  USING (public.is_active_member_of(organization_id));
+  USING (false);
 
 CREATE POLICY "order_status_history_insert_blocked"
   ON public.order_status_history FOR INSERT
@@ -507,14 +546,18 @@ ALTER TABLE public.order_number_sequences ENABLE ROW LEVEL SECURITY;
 -- No policies: every JWT-client operation is denied by default under RLS.
 -- The service role bypasses RLS and is the only caller.
 
--- Defense in depth: RLS and GRANTs are independent gates and a write needs
--- BOTH. Revoking the privilege means a future permissive policy — or a policy
+-- Defense in depth: RLS and GRANTs are independent gates and an operation needs
+-- BOTH. Revoking the privileges means a future permissive policy — or a policy
 -- accidentally dropped in a later migration — still cannot re-open a direct
--- client write path. SELECT stays granted where a select policy exists above.
-REVOKE INSERT, UPDATE, DELETE ON public.orders               FROM anon, authenticated;
-REVOKE INSERT, UPDATE, DELETE ON public.order_items          FROM anon, authenticated;
-REVOKE INSERT, UPDATE, DELETE ON public.order_status_history FROM anon, authenticated;
-REVOKE ALL                     ON public.order_number_sequences FROM anon, authenticated;
+-- client path. SELECT is revoked alongside the write privileges for the reason
+-- argued above: there is no client read path to preserve.
+--
+-- service_role is unaffected: it bypasses RLS and holds table privileges
+-- independently of these grants, so the server domain keeps working.
+REVOKE SELECT, INSERT, UPDATE, DELETE ON public.orders               FROM anon, authenticated;
+REVOKE SELECT, INSERT, UPDATE, DELETE ON public.order_items          FROM anon, authenticated;
+REVOKE SELECT, INSERT, UPDATE, DELETE ON public.order_status_history FROM anon, authenticated;
+REVOKE ALL                              ON public.order_number_sequences FROM anon, authenticated;
 
 -- ── FUTURE INVENTORY TRIGGER POINT (documented, NOT implemented) ──────────────
 --

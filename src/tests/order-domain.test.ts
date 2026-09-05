@@ -152,6 +152,22 @@ function readSource(relPath: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
 }
 
+/** Every .ts/.tsx file under a directory, relative to the repo root. */
+function findSourceFiles(dir: string): string[] {
+  const abs = path.resolve(process.cwd(), dir);
+  if (!fs.existsSync(abs)) return [];
+  const out: string[] = [];
+  const walk = (current: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.tsx?$/.test(entry.name)) out.push(path.relative(process.cwd(), full));
+    }
+  };
+  walk(abs);
+  return out;
+}
+
 /**
  * The property names declared directly in an interface body, ignoring comments.
  * Used so a doc comment that mentions a forbidden concept cannot be mistaken
@@ -164,6 +180,22 @@ function fieldNames(interfaceBody: string): string[] {
     .filter((line) => !line.startsWith("*") && !line.startsWith("/*") && !line.startsWith("//"))
     .map((line) => /^([A-Za-z_$][\w$]*)\s*\??\s*:/.exec(line)?.[1])
     .filter((name): name is string => Boolean(name));
+}
+
+/**
+ * SQL with `--` comment lines removed.
+ *
+ * These migrations explain in prose the very patterns they rule out ("do NOT
+ * grant EXECUTE to authenticated", "not SELECT MAX + 1"). A structural test
+ * that scans the raw text would read those warnings as the thing they warn
+ * against, so anything asserting about what the migration DOES must look at
+ * executable statements only.
+ */
+function executableSql(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n");
 }
 
 const ordersMigration = () => readSource("supabase/migrations/023_orders.sql");
@@ -621,7 +653,15 @@ describe("Test 6: Client cannot inject organization_id or user_id", () => {
     expect(sql).toMatch(
       /REVOKE EXECUTE ON FUNCTION public\.transition_order_status_v1[\s\S]*?FROM PUBLIC, anon, authenticated;/,
     );
-    expect(sql).not.toMatch(/GRANT EXECUTE ON FUNCTION public\.create_order_v1/);
+    // The only EXECUTE grant is to service_role — the server's own connection
+    // role. See Test 23: revoking from PUBLIC also takes it from service_role,
+    // so the grant is required, and it must not extend to JWT roles.
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.create_order_v1[\s\S]*?TO service_role;/,
+    );
+    const executable = executableSql(sql);
+    expect(executable).not.toMatch(/GRANT EXECUTE[^;]*TO[^;]*\bauthenticated\b/);
+    expect(executable).not.toMatch(/GRANT EXECUTE[^;]*TO[^;]*\banon\b/);
   });
 });
 
@@ -1278,15 +1318,7 @@ describe("Test 17: Browser direct writes are denied", () => {
     it(`${table}: table privileges are revoked as well as policy-blocked`, () => {
       expect(ordersMigration()).toMatch(
         new RegExp(
-          `REVOKE INSERT, UPDATE, DELETE ON public\\.${table}\\s+FROM anon, authenticated`,
-        ),
-      );
-    });
-
-    it(`${table}: members can still SELECT their own org's rows`, () => {
-      expect(ordersMigration()).toMatch(
-        new RegExp(
-          `"${table}_select_member"[\\s\\S]{0,160}is_active_member_of\\(organization_id\\)`,
+          `REVOKE SELECT, INSERT, UPDATE, DELETE ON public\\.${table}\\s+FROM anon, authenticated`,
         ),
       );
     });
@@ -1420,13 +1452,7 @@ describe("Test 20: Order number strategy", () => {
   it("allocation is an atomic increment, never SELECT MAX + 1", () => {
     const sql = rpcMigration();
     expect(sql).toMatch(/ON CONFLICT \(organization_id, year\)\s+DO UPDATE SET last_number = /);
-    // Strip comments: the migration explains in prose why MAX+1 is wrong, and
-    // that explanation must not be mistaken for the pattern it warns against.
-    const executable = sql
-      .split("\n")
-      .filter((line) => !line.trim().startsWith("--"))
-      .join("\n");
-    expect(executable).not.toMatch(/MAX\(/i);
+    expect(executableSql(sql)).not.toMatch(/MAX\(/i);
   });
 
   it("the reference is unique per organization, not globally", () => {
@@ -1502,6 +1528,187 @@ describe("Test 21: Permission vocabulary", () => {
       "orders.update",
       "payments.confirm",
     ]);
+  });
+});
+
+describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
+  const entryPoints = [
+    {
+      name: "create_order_v1",
+      signature: "\\(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT\\)",
+    },
+    {
+      name: "transition_order_status_v1",
+      signature: "\\(UUID, UUID, TEXT, TEXT, TEXT, UUID, TEXT\\)",
+    },
+  ];
+
+  for (const { name, signature } of entryPoints) {
+    it(`${name}: EXECUTE is revoked from PUBLIC, anon and authenticated`, () => {
+      expect(rpcMigration()).toMatch(
+        new RegExp(
+          `REVOKE EXECUTE ON FUNCTION public\\.${name}${signature}\\s+FROM PUBLIC, anon, authenticated;`,
+        ),
+      );
+    });
+
+    it(`${name}: EXECUTE is explicitly granted to service_role`, () => {
+      // service_role has BYPASSRLS, not superuser — ordinary GRANT checks still
+      // apply to it, and REVOKE ... FROM PUBLIC takes away the only grant it
+      // would otherwise have had. Without this GRANT the server gets
+      // "permission denied for function" on every order write.
+      expect(rpcMigration()).toMatch(
+        new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}${signature}\\s+TO service_role;`),
+      );
+    });
+
+    it(`${name}: the grant is to service_role only — never anon or authenticated`, () => {
+      const sql = executableSql(rpcMigration());
+      const grants = [
+        ...sql.matchAll(new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}[\\s\\S]*?;`, "g")),
+      ];
+      expect(grants.length).toBe(1);
+      const grantText = grants[0]![0];
+      expect(grantText).toContain("service_role");
+      expect(grantText).not.toMatch(/\banon\b/);
+      expect(grantText).not.toMatch(/\bauthenticated\b/);
+      expect(grantText).not.toMatch(/\bPUBLIC\b/);
+    });
+
+    it(`${name}: the REVOKE precedes the GRANT, so the end state is unambiguous`, () => {
+      const sql = rpcMigration();
+      const revokeIdx = sql.indexOf(`REVOKE EXECUTE ON FUNCTION public.${name}`);
+      const grantIdx = sql.indexOf(`GRANT EXECUTE ON FUNCTION public.${name}`);
+      expect(revokeIdx).toBeGreaterThan(-1);
+      expect(grantIdx).toBeGreaterThan(revokeIdx);
+    });
+  }
+
+  it("allocate_order_number stays unreachable — revoked, and granted to nobody", () => {
+    const sql = rpcMigration();
+    expect(sql).toMatch(
+      /REVOKE EXECUTE ON FUNCTION public\.allocate_order_number\(UUID\)\s+FROM PUBLIC, anon, authenticated;/,
+    );
+    // It is only ever called from inside create_order_v1, which is SECURITY
+    // DEFINER — so the nested EXECUTE check runs against that function's owner,
+    // who holds it implicitly. No role needs a grant, including service_role.
+    expect(executableSql(sql)).not.toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.allocate_order_number/,
+    );
+  });
+
+  it("allocate_order_number is never called from application code", () => {
+    for (const file of [
+      "src/server/orders/repository.ts",
+      "src/server/orders/service.ts",
+      "src/api/orders.ts",
+    ]) {
+      expect(readSource(file)).not.toContain("allocate_order_number");
+    }
+  });
+
+  it("the two granted functions are exactly the two the repository calls", () => {
+    const sql = executableSql(rpcMigration());
+    const granted = [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
+      .map((m) => m[1])
+      .sort();
+    const called = [...readSource("src/server/orders/repository.ts").matchAll(/db\.rpc\("(\w+)"/g)]
+      .map((m) => m[1])
+      .sort();
+    expect(granted).toEqual(called);
+  });
+
+  it("the migration no longer claims service_role needs no grant", () => {
+    // The original wording asserted the opposite of PostgreSQL's semantics and
+    // is what made the missing grant look intentional.
+    expect(rpcMigration()).not.toMatch(/needs no explicit grant/i);
+    expect(rpcMigration()).toMatch(/BYPASSRLS bypasses ROW-LEVEL SECURITY only/);
+  });
+});
+
+describe("Test 24: Order reads are not client-reachable (review blocker 2)", () => {
+  const tables = ["orders", "order_items", "order_status_history"];
+
+  for (const table of tables) {
+    it(`${table}: SELECT is policy-blocked for JWT clients`, () => {
+      expect(ordersMigration()).toMatch(
+        new RegExp(`"${table}_select_blocked"[\\s\\S]{0,120}USING \\(false\\)`),
+      );
+    });
+
+    it(`${table}: SELECT privilege is revoked as well as policy-blocked`, () => {
+      expect(ordersMigration()).toMatch(
+        new RegExp(`REVOKE SELECT[^\\n]*ON public\\.${table}\\s+FROM anon, authenticated`),
+      );
+    });
+  }
+
+  it("no order table grants SELECT on bare membership", () => {
+    // is_active_member_of() cannot see permissions, so a member holding a custom
+    // role without orders.read would read every order straight from PostgREST.
+    // Scanned against executable SQL: the migration discusses the rejected
+    // pattern by name, and that discussion must not trip the guard.
+    const sql = executableSql(ordersMigration());
+    const policies = [...sql.matchAll(/CREATE POLICY "[^"]+"[\s\S]*?;/g)].map((m) => m[0]);
+    for (const policy of policies) {
+      expect(policy).not.toContain("is_active_member_of");
+    }
+    expect(sql).not.toMatch(/CREATE POLICY[\s\S]{0,200}is_active_member_of/);
+  });
+
+  it("orders.read remains the authoritative gate, enforced in the service", async () => {
+    const { getOrderById, listOrders } = await import("../server/orders/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+      // A plausible restricted custom role: can create orders, cannot read them.
+      "orders.create",
+      "orders.update",
+    ]);
+    await expectForbidden(() => getOrderById(ctx, ORDER_ID));
+    await expectForbidden(() => listOrders(ctx));
+  });
+
+  it("a member without orders.read has no second path to the data", () => {
+    // The service refuses (asserted above); PostgREST refuses because SELECT is
+    // both policy-blocked and revoked. Those are the only two ways in.
+    const sql = ordersMigration();
+    for (const table of tables) {
+      expect(sql).toMatch(new RegExp(`"${table}_select_blocked"[\\s\\S]{0,120}USING \\(false\\)`));
+      expect(sql).toMatch(
+        new RegExp(`REVOKE SELECT[^\\n]*ON public\\.${table}\\s+FROM anon, authenticated`),
+      );
+    }
+  });
+
+  it("blocking client reads breaks nothing — no browser code reads these tables", () => {
+    const clientFiles = [
+      ...findSourceFiles("src/routes"),
+      ...findSourceFiles("src/components"),
+      ...findSourceFiles("src/lib"),
+      ...findSourceFiles("src/hooks"),
+    ];
+    for (const file of clientFiles) {
+      const src = readSource(file);
+      for (const table of tables) {
+        expect(src).not.toContain(`from("${table}")`);
+        expect(src).not.toContain(`from('${table}')`);
+      }
+    }
+  });
+
+  it("every order read in the app goes through a server function", () => {
+    const api = readSource("src/api/orders.ts");
+    expect(api).toContain("getOrderByIdFn");
+    expect(api).toContain("listOrdersFn");
+    // The server functions reach the DB through the service-role repository.
+    expect(readSource("src/server/orders/repository.ts")).toContain("@/lib/supabase/server");
+  });
+
+  it("documents the permission-aware pattern required if direct reads return", () => {
+    // migration 008 gates audit_logs SELECT on 'org.read' via has_audit_access();
+    // that is the shape any future direct order read must take.
+    const sql = ordersMigration();
+    expect(sql).toMatch(/has_audit_access/);
+    expect(sql).toMatch(/orders\.read/);
   });
 });
 

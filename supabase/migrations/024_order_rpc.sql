@@ -441,10 +441,51 @@ $$;
 
 -- ── Privileges ────────────────────────────────────────────────────────────────
 --
--- No JWT client may call any of these. They accept an organization_id, so a
--- grant to `authenticated` would be a direct cross-tenant write primitive.
--- The service role is not listed because it bypasses these checks by design;
--- it needs no explicit grant.
+-- THE CORRECTION THIS BLOCK ENCODES
+--   An earlier draft revoked EXECUTE from PUBLIC, anon and authenticated and
+--   said the service role "bypasses these checks by design; it needs no
+--   explicit grant". That was wrong, and would have broken every order write.
+--
+--   service_role has BYPASSRLS. BYPASSRLS bypasses ROW-LEVEL SECURITY only —
+--   it is not superuser, and ordinary GRANT/ACL checks still apply to it. A
+--   newly created function starts with EXECUTE granted to PUBLIC, and
+--   service_role could execute these functions only by virtue of being part of
+--   PUBLIC. `REVOKE EXECUTE ... FROM PUBLIC` therefore takes that away from
+--   service_role too, unless service_role happens to hold a separate explicit
+--   grant.
+--
+--   Supabase's bootstrap does set ALTER DEFAULT PRIVILEGES ... GRANT EXECUTE ON
+--   FUNCTIONS TO anon, authenticated, service_role, which would supply such an
+--   explicit grant — but only for objects created by the role those default
+--   privileges were defined for. Whether that fires depends on which role runs
+--   the migration, which is exactly the kind of environment-dependent accident
+--   the write path must not rest on. PostgREST executes a service-key request
+--   as service_role (SET ROLE from the JWT's role claim), so if the grant is
+--   missing the server gets "permission denied for function create_order_v1"
+--   on every order.
+--
+--   The fix is the smallest explicit grant that makes the intent independent of
+--   the environment: the two entry points, to service_role, and nothing else.
+--
+-- WHY anon / authenticated STAY REVOKED
+--   These functions accept p_organization_id. EXECUTE for a JWT client would be
+--   a direct cross-tenant write primitive — a browser session could name any
+--   organization and create or transition orders inside it. (Contrast
+--   create_organization_for_founder in migration 009, which IS called by a JWT
+--   client and therefore takes no id parameters and derives identity from
+--   auth.uid().)
+--
+-- WHY allocate_order_number GETS NO GRANT
+--   It is never called from application code — only from inside create_order_v1,
+--   which is SECURITY DEFINER. Inside a SECURITY DEFINER function the effective
+--   user is the function's OWNER, not the caller, so the nested call's EXECUTE
+--   check is made against that owner, who holds it implicitly as the owner of
+--   the function. Granting it to service_role would widen the surface for no
+--   benefit and would let a mistake burn order numbers without creating orders.
+--   It stays unreachable by browser clients and unreachable by the server.
+--
+-- REVOKE runs before GRANT so the end state does not depend on statement order
+-- being read charitably.
 
 REVOKE EXECUTE ON FUNCTION public.allocate_order_number(UUID)
   FROM PUBLIC, anon, authenticated;
@@ -454,3 +495,11 @@ REVOKE EXECUTE ON FUNCTION public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID,
 
 REVOKE EXECUTE ON FUNCTION public.transition_order_status_v1(UUID, UUID, TEXT, TEXT, TEXT, UUID, TEXT)
   FROM PUBLIC, anon, authenticated;
+
+-- The APSA server domain (src/server/orders/service.ts via supabaseAdmin) is
+-- the only caller of these two, and it connects as service_role.
+GRANT EXECUTE ON FUNCTION public.create_order_v1(UUID, UUID, TEXT, JSONB, UUID, UUID, BIGINT)
+  TO service_role;
+
+GRANT EXECUTE ON FUNCTION public.transition_order_status_v1(UUID, UUID, TEXT, TEXT, TEXT, UUID, TEXT)
+  TO service_role;
