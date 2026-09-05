@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { cn } from "@/lib/utils";
+import { Mascot } from "./mascot/Mascot";
+import type { MascotState } from "./mascot/mascot-states";
 
 export type ApsiPose = "default" | "waving" | "winking" | "typing" | "merging";
 
@@ -10,10 +10,17 @@ interface ApsiIllustrationProps {
   alt?: string;
 }
 
+const POSE_TO_STATE: Record<ApsiPose, MascotState> = {
+  default: "default",
+  waving: "greeting",
+  winking: "success",
+  typing: "typing",
+  merging: "celebration",
+};
+
 /**
- * Loads /apsi/{pose}.png. Until (or unless) the art loads, a soft blue blob
- * holds the exact requested dimensions, so dropping real art in later causes
- * zero layout shift and no broken-image flash.
+ * Legacy pose-based entry point, kept so existing screens keep working.
+ * New code should use <Mascot state="..." /> from `@/design-system/mascot`.
  */
 export function ApsiIllustration({
   pose = "default",
@@ -21,34 +28,5 @@ export function ApsiIllustration({
   className,
   alt = "",
 }: ApsiIllustrationProps) {
-  const [loaded, setLoaded] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  return (
-    <div
-      role={alt ? "img" : undefined}
-      aria-label={alt || undefined}
-      aria-hidden={alt === "" ? true : undefined}
-      className={cn("relative shrink-0 overflow-hidden rounded-[38%]", className)}
-      style={{
-        width: size,
-        height: size,
-        backgroundColor: loaded ? "transparent" : "var(--companion-nilo)",
-        opacity: loaded ? 1 : 0.6,
-      }}
-    >
-      {failed ? null : (
-        <img
-          src={`/apsi/${pose}.png`}
-          alt=""
-          width={size}
-          height={size}
-          onLoad={() => setLoaded(true)}
-          onError={() => setFailed(true)}
-          className="size-full object-contain"
-          style={{ opacity: loaded ? 1 : 0 }}
-        />
-      )}
-    </div>
-  );
+  return <Mascot state={POSE_TO_STATE[pose]} size={size} alt={alt} className={className} />;
 }
