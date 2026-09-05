@@ -3,6 +3,7 @@
  * When a real backend arrives, only the bodies change.
  */
 import { usd } from "@/lib/money";
+import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -54,7 +55,7 @@ function resolve<T>(value: T, ms = LATENCY): Promise<T> {
  * are not yet productionized. They bypass the server function validator so UUID
  * validation is never weakened — mock IDs simply never reach the server boundary.
  */
-function isProductionId(id: string): boolean {
+export function isProductionId(id: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 }
 
@@ -154,7 +155,10 @@ const COMPANION_COLORS: Array<Product["companion"]> = ["nilo", "minto", "vela", 
  */
 function mapServerProductToUi(p: ServerProductItem): Product {
   const firstVariant = p.variants[0];
-  const sum = p.id.slice(-12).split("").reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
+  const sum = p.id
+    .slice(-12)
+    .split("")
+    .reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
   const companion = COMPANION_COLORS[sum % COMPANION_COLORS.length]!;
   const mapped: Product = {
     id: p.id,
@@ -411,6 +415,76 @@ export async function getOrders(): Promise<Order[]> {
   return resolve([...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 }
 
+/* --------------- Real Order UI Integration (production Order domain) ------
+ *
+ * These four functions are the ONLY way UI code reaches the production Order
+ * domain. Each is a thin wrapper: call the TanStack server function, map the
+ * result with src/lib/orders.ts, return it. No try/catch, no demo-mode
+ * fallback — unlike getProducts()/getPosProducts() above, a real order id is
+ * never allowed to fall back to mock data (there is no legitimate reason a
+ * UUID order lookup fails except "it really doesn't exist/isn't yours",
+ * which the server already reports as a clean 404).
+ *
+ * organizationId/userId are never parameters here — the server functions
+ * derive both from the session, exactly as src/api/orders.ts requires.
+ */
+
+/** Production Order list — src/routes/app.orders.tsx. Newest first, org-scoped by the server. */
+export async function listRealOrders(): Promise<Order[]> {
+  const { listOrdersFn } = await import("@/api/orders");
+  const rows = await listOrdersFn({ data: {} });
+  return rows.map(mapOrderSummaryToUi);
+}
+
+/** Production Order detail — src/routes/app.orders.$id.tsx (real-UUID branch). */
+export async function getRealOrderDetail(orderId: string): Promise<RealOrderDetail> {
+  const { getOrderByIdFn } = await import("@/api/orders");
+  const detail = await getOrderByIdFn({ data: { orderId } });
+  return mapOrderDetailToUi(detail);
+}
+
+export interface CreateRealOrderInput {
+  source: "POS" | "FACEBOOK" | "INSTAGRAM" | "TELEGRAM" | "MANUAL";
+  items: Array<{ variantId: string; quantity: number; productId?: string }>;
+  customerId?: string | null;
+  /** Integer minor units in the org's currency — bounded and priced server-side. */
+  discountMinor?: number;
+}
+
+/**
+ * Create a new order. The server derives every price from the catalog; this
+ * function's input has no field for a price, subtotal or total (see
+ * src/api/orders.ts's own comment on why one must never be added).
+ */
+export async function createRealOrder(input: CreateRealOrderInput): Promise<RealOrderDetail> {
+  const { createOrderFn } = await import("@/api/orders");
+  const detail = await createOrderFn({ data: input });
+  return mapOrderDetailToUi(detail);
+}
+
+/** Confirm flow (requirement 4): draft -> confirmed. Consumes stock server-side (migration 026). */
+export async function confirmRealOrder(orderId: string): Promise<RealOrderDetail> {
+  const { transitionOrderLifecycleFn } = await import("@/api/orders");
+  const detail = await transitionOrderLifecycleFn({ data: { orderId, to: "confirmed" } });
+  return mapOrderDetailToUi(detail);
+}
+
+/** Cancel flow (requirement 5): draft|confirmed -> cancelled. Restores stock server-side when it applies. */
+export async function cancelRealOrder(orderId: string, reason?: string): Promise<RealOrderDetail> {
+  const { transitionOrderLifecycleFn } = await import("@/api/orders");
+  const detail = await transitionOrderLifecycleFn({
+    data: { orderId, to: "cancelled", ...(reason ? { reason } : {}) },
+  });
+  return mapOrderDetailToUi(detail);
+}
+
+/** Lightweight customer list for the create-order flow's optional customer picker. */
+export async function listRealCustomers(): Promise<Customer[]> {
+  const { listCustomersFn } = await import("@/api/customers");
+  const rows = await listCustomersFn({ data: { limit: 100, status: "active" } });
+  return rows as unknown as Customer[];
+}
+
 export interface DeliveryDetail {
   delivery: Delivery;
   order: Order | null;
@@ -580,7 +654,11 @@ export async function applyDeliveryAction(
   action: DeliveryAction,
 ): Promise<DeliveryStatus> {
   const next: DeliveryStatus =
-    action === "mark_delivered" ? "delivered" : action === "return_to_shop" ? "cancelled" : "in_transit";
+    action === "mark_delivered"
+      ? "delivered"
+      : action === "return_to_shop"
+        ? "cancelled"
+        : "in_transit";
   void deliveryId;
   return resolve(next, 220);
 }
