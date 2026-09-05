@@ -445,7 +445,14 @@ export type ConversationStatus =
 
 export interface Conversation {
   id: string;
+  /** "" when this conversation has no resolved customer yet (production path). */
   customerId: string;
+  /**
+   * Non-sensitive display name for the linked customer, from the production
+   * server path only (mock path resolves the name locally via getCustomers()).
+   * Lets the Inbox list render a name without an N+1 customer lookup per row.
+   */
+  customerName?: string;
   channel: Channel;
   lastMessage: string;
   lastMessageAt: string;

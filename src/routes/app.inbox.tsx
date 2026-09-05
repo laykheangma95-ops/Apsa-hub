@@ -72,7 +72,10 @@ function InboxLayout() {
     queryKey: ["conversations", status, channel, query],
     queryFn: () => getConversations({ status, channel, query }),
   });
-  const countsQuery = useQuery({ queryKey: ["conversation-counts"], queryFn: getConversationCounts });
+  const countsQuery = useQuery({
+    queryKey: ["conversation-counts"],
+    queryFn: getConversationCounts,
+  });
   const customersQuery = useQuery({ queryKey: ["customers"], queryFn: getCustomers });
   const staffQuery = useQuery({ queryKey: ["staff"], queryFn: getStaff });
 
@@ -103,9 +106,7 @@ function InboxLayout() {
                 onClick={() => setTab(key)}
                 className={cn(
                   "tap-target text-label flex-1 rounded-full",
-                  tab === key
-                    ? "bg-surface-primary text-text-primary"
-                    : "text-text-secondary",
+                  tab === key ? "bg-surface-primary text-text-primary" : "text-text-secondary",
                 )}
               >
                 {t(`inbox.tabs.${key}`)}
@@ -147,18 +148,13 @@ function InboxLayout() {
 
               <ChipRow label={t("inbox.channels.all")}>
                 {CHANNEL_FILTERS.map((value) => (
-                  <Chip
-                    key={value}
-                    selected={channel === value}
-                    onClick={() => setChannel(value)}
-                  >
+                  <Chip key={value} selected={channel === value} onClick={() => setChannel(value)}>
                     {value === "all" ? t("inbox.channels.all") : t(`channel.${value}`)}
                   </Chip>
                 ))}
               </ChipRow>
             </>
           ) : null}
-
         </div>
       </AppHeader>
 
@@ -205,7 +201,15 @@ function InboxLayout() {
             <ul>
               {conversations.map((conversation) => {
                 const customer = customersQuery.data?.find((c) => c.id === conversation.customerId);
-                const assigned = staffQuery.data?.find((s) => s.id === conversation.assignedStaffId);
+                // Production conversations resolve their customer via the real
+                // Customer domain server-side (conversation.customerName) rather
+                // than this mock lookup — see src/lib/api/index.ts#getConversations.
+                const customerName = customer
+                  ? localName(customer, language)
+                  : (conversation.customerName ?? "—");
+                const assigned = staffQuery.data?.find(
+                  (s) => s.id === conversation.assignedStaffId,
+                );
                 const active = pathname === `/app/inbox/${conversation.id}`;
                 return (
                   <li key={conversation.id}>
@@ -217,7 +221,7 @@ function InboxLayout() {
                     >
                       <ConversationRow
                         conversation={conversation}
-                        customerName={customer ? localName(customer, language) : "—"}
+                        customerName={customerName}
                         companion={customer?.companion ?? "nilo"}
                         assignedStaff={assigned}
                         className={active ? "bg-surface-secondary" : undefined}
@@ -265,4 +269,3 @@ function InboxLayout() {
     </div>
   );
 }
-
