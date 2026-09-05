@@ -309,7 +309,9 @@ BEGIN
   v_order_fulfillment := CASE
     WHEN p_to IN ('preparing', 'ready', 'in_transit') THEN 'processing'::public.order_fulfillment_status
     WHEN p_to = 'delivered' THEN 'fulfilled'::public.order_fulfillment_status
-    WHEN p_to = 'cancelled' THEN 'cancelled'::public.order_fulfillment_status
+    -- Cancelling a Delivery retires only this attempt. The confirmed Order
+    -- remains eligible for a replacement Delivery and retains its inventory.
+    WHEN p_to = 'cancelled' THEN 'unfulfilled'::public.order_fulfillment_status
     WHEN p_to = 'failed' THEN 'unfulfilled'::public.order_fulfillment_status
     ELSE NULL
   END;

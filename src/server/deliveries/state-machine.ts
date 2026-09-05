@@ -39,7 +39,7 @@ export const DELIVERY_TO_ORDER_FULFILLMENT: Readonly<
   in_transit: "processing",
   delivered: "fulfilled",
   failed: "unfulfilled",
-  cancelled: "cancelled",
+  cancelled: "unfulfilled",
 };
 
 export function isValidDeliveryTransition(from: DeliveryStatus, to: DeliveryStatus): boolean {

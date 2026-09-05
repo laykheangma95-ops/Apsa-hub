@@ -10,6 +10,7 @@ const ORG_A = "aaaaaaaa-0000-0000-0000-000000000001";
 const USER_A = "aaaaaaaa-1111-0000-0000-000000000001";
 const ORDER_A = "aaaaaaaa-2222-0000-0000-000000000001";
 const DELIVERY_A = "aaaaaaaa-3333-0000-0000-000000000001";
+const DELIVERY_B = "aaaaaaaa-3333-0000-0000-000000000002";
 const LOCATION_A = "aaaaaaaa-4444-0000-0000-000000000001";
 const PROVIDER_A = "aaaaaaaa-5555-0000-0000-000000000001";
 
@@ -194,7 +195,7 @@ describe("Delivery status machine", () => {
       in_transit: "processing",
       delivered: "fulfilled",
       failed: "unfulfilled",
-      cancelled: "cancelled",
+      cancelled: "unfulfilled",
     });
   });
 });
@@ -419,7 +420,7 @@ describe("Order fulfillment atomicity", () => {
     const sql = executableSql(migration());
     expect(sql).toMatch(/p_to IN \('preparing', 'ready', 'in_transit'\) THEN 'processing'/);
     expect(sql).toMatch(/p_to = 'delivered' THEN 'fulfilled'/);
-    expect(sql).toMatch(/p_to = 'cancelled' THEN 'cancelled'/);
+    expect(sql).toMatch(/p_to = 'cancelled' THEN 'unfulfilled'/);
     expect(sql).toMatch(/p_to = 'failed' THEN 'unfulfilled'/);
     expect(sql).toMatch(/UPDATE public\.orders SET fulfillment_status = v_order_fulfillment/);
     expect(sql).toMatch(/INSERT INTO public\.order_status_history/);
@@ -478,13 +479,98 @@ describe("Golden merchant fulfillment flow", () => {
     expect(orderFulfillment).toBe("fulfilled");
   });
 
-  it("pre-transit cancellation ends both Delivery and Order fulfillment cancelled", async () => {
+  it("cancels one attempt and permits a replacement without changing Order or inventory", async () => {
     const { DELIVERY_TO_ORDER_FULFILLMENT, isValidDeliveryTransition } =
       await import("../server/deliveries/state-machine");
+
+    const orderLifecycle = "confirmed";
+    const inventoryConsumed = true;
     for (const from of ["pending", "preparing", "ready"] as const) {
       expect(isValidDeliveryTransition(from, "cancelled")).toBe(true);
-      expect(DELIVERY_TO_ORDER_FULFILLMENT.cancelled).toBe("cancelled");
+      expect(DELIVERY_TO_ORDER_FULFILLMENT.cancelled).toBe("unfulfilled");
     }
+
+    const cancelledAttempt: DeliveryStatus = "cancelled";
+    let orderFulfillment = DELIVERY_TO_ORDER_FULFILLMENT.cancelled;
+    const hasActiveDelivery = !["delivered", "failed", "cancelled"].includes(cancelledAttempt);
+
+    expect(orderLifecycle).toBe("confirmed");
+    expect(inventoryConsumed).toBe(true);
+    expect(orderFulfillment).toBe("unfulfilled");
+    expect(hasActiveDelivery).toBe(false);
+
+    const replacementStatus: DeliveryStatus = "pending";
+    orderFulfillment = DELIVERY_TO_ORDER_FULFILLMENT[replacementStatus];
+    expect(replacementStatus).toBe("pending");
+    expect(orderFulfillment).toBe("processing");
+    expect(orderLifecycle).toBe("confirmed");
+    expect(inventoryConsumed).toBe(true);
+
+    const sql = executableSql(migration());
+    const transitionSql = sql.slice(
+      sql.indexOf("CREATE OR REPLACE FUNCTION public.transition_delivery_status_v1"),
+    );
+    expect(transitionSql).not.toMatch(/UPDATE public\.orders SET lifecycle_status/);
+    expect(transitionSql).not.toContain("inventory_movements");
+  });
+
+  it("creates a replacement after the prior Delivery is cancelled", async () => {
+    const { cancelDelivery, createDelivery } = await import("../server/deliveries/service");
+    const calls = await withDb(
+      {
+        tables: {
+          orders: [order({ fulfillment_status: "unfulfilled" })],
+          locations: [location],
+          deliveries: [
+            delivery({ status: "ready" }),
+            delivery({ status: "cancelled" }),
+            { data: null, error: null },
+            delivery({ id: DELIVERY_B, status: "pending" }),
+          ],
+          delivery_status_history: [history("ready", "cancelled"), history(null, "pending")],
+        },
+        rpc: {
+          transition_delivery_status_v1: {
+            data: {
+              status: "success",
+              from: "ready",
+              to: "cancelled",
+              order_fulfillment: "unfulfilled",
+            },
+            error: null,
+          },
+          create_delivery_v1: {
+            data: {
+              status: "success",
+              delivery_id: DELIVERY_B,
+              order_fulfillment: "processing",
+            },
+            error: null,
+          },
+        },
+      },
+      async (recorded) => {
+        const cancelled = await cancelDelivery(
+          makeCtx(allPermissions),
+          DELIVERY_A,
+          "Replace courier",
+        );
+        expect(cancelled.status).toBe("cancelled");
+
+        const replacement = await createDelivery(makeCtx(allPermissions), {
+          orderId: ORDER_A,
+          providerName: "Replacement courier",
+        });
+        expect(replacement.id).toBe(DELIVERY_B);
+        expect(replacement.status).toBe("pending");
+        return recorded;
+      },
+    );
+
+    expect(calls.map(({ fn }) => fn)).toEqual([
+      "transition_delivery_status_v1",
+      "create_delivery_v1",
+    ]);
   });
 });
 
