@@ -123,6 +123,13 @@ export interface RecordMovementInput {
   locationId?: string | null | undefined;
   quantityDelta: number;
   movementType: InventoryMovementTypeDb;
+  /**
+   * reference_type + reference_id identify the SOURCE RECORD this movement came
+   * from (e.g. "order" + the order's uuid) — not the event. movementType is the
+   * event. Idempotency is keyed on (variant, movementType, reference), so a
+   * replayed 'sale' for order X is rejected while a later 'return' for order X
+   * is accepted. See migration 021's uniq_inventory_movements_reference.
+   */
   referenceType?: string | null | undefined;
   referenceId?: string | null | undefined;
   reason?: string | null | undefined;

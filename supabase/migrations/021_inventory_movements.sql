@@ -29,11 +29,16 @@
 -- Cross-tenant integrity: trigger enforces variant/product/location all belong
 --   to the same organization_id as the movement row (mirrors 020's pattern).
 -- Idempotency: partial unique index on (organization_id, variant_id,
---   reference_type, reference_id) prevents duplicate movements for the same
---   external/domain event (e.g. a retried order-paid webhook).
--- RLS: active members can read; INSERT is layered defense-in-depth (the
---   application/service layer is authoritative — see src/server/inventory).
---   No UPDATE, no DELETE — the ledger is append-only.
+--   movement_type, reference_type, reference_id) prevents duplicate movements
+--   for the same event on the same source record (e.g. a retried order-paid
+--   webhook), while still allowing a different later event on that record
+--   (a return after a sale). See the index's own comment for the contract.
+-- RLS: active members can READ their org's movements. JWT clients cannot write
+--   at all — INSERT/UPDATE/DELETE are blocked by policy AND the table
+--   privileges are revoked from anon/authenticated. Every write goes through
+--   the server/domain boundary (src/server/inventory/service.ts) using the
+--   service-role client, which is where permission checks and the mandatory
+--   audit live. The ledger is append-only for everyone.
 
 -- ── Enum ──────────────────────────────────────────────────────────────────────
 
@@ -72,12 +77,32 @@ CREATE TABLE public.inventory_movements (
 COMMENT ON TABLE public.inventory_movements IS
   'Append-only inventory ledger. Never UPDATE or DELETE rows in normal product flow — stock corrections are new movements, not edits.';
 
--- ── Idempotency: one movement per (org, variant, reference) ───────────────────
--- Prevents duplicate processing of the same domain/external event (e.g. an
--- order-paid webhook retried after a timeout) from double-counting stock.
+-- ── Idempotency: one movement per (org, variant, movement_type, reference) ────
+--
+-- CONTRACT: reference_type + reference_id identify the SOURCE RECORD (e.g.
+-- reference_type='order', reference_id=<order uuid>), not the event that
+-- happened to it. movement_type identifies the event. The uniqueness key is
+-- therefore the triple (variant, movement_type, reference):
+--
+--   retry of the same event      → same (variant, 'sale', order X) → REJECTED,
+--                                  so a replayed webhook cannot double-count.
+--   later, different event on
+--   the same source record       → ('return', order X) vs ('sale', order X)
+--                                  → ALLOWED, so a customer returning an item
+--                                  they bought is never blocked.
+--
+-- Keying on (variant, reference) alone — without movement_type — would collapse
+-- those two cases and silently refuse the return. Keying on movement_type alone
+-- would not deduplicate anything.
+--
+-- Scope note: this makes one movement per event type per source record per
+-- variant. Partial fulfilment (two separate 'sale' movements against one order
+-- line) is out of V1 scope; when Order integration needs it, the caller will
+-- pass a line-level reference_id rather than the order id — no schema change
+-- required here.
 
 CREATE UNIQUE INDEX uniq_inventory_movements_reference
-  ON public.inventory_movements(organization_id, variant_id, reference_type, reference_id)
+  ON public.inventory_movements(organization_id, variant_id, movement_type, reference_type, reference_id)
   WHERE reference_id IS NOT NULL;
 
 -- ── Indexes ───────────────────────────────────────────────────────────────────
@@ -150,6 +175,24 @@ CREATE TRIGGER inventory_movement_integrity_check
   FOR EACH ROW EXECUTE FUNCTION public.check_inventory_movement_integrity();
 
 -- ── Row-Level Security ──────────────────────────────────────────────────────────
+--
+-- SECURITY: JWT clients (anon / authenticated) get READ access only. They must
+-- NOT be able to INSERT movements directly.
+--
+-- An earlier draft of this migration allowed INSERT for any active member
+-- (WITH CHECK is_active_member_of(organization_id)). That was a privilege-
+-- escalation hole: a Cashier holding only a browser session could POST straight
+-- to PostgREST and write a ledger row, bypassing every server-side control that
+-- makes this domain safe — the inventory.receive_stock / inventory.adjust
+-- permission check, the movement-type-to-permission mapping, the required
+-- reason on manual adjustments, and the mandatory fail-closed audit record.
+-- Membership is not authorization: holding a session says which tenant you
+-- belong to, not which stock operations you may perform.
+--
+-- All production writes go through the server/domain boundary
+-- (src/server/inventory/service.ts), which writes with the service-role client.
+-- The service role bypasses RLS by design, so blocking JWT clients here costs
+-- the server path nothing.
 
 ALTER TABLE public.inventory_movements ENABLE ROW LEVEL SECURITY;
 
@@ -157,11 +200,11 @@ CREATE POLICY "inventory_movements_select_member"
   ON public.inventory_movements FOR SELECT
   USING (public.is_active_member_of(organization_id));
 
--- Application layer (src/server/inventory/service.ts) checks the appropriate
--- inventory.* permission for the movement_type before this INSERT executes.
-CREATE POLICY "inventory_movements_insert_member"
+-- Writes blocked for JWT clients — the application server owns the ledger
+-- write path (same posture as memberships/locations in migrations 005/006).
+CREATE POLICY "inventory_movements_insert_blocked"
   ON public.inventory_movements FOR INSERT
-  WITH CHECK (public.is_active_member_of(organization_id));
+  WITH CHECK (false);
 
 -- Append-only ledger: no UPDATE, no DELETE, ever, in normal product flow.
 CREATE POLICY "inventory_movements_no_update"
@@ -171,6 +214,13 @@ CREATE POLICY "inventory_movements_no_update"
 CREATE POLICY "inventory_movements_no_delete"
   ON public.inventory_movements FOR DELETE
   USING (false);
+
+-- Defense in depth: revoke the table privileges themselves, so a future
+-- permissive policy (or a policy accidentally dropped) cannot re-open a direct
+-- write path. RLS and GRANTs are independent gates — a write needs BOTH, so
+-- removing the GRANT means an INSERT is refused even if a policy would allow it.
+-- SELECT stays granted; the select policy above scopes it to the caller's org.
+REVOKE INSERT, UPDATE, DELETE ON public.inventory_movements FROM anon, authenticated;
 
 -- ── inventory_stock: live derived balance (never a mutable cache) ─────────────
 -- security_invoker means this view enforces the RLS of inventory_movements for

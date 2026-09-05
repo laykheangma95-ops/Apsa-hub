@@ -16,6 +16,10 @@
  * 12.  No direct client inventory mutation (append-only — no update/delete/setStock export)
  * 13.  Cross-org location_id rejected
  * 14.  Variant/product mismatch rejected
+ * 15.  Direct client (JWT) INSERT into the ledger denied by DB policy + REVOKE
+ * 16.  Server/domain write path still valid after the RLS lockdown
+ * 17.  Idempotency keyed on (variant, movement_type, reference) — a retried
+ *      sale is rejected, a later return for the same order is allowed
  *
  * Unit tests (no DB, mocked repository db): all of the above except live-DB
  * integration checks, which are skipped when Supabase is not configured
@@ -25,6 +29,8 @@
  */
 
 import { describe, it, expect, beforeAll, mock, afterEach } from "bun:test";
+import * as fs from "fs";
+import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
 
@@ -111,6 +117,17 @@ const VARIANT_ID = "dddddddd-0000-0000-0000-000000000001";
 const OTHER_PRODUCT_ID = "eeeeeeee-0000-0000-0000-000000000001";
 const LOCATION_ID = "ffffffff-0000-0000-0000-000000000001";
 const FAKE_VARIANT_ID = "ffffffff-dead-beef-0000-000000000099";
+const ORDER_ID = "11111111-0000-0000-0000-000000000001";
+
+// ── Source/migration readers (structural assertions, no DB needed) ────────────
+
+function readSource(relPath: string): string {
+  return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
+}
+
+function readMigration021(): string {
+  return readSource("supabase/migrations/021_inventory_movements.sql");
+}
 
 // ── Mock repository DB builder ─────────────────────────────────────────────────
 // A minimal fluent fake for the supabase-js query builder shape used by
@@ -738,6 +755,236 @@ describe("Test 12: The ledger has no update/delete/setStock path", () => {
     for (const forbidden of ["updateMovement", "deleteMovement", "setStock", "updateStock"]) {
       expect(exportNames).not.toContain(forbidden);
     }
+  });
+});
+
+// ── Test 15: JWT clients cannot INSERT into the ledger directly ──────────────
+// Regression guard for the review blocker: an earlier draft of migration 021
+// allowed INSERT for any active member, which let a browser session bypass the
+// permission check, the movement-type mapping and the mandatory audit entirely.
+
+describe("Test 15: Direct client INSERT into inventory_movements is denied by the DB", () => {
+  const migrationSql = readMigration021();
+
+  it("has no permissive INSERT policy for authenticated members", () => {
+    // The old hole. If this string comes back, the blocker has regressed.
+    expect(migrationSql).not.toMatch(
+      /FOR INSERT\s+WITH CHECK \(public\.is_active_member_of\(organization_id\)\)/,
+    );
+  });
+
+  it("blocks INSERT for JWT clients via WITH CHECK (false)", () => {
+    expect(migrationSql).toMatch(
+      /CREATE POLICY "inventory_movements_insert_blocked"[\s\S]*?FOR INSERT[\s\S]*?WITH CHECK \(false\)/,
+    );
+  });
+
+  it("revokes INSERT/UPDATE/DELETE table privileges from anon and authenticated", () => {
+    expect(migrationSql).toMatch(
+      /REVOKE INSERT, UPDATE, DELETE ON public\.inventory_movements FROM anon, authenticated/,
+    );
+  });
+
+  it("still allows tenant-scoped SELECT for active members", () => {
+    expect(migrationSql).toMatch(
+      /CREATE POLICY "inventory_movements_select_member"[\s\S]*?FOR SELECT[\s\S]*?USING \(public\.is_active_member_of\(organization_id\)\)/,
+    );
+  });
+
+  it("keeps UPDATE and DELETE blocked (append-only)", () => {
+    expect(migrationSql).toMatch(
+      /CREATE POLICY "inventory_movements_no_update"[\s\S]*?FOR UPDATE[\s\S]*?USING \(false\)/,
+    );
+    expect(migrationSql).toMatch(
+      /CREATE POLICY "inventory_movements_no_delete"[\s\S]*?FOR DELETE[\s\S]*?USING \(false\)/,
+    );
+  });
+
+  it("an anon-key client INSERT is rejected by the database (requires DB)", async () => {
+    await requireSupabase(async () => {
+      const url = process.env["VITE_SUPABASE_URL"];
+      const anonKey = process.env["VITE_SUPABASE_ANON_KEY"];
+      if (!url || !anonKey) {
+        console.warn("[SKIP] VITE_SUPABASE_ANON_KEY not set — skipping anon INSERT probe");
+        return;
+      }
+
+      const { createClient } = await import("@supabase/supabase-js");
+      const anonDb = createClient(url, anonKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+
+      // Even a well-formed row from a legitimately-scoped org must be refused:
+      // the write path is server-only.
+      const { error } = await anonDb.from("inventory_movements").insert({
+        organization_id: ORG_A_ID,
+        product_id: PRODUCT_ID,
+        variant_id: VARIANT_ID,
+        quantity_delta: 100,
+        movement_type: "restock",
+      });
+
+      expect(error).not.toBeNull();
+    });
+  });
+});
+
+// ── Test 16: The server-authorized write path still works ────────────────────
+
+describe("Test 16: Server/domain write path remains valid after the RLS lockdown", () => {
+  it("recordMovement still inserts through the service-role repository", async () => {
+    const { recordMovement } = await import("../server/inventory/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["inventory.receive_stock"]);
+
+    const insertedRow = {
+      id: "movement-server-path",
+      organization_id: ORG_A_ID,
+      product_id: PRODUCT_ID,
+      variant_id: VARIANT_ID,
+      location_id: null,
+      quantity_delta: 42,
+      movement_type: "restock",
+      reference_type: null,
+      reference_id: null,
+      reason: null,
+      created_by: USER_ORG_A,
+      created_at: new Date().toISOString(),
+    };
+
+    const result = await withInventoryDb(
+      { product_variants: variantRow, inventory_movements: { data: insertedRow, error: null } },
+      () =>
+        recordMovement(ctx, {
+          productId: PRODUCT_ID,
+          variantId: VARIANT_ID,
+          quantityDelta: 42,
+          movementType: "restock",
+        }),
+    );
+
+    expect(result.id).toBe("movement-server-path");
+    expect(result.quantityDelta).toBe(42);
+    expect(result.createdBy).toBe(USER_ORG_A);
+  });
+
+  it("the repository writes with the service-role client (supabaseAdmin), not a JWT client", async () => {
+    const source = readSource("src/server/inventory/repository.ts");
+    expect(source).toMatch(/import \{ supabaseAdmin \} from "@\/lib\/supabase\/server"/);
+  });
+});
+
+// ── Test 17: Idempotency key includes movement_type ──────────────────────────
+// Regression guard for the second review blocker: keying uniqueness on
+// (variant, reference) alone would reject a legitimate return for an order that
+// already had a sale.
+
+describe("Test 17: Idempotency distinguishes event type from source record", () => {
+  const migrationSql = readMigration021();
+
+  it("the unique index includes movement_type alongside the reference", () => {
+    expect(migrationSql).toMatch(
+      /CREATE UNIQUE INDEX uniq_inventory_movements_reference\s+ON public\.inventory_movements\(organization_id, variant_id, movement_type, reference_type, reference_id\)/,
+    );
+  });
+
+  it("the unique index is partial — movements with no reference are never deduplicated", () => {
+    expect(migrationSql).toMatch(
+      /uniq_inventory_movements_reference[\s\S]*?WHERE reference_id IS NOT NULL/,
+    );
+  });
+
+  it("a retried sale for the same order + variant is rejected as a duplicate", async () => {
+    const { recordMovement } = await import("../server/inventory/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["inventory.adjust"]);
+
+    const duplicateError = {
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "uniq_inventory_movements_reference"',
+      },
+    };
+
+    await withInventoryDb(
+      { product_variants: variantRow, inventory_movements: duplicateError },
+      async () => {
+        await expect(
+          recordMovement(ctx, {
+            productId: PRODUCT_ID,
+            variantId: VARIANT_ID,
+            quantityDelta: -2,
+            movementType: "sale",
+            referenceType: "order",
+            referenceId: ORDER_ID,
+          }),
+        ).rejects.toMatchObject({ statusCode: 409 });
+      },
+    );
+  });
+
+  it("a sale and a later return for the same order + variant can both be recorded", async () => {
+    const { recordMovement } = await import("../server/inventory/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["inventory.adjust"]);
+
+    const baseRow = {
+      organization_id: ORG_A_ID,
+      product_id: PRODUCT_ID,
+      variant_id: VARIANT_ID,
+      location_id: null,
+      reference_type: "order",
+      reference_id: ORDER_ID,
+      reason: null,
+      created_by: USER_ORG_A,
+      created_at: new Date().toISOString(),
+    };
+
+    // Same order, same variant, different movement_type — distinct index keys,
+    // so the DB accepts both. Neither call is a duplicate of the other.
+    const sale = await withInventoryDb(
+      {
+        product_variants: variantRow,
+        inventory_movements: {
+          data: { ...baseRow, id: "m-sale", quantity_delta: -2, movement_type: "sale" },
+          error: null,
+        },
+      },
+      () =>
+        recordMovement(ctx, {
+          productId: PRODUCT_ID,
+          variantId: VARIANT_ID,
+          quantityDelta: -2,
+          movementType: "sale",
+          referenceType: "order",
+          referenceId: ORDER_ID,
+        }),
+    );
+
+    const refund = await withInventoryDb(
+      {
+        product_variants: variantRow,
+        inventory_movements: {
+          data: { ...baseRow, id: "m-return", quantity_delta: 2, movement_type: "return" },
+          error: null,
+        },
+      },
+      () =>
+        recordMovement(ctx, {
+          productId: PRODUCT_ID,
+          variantId: VARIANT_ID,
+          quantityDelta: 2,
+          movementType: "return",
+          referenceType: "order",
+          referenceId: ORDER_ID,
+        }),
+    );
+
+    expect(sale.movementType).toBe("sale");
+    expect(refund.movementType).toBe("return");
+    expect(sale.referenceId).toBe(ORDER_ID);
+    expect(refund.referenceId).toBe(ORDER_ID);
+    // Net effect on stock is zero — the ledger holds both entries, not one edit.
+    expect(sale.quantityDelta + refund.quantityDelta).toBe(0);
   });
 });
 
