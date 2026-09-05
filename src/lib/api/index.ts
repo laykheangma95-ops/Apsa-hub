@@ -4,6 +4,12 @@
  */
 import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
+import {
+  mapDeliveryDetailToUi,
+  mapDeliverySummaryToUi,
+  type RealDelivery,
+  type RealDeliveryDetail,
+} from "@/lib/deliveries";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -501,6 +507,99 @@ export interface OrderCustomerOption {
 export async function listRealCustomers(): Promise<OrderCustomerOption[]> {
   const { listCustomersFn } = await import("@/api/customers");
   return listCustomersFn({ data: { limit: 100, status: "active" } });
+}
+
+/* ------------- Delivery UI Production Integration (production Delivery domain) -----------
+ *
+ * These functions are the ONLY way UI code reaches the production Delivery
+ * domain (src/server/deliveries/service.ts via src/api/deliveries.ts). Each
+ * is a thin wrapper: call the TanStack server function, map the result with
+ * src/lib/deliveries.ts, return it. organizationId/userId are never
+ * parameters here — the server functions derive both from the session,
+ * exactly as src/api/deliveries.ts requires. No client-computed status,
+ * fulfillment or payment consequence is ever sent — those are exclusively
+ * the server's own consequence of a transition.
+ */
+
+/** Production Delivery detail — src/routes/app.deliveries.$id.tsx (real-UUID branch). */
+export async function getRealDeliveryDetail(deliveryId: string): Promise<RealDeliveryDetail> {
+  const { getDeliveryByIdFn } = await import("@/api/deliveries");
+  const detail = await getDeliveryByIdFn({ data: { deliveryId } });
+  return mapDeliveryDetailToUi(detail);
+}
+
+/** Deliveries for one order — used by the real Order detail screen's Delivery section. */
+export async function listRealDeliveriesForOrder(orderId: string): Promise<RealDelivery[]> {
+  const { listDeliveriesFn } = await import("@/api/deliveries");
+  const rows = await listDeliveriesFn({ data: { orderId } });
+  return rows.map(mapDeliverySummaryToUi);
+}
+
+export interface CreateRealDeliveryInput {
+  orderId: string;
+  /** Manual-provider path (requirement 3: "support the existing backend provider/manual-provider options" — no list-providers endpoint exists yet to offer a providerId picker). */
+  providerName: string;
+  providerKey?: string;
+  externalTrackingNumber?: string;
+  /** Integer minor units, operational only — never marks the order as paid. */
+  codAmountMinor?: number;
+}
+
+/** Create a delivery for an eligible confirmed order. The server re-validates eligibility independently. */
+export async function createRealDelivery(
+  input: CreateRealDeliveryInput,
+): Promise<RealDeliveryDetail> {
+  const { createDeliveryFn } = await import("@/api/deliveries");
+  const detail = await createDeliveryFn({
+    data: {
+      orderId: input.orderId,
+      providerName: input.providerName,
+      ...(input.providerKey ? { providerKey: input.providerKey } : {}),
+      ...(input.externalTrackingNumber
+        ? { externalTrackingNumber: input.externalTrackingNumber }
+        : {}),
+      ...(input.codAmountMinor !== undefined ? { codAmountMinor: input.codAmountMinor } : {}),
+    },
+  });
+  return mapDeliveryDetailToUi(detail);
+}
+
+export async function startPreparingRealDelivery(deliveryId: string): Promise<RealDeliveryDetail> {
+  const { startPreparingDeliveryFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await startPreparingDeliveryFn({ data: { deliveryId } }));
+}
+
+export async function markRealDeliveryReady(deliveryId: string): Promise<RealDeliveryDetail> {
+  const { markDeliveryReadyFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await markDeliveryReadyFn({ data: { deliveryId } }));
+}
+
+export async function markRealDeliveryInTransit(deliveryId: string): Promise<RealDeliveryDetail> {
+  const { markDeliveryInTransitFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await markDeliveryInTransitFn({ data: { deliveryId } }));
+}
+
+/** Terminal success. Never touches order payment — COD settlement is a separate Payment-domain decision. */
+export async function markRealDeliveryDelivered(deliveryId: string): Promise<RealDeliveryDetail> {
+  const { markDeliveryDeliveredFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await markDeliveryDeliveredFn({ data: { deliveryId } }));
+}
+
+export async function markRealDeliveryFailed(
+  deliveryId: string,
+  reason: string,
+): Promise<RealDeliveryDetail> {
+  const { markDeliveryFailedFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await markDeliveryFailedFn({ data: { deliveryId, reason } }));
+}
+
+/** Cancellation: server drives the order's fulfillment back to unfulfilled; a replacement delivery can be created afterwards. */
+export async function cancelRealDelivery(
+  deliveryId: string,
+  reason: string,
+): Promise<RealDeliveryDetail> {
+  const { cancelDeliveryFn } = await import("@/api/deliveries");
+  return mapDeliveryDetailToUi(await cancelDeliveryFn({ data: { deliveryId, reason } }));
 }
 
 export interface DeliveryDetail {

@@ -19,6 +19,7 @@ import {
 
 import { OperationalState } from "@/components/common/OperationalState";
 import { CancelOrderSheet } from "@/components/orders/CancelOrderSheet";
+import { CreateDeliverySheet } from "@/components/delivery/CreateDeliverySheet";
 import {
   ArrangeDeliverySheet,
   RecordPaymentSheet,
@@ -36,6 +37,7 @@ import {
   getOrderDetail,
   getRealOrderDetail,
   isProductionId,
+  listRealDeliveriesForOrder,
   recordPayment,
   PERMISSION_DENIED,
 } from "@/lib/api";
@@ -47,6 +49,7 @@ import {
   totalStockUnits,
   type OrderErrorKind,
 } from "@/lib/orders";
+import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { fullTimestamp, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { addMoney, formatMoney, subtractMoney, usd } from "@/lib/money";
@@ -116,10 +119,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const errorCopy = useOrderErrorCopy();
 
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const queryKey = ["order", "real", id];
   const query = useQuery({ queryKey, queryFn: () => getRealOrderDetail(id) });
+
+  const deliveriesQueryKey = ["order", "real", id, "deliveries"];
+  const deliveriesQuery = useQuery({
+    queryKey: deliveriesQueryKey,
+    queryFn: () => listRealDeliveriesForOrder(id),
+    enabled: query.isSuccess,
+  });
 
   // A session that expires mid-view is the one case with no useful inline
   // message — send the merchant back through the same gate /app already
@@ -187,6 +198,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const canCancel = canCancelOrder(order.lifecycleStatus);
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
+
+  // Newest first (src/server/deliveries/repository.ts listDeliveries ordering).
+  const deliveries = deliveriesQuery.data ?? [];
+  const activeDelivery = deliveries.find((d) => isActiveDeliveryStatus(d.status)) ?? null;
+  const latestDelivery = deliveries[0] ?? null;
+  const canCreateDelivery =
+    !activeDelivery &&
+    canCreateDeliveryForOrder({
+      lifecycleStatus: order.lifecycleStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+    });
+  const isReplacementDelivery = canCreateDelivery && latestDelivery !== null;
 
   const historyItems: TimelineItem[] = [...(order.statusHistory ?? [])]
     .sort((a, b) => b.changedAt.localeCompare(a.changedAt))
@@ -305,6 +328,55 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : null}
         </Section>
 
+        <Section
+          title={t("order.delivery")}
+          action={
+            latestDelivery ? (
+              <button
+                type="button"
+                onClick={() =>
+                  navigate({ to: "/app/deliveries/$id", params: { id: latestDelivery.id } })
+                }
+                className="text-label rounded-full px-1 py-2 text-action-primary"
+              >
+                {t("order.viewDelivery")}
+              </button>
+            ) : null
+          }
+        >
+          {latestDelivery ? (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-body-sm min-w-0 text-text-primary">
+                  {latestDelivery.providerName}
+                </span>
+                <StatusChip status={latestDelivery.status} />
+              </div>
+              {latestDelivery.externalTrackingNumber ? (
+                <p className="text-caption tnum text-text-muted">
+                  {t("delivery.tracking")}: {latestDelivery.externalTrackingNumber}
+                </p>
+              ) : null}
+              {latestDelivery.codAmount ? (
+                <p className="text-body-sm text-status-warning-text">{t("order.codNote")}</p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-body-sm text-text-secondary">{t("order.noDeliveryBody")}</p>
+          )}
+          {canCreateDelivery ? (
+            <Button
+              variant="ghost"
+              className="tap-target text-label mt-3 h-11 w-full text-action-primary"
+              onClick={() => setCreateDeliveryOpen(true)}
+            >
+              {isReplacementDelivery
+                ? t("order.createReplacementDelivery")
+                : t("order.arrangeDelivery")}
+            </Button>
+          ) : null}
+        </Section>
+
         <Section title={t("order.history")}>
           {historyItems.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("customer360.noTimelineBody")}</p>
@@ -344,6 +416,15 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         onOpenChange={setCancelOpen}
         pending={cancelMutation.isPending}
         onConfirm={(reason) => cancelMutation.mutate(reason)}
+      />
+      <CreateDeliverySheet
+        open={createDeliveryOpen}
+        onOpenChange={setCreateDeliveryOpen}
+        orderId={order.id}
+        onCreated={(detail) => {
+          void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
+          void navigate({ to: "/app/deliveries/$id", params: { id: detail.id } });
+        }}
       />
     </div>
   );

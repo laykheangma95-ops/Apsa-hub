@@ -66,6 +66,8 @@ const MAP: Record<StatusKey, { tone: Tone; icon: LucideIcon }> = {
   unfulfilled: { tone: "neutral", icon: Package },
   processing: { tone: "info", icon: Package },
   fulfilled: { tone: "success", icon: PackageCheck },
+  // Production Delivery domain (src/server/deliveries/state-machine.ts).
+  preparing: { tone: "info", icon: Package },
 };
 
 interface StatusChipProps {

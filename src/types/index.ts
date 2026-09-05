@@ -155,7 +155,9 @@ export type StatusKey =
   | "pending"
   | "unfulfilled"
   | "processing"
-  | "fulfilled";
+  | "fulfilled"
+  // Production Delivery domain (src/server/deliveries/state-machine.ts).
+  | "preparing";
 
 export type CompanionColor = "nilo" | "minto" | "vela" | "suri" | "luma";
 
