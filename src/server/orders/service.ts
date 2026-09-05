@@ -110,6 +110,8 @@ export interface OrderSummary {
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Opaque provenance only — see migration 030. Never a Conversation FK. */
+  sourceConversationRef: string | null;
 }
 
 export interface OrderStatusHistoryEntry {
@@ -152,6 +154,7 @@ function mapOrder(row: OrderRow): OrderSummary {
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sourceConversationRef: row.source_conversation_ref ?? null,
   };
 }
 
@@ -272,7 +275,18 @@ export interface CreateOrderServiceInput {
    * derives the total itself.
    */
   discountMinor?: number | undefined;
+  /**
+   * Opaque provenance identifier for the conversation this order came from
+   * (Conversation -> Order linkage). Not a Conversation FK — no production
+   * Conversation table exists yet (see migration 030's own comment). This is
+   * a bare identifier, never conversation content: passing anything longer
+   * than a plausible id is rejected rather than silently truncated.
+   */
+  sourceConversationRef?: string | null | undefined;
 }
+
+/** Provenance identifiers are short opaque ids, never a place to smuggle content. */
+const SOURCE_CONVERSATION_REF_MAX_LENGTH = 200;
 
 /**
  * Create a new order in `draft` lifecycle state.
@@ -321,6 +335,13 @@ export async function createOrder(
     ctx.require("orders.apply_discount");
   }
 
+  const sourceConversationRef = input.sourceConversationRef?.trim() || null;
+  if (sourceConversationRef && sourceConversationRef.length > SOURCE_CONVERSATION_REF_MAX_LENGTH) {
+    throw badRequest(
+      `sourceConversationRef must be at most ${SOURCE_CONVERSATION_REF_MAX_LENGTH} characters`,
+    );
+  }
+
   // Tenant ownership, checked before the write. The RPC and the DB triggers
   // check the same things; this layer exists so the caller gets a precise 404
   // instead of a raw SQL error, and so a cross-org id never reaches the
@@ -353,6 +374,7 @@ export async function createOrder(
     customer_id: input.customerId ?? null,
     location_id: input.locationId ?? null,
     discount_minor: discountMinor,
+    source_conversation_ref: sourceConversationRef,
   });
 
   if (result.status !== "success" || !result.order_id) {
@@ -382,6 +404,9 @@ export async function createOrder(
       discount_minor: detail.discount.amount,
       total_minor: detail.total.amount,
       item_count: detail.items.length,
+      ...(detail.sourceConversationRef
+        ? { source_conversation_ref: detail.sourceConversationRef }
+        : {}),
     },
   });
 

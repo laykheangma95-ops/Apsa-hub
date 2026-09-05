@@ -84,6 +84,7 @@ export async function createOrder(
     p_customer_id: input.customer_id ?? null,
     p_location_id: input.location_id ?? null,
     p_discount_minor: input.discount_minor ?? 0,
+    p_source_conversation_ref: input.source_conversation_ref ?? null,
   });
 
   if (error) throw new Error(`createOrder: ${errMessage(error)}`);

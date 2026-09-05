@@ -95,6 +95,9 @@ export const createOrderFn = createServerFn()
         locationId: z.string().uuid("Invalid location ID").nullish(),
         // Integer minor units. An input to the server's calculation, never a total.
         discountMinor: z.number().int().min(0).optional(),
+        // Opaque provenance only (Conversation -> Order linkage). Never a FK,
+        // never conversation content — see migration 030.
+        sourceConversationRef: z.string().trim().min(1).max(200).nullish(),
       })
       .parse(data),
   )
@@ -111,6 +114,7 @@ export const createOrderFn = createServerFn()
       customerId: data.customerId ?? null,
       locationId: data.locationId ?? null,
       discountMinor: data.discountMinor,
+      sourceConversationRef: data.sourceConversationRef ?? null,
     });
   });
 

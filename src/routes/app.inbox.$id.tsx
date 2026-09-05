@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ImagePlus, MessageSquareQuote, Send } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,7 +16,23 @@ import {
 } from "@/design-system";
 import { CreateOrderSheet } from "@/components/inbox/CreateOrderSheet";
 import { CustomerDetailSheet } from "@/components/inbox/CustomerDetailSheet";
-import { getConversation, getCustomer } from "@/lib/api";
+import { PrepareOrderSheet } from "@/components/inbox/PrepareOrderSheet";
+import { SmartActionStrip } from "@/components/inbox/SmartActionStrip";
+import {
+  getConversation,
+  getCustomer,
+  getCustomerOrders,
+  getMostRecentRealOrderForCustomer,
+  getProducts,
+  isProductionId,
+} from "@/lib/api";
+import {
+  buildSmartActionSuggestion,
+  toPrepareOrderItems,
+  toRepeatOrderItems,
+  type PrepareOrderItemInput,
+  type SmartActionId,
+} from "@/lib/conversation/smart-actions";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -76,6 +92,8 @@ function ConversationScreen() {
   const [orderOpen, setOrderOpen] = useState(false);
   const [savedOpen, setSavedOpen] = useState(false);
   const [lastOrder, setLastOrder] = useState<Order | null>(null);
+  const [prepareOpen, setPrepareOpen] = useState(false);
+  const [prepareItems, setPrepareItems] = useState<PrepareOrderItemInput[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
 
   const conversationQuery = useQuery({
@@ -92,8 +110,36 @@ function ConversationScreen() {
   const customer = customerQuery.data;
   const displayName = customer ? localName(customer, language) : "…";
 
+  // Catalog for Smart Action variant resolution (§ PRODUCT / VARIANT
+  // RESOLUTION) and for the Prepare Order review step. Same production/mock
+  // branching as everywhere else — see getProducts()'s own comment.
+  const productsQuery = useQuery({
+    queryKey: ["conversation-smart-action-products"],
+    queryFn: getProducts,
+  });
+  const products = productsQuery.data ?? [];
+
   const messages = [...(conversation?.messages ?? []), ...appended];
   const currentStatus = status ?? conversation?.status ?? "needs_reply";
+
+  // Deterministic, client-side only — never a security decision (§
+  // SECURITY / TENANT ISOLATION: "intent/suggestion layer is never
+  // security-authoritative"). Every action it names still goes through the
+  // same server-authoritative path a manual tap would.
+  const suggestion = useMemo(
+    () =>
+      buildSmartActionSuggestion({
+        messages: messages.map((message) => ({
+          body: message.body,
+          direction: message.direction,
+          at: message.at,
+        })),
+        hasCustomer: Boolean(customer),
+        products,
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messages.length, customer, products],
+  );
 
   useEffect(() => {
     setAppended([]);
@@ -121,6 +167,70 @@ function ConversationScreen() {
       state: "sent",
     });
     setDraft("");
+  }
+
+  /**
+   * Smart Action dispatch. Every branch either (a) opens the Prepare Order
+   * review step — never a direct order, the merchant always taps Create Draft
+   * / Confirm themselves — or (b) sends a short composer message, exactly as
+   * if the merchant had typed it, or (c) opens an existing, already-secure
+   * surface (Customer detail). Nothing here creates, confirms, or pays for
+   * anything on its own.
+   */
+  async function handleSmartAction(action: SmartActionId) {
+    switch (action) {
+      case "prepare_order": {
+        setPrepareItems(toPrepareOrderItems(suggestion.items, products));
+        setPrepareOpen(true);
+        return;
+      }
+      case "repeat_order": {
+        if (!customer) return;
+        // §9 negative example note: "location ដដែល" is filtered out of
+        // repeat-purchase detection upstream (src/lib/intent/detect.ts), so
+        // reaching here means the engine is confident this is a product
+        // repeat, not an address repeat.
+        const previous = isProductionId(customer.id)
+          ? await getMostRecentRealOrderForCustomer(customer.id)
+          : ((await getCustomerOrders(customer.id))[0] ?? null);
+        setPrepareItems(toRepeatOrderItems(previous?.items ?? [], products));
+        setPrepareOpen(true);
+        return;
+      }
+      case "view_product": {
+        setPrepareItems([]);
+        setPrepareOpen(true);
+        return;
+      }
+      case "view_customer": {
+        setCustomerOpen(true);
+        return;
+      }
+      case "check_stock": {
+        send(t("conversation.saved.stock"));
+        return;
+      }
+      case "send_price": {
+        send(t("conversation.saved.price"));
+        return;
+      }
+      case "delivery_info": {
+        send(t("conversation.saved.delivery"));
+        return;
+      }
+      case "ask_quantity": {
+        send(t("conversation.intent.prompts.quantity"));
+        return;
+      }
+      case "ask_variant": {
+        send(t("conversation.intent.prompts.variant"));
+        return;
+      }
+      case "ask_address": {
+        send(t("conversation.intent.prompts.address"));
+        return;
+      }
+    }
   }
 
   return (
@@ -203,6 +313,12 @@ function ConversationScreen() {
       {/* One bottom surface: order action first, composer beneath it. */}
       <div className="surface-glass elevation-3 border-t border-border-default pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
         <div className="px-4 pt-3">
+          {conversation ? (
+            <SmartActionStrip
+              suggestion={suggestion}
+              onAction={(action) => void handleSmartAction(action)}
+            />
+          ) : null}
           {lastOrder ? (
             <nav
               aria-label={t("conversation.orderActions.label")}
@@ -267,7 +383,6 @@ function ConversationScreen() {
           </button>
         </form>
       </div>
-
 
       <BottomSheet
         open={statusOpen}
@@ -347,6 +462,35 @@ function ConversationScreen() {
             setStatus("order_created");
             setLastOrder(order);
           }}
+        />
+      ) : null}
+
+      {customer && conversation ? (
+        <PrepareOrderSheet
+          open={prepareOpen}
+          onOpenChange={setPrepareOpen}
+          customer={customer}
+          displayName={displayName}
+          channel={conversation.channel}
+          products={products}
+          initialItems={prepareItems}
+          // Conversation has no production id today (Inbox is not yet
+          // productionized — see APSA_BUILD_STATUS.md), so this is always
+          // null in practice. Wired now so a real conversation id flows
+          // through unchanged once Inbox is productionized, with no change
+          // needed here.
+          sourceConversationRef={isProductionId(id) ? id : null}
+          onCreated={(order) => {
+            append({
+              id: `sys-${order.code}`,
+              direction: "system",
+              body: t("createOrder.created", { code: order.code }),
+              at: order.createdAt,
+            });
+            setStatus("order_created");
+            setLastOrder(order);
+          }}
+          onConfirmed={(order) => setLastOrder(order)}
         />
       ) : null}
     </div>

@@ -49,6 +49,8 @@ export interface OrderRow {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  /** Opaque provenance only — see migration 030. Never a Conversation FK. */
+  source_conversation_ref: string | null;
 }
 
 export interface OrderItemRow {
@@ -99,6 +101,12 @@ export interface CreateOrderInput {
   customer_id?: string | null | undefined;
   location_id?: string | null | undefined;
   discount_minor?: number | undefined;
+  /**
+   * Opaque provenance identifier for the conversation this order came from
+   * (see migration 030). Never a Conversation FK — no production Conversation
+   * table exists yet. Never the conversation content.
+   */
+  source_conversation_ref?: string | null | undefined;
 }
 
 /** Result envelope returned by the create_order_v1 RPC. */

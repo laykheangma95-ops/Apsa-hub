@@ -449,12 +449,34 @@ export async function getRealOrderDetail(orderId: string): Promise<RealOrderDeta
   return mapOrderDetailToUi(detail);
 }
 
+/**
+ * Most recent real order for a customer, with its lines — used by the
+ * Conversation "Repeat order" Smart Action (real-customer branch only). Reuses
+ * the same two production reads as everywhere else in this file; no new
+ * server function or query shape.
+ */
+export async function getMostRecentRealOrderForCustomer(
+  customerId: string,
+): Promise<RealOrderDetail | null> {
+  const { listOrdersFn } = await import("@/api/orders");
+  const rows = await listOrdersFn({ data: { customerId, limit: 1 } });
+  const mostRecent = rows[0];
+  if (!mostRecent) return null;
+  return getRealOrderDetail(mostRecent.id);
+}
+
 export interface CreateRealOrderInput {
   source: "POS" | "FACEBOOK" | "INSTAGRAM" | "TELEGRAM" | "MANUAL";
   items: Array<{ variantId: string; quantity: number; productId?: string }>;
   customerId?: string | null;
   /** Integer minor units in the org's currency — bounded and priced server-side. */
   discountMinor?: number;
+  /**
+   * Opaque provenance identifier for the conversation this order came from.
+   * Never a Conversation FK (no production Conversation table exists yet) and
+   * never conversation content — see migration 030.
+   */
+  sourceConversationRef?: string | null;
 }
 
 /**
