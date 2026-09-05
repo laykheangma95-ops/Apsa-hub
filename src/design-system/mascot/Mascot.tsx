@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   companionSource,
@@ -22,6 +22,13 @@ export interface MascotProps {
 function Frame({ source, size, alt }: { source: MascotSource; size: number; alt: string }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  // The image can already be complete before React attaches onLoad (SSR markup).
+  useEffect(() => {
+    const img = imgRef.current;
+    if (img?.complete && img.naturalWidth > 0) setLoaded(true);
+  }, []);
 
   if (source.kind !== "image") {
     // Future Rive/Lottie/video renderers plug in here; the API above stays put.
@@ -42,6 +49,7 @@ function Frame({ source, size, alt }: { source: MascotSource; size: number; alt:
     >
       {failed ? null : (
         <img
+          ref={imgRef}
           src={source.url}
           alt=""
           width={size}
