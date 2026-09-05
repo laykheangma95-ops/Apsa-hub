@@ -75,7 +75,7 @@ export async function getHomeSummary(range: MetricRange = "today"): Promise<Home
   return resolve(homeSummaries[range]);
 }
 
-export async function getConversations(filter?: ConversationFilter): Promise<Conversation[]> {
+function mockGetConversations(filter?: ConversationFilter): Conversation[] {
   let list = [...conversations];
   if (filter?.status && filter.status !== "all") {
     list = list.filter((c) => c.status === filter.status);
@@ -101,22 +101,101 @@ export async function getConversations(filter?: ConversationFilter): Promise<Con
       );
     }
   }
-  return resolve(list);
+  return list;
+}
+
+/**
+ * Production Inbox list — tries the real server first, falls back to mock
+ * data only in demo-mode contexts (bun test / Storybook — see isDemoModeError's
+ * own comment). Once a real backend is reachable, an org with zero real
+ * conversations sees an empty inbox, not mock rows — same precedent as
+ * getProducts()/getPosProducts() above.
+ */
+export async function getConversations(filter?: ConversationFilter): Promise<Conversation[]> {
+  try {
+    const { listConversationsFn } = await import("@/api/conversations");
+    const params: {
+      status?: ConversationStatus | "all";
+      channel?: Conversation["channel"] | "all";
+      query?: string;
+    } = {};
+    if (filter?.status) params.status = filter.status;
+    if (filter?.channel) params.channel = filter.channel;
+    if (filter?.query) params.query = filter.query;
+    const page = await listConversationsFn({ data: params });
+    return page.conversations as unknown as Conversation[];
+  } catch (err) {
+    if (isDemoModeError(err)) return resolve(mockGetConversations(filter));
+    throw err;
+  }
 }
 
 /** Counts per status for the inbox filter chips, ignoring the status filter itself. */
 export async function getConversationCounts(): Promise<Record<string, number>> {
-  const counts: Record<string, number> = { all: conversations.length };
-  for (const conversation of conversations) {
-    counts[conversation.status] = (counts[conversation.status] ?? 0) + 1;
+  try {
+    const { listConversationCountsFn } = await import("@/api/conversations");
+    return await listConversationCountsFn();
+  } catch (err) {
+    if (isDemoModeError(err)) {
+      const counts: Record<string, number> = { all: conversations.length };
+      for (const conversation of conversations) {
+        counts[conversation.status] = (counts[conversation.status] ?? 0) + 1;
+      }
+      return resolve(counts, 80);
+    }
+    throw err;
   }
-  return resolve(counts, 80);
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const conversation = conversations.find((c) => c.id === id);
-  if (!conversation) throw new Error(`Conversation ${id} not found`);
-  return resolve({ ...conversation, messages: conversationMessages[id] ?? [] });
+  if (!isProductionId(id)) {
+    // Non-UUID mock ID — use in-memory mock data. The server function UUID
+    // validator is not weakened; mock IDs never reach it (see isProductionId's
+    // own comment).
+    const conversation = conversations.find((c) => c.id === id);
+    if (!conversation) throw new Error(`Conversation ${id} not found`);
+    return resolve({ ...conversation, messages: conversationMessages[id] ?? [] });
+  }
+  const { getConversationDetailFn } = await import("@/api/conversations");
+  const detail = await getConversationDetailFn({ data: { conversationId: id } });
+  return detail as unknown as ConversationDetail;
+}
+
+/*
+ * The three functions below follow the same "Real*" convention as
+ * getRealOrderDetail/createRealOrder above: the caller is responsible for
+ * only invoking them once isProductionId(id) is true (there is no mock
+ * equivalent to fall back to — these are new production-only capabilities
+ * with no route wired to them yet in this phase; see the phase's final
+ * report). A mock ID passed here would fail the server function's own zod
+ * UUID validator, so a non-UUID id can never reach the production backend.
+ */
+
+/** Mark a production conversation's unread count as cleared. Idempotent — safe to call repeatedly. */
+export async function markRealConversationRead(id: string): Promise<Conversation> {
+  const { markConversationReadFn } = await import("@/api/conversations");
+  const updated = await markConversationReadFn({ data: { conversationId: id } });
+  return updated as unknown as Conversation;
+}
+
+/** Change a production conversation's operational status. The server re-validates the required permission per target status. */
+export async function updateRealConversationStatus(
+  id: string,
+  status: ConversationStatus,
+): Promise<Conversation> {
+  const { updateConversationStatusFn } = await import("@/api/conversations");
+  const updated = await updateConversationStatusFn({ data: { conversationId: id, status } });
+  return updated as unknown as Conversation;
+}
+
+/** Assign (or, with null, unassign) a production conversation. */
+export async function assignRealConversation(
+  id: string,
+  assignedUserId: string | null,
+): Promise<Conversation> {
+  const { assignConversationFn } = await import("@/api/conversations");
+  const updated = await assignConversationFn({ data: { conversationId: id, assignedUserId } });
+  return updated as unknown as Conversation;
 }
 
 export async function getCustomers(): Promise<Customer[]> {
@@ -124,9 +203,17 @@ export async function getCustomers(): Promise<Customer[]> {
 }
 
 export async function getCustomer(id: string): Promise<Customer> {
-  const customer = customers.find((c) => c.id === id);
-  if (!customer) throw new Error(`Customer ${id} not found`);
-  return resolve(customer);
+  if (!isProductionId(id)) {
+    // Non-UUID mock ID — use in-memory mock data; see isProductionId's own comment.
+    const customer = customers.find((c) => c.id === id);
+    if (!customer) throw new Error(`Customer ${id} not found`);
+    return resolve(customer);
+  }
+  // Reuses the existing, already PII-gated Customer domain — never a parallel
+  // identity resolver (see src/server/conversations/service.ts's own note).
+  const { getCustomer360Fn } = await import("@/api/customers");
+  const result = await getCustomer360Fn({ data: { id } });
+  return (result as unknown as Customer360).customer as unknown as Customer;
 }
 
 export async function getCustomerOrders(customerId: string): Promise<Order[]> {
