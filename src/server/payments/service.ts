@@ -120,9 +120,17 @@ export interface PaymentSummary {
   /** Withheld (null) unless the caller holds payments.view_provider_reference. */
   reference: string | null;
   /**
-   * Free text. Withheld only where it literally contains a reference value
-   * already known to belong to this payment, unless the caller holds
-   * payments.view_provider_reference — see redactKnownReferencesFromText.
+   * Free text, unless the caller holds payments.view_provider_reference, in
+   * which case it is returned unmodified. Otherwise:
+   *  - From getPaymentById (detail): redacted — only literal occurrences of
+   *    a reference value already known to belong to this payment (its own
+   *    `reference` column plus its evidence's OCR-extracted references) are
+   *    replaced with "[withheld]"; everything else passes through. See
+   *    redactKnownReferencesFromText.
+   *  - From listPayments (list): withheld entirely (null). The list
+   *    endpoint does not fetch per-payment evidence, so it cannot compute
+   *    the same complete known-reference set — see resolveNote's "withhold"
+   *    mode for why a partial redaction there would be unsafe.
    */
   note: string | null;
   recordedBy: string | null;
@@ -178,6 +186,17 @@ function collectKnownReferences(
  * even needed), so ordinary notes/reasons ("2nd installment", "table 4",
  * "typo fix") are completely unaffected unless they happen to literally
  * contain this specific payment's own reference value.
+ *
+ * Matching is intentionally CASE-SENSITIVE (exact literal substring, no
+ * `.toLowerCase()`/`.toUpperCase()` folding on either side). This is a
+ * deliberate choice, not an oversight: case-folding a short alphanumeric
+ * reference value would widen it into a much more casual substring match
+ * against ordinary free text (raising the odds of clobbering unrelated
+ * words), trading a real over-redaction risk for a narrower gap — a caller
+ * who deliberately re-types this payment's own reference in different
+ * casing inside free text. Known residual risk, not covered by this
+ * function; see MIN_REDACTABLE_KNOWN_REFERENCE_LENGTH for the same
+ * over-matching trade-off from the other direction.
  */
 function redactKnownReferencesFromText(
   text: string | null,
@@ -194,15 +213,46 @@ function redactKnownReferencesFromText(
   return redacted;
 }
 
+/**
+ * `note` handling differs between detail and list responses for a caller
+ * without payments.view_provider_reference:
+ *
+ *  - "redact-known" (loadDetail/getPaymentById): the caller already paid for
+ *    a per-payment evidence fetch, so the full known-reference set (this
+ *    payment's own `reference` column PLUS every evidence row's
+ *    OCR-extracted reference) is available, and note is redacted against it
+ *    — see redactKnownReferencesFromText.
+ *  - "withhold" (listPayments): the list endpoint deliberately does NOT
+ *    fetch evidence per row (that would be an N+1 query across the whole
+ *    page). Without evidence, only `row.reference` could be checked, which
+ *    is an INCOMPLETE known-reference set — the exact gap that let an
+ *    evidence-derived reference quoted in `note` pass through `listPayments`
+ *    unredacted while the same payment's `getPaymentById` response correctly
+ *    scrubbed it (PR #30 review finding). Rather than ship that same
+ *    incomplete partial redaction again, list responses fail closed: `note`
+ *    is withheld entirely for a caller lacking the permission, never
+ *    partially redacted.
+ */
+type NoteMode = "redact-known" | "withhold";
+
+function resolveNote(
+  row: PaymentRow,
+  canViewReference: boolean,
+  noteMode: NoteMode,
+  extraKnownReferences: ReadonlyArray<string | null>,
+): string | null {
+  if (canViewReference) return row.note;
+  if (noteMode === "withhold") return null;
+  const knownReferences = collectKnownReferences(row.reference, extraKnownReferences);
+  return redactKnownReferencesFromText(row.note, knownReferences);
+}
+
 function mapPayment(
   row: PaymentRow,
   canViewReference: boolean,
+  noteMode: NoteMode = "redact-known",
   extraKnownReferences: ReadonlyArray<string | null> = [],
 ): PaymentSummary {
-  const knownReferences = canViewReference
-    ? collectKnownReferences(null)
-    : collectKnownReferences(row.reference, extraKnownReferences);
-
   return {
     id: row.id,
     organizationId: row.organization_id,
@@ -212,7 +262,7 @@ function mapPayment(
     status: row.status,
     verificationState: row.verification_state,
     reference: canViewReference ? row.reference : null,
-    note: redactKnownReferencesFromText(row.note, knownReferences),
+    note: resolveNote(row, canViewReference, noteMode, extraKnownReferences),
     recordedBy: row.recorded_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -774,7 +824,7 @@ async function loadDetail(
     : collectKnownReferences(payment.reference, extractedReferences);
 
   return {
-    ...mapPayment(payment, canViewReference, extractedReferences),
+    ...mapPayment(payment, canViewReference, "redact-known", extractedReferences),
     events: events.map((row) => mapEvent(row, canViewReference, knownReferences)),
     evidence: evidence.map((row) => mapEvidence(row, canViewReference)),
   };
@@ -808,5 +858,5 @@ export async function listPayments(
   ctx.require("payments.read");
   const canViewReference = ctx.can("payments.view_provider_reference");
   const rows = await repo.listPayments(ctx.organizationId, opts);
-  return rows.map((row) => mapPayment(row, canViewReference));
+  return rows.map((row) => mapPayment(row, canViewReference, "withhold"));
 }

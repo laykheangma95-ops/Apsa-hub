@@ -1888,7 +1888,7 @@ describe("Test 34: a known reference cannot be recovered through free-text note/
     );
   });
 
-  it("listPayments also withholds the reference from note (using only the payment's own reference column)", async () => {
+  it("listPayments withholds note entirely (null), not a partial redaction, for a caller without the permission", async () => {
     const { listPayments } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
 
@@ -1919,6 +1919,171 @@ describe("Test 34: a known reference cannot be recovered through free-text note/
     );
 
     expect(summary!.reference).toBeNull();
-    expect(summary!.note).toBe("Paid [withheld] in full.");
+    expect(summary!.note).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIST/DETAIL CONSISTENCY FOR EVIDENCE-DERIVED REFERENCES (final hardening — PR #30)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 35: listPayments cannot leak an evidence-derived reference through note", () => {
+  const NOTE_WITH_EVIDENCE_REF = "OCR read KHQR-EVID-REF-777 off the slip.";
+
+  function paymentsRowWithEvidenceRefInNote(): QueryResult {
+    return rows([
+      {
+        id: PAYMENT_ID,
+        organization_id: ORG_A_ID,
+        order_id: ORDER_ID,
+        method: "bank_transfer",
+        currency: "USD",
+        amount_minor: 1000,
+        status: "pending",
+        verification_state: "unverified",
+        // (1) The payment's own reference column is null — a payment can be
+        // recorded with no reference, then have evidence attached later.
+        reference: null,
+        idempotency_key: null,
+        // (3) The note contains that exact evidence-extracted value, not the
+        // (null) payment reference.
+        note: NOTE_WITH_EVIDENCE_REF,
+        recorded_by: USER_ORG_A,
+        created_at: "2026-09-05T00:00:00.000Z",
+        updated_at: "2026-09-05T00:00:00.000Z",
+      },
+    ]);
+  }
+
+  it("getPaymentById() redacts the evidence-derived reference out of note for an unauthorized caller", async () => {
+    const { getPaymentById } = await import("../server/payments/service");
+    // (4) payments.read only, NOT payments.view_provider_reference.
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({ reference: null, note: NOTE_WITH_EVIDENCE_REF }),
+          payment_events: emptyEvents,
+          // (2) Evidence carries the extracted reference the note quotes.
+          payment_evidence: rows([
+            {
+              id: "ev-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              evidence_type: "screenshot",
+              storage_ref: "evidence/org-a/ev-1.png",
+              extracted_amount_minor: null,
+              extracted_reference: "KHQR-EVID-REF-777",
+              extracted_at: "2026-09-05T00:00:00.000Z",
+              uploaded_by: USER_ORG_A,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+
+    // (5) getPaymentById() does not expose the evidence-derived reference.
+    expect(detail.note).toBe("OCR read [withheld] off the slip.");
+    expect(detail.note).not.toContain("KHQR-EVID-REF-777");
+  });
+
+  it("listPayments() also does not expose the evidence-derived reference (fails closed via full withholding)", async () => {
+    const { listPayments } = await import("../server/payments/service");
+    // (4) payments.read only, NOT payments.view_provider_reference.
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+
+    const [summary] = await withPaymentDb(
+      { tables: { payments: paymentsRowWithEvidenceRefInNote() } },
+      () => listPayments(ctx),
+    );
+
+    // (6) listPayments() does not expose it either — note is withheld
+    // entirely rather than partially (and incompletely) redacted, since the
+    // list path has no evidence to check against.
+    expect(summary!.note).toBeNull();
+    expect(summary!.reference).toBeNull();
+  });
+
+  it("an authorized caller (payments.view_provider_reference) sees note and reference unmodified in both list and detail", async () => {
+    const { getPaymentById, listPayments } = await import("../server/payments/service");
+    // (7) authorized caller behavior remains correct.
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS, "OWNER");
+
+    const detail = await withPaymentDb(
+      {
+        tables: {
+          payments: paymentRow({ reference: null, note: NOTE_WITH_EVIDENCE_REF }),
+          payment_events: emptyEvents,
+          payment_evidence: rows([
+            {
+              id: "ev-1",
+              organization_id: ORG_A_ID,
+              payment_id: PAYMENT_ID,
+              evidence_type: "screenshot",
+              storage_ref: "evidence/org-a/ev-1.png",
+              extracted_amount_minor: null,
+              extracted_reference: "KHQR-EVID-REF-777",
+              extracted_at: "2026-09-05T00:00:00.000Z",
+              uploaded_by: USER_ORG_A,
+              created_at: "2026-09-05T00:00:00.000Z",
+            },
+          ]),
+        },
+      },
+      () => getPaymentById(ctx, PAYMENT_ID),
+    );
+    expect(detail.note).toBe(NOTE_WITH_EVIDENCE_REF);
+
+    const [summary] = await withPaymentDb(
+      { tables: { payments: paymentsRowWithEvidenceRefInNote() } },
+      () => listPayments(ctx),
+    );
+    expect(summary!.note).toBe(NOTE_WITH_EVIDENCE_REF);
+    expect(summary!.reference).toBeNull(); // (this payment's own reference column IS null
+  });
+
+  it("ordinary listPayments behavior is otherwise unaffected: other fields and authorized notes pass through normally", async () => {
+    const { listPayments } = await import("../server/payments/service");
+    // (8) ordinary list behavior is not otherwise broken.
+    const unauthorizedCtx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"], "CASHIER");
+    const authorizedCtx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS, "OWNER");
+
+    const ordinaryRow = rows([
+      {
+        id: PAYMENT_ID,
+        organization_id: ORG_A_ID,
+        order_id: ORDER_ID,
+        method: "cash",
+        currency: "USD",
+        amount_minor: 2500,
+        status: "paid",
+        verification_state: "staff_confirmed",
+        reference: null,
+        idempotency_key: null,
+        note: "2nd installment, customer asked for table 4.",
+        recorded_by: USER_ORG_A,
+        created_at: "2026-09-05T00:00:00.000Z",
+        updated_at: "2026-09-05T00:00:00.000Z",
+      },
+    ]);
+
+    const [unauthorizedSummary] = await withPaymentDb({ tables: { payments: ordinaryRow } }, () =>
+      listPayments(unauthorizedCtx),
+    );
+    expect(unauthorizedSummary!.id).toBe(PAYMENT_ID);
+    expect(unauthorizedSummary!.amount).toEqual({ amount: 2500, currency: "USD" });
+    expect(unauthorizedSummary!.status).toBe("paid");
+    expect(unauthorizedSummary!.verificationState).toBe("staff_confirmed");
+    // note is withheld even though it contains nothing sensitive — the list
+    // endpoint fails closed unconditionally for an unauthorized caller.
+    expect(unauthorizedSummary!.note).toBeNull();
+
+    const [authorizedSummary] = await withPaymentDb({ tables: { payments: ordinaryRow } }, () =>
+      listPayments(authorizedCtx),
+    );
+    expect(authorizedSummary!.note).toBe("2nd installment, customer asked for table 4.");
   });
 });
