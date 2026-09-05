@@ -21,7 +21,7 @@
  *    11.  Valid / invalid payment transitions
  *    12.  Valid / invalid fulfillment transitions
  *    13.  Valid / invalid lifecycle transitions, terminal behavior
- *    14.  The future inventory trigger point is explicit and documented
+ *    14.  The inventory integration point is explicit, wired and documented
  *   READS
  *    15.  Org-scoped get by id; a guessed Org B id is not readable by Org A
  *    16.  List pagination and ordering
@@ -1116,45 +1116,55 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
   });
 });
 
-describe("Test 14: Future inventory trigger point is explicit", () => {
+describe("Test 14: The inventory integration point is explicit", () => {
   it("names draft -> confirmed as the stock-consuming transition", async () => {
     const { STOCK_CONSUMING_TRANSITION } = await import("../server/orders/state-machine");
     expect(STOCK_CONSUMING_TRANSITION.axis).toBe("lifecycle");
     expect(STOCK_CONSUMING_TRANSITION.from).toBe("draft");
     expect(STOCK_CONSUMING_TRANSITION.to).toBe("confirmed");
-    expect(STOCK_CONSUMING_TRANSITION.plannedMovementType).toBe("sale");
+    expect(STOCK_CONSUMING_TRANSITION.movementType).toBe("sale");
+    expect(STOCK_CONSUMING_TRANSITION.deltaSign).toBe(-1);
   });
 
   it("names confirmed -> cancelled as the stock-releasing transition", async () => {
     const { STOCK_RELEASING_TRANSITION } = await import("../server/orders/state-machine");
     expect(STOCK_RELEASING_TRANSITION.from).toBe("confirmed");
     expect(STOCK_RELEASING_TRANSITION.to).toBe("cancelled");
-    expect(STOCK_RELEASING_TRANSITION.plannedMovementType).toBe("return");
+    expect(STOCK_RELEASING_TRANSITION.movementType).toBe("return");
+    expect(STOCK_RELEASING_TRANSITION.deltaSign).toBe(1);
   });
 
-  it("is marked as NOT implemented in this phase", async () => {
+  it("is marked implemented, in the database rather than in the service", async () => {
     const { STOCK_CONSUMING_TRANSITION, STOCK_RELEASING_TRANSITION } =
       await import("../server/orders/state-machine");
-    expect(STOCK_CONSUMING_TRANSITION.implemented).toBe(false);
-    expect(STOCK_RELEASING_TRANSITION.implemented).toBe(false);
+    for (const t of [STOCK_CONSUMING_TRANSITION, STOCK_RELEASING_TRANSITION]) {
+      expect(t.implemented).toBe(true);
+      expect(t.implementedIn).toBe("supabase/migrations/026_order_inventory_integration.sql");
+      expect(fs.existsSync(path.resolve(process.cwd(), t.implementedIn))).toBe(true);
+    }
   });
 
-  it("the Order domain does not call the Inventory domain yet", () => {
+  it("the Order domain still does not call the Inventory SERVICE", () => {
+    // This is an authorization property, not just a layering one: going through
+    // inventory/service.ts would impose inventory.adjust on every cashier who
+    // confirms a sale. The movements are written by the transition RPC instead.
     for (const file of [
       "src/server/orders/service.ts",
       "src/server/orders/repository.ts",
       "src/api/orders.ts",
     ]) {
       const src = readSource(file);
-      // Prose references to the future integration are expected; executable
-      // imports and calls are not.
+      // Prose references to the integration are expected; executable imports
+      // and calls are not.
       expect(src).not.toMatch(/^\s*import[\s\S]{0,120}?from ["']@\/server\/inventory/m);
       expect(src).not.toMatch(/await import\(["']@\/server\/inventory/);
       expect(src).not.toMatch(/recordMovement\(/);
     }
   });
 
-  it("no order migration writes to inventory_movements", () => {
+  it("the merged order migrations were not edited to add the integration", () => {
+    // 023-025 are merged and must stay byte-stable; the wiring is forward-only
+    // in 026.
     for (const sql of [ordersMigration(), rpcMigration(), permsMigration()]) {
       expect(sql).not.toMatch(/INSERT INTO public\.inventory_movements/);
     }
@@ -1162,7 +1172,7 @@ describe("Test 14: Future inventory trigger point is explicit", () => {
 
   it("the trigger point is documented in the migration as well as the code", () => {
     expect(ordersMigration()).toContain("FUTURE INVENTORY TRIGGER POINT");
-    expect(readSource("src/server/orders/service.ts")).toContain("FUTURE INVENTORY TRIGGER POINT");
+    expect(readSource("src/server/orders/service.ts")).toContain("INVENTORY CONSEQUENCE");
   });
 });
 
