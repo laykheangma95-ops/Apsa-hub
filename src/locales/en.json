@@ -534,6 +534,24 @@
       "payment": "Record payment",
       "delivery": "Arrange delivery",
       "view": "View order"
+    },
+    "intent": {
+      "label": "Suggested actions",
+      "detected": "Detected from the customer's message",
+      "needsProduct": "Confirm which product the customer means",
+      "actions": {
+        "prepare_order": "Prepare order",
+        "check_stock": "Check stock",
+        "send_price": "Send price",
+        "view_product": "View product",
+        "ask_quantity": "Ask quantity",
+        "ask_variant": "Ask which one",
+        "ask_address": "Ask address",
+        "delivery_info": "Delivery info",
+        "save_contact": "Save to customer",
+        "send_photo": "Send photo",
+        "confirm_change": "Confirm change"
+      }
     }
   },
   "createOrder": {

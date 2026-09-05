@@ -534,6 +534,24 @@
       "payment": "កត់ត្រាការទូទាត់",
       "delivery": "រៀបចំដឹកជញ្ជូន",
       "view": "មើលការបញ្ជាទិញ"
+    },
+    "intent": {
+      "label": "សកម្មភាពដែលស្នើ",
+      "detected": "រកឃើញពីសាររបស់អតិថិជន",
+      "needsProduct": "សូមបញ្ជាក់ថាអតិថិជនចង់បានទំនិញណា",
+      "actions": {
+        "prepare_order": "រៀបចំការកម្មង់",
+        "check_stock": "ពិនិត្យស្តុក",
+        "send_price": "ផ្ញើតម្លៃ",
+        "view_product": "មើលទំនិញ",
+        "ask_quantity": "សួរចំនួន",
+        "ask_variant": "សួរម៉ូតណាមួយ",
+        "ask_address": "សួរអាសយដ្ឋាន",
+        "delivery_info": "ព័ត៌មានដឹកជញ្ជូន",
+        "save_contact": "រក្សាទុកទៅអតិថិជន",
+        "send_photo": "ផ្ញើរូបភាព",
+        "confirm_change": "បញ្ជាក់ការផ្លាស់ប្តូរ"
+      }
     }
   },
   "createOrder": {
