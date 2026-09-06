@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { ApsiIllustration } from "./ApsiIllustration";
+import { Apsi } from "./mascot";
 
 interface ErrorStateProps {
   title?: string;
@@ -15,7 +15,7 @@ export function ErrorState({ title, body, onRetry, className }: ErrorStateProps)
 
   return (
     <div className={cn("flex flex-col items-center px-6 py-10 text-center", className)} role="alert">
-      <ApsiIllustration pose="default" size={80} />
+      <Apsi emotion="supportive" size="md" withCompanion />
       <h3 className="text-h3 mt-4 text-text-primary">{title ?? t("error.title")}</h3>
       <p className="text-body mt-1 max-w-xs text-text-secondary">{body ?? t("error.body")}</p>
       {onRetry ? (
