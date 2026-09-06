@@ -800,7 +800,7 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
     );
   });
 
-  it("blocks the refund when the mandatory audit write fails (fail-closed)", async () => {
+  it("reports failure when the separate mandatory refund audit cannot be persisted", async () => {
     mock.module("@/server/auth/audit", () => ({
       auditLog: async () => {},
       auditLogRequired: async () => {
@@ -830,6 +830,54 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
     );
 
     restoreDefaultAuditMock();
+  });
+
+  it("a keyed refund retry repairs an earlier mandatory audit failure before succeeding", async () => {
+    let attempts = 0;
+    const persisted: Array<{ afterJson?: { replayed?: boolean } }> = [];
+    mock.module("@/server/auth/audit", () => ({
+      auditLog: async () => {},
+      auditLogRequired: async (_ctx: unknown, payload: { afterJson?: { replayed?: boolean } }) => {
+        attempts++;
+        if (attempts === 1) throw new Error("Audit record could not be persisted");
+        persisted.push(payload);
+      },
+      MANDATORY_AUDIT_ACTIONS: new Set(["payments.refund"]),
+    }));
+    const { refundPayment } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+    try {
+      for (const replayed of [false, true]) {
+        await withPaymentDb(
+          {
+            tables: {
+              payments: paymentRow({ status: "paid" }),
+              payment_events: emptyEvents,
+              payment_evidence: emptyEvidence,
+            },
+            rpc: {
+              refund_payment_v1: {
+                data: { status: "success", refunded_total: 400, fully_refunded: false, replayed },
+                error: null,
+              },
+            },
+          },
+          async (calls) => {
+            const result = refundPayment(ctx, PAYMENT_ID, 400, "Partial refund", "refund-retry");
+            if (replayed) await expect(result).resolves.toBeDefined();
+            else await expect(result).rejects.toThrow("could not be persisted");
+            expect(calls.find((c) => c.fn === "refund_payment_v1")?.args["p_idempotency_key"]).toBe(
+              "refund-retry",
+            );
+          },
+        );
+      }
+      expect(attempts).toBe(2);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]?.afterJson?.replayed).toBe(true);
+    } finally {
+      restoreDefaultAuditMock();
+    }
   });
 
   it("payments.reverse and payments.refund are registered as MANDATORY_AUDIT_ACTIONS", async () => {

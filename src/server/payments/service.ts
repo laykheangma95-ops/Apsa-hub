@@ -737,18 +737,21 @@ export async function refundPayment(
   );
   if (result.status !== "success") throw refundFailureToError(result);
 
-  if (!result.replayed)
-    await auditLogRequired(ctx, {
-      action: "payments.refund",
-      resourceType: "payments",
-      resourceId: paymentId,
-      afterJson: {
-        refunded_amount_minor: amountMinor,
-        refunded_total: result.refunded_total,
-        fully_refunded: result.fully_refunded ?? false,
-      },
-      reason,
-    });
+  // A previous attempt may have committed the refund but failed its separate
+  // required audit write. Replay must persist that audit before returning
+  // success too; its explicit flag distinguishes a retry from new money.
+  await auditLogRequired(ctx, {
+    action: "payments.refund",
+    resourceType: "payments",
+    resourceId: paymentId,
+    afterJson: {
+      refunded_amount_minor: amountMinor,
+      refunded_total: result.refunded_total,
+      fully_refunded: result.fully_refunded ?? false,
+      replayed: result.replayed ?? false,
+    },
+    reason,
+  });
 
   return requireDetail(ctx, paymentId);
 }

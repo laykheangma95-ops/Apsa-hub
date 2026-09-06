@@ -99,6 +99,21 @@ $$;
 CREATE TRIGGER payment_principal_immutable BEFORE UPDATE OR DELETE ON public.payments
   FOR EACH ROW EXECUTE FUNCTION public.guard_payment_principal();
 
+-- TRUNCATE bypasses row triggers, so append-only protection also needs a
+-- statement guard. This protects privileged accidental maintenance SQL too.
+CREATE FUNCTION public.block_payment_truncate() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, auth AS $$
+BEGIN
+  RAISE EXCEPTION 'Payment history is append-only: TRUNCATE % is forbidden', TG_TABLE_NAME;
+END;
+$$;
+CREATE TRIGGER payments_no_truncate BEFORE TRUNCATE ON public.payments
+  FOR EACH STATEMENT EXECUTE FUNCTION public.block_payment_truncate();
+CREATE TRIGGER payment_events_no_truncate BEFORE TRUNCATE ON public.payment_events
+  FOR EACH STATEMENT EXECUTE FUNCTION public.block_payment_truncate();
+CREATE TRIGGER payment_evidence_no_truncate BEFORE TRUNCATE ON public.payment_evidence
+  FOR EACH STATEMENT EXECUTE FUNCTION public.block_payment_truncate();
+
 -- All same-tenant links additionally prove currency, including direct DB writes.
 CREATE OR REPLACE FUNCTION public.check_payment_cross_tenant_refs() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth AS $$
@@ -222,7 +237,7 @@ BEGIN
       WHERE organization_id=p_organization_id AND payment_id=p_payment_id
         AND event_type='refund' AND idempotency_key=key;
     IF FOUND THEN
-      IF previous.amount_minor <> p_amount_minor OR previous.reason IS DISTINCT FROM p_reason THEN
+      IF previous.amount_minor IS DISTINCT FROM p_amount_minor OR previous.reason IS DISTINCT FROM p_reason THEN
         RAISE EXCEPTION 'Refund idempotency key conflicts with original request';
       END IF;
       RETURN previous.metadata || jsonb_build_object('replayed',true);
@@ -268,6 +283,8 @@ GRANT EXECUTE ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,te
   public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text) TO service_role;
 REVOKE INSERT,UPDATE,DELETE ON public.payments,public.payment_events,public.payment_evidence
   FROM service_role;
+REVOKE TRUNCATE ON public.payments,public.payment_events,public.payment_evidence
+  FROM PUBLIC,anon,authenticated,service_role;
 
 -- Deprecate the old payment axis without changing lifecycle/stock/fulfillment.
 ALTER FUNCTION public.transition_order_status_v1(uuid,uuid,text,text,text,uuid,text)

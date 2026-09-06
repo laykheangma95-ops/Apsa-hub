@@ -371,6 +371,9 @@ describe("Payment transaction authority and isolation", () => {
     await expect(
       f.rpc("refund_payment_v1", [f.org, payment, f.actor, 3000, "returned item", "refund-click"]),
     ).rejects.toThrow("idempotency key conflicts");
+    await expect(
+      f.rpc("refund_payment_v1", [f.org, payment, f.actor, null, "returned item", "refund-click"]),
+    ).rejects.toThrow("idempotency key conflicts");
     const final = [f.org, payment, f.actor, 8000, "remaining refund", "refund-final"];
     await f.rpc("refund_payment_v1", final);
     expect((await f.rpc("refund_payment_v1", final)).replayed).toBe(true);
@@ -455,6 +458,34 @@ describe("Payment transaction authority and isolation", () => {
     } finally {
       await f.db.exec("RESET ROLE");
     }
+  });
+
+  it("TRUNCATE cannot erase financial history through service privileges or privileged SQL", async () => {
+    const order = await f.newOrder();
+    const payment = await f.record(10000, "cash", null, order);
+    await f.verify(payment);
+    await f.refund(payment, 2000);
+    const before = await f.state(order);
+    for (const table of ["payments", "payment_events", "payment_evidence"]) {
+      for (const role of ["service_role", "authenticated", "anon"]) {
+        expect(
+          (
+            await f.db.query<{ allowed: boolean }>(
+              "select has_table_privilege($1,$2,'TRUNCATE') as allowed",
+              [role, table],
+            )
+          ).rows[0]!.allowed,
+        ).toBe(false);
+      }
+      await f.db.exec("SET ROLE service_role");
+      try {
+        await expect(f.db.exec(`TRUNCATE ${table} CASCADE`)).rejects.toThrow("permission denied");
+      } finally {
+        await f.db.exec("RESET ROLE");
+      }
+      await expect(f.db.exec(`TRUNCATE ${table} CASCADE`)).rejects.toThrow("append-only");
+    }
+    expect(await f.state(order)).toEqual(before);
   });
 
   it("principal/history cannot be rewritten and Order currency/tenant cannot detach existing Payments", async () => {

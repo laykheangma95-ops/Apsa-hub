@@ -94,6 +94,7 @@ When documents conflict, apply this priority order (highest to lowest):
 ---
 
 *This file should remain under version control and be updated whenever a meaningful decision changes.*
+
 # Approved financial semantics — 2026-09-06
 
 Payment ↔ Order integration preserves `payment_status=paid` after partial

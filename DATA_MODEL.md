@@ -1389,6 +1389,11 @@ same refund action. Replay returns the original event result, and conflicting
 amount/reason reuse fails. Legacy callers without a key retain non-idempotent
 refund behavior and must not automatically retry an uncertain response.
 
+Payment history is protected against TRUNCATE as well as row mutation. Payment
+RPCs preserve one financial refund event per retry key. The separate mandatory
+audit write is required on replay too, so a failed earlier audit can be repaired.
+Replay audit records carry an explicit flag and do not represent a second refund.
+
 ---
 
 # 54. DELIVERY

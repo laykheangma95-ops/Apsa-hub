@@ -922,6 +922,10 @@ Payment refund events. Neither `payments.confirm` nor an Order transition
 may bypass `payments.*` settlement/refund permissions. Evidence and Delivery
 COD status are never settlement authority.
 
+Payment tables revoke TRUNCATE from application roles and have statement-level
+guards against privileged accidental truncation. Refund replay must retry the
+mandatory audit write before reporting success if an earlier attempt failed it.
+
 ---
 
 # 44. INVENTORY SECURITY
