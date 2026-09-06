@@ -1,0 +1,16 @@
+{
+  "$schema": "APSA hosted-migrations lock file — do not hand-edit hashes",
+  "description": "Migrations recorded as APPLIED to the live APSA Supabase project (Seoul / ap-northeast-2), per APSA_BUILD_STATUS.md. Files listed here are immutable: any future change must be a NEW migration, never an edit to one of these files. scripts/check-migration-safety.ts fails CI if any listed file's content hash no longer matches.",
+  "source_of_truth": "APSA_BUILD_STATUS.md",
+  "last_verified": "2026-09-06",
+  "hosted": {
+    "001_auth_profiles.sql": "e7a190be5876d73407ced78019b90a47322cbba63c79fe22582ec485b290defd",
+    "002_organizations.sql": "1f65d37178d964a0e90fe5b5d346c31bdcb4faa08504891f6b7eb3f3b9352b80",
+    "003_roles_permissions.sql": "c8564ded9b44a2dbf13fd7d0aa8c0d7c3e863c4c631e85c167abd1a536555a59",
+    "004_workspaces.sql": "402654d3d9a7d4c4d21791e8d579341e0db40c0ad79e4255c8cf7bf728ac8f7d",
+    "005_locations.sql": "21c36d6bb14418843ec9be9ffc87a021526e87f0e127b7f803d3f669403e0bd3",
+    "006_memberships.sql": "75e2a4e6b128328480a06ccc0f2f50033c572086cf8b428d7b8ca19770669e28",
+    "007_rls_deferred_member_policies.sql": "21158fd469ba3b93affc8ec55ef3ff313633f7b8d6ea19aa8f97dab9e689c5df",
+    "008_audit_logs.sql": "2116e4d2f7075776e5432dee39214bc2ab97498de306fce7de2c5b3feebc9084"
+  }
+}
