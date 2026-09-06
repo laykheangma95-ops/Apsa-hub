@@ -1,10 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { TrendingDown, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { getActiveShop, getHomeSummary } from "@/lib/api";
-import { localName } from "@/lib/format";
+import { localName, percent } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import { useLanguage } from "@/lib/i18n";
 import {
@@ -18,10 +19,15 @@ import {
   HomeSkeleton,
   MetricTile,
   QuickActionGrid,
+  ScreenBleed,
+  SegmentedControl,
   Sparkline,
+  type QuickActionId,
+  type Segment,
 } from "@/design-system";
 import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
-import type { MetricRange } from "@/types";
+import { cn } from "@/lib/utils";
+import type { AttentionItem, MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
   head: () => ({
@@ -45,9 +51,21 @@ export const Route = createFileRoute("/app/")({
 
 const RANGES: MetricRange[] = ["today", "week", "month"];
 
+/**
+ * Where an attention row goes. Only the destinations that exist today are
+ * listed — a row with no route stays a plain, honest count rather than a
+ * button that leads nowhere.
+ */
+const ATTENTION_ROUTE: Partial<Record<AttentionItem["id"], "/app/inbox" | "/app/orders">> = {
+  unread_conversations: "/app/inbox",
+  awaiting_payment: "/app/orders",
+  awaiting_delivery: "/app/orders",
+};
+
 function BusinessHome() {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const navigate = useNavigate();
   const [range, setRange] = useState<MetricRange>("today");
   const [createOpen, setCreateOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -61,23 +79,45 @@ function BusinessHome() {
 
   const summary = homeQuery.data;
   const isEmpty = summary && summary.revenue.amount === 0;
+  const unread = summary?.attention.find((item) => item.id === "unread_conversations")?.count ?? 0;
+
+  const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
+    value,
+    label: t(`home.range.${value}`),
+  }));
+
+  function handleQuickAction(id: QuickActionId) {
+    // Only two of the four have a real destination today. The rest open the
+    // create sheet, which says plainly what is and is not built yet.
+    if (id === "newOrder") {
+      void navigate({ to: "/app/orders" });
+      return;
+    }
+    if (id === "receivePayment") {
+      void navigate({ to: "/app/pos" });
+      return;
+    }
+    setCreateOpen(true);
+  }
 
   return (
-    <div className="min-h-screen bg-surface-page pb-28">
+    <ScreenBleed bottom="nav">
       <AppHeader
         title={shopQuery.data ? localName(shopQuery.data, language) : t("brand.name")}
         subtitle={shopQuery.data?.city}
         onShopSwitch={() => setSwitcherOpen(true)}
-        notificationCount={3}
-        variant="plain"
+        notificationCount={unread}
       >
-        <div>
-          <p className="text-h2">{t("home.greeting", { name: summary?.greetingName ?? "" })}</p>
+        {/* Greeting scrolls away with the page — only the bar stays pinned. */}
+        <div className="pb-1">
+          <h1 className="text-h1 text-text-primary">
+            {t("home.greeting", { name: summary?.greetingName ?? "" })}
+          </h1>
           <p className="text-body-sm text-text-secondary">{t("home.subtitle")}</p>
         </div>
       </AppHeader>
 
-      <main className="mx-auto max-w-[560px]">
+      <main className="mx-auto max-w-[var(--screen-max)]">
         {homeQuery.isPending ? <HomeSkeleton /> : null}
 
         {homeQuery.isError ? (
@@ -94,7 +134,7 @@ function BusinessHome() {
             title={t("home.empty.title")}
             body={t("home.empty.body")}
             action={
-              <Button className="tap-target" onClick={() => setCreateOpen(true)}>
+              <Button className="press tap-target h-12 px-6" onClick={() => setCreateOpen(true)}>
                 {t("home.empty.action")}
               </Button>
             }
@@ -102,63 +142,58 @@ function BusinessHome() {
         ) : null}
 
         {summary && !isEmpty ? (
-          <div className="stack-section px-4 py-5 pb-[var(--space-screen-bottom)]">
-            <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-              <p className="text-label text-text-secondary">{t("home.revenue")}</p>
-              <p className="text-financial-lg mt-1 text-text-primary">
-                {formatMoney(summary.revenue)}
-              </p>
-              <Sparkline series={summary.revenueSeries} tone="success" />
-            </section>
+          <div className="stack-section screen-gutter pt-4">
+            {/*
+             * What needs doing comes before what already happened. On a phone
+             * the merchant sees roughly one screen before scrolling, and that
+             * screen should be work, not a report.
+             */}
+            {summary.attention.length > 0 ? (
+              <section aria-labelledby="attention-heading">
+                <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
+                  {t("home.attention")}
+                </h2>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {summary.attention.map((item) => {
+                    const to = ATTENTION_ROUTE[item.id];
+                    return (
+                      <AttentionCard
+                        key={item.id}
+                        item={item}
+                        onClick={to ? () => void navigate({ to }) : undefined}
+                      />
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
 
-            {/* Needs attention comes before metrics, always. */}
-            <section aria-labelledby="attention-heading">
-              <h2 id="attention-heading" className="text-h3 text-text-primary">
-                {t("home.attention")}
-              </h2>
-              <p className="text-body-sm text-text-secondary">{t("home.attentionSubtitle")}</p>
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {summary.attention.map((item) => (
-                  <AttentionCard key={item.id} item={item} />
-                ))}
-              </div>
-            </section>
-
-            <section aria-labelledby="actions-heading">
-              <h2 id="actions-heading" className="text-h3 mb-3 text-text-primary">
-                {t("home.quickActions")}
-              </h2>
-              <QuickActionGrid onAction={() => setCreateOpen(true)} />
-            </section>
-
-            <section aria-labelledby="overview-heading">
-              <div className="flex items-center gap-2">
-                <h2 id="overview-heading" className="text-h3 flex-1 text-text-primary">
+            <section aria-labelledby="overview-heading" className="stack-group">
+              <div className="flex min-w-0 items-center justify-between gap-3 px-1">
+                <h2 id="overview-heading" className="text-label min-w-0 text-text-secondary">
                   {t("home.overview")}
                 </h2>
-                <div
-                  role="group"
-                  aria-label={t("home.overview")}
-                  className="flex rounded-full border border-border-default bg-surface-primary p-0.5"
-                >
-                  {RANGES.map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      aria-pressed={range === value}
-                      onClick={() => setRange(value)}
-                      className={`text-caption chip-text rounded-full px-3 py-1.5 ${
-                        range === value
-                          ? "bg-action-primary text-text-on-action"
-                          : "text-text-secondary"
-                      }`}
-                    >
-                      {t(`home.range.${value}`)}
-                    </button>
-                  ))}
-                </div>
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
+
+              <SegmentedControl
+                segments={rangeSegments}
+                value={range}
+                onChange={setRange}
+                label={t("home.overview")}
+              />
+
+              <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+                <p className="text-label text-text-secondary">{t("home.revenue")}</p>
+                <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <p className="text-financial-lg min-w-0 text-text-primary">
+                    {formatMoney(summary.revenue)}
+                  </p>
+                  <RevenueDelta value={summary.revenueDeltaPercent} />
+                </div>
+                <Sparkline series={summary.revenueSeries} tone="success" />
+              </section>
+
+              <div className="grid grid-cols-2 gap-2">
                 {summary.metrics.map((metric) => (
                   <MetricTile
                     key={metric.id}
@@ -169,6 +204,13 @@ function BusinessHome() {
                   />
                 ))}
               </div>
+            </section>
+
+            <section aria-labelledby="actions-heading" className="stack-group">
+              <h2 id="actions-heading" className="text-label px-1 text-text-secondary">
+                {t("home.quickActions")}
+              </h2>
+              <QuickActionGrid onAction={handleQuickAction} />
             </section>
 
             {!insightDismissed ? (
@@ -184,7 +226,11 @@ function BusinessHome() {
       </main>
 
       <WorkspaceSwitcherSheet open={switcherOpen} onOpenChange={setSwitcherOpen} />
-      <BottomNav workspace="business" onCreate={() => setCreateOpen(true)} />
+      <BottomNav
+        workspace="business"
+        onCreate={() => setCreateOpen(true)}
+        {...(unread > 0 ? { badges: { inbox: unread } } : {})}
+      />
 
       <BottomSheet
         open={createOpen}
@@ -198,7 +244,7 @@ function BusinessHome() {
               <button
                 type="button"
                 onClick={() => setCreateOpen(false)}
-                className="tap-target w-full rounded-xl border border-border-default px-4 text-left text-body"
+                className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
               >
                 {t(`nav.${key}`)}
               </button>
@@ -206,6 +252,26 @@ function BusinessHome() {
           ))}
         </ul>
       </BottomSheet>
-    </div>
+    </ScreenBleed>
+  );
+}
+
+/** Direction is carried by an arrow and a sign, never by the colour alone. */
+function RevenueDelta({ value }: { value: number }) {
+  const up = value >= 0;
+  const Arrow = up ? TrendingUp : TrendingDown;
+
+  return (
+    <span
+      className={cn(
+        "text-caption tnum inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5",
+        up
+          ? "bg-status-success-soft text-status-success-text"
+          : "bg-status-danger-soft text-status-danger-text",
+      )}
+    >
+      <Arrow className="size-3" aria-hidden />
+      {percent(value)}
+    </span>
   );
 }

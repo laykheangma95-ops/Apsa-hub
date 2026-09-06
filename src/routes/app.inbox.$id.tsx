@@ -1,11 +1,22 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ImagePlus, MessageSquareQuote, Send } from "lucide-react";
+import {
+  ArrowLeft,
+  ImagePlus,
+  MessageSquareQuote,
+  Plus,
+  Send,
+  ShoppingBag,
+  Truck,
+  UserRound,
+  Wallet,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ActionRow,
   BottomSheet,
   ChannelBadge,
   EmptyState,
@@ -103,6 +114,7 @@ function ConversationScreen() {
   const [orderOpen, setOrderOpen] = useState(false);
   const [savedOpen, setSavedOpen] = useState(false);
   const [lastOrder, setLastOrder] = useState<Order | null>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [prepareOpen, setPrepareOpen] = useState(false);
   const [prepareItems, setPrepareItems] = useState<PrepareOrderItemInput[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
@@ -169,6 +181,7 @@ function ConversationScreen() {
     setStatus(null);
     setDraft("");
     setLastOrder(null);
+    setActionsOpen(false);
   }, [id]);
 
   useEffect(() => {
@@ -254,6 +267,22 @@ function ConversationScreen() {
   }
 
   /**
+   * The one place the chat→order flow starts, wherever it is triggered from.
+   * Production threads go through Prepare Order (a review step the merchant
+   * confirms); the mock path keeps its own sheet. Neither creates anything on
+   * its own — the merchant still taps Create Draft / Confirm.
+   */
+  function startOrder() {
+    setActionsOpen(false);
+    if (isProductionId(id)) {
+      setPrepareItems([]);
+      setPrepareOpen(true);
+      return;
+    }
+    setOrderOpen(true);
+  }
+
+  /**
    * Smart Action dispatch. Every branch either (a) opens the Prepare Order
    * review step — never a direct order, the merchant always taps Create Draft
    * / Confirm themselves — or (b) sends a short composer message, exactly as
@@ -319,51 +348,77 @@ function ConversationScreen() {
 
   return (
     <div className="flex h-[100dvh] w-full min-w-0 flex-col bg-surface-primary">
-      <header className="flex items-center gap-2 border-b border-border-default px-3 pt-[calc(env(safe-area-inset-top)+0.5rem)] pb-2">
-        <button
-          type="button"
-          aria-label={t("conversation.back")}
-          onClick={() => void navigate({ to: "/app/inbox" })}
-          className="tap-target flex shrink-0 items-center justify-center rounded-full text-text-primary lg:hidden"
-        >
-          <ArrowLeft className="size-5" aria-hidden />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setCustomerOpen(true)}
-          aria-label={t("conversation.openCustomer")}
-          className="tap-target flex min-w-0 flex-1 items-center gap-2 text-left"
-          disabled={!customer}
-        >
-          <span
-            aria-hidden
-            className="text-label flex size-9 shrink-0 items-center justify-center rounded-full text-text-inverse"
-            style={{ backgroundColor: COMPANION_VAR[customer?.companion ?? "nilo"] }}
+      <header className="glass-bar sticky top-0 z-20 border-b border-[var(--glass-border)]">
+        <div className="flex items-center gap-1 px-2 pt-[calc(env(safe-area-inset-top)+0.5rem)] pb-2">
+          <button
+            type="button"
+            aria-label={t("conversation.back")}
+            onClick={() => void navigate({ to: "/app/inbox" })}
+            className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full text-text-primary lg:hidden"
           >
-            {initials(displayName)}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="text-h3 block truncate text-text-primary">{displayName}</span>
-            {conversation ? (
-              <span className="flex items-center gap-1">
-                <ChannelBadge channel={conversation.channel} withLabel />
-              </span>
-            ) : null}
-          </span>
-        </button>
+            <ArrowLeft className="size-5" aria-hidden />
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setStatusOpen(true)}
-          aria-label={t("conversation.statusLabel")}
-          className="tap-target shrink-0 rounded-full px-1"
-        >
-          <StatusChip status={currentStatus} />
-        </button>
+          <button
+            type="button"
+            onClick={() => setCustomerOpen(true)}
+            aria-label={t("conversation.openCustomer")}
+            className="press-tactile tap-target flex min-w-0 flex-1 items-center gap-2 rounded-2xl px-1 text-left"
+            disabled={!customer}
+          >
+            <span
+              aria-hidden
+              className="text-label flex size-9 shrink-0 items-center justify-center rounded-full text-text-inverse"
+              style={{ backgroundColor: COMPANION_VAR[customer?.companion ?? "nilo"] }}
+            >
+              {initials(displayName)}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="text-h3 block truncate text-text-primary">{displayName}</span>
+              {conversation ? (
+                <span className="flex items-center gap-1">
+                  <ChannelBadge channel={conversation.channel} withLabel />
+                </span>
+              ) : null}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusOpen(true)}
+            aria-label={t("conversation.statusLabel")}
+            aria-haspopup="dialog"
+            className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full px-1"
+          >
+            <StatusChip status={currentStatus} />
+          </button>
+        </div>
+
+        {/*
+         * Order context, only once there is an order to talk about. It reads
+         * as a status line rather than a control panel, and the whole strip
+         * is one target to the order itself — where the money and delivery
+         * actions actually live and are actually authorised.
+         */}
+        {lastOrder ? (
+          <button
+            type="button"
+            onClick={() => void navigate({ to: "/app/orders/$id", params: { id: lastOrder.id } })}
+            className="press flex w-full items-center gap-2 border-t border-border-default bg-action-primary-soft/60 px-4 py-2 text-left"
+          >
+            <span className="text-label tnum shrink-0 text-status-info-text">{lastOrder.code}</span>
+            <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+              <StatusChip status={lastOrder.paymentStatus} />
+              <StatusChip status={lastOrder.fulfillmentStatus} />
+            </span>
+            <span className="text-caption shrink-0 text-action-primary">
+              {t("conversation.orderActions.view")}
+            </span>
+          </button>
+        ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="scroll-pane min-h-0 flex-1 bg-surface-page px-4 py-3">
         {conversationQuery.isPending ? <ListSkeleton rows={4} /> : null}
 
         {conversationQuery.isError ? (
@@ -387,14 +442,24 @@ function ConversationScreen() {
         ) : null}
 
         {operationError ? (
-          <p role="alert" className="px-4 text-text-secondary">
+          <p
+            role="alert"
+            className="text-body-sm mb-2 rounded-2xl bg-status-danger-soft px-4 py-2.5 text-status-danger-text"
+          >
             {t("conversation.operationFailed")}
           </p>
         ) : null}
         {(olderCursor === undefined ? conversation?.nextBeforeId : olderCursor) ? (
-          <Button variant="outline" disabled={loadingOlder} onClick={() => void loadOlder()}>
-            {t("conversation.loadEarlier")}
-          </Button>
+          <div className="flex justify-center pb-2">
+            <Button
+              variant="outline"
+              disabled={loadingOlder}
+              onClick={() => void loadOlder()}
+              className="press tap-target text-label rounded-full border-border-default bg-surface-primary px-4"
+            >
+              {loadingOlder ? t("common.loading") : t("conversation.loadEarlier")}
+            </Button>
+          </div>
         ) : null}
         <div className="space-y-2">
           {messages.map((message) => (
@@ -404,50 +469,29 @@ function ConversationScreen() {
         <div ref={endRef} />
       </div>
 
-      {/* One bottom surface: order action first, composer beneath it. */}
-      <div className="surface-glass elevation-3 border-t border-border-default pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
-        <div className="px-4 pt-3">
-          {conversation ? (
+      {/*
+       * The chat keeps its screen. Business controls are contextual: the
+       * Smart Action strip appears only when the engine has something worth
+       * suggesting, and everything else lives one tap away behind the
+       * composer's action button rather than parked permanently over the
+       * thread.
+       */}
+      <div className="glass-bar border-t border-[var(--glass-border)] pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+        {conversation ? (
+          <div className="px-4 pt-2.5">
             <SmartActionStrip
               suggestion={suggestion}
               onAction={(action) => void handleSmartAction(action)}
             />
-          ) : null}
-          {lastOrder ? (
-            <nav
-              aria-label={t("conversation.orderActions.label")}
-              className="scrollbar-none mb-2 flex gap-2 overflow-x-auto"
-            >
-              {(["payment", "delivery", "view"] as const).map((action) => (
-                <button
-                  key={action}
-                  type="button"
-                  className="press tap-target text-label shrink-0 rounded-full border border-border-default bg-surface-primary px-4 text-text-primary"
-                >
-                  <span className="chip-text">{t(`conversation.orderActions.${action}`)}</span>
-                </button>
-              ))}
-            </nav>
-          ) : null}
-          <Button
-            className="press tap-target elevation-action h-12 w-full"
-            disabled={!customer}
-            onClick={() => {
-              if (isProductionId(id)) {
-                setPrepareItems([]);
-                setPrepareOpen(true);
-              } else setOrderOpen(true);
-            }}
-          >
-            {t("conversation.createOrder")}
-          </Button>
-        </div>
+          </div>
+        ) : null}
 
         {isProductionId(id) ? (
-          <p className="px-4 pt-2 text-caption text-text-secondary">
+          <p className="text-caption px-4 pt-2 text-text-secondary">
             {t("conversation.providerPending")}
           </p>
         ) : null}
+
         <form
           className="flex items-end gap-1.5 px-3 pt-2"
           onSubmit={(event) => {
@@ -457,36 +501,98 @@ function ConversationScreen() {
         >
           <button
             type="button"
-            aria-label={t("conversation.savedReplies")}
-            onClick={() => setSavedOpen(true)}
-            className="press tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
+            aria-label={t("conversation.actions.title")}
+            aria-haspopup="dialog"
+            aria-expanded={actionsOpen}
+            onClick={() => setActionsOpen(true)}
+            className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary-soft text-action-primary"
           >
-            <MessageSquareQuote className="size-5" aria-hidden />
-          </button>
-          <button
-            type="button"
-            aria-label={t("conversation.attachment")}
-            className="press tap-target flex shrink-0 items-center justify-center rounded-full text-text-secondary"
-          >
-            <ImagePlus className="size-5" aria-hidden />
+            <Plus className="size-5" aria-hidden />
           </button>
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            enterKeyHint="send"
             placeholder={t("conversation.composerPlaceholder")}
             aria-label={t("conversation.composerPlaceholder")}
-            className="h-12 min-w-0 flex-1 rounded-full bg-surface-primary"
+            className="h-12 min-w-0 flex-1 rounded-full border-border-default bg-surface-primary px-4"
           />
           <button
             type="submit"
             aria-label={t("conversation.send")}
             disabled={isProductionId(id) || draft.trim().length === 0}
-            className="press tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
+            className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
           >
             <Send className="size-5" aria-hidden />
           </button>
         </form>
       </div>
+
+      <BottomSheet
+        open={actionsOpen}
+        onOpenChange={setActionsOpen}
+        title={t("conversation.actions.title")}
+        description={t("conversation.actions.description")}
+        snap="half"
+      >
+        <div className="space-y-2">
+          <ActionRow
+            emphasis
+            icon={ShoppingBag}
+            label={t("conversation.createOrder")}
+            description={t("conversation.actions.createOrderBody")}
+            disabled={!customer}
+            onClick={startOrder}
+          />
+          <ActionRow
+            icon={UserRound}
+            label={t("conversation.actions.viewCustomer")}
+            description={t("conversation.actions.viewCustomerBody")}
+            disabled={!customer}
+            onClick={() => {
+              setActionsOpen(false);
+              setCustomerOpen(true);
+            }}
+          />
+          <ActionRow
+            icon={MessageSquareQuote}
+            label={t("conversation.savedReplies")}
+            description={t("conversation.actions.savedRepliesBody")}
+            onClick={() => {
+              setActionsOpen(false);
+              setSavedOpen(true);
+            }}
+          />
+          <ActionRow
+            icon={ImagePlus}
+            label={t("conversation.attachment")}
+            description={t("conversation.actions.attachmentBody")}
+            disabled
+          />
+          {lastOrder ? (
+            <>
+              <ActionRow
+                icon={Wallet}
+                label={t("conversation.orderActions.payment")}
+                description={t("conversation.actions.paymentBody", { code: lastOrder.code })}
+                onClick={() => {
+                  setActionsOpen(false);
+                  void navigate({ to: "/app/orders/$id", params: { id: lastOrder.id } });
+                }}
+              />
+              <ActionRow
+                icon={Truck}
+                label={t("conversation.orderActions.delivery")}
+                description={t("conversation.actions.deliveryBody", { code: lastOrder.code })}
+                onClick={() => {
+                  setActionsOpen(false);
+                  void navigate({ to: "/app/orders/$id", params: { id: lastOrder.id } });
+                }}
+              />
+            </>
+          ) : null}
+        </div>
+      </BottomSheet>
 
       <BottomSheet
         open={statusOpen}

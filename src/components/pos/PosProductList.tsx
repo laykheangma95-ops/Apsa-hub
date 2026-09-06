@@ -83,37 +83,47 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
         }
 
         return (
-          <li key={product.id} className="flex items-center gap-3 px-4 py-3">
-            <Thumb product={product} size="sm" />
-            <div className="min-w-0 flex-1">
-              <p className="text-body truncate text-text-primary">{name}</p>
-              <p className="text-caption text-text-secondary">
-                {product.sku}
-                {variants ? ` · ${variants}` : ""}
-              </p>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                <span className="text-financial text-text-primary">
-                  {formatMoney(product.price)}
-                </span>
-                <span className="text-caption text-text-muted">
-                  {t("pos.available", { count: availableStock(product) })}
-                </span>
-                {product.reserved ? (
-                  <span className="text-caption text-text-muted">
-                    {t("pos.reserved", { count: product.reserved })}
-                  </span>
-                ) : null}
-                {state !== "available" ? <StatusChip status={state} size="sm" /> : null}
-              </div>
-            </div>
+          <li key={product.id}>
+            {/*
+             * The whole row rings the product up. Behind a counter the target
+             * is the product, not a 44px plus sign at the far edge of the
+             * phone — the icon stays as the affordance, not as the only way in.
+             */}
             <button
               type="button"
               onClick={() => onSelect(product)}
               disabled={disabled}
               aria-label={label}
-              className="press tap-target flex shrink-0 items-center justify-center rounded-xl bg-action-primary-soft px-3 text-action-primary transition-colors hover:bg-action-primary hover:text-text-on-action disabled:opacity-40"
+              className="press flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
             >
-              <Plus className="size-5" aria-hidden />
+              <Thumb product={product} size="sm" />
+              <span className="min-w-0 flex-1">
+                <span className="text-body block truncate text-text-primary">{name}</span>
+                <span className="text-caption block truncate text-text-secondary">
+                  {product.sku}
+                  {variants ? ` · ${variants}` : ""}
+                </span>
+                <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-financial text-text-primary">
+                    {formatMoney(product.price)}
+                  </span>
+                  <span className="text-caption text-text-muted">
+                    {t("pos.available", { count: availableStock(product) })}
+                  </span>
+                  {product.reserved ? (
+                    <span className="text-caption text-text-muted">
+                      {t("pos.reserved", { count: product.reserved })}
+                    </span>
+                  ) : null}
+                  {state !== "available" ? <StatusChip status={state} size="sm" /> : null}
+                </span>
+              </span>
+              <span
+                aria-hidden
+                className="tap-target flex shrink-0 items-center justify-center rounded-2xl bg-action-primary-soft px-3 text-action-primary"
+              >
+                <Plus className="size-5" />
+              </span>
             </button>
           </li>
         );

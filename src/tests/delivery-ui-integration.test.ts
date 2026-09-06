@@ -338,8 +338,12 @@ describe("Error states are classified and mapped to translated copy, never raw e
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Loading states use the existing APSA visual system", () => {
-  it("the real detail screen renders ListSkeleton while loading", () => {
-    expect(readSource(DELIVERY_DETAIL_ROUTE)).toMatch(/query\.isLoading[\s\S]{0,200}ListSkeleton/);
+  // A design-system skeleton, never an ad-hoc spinner — and one shaped like the
+  // detail screen it precedes rather than the avatar-led list skeleton.
+  it("the real detail screen renders a design-system skeleton while loading", () => {
+    expect(readSource(DELIVERY_DETAIL_ROUTE)).toMatch(
+      /query\.isLoading[\s\S]{0,200}DetailSkeleton/,
+    );
   });
 
   it("Delivery screens use the Apsi-free OperationalState, never the Apsi-carrying EmptyState/ErrorState", () => {

@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import { initials, fullTimestamp } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import { ChannelBadge } from "./ChannelBadge";
+import { InlineAction } from "./InlineAction";
 import type { CompanionColor, Customer } from "@/types";
 
 const COMPANION_VAR: Record<CompanionColor, string> = {
@@ -88,13 +89,9 @@ export function CustomerSummaryCard({
       ) : null}
 
       {onViewProfile ? (
-        <button
-          type="button"
-          onClick={onViewProfile}
-          className="tap-target text-label mt-3 inline-flex items-center text-action-primary"
-        >
-          {t("customer.viewProfile")}
-        </button>
+        <div className="mt-2">
+          <InlineAction onClick={onViewProfile}>{t("customer.viewProfile")}</InlineAction>
+        </div>
       ) : null}
     </section>
   );

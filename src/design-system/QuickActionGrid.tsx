@@ -18,11 +18,18 @@ interface QuickActionGridProps {
   className?: string;
 }
 
+/**
+ * Four starting points, two per row.
+ *
+ * The old 4-across grid gave each tile 68px on a 320px phone; every Khmer
+ * label — which cannot hyphenate or truncate cleanly — clipped. Two columns
+ * with a leading icon give the label a real line to sit on in both languages.
+ */
 export function QuickActionGrid({ onAction, className }: QuickActionGridProps) {
   const { t } = useTranslation();
 
   return (
-    <div className={cn("grid grid-cols-4 gap-2", className)}>
+    <div className={cn("grid grid-cols-2 gap-2", className)}>
       {ORDER.map((id) => {
         const Icon = ICONS[id];
         return (
@@ -30,12 +37,12 @@ export function QuickActionGrid({ onAction, className }: QuickActionGridProps) {
             key={id}
             type="button"
             onClick={() => onAction?.(id)}
-            className="tap-target flex flex-col items-center gap-1.5 rounded-2xl border border-border-default bg-surface-primary px-1 py-3 text-center transition-colors hover:bg-surface-secondary"
+            className="press tap-target flex items-center gap-2.5 rounded-2xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary"
           >
-            <span className="flex size-9 items-center justify-center rounded-xl bg-action-primary-soft text-action-primary">
-              <Icon className="size-4" aria-hidden />
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-action-primary-soft text-action-primary">
+              <Icon className="size-[18px]" aria-hidden />
             </span>
-            <span className="text-caption chip-text text-text-secondary">
+            <span className="text-label chip-text min-w-0 text-text-primary">
               {t(`home.actions.${id}`)}
             </span>
           </button>

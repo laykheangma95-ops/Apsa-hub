@@ -1,4 +1,5 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { motion, useReducedMotion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Home, Inbox, MoreHorizontal, ShoppingBag, Sparkles } from "lucide-react";
 import { useState } from "react";
@@ -47,13 +48,17 @@ interface BottomNavProps {
   tabs?: { left: NavTab[]; right: NavTab[] };
   className?: string;
   businessType?: BusinessNavVariant;
+  /**
+   * Unhandled work per tab. A badge is a claim on the merchant's attention, so
+   * only counts that someone can act on belong here — never a total.
+   */
+  badges?: Partial<Record<MobileNavTabId, number>>;
 }
 
 const sheetActionClass =
   "press flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
-const sheetSectionTitleClass =
-  "text-caption px-1 pb-2 font-medium tracking-[0.02em] text-text-muted";
+const sheetSectionTitleClass = "text-label px-1 pb-2 text-text-muted";
 
 const itemClass =
   "press-tactile tap-target group relative flex flex-1 flex-col items-center justify-center gap-0.5 px-1 py-1.5 text-text-secondary";
@@ -88,6 +93,7 @@ export function BottomNav({
   tabs = SELLER_TABS,
   className,
   businessType = "online-seller",
+  badges = {},
 }: BottomNavProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -161,15 +167,19 @@ export function BottomNav({
         aria-label={t("nav.primary")}
         className={cn("fixed inset-x-0 bottom-0 z-50 px-2 pb-2 lg:hidden", className)}
       >
-        <div className="mx-auto max-w-[560px] pb-[env(safe-area-inset-bottom)]">
-          <div className="elevation-3 relative rounded-[30px] border border-white/85 bg-[color:rgba(247,250,255,0.96)] px-2 pt-2 shadow-[0_-8px_26px_-14px_rgba(27,43,89,0.34)]">
-            <div className="pointer-events-none absolute inset-x-10 top-0 h-px bg-[linear-gradient(90deg,rgba(115,183,255,0),rgba(52,120,246,0.5),rgba(115,183,255,0))]" />
-            <div className="grid grid-cols-5 items-end gap-1 pb-2">
+        <div className="mx-auto max-w-[var(--screen-max)] pb-[env(safe-area-inset-bottom)]">
+          <div className="glass-bar relative rounded-[26px] px-1.5 pt-1.5 pb-1.5">
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-10 top-0 h-px bg-[linear-gradient(90deg,rgba(115,183,255,0),rgba(52,120,246,0.45),rgba(115,183,255,0))]"
+            />
+            <div className="grid grid-cols-5 items-stretch gap-0.5">
               {config.tabs.map((tab) => (
                 <MobileTab
                   key={tab.id}
                   tab={tab}
                   activeTab={activeTab}
+                  badge={badges[tab.id]}
                   resolveOpen={resolveOpen}
                   salesOpen={salesOpen}
                   moreOpen={moreOpen}
@@ -200,9 +210,9 @@ export function BottomNav({
         open={resolveOpen}
         onOpenChange={setResolveOpen}
         title={t("nav.resolveSheetTitle")}
+        description={t("nav.resolveSheetLead")}
         snap="half"
       >
-        <SheetLead title={t("nav.resolveSheetLead")} body={t("nav.resolveSheetBody")} />
         <SheetGroupList groups={config.resolveGroups} onRoute={goTo} />
       </BottomSheet>
 
@@ -212,9 +222,9 @@ export function BottomNav({
         open={salesOpen}
         onOpenChange={setSalesOpen}
         title={t("nav.salesSheetTitle")}
+        description={t("nav.salesSheetLead")}
         snap="full"
       >
-        <SheetLead title={t("nav.salesSheetLead")} body={t("nav.salesSheetBody")} />
         <SheetGroupList groups={config.salesGroups} onRoute={goTo} />
         <RecentOrders
           title={t("nav.salesRecent")}
@@ -231,9 +241,9 @@ export function BottomNav({
         open={moreOpen}
         onOpenChange={setMoreOpen}
         title={t("nav.moreSheetTitle")}
+        description={t("nav.moreSheetLead")}
         snap="full"
       >
-        <SheetLead title={t("nav.moreSheetLead")} body={t("nav.moreSheetBody")} />
         <SheetGroupList groups={config.moreGroups} onRoute={goTo} />
       </BottomSheet>
     </>
@@ -243,6 +253,7 @@ export function BottomNav({
 interface MobileTabProps {
   tab: MobileNavTabConfig;
   activeTab: MobileNavTabId | undefined;
+  badge?: number | undefined;
   resolveOpen: boolean;
   salesOpen: boolean;
   moreOpen: boolean;
@@ -252,9 +263,15 @@ interface MobileTabProps {
   onOpenMore: () => void;
 }
 
+/**
+ * One tab. Three jobs, in order: say where you are, say what needs attention,
+ * take the tap. Everything else — hover states, decorative glow — is noise on
+ * a surface this small.
+ */
 function MobileTab({
   tab,
   activeTab,
+  badge,
   resolveOpen,
   salesOpen,
   moreOpen,
@@ -264,6 +281,7 @@ function MobileTab({
   onOpenMore,
 }: MobileTabProps) {
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
   const active =
     tab.id === "resolve"
       ? resolveOpen
@@ -273,37 +291,62 @@ function MobileTab({
           ? moreOpen || activeTab === "more"
           : activeTab === tab.id;
   const isResolve = tab.id === "resolve";
-  const buttonClass = cn(
-    "press tap-target flex min-w-0 flex-col items-center justify-center gap-1 rounded-[22px] px-1 pb-1.5 pt-2 text-center transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)]",
-    isResolve ? "relative -mt-4 min-h-[72px]" : "min-h-[60px]",
-    active ? "text-action-primary" : "text-text-secondary",
-  );
-  const iconWrapClass = cn(
-    "flex items-center justify-center rounded-2xl transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)]",
-    isResolve ? "h-11 w-11" : "h-9 w-9",
-    active
-      ? isResolve
-        ? "bg-action-primary text-text-on-action shadow-[0_12px_24px_-14px_rgba(52,120,246,0.8)]"
-        : "bg-action-primary-soft text-action-primary"
-      : isResolve
-        ? "border border-action-primary-border bg-white text-text-primary"
-        : "bg-transparent text-current",
-  );
 
   const content = (
     <>
-      <span className={iconWrapClass}>
-        <tab.icon className={isResolve ? "size-5" : "size-[18px]"} aria-hidden />
+      <span
+        className={cn(
+          "relative flex items-center justify-center rounded-2xl transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
+          isResolve ? "size-10" : "size-9",
+          isResolve
+            ? active
+              ? "elevation-action bg-action-primary text-text-on-action"
+              : "bg-action-primary-soft text-action-primary"
+            : undefined,
+        )}
+      >
+        {/* The active pill is one shared element that slides between tabs, so
+            switching reads as movement rather than two separate blinks. */}
+        {active && !isResolve ? (
+          <motion.span
+            aria-hidden
+            layoutId="apsa-nav-active"
+            className="absolute inset-0 rounded-2xl bg-action-primary-soft"
+            transition={
+              reduceMotion
+                ? { duration: 0 }
+                : { type: "spring", stiffness: 520, damping: 40, mass: 0.6 }
+            }
+          />
+        ) : null}
+        <tab.icon
+          className={cn("relative", isResolve ? "size-[21px]" : "size-[20px]")}
+          strokeWidth={active ? 2.2 : 1.9}
+          aria-hidden
+        />
+        {badge && badge > 0 ? (
+          <span
+            aria-hidden
+            className="text-caption tnum absolute -top-0.5 -right-1 flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-status-danger px-1 leading-none text-text-inverse ring-2 ring-[color:var(--surface-glass)]"
+          >
+            {badge > 99 ? "99+" : badge}
+          </span>
+        ) : null}
       </span>
       <span
         className={cn(
-          "block max-w-full px-0.5 text-[10px] font-medium leading-3",
-          isResolve ? "text-[10px]" : undefined,
+          "chip-text block max-w-full px-0.5 text-[11px] leading-[13px]",
+          active ? "font-semibold" : "font-medium",
         )}
       >
         {t(tab.labelKey)}
       </span>
     </>
+  );
+
+  const buttonClass = cn(
+    "press-tactile tap-target flex min-h-[56px] min-w-0 flex-col items-center justify-center gap-1 rounded-[20px] px-0.5 pt-1.5 pb-1 text-center",
+    active ? "text-action-primary" : "text-text-secondary",
   );
 
   if (tab.kind === "route" && tab.to) {
@@ -313,6 +356,11 @@ function MobileTab({
         onClick={() => onRoute(tab.to!)}
         className={buttonClass}
         aria-current={active ? "page" : undefined}
+        aria-label={
+          badge && badge > 0
+            ? t("nav.tabWithCount", { tab: t(tab.labelKey), count: badge })
+            : undefined
+        }
       >
         {content}
       </button>
@@ -324,6 +372,7 @@ function MobileTab({
       type="button"
       onClick={tab.id === "resolve" ? onOpenResolve : tab.id === "sales" ? onOpenSales : onOpenMore}
       className={buttonClass}
+      aria-haspopup="dialog"
       aria-expanded={tab.id === "resolve" ? resolveOpen : tab.id === "sales" ? salesOpen : moreOpen}
       aria-label={
         tab.id === "resolve"
@@ -338,15 +387,6 @@ function MobileTab({
   );
 }
 
-function SheetLead({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="rounded-[24px] border border-action-primary-border bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(234,242,254,0.94))] px-4 py-4">
-      <p className="text-label text-brand-ink">{title}</p>
-      <p className="text-body-sm mt-1 text-text-secondary">{body}</p>
-    </div>
-  );
-}
-
 function SheetGroupList({
   groups,
   onRoute,
@@ -357,7 +397,7 @@ function SheetGroupList({
   const { t } = useTranslation();
 
   return (
-    <div className="mt-4 space-y-4">
+    <div className="space-y-5">
       {groups.map((group) => (
         <section key={group.id}>
           <h3 className={sheetSectionTitleClass}>{t(group.titleKey)}</h3>

@@ -23,7 +23,18 @@
     "offline": "Connection lost",
     "syncing": "Syncing",
     "synced": "All changes saved",
-    "syncProblem": "Sync problem"
+    "syncProblem": "Sync problem",
+    "notificationsWithCount": "Notifications, {{count}} unread",
+    "more": "More",
+    "less": "Less",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "done": "Done",
+    "apply": "Apply",
+    "reset": "Reset",
+    "filters": "Filters",
+    "filtersActive": "Filters, {{count}} active",
+    "copied": "Copied"
   },
   "nav": {
     "home": "Home",
@@ -157,7 +168,8 @@
         "label": "Profile / account",
         "description": "Profile and account settings are not in the app yet."
       }
-    }
+    },
+    "tabWithCount": "{{tab}}, {{count}} need attention"
   },
   "landing": {
     "head": {
@@ -376,7 +388,8 @@
     "error": {
       "title": "Today's numbers didn't load",
       "body": "The data didn't come back. Check your connection and try again."
-    }
+    },
+    "attentionAction": "{{label}}: {{count}}. Open"
   },
   "status": {
     "unread": "Unread",
@@ -465,7 +478,9 @@
       "all": "All"
     },
     "channels": {
-      "all": "All channels"
+      "all": "All channels",
+      "title": "Channel",
+      "description": "Show only conversations from one channel."
     },
     "pullToRefresh": "Pull to refresh",
     "releaseToRefresh": "Release to refresh",
@@ -490,7 +505,10 @@
       "title": "Pick a conversation",
       "body": "Choose someone on the left and the thread opens here."
     },
-    "loadMore": "Load more"
+    "loadMore": "Load more",
+    "loadingMore": "Loading more conversations",
+    "clearSearch": "Clear search",
+    "unreadCount": "{{count}} unread"
   },
   "conversation": {
     "back": "Back to inbox",
@@ -600,7 +618,18 @@
     "loadEarlier": "Load earlier messages",
     "operationFailed": "The conversation could not be updated. Refresh and try again.",
     "providerPending": "Sending will be available when this channel is connected.",
-    "unresolvedCustomer": "Unlinked customer"
+    "unresolvedCustomer": "Unlinked customer",
+    "actions": {
+      "title": "Conversation actions",
+      "description": "Everything you can do for this customer without leaving the thread.",
+      "createOrderBody": "Build the order from what they asked for.",
+      "viewCustomer": "Customer details",
+      "viewCustomerBody": "Contact, spend and order history.",
+      "savedRepliesBody": "Send a prepared answer.",
+      "attachmentBody": "Sending photos is not in the app yet.",
+      "paymentBody": "Record or check payment on {{code}}.",
+      "deliveryBody": "Arrange or track delivery for {{code}}."
+    }
   },
   "createOrder": {
     "title": "Create order",
@@ -869,7 +898,8 @@
         "title": "That's not possible right now",
         "body": "This order can't move to that status from where it is."
       }
-    }
+    },
+    "balanceDue": "{{amount}} still to collect."
   },
   "orderList": {
     "title": "Orders",
@@ -1009,7 +1039,12 @@
         "title": "That's not possible right now",
         "body": "This delivery can't move to that status from where it is."
       }
-    }
+    },
+    "progressStep": "Step {{step}} of {{total}} — {{status}}",
+    "progressLabel": "Delivery progress: step {{step}} of {{total}}, {{status}}",
+    "nextStepHint": "Next: {{action}}",
+    "detailsTitle": "Details",
+    "codDue": "{{amount}} to collect on delivery."
   },
   "customer360": {
     "title": "Customer",

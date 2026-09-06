@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -35,7 +36,6 @@ import {
   type CartDiscountInput,
   type CartLine,
 } from "@/lib/pos-cart";
-import { cn } from "@/lib/utils";
 import type { Customer, Product, ProductCategory } from "@/types";
 
 export const Route = createFileRoute("/app/pos")({
@@ -69,6 +69,7 @@ const CATEGORIES: (ProductCategory | "all")[] = [
 function PosScreen() {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const reduceMotion = useReducedMotion();
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<ProductCategory | "all">("all");
@@ -187,7 +188,7 @@ function PosScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-surface-secondary pb-48 lg:pb-0">
+    <div className="min-h-dvh bg-surface-secondary pb-[calc(var(--nav-clearance)+var(--action-bar-height))] lg:pb-0">
       <AppHeader
         title={t("pos.title")}
         subtitle={shopQuery.data ? localName(shopQuery.data, language) : undefined}
@@ -206,8 +207,8 @@ function PosScreen() {
       <div className="mx-auto flex max-w-[1200px] flex-col lg:flex-row lg:items-start lg:gap-4 lg:px-4 lg:py-4">
         <main className="min-w-0 flex-1">
           <div className="space-y-3 bg-surface-primary px-4 py-3 lg:rounded-2xl lg:border lg:border-border-default">
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-              <div className="relative min-w-0">
+            <div className="flex items-center gap-2">
+              <div className="relative min-w-0 flex-1">
                 <Search
                   className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-text-secondary"
                   aria-hidden
@@ -215,7 +216,10 @@ function PosScreen() {
                 <Input
                   aria-label={t("pos.searchLabel")}
                   placeholder={t("pos.searchPlaceholder")}
-                  className="h-12 pl-9"
+                  className="h-12 rounded-2xl border-border-default pl-9"
+                  type="search"
+                  enterKeyHint="search"
+                  autoComplete="off"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                 />
@@ -224,7 +228,7 @@ function PosScreen() {
                 type="button"
                 aria-label={t("pos.scan")}
                 onClick={() => setQuery("8850001000031")}
-                className="press tap-target flex shrink-0 items-center justify-center rounded-xl border border-border-default bg-surface-primary px-3 text-text-primary"
+                className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
               >
                 <ScanLine className="size-5" aria-hidden />
               </button>
@@ -233,7 +237,7 @@ function PosScreen() {
                 aria-label={t(view === "list" ? "pos.view.grid" : "pos.view.list")}
                 aria-pressed={view === "grid"}
                 onClick={() => setView(view === "list" ? "grid" : "list")}
-                className="tap-target col-start-2 flex shrink-0 items-center justify-center rounded-xl border border-border-strong bg-surface-primary px-3 text-text-primary"
+                className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
               >
                 {view === "list" ? (
                   <LayoutGrid className="size-5" aria-hidden />
@@ -285,33 +289,62 @@ function PosScreen() {
         </aside>
       </div>
 
-      {/* Mobile: total + checkout stay pinned above the fold. */}
-      <div className="surface-glass elevation-3 fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.75rem)] z-40 border-t border-border-default px-4 pt-3 pb-3 lg:hidden">
-        <div className="mx-auto grid max-w-[560px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setCartOpen(true)}
-            className="press tap-target flex min-w-0 items-center gap-2 text-left"
+      {/*
+       * The cart bar is the sale in progress, so it only exists once there is
+       * one. An empty bar reading "0 items" cost 70px of catalogue on every
+       * phone for no information; it now slides in with the first tap and the
+       * merchant gets the extra row of products back while browsing.
+       */}
+      <AnimatePresence>
+        {totals.itemCount > 0 ? (
+          <motion.div
+            initial={reduceMotion ? false : { y: "100%", opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={reduceMotion ? { opacity: 0 } : { y: "100%", opacity: 0 }}
+            transition={{ duration: reduceMotion ? 0 : 0.22, ease: [0.2, 0, 0, 1] }}
+            className="glass-bar fixed inset-x-0 bottom-[var(--nav-clearance)] z-40 border-t border-[var(--glass-border)] px-4 pt-2.5 pb-2.5 lg:hidden"
           >
-            <ShoppingCart className="size-5 shrink-0 text-text-secondary" aria-hidden />
-            <span className="min-w-0">
-              <span className="text-caption block text-text-secondary">
-                {t("pos.itemCount", { count: totals.itemCount })}
-              </span>
-              <span className="text-financial-lg block truncate text-text-primary">
-                {formatMoney(totals.total)}
-              </span>
-            </span>
-          </button>
-          <Button
-            className="press tap-target elevation-action shrink-0"
-            disabled={totals.itemCount === 0 || approvalRequired || offline}
-            onClick={() => setCheckoutOpen(true)}
-          >
-            {t("pos.checkout")}
-          </Button>
-        </div>
-      </div>
+            <div className="mx-auto flex max-w-[var(--screen-max)] items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setCartOpen(true)}
+                aria-haspopup="dialog"
+                className="press tap-target flex min-w-0 flex-1 items-center gap-2 rounded-2xl text-left"
+              >
+                <span className="relative shrink-0">
+                  <ShoppingCart className="size-5 text-text-secondary" aria-hidden />
+                  <span className="text-caption tnum absolute -top-1.5 -right-2 flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-action-primary px-1 leading-none text-text-on-action">
+                    {totals.itemCount > 99 ? "99+" : totals.itemCount}
+                  </span>
+                </span>
+                <span className="min-w-0">
+                  <span className="text-caption block text-text-secondary">
+                    {t("pos.itemCount", { count: totals.itemCount })}
+                  </span>
+                  <span className="text-h2 tnum block truncate text-text-primary">
+                    {formatMoney(totals.total)}
+                  </span>
+                </span>
+              </button>
+              <Button
+                className="press-tactile tap-target elevation-action h-12 shrink-0 rounded-2xl px-5"
+                disabled={approvalRequired || offline}
+                onClick={() => setCheckoutOpen(true)}
+              >
+                {t("pos.checkout")}
+              </Button>
+            </div>
+            {approvalRequired || offline ? (
+              <p
+                role="status"
+                className="text-caption mx-auto mt-1.5 max-w-[var(--screen-max)] text-status-warning-text"
+              >
+                {offline ? t("pos.offline") : t("pos.discount.approval")}
+              </p>
+            ) : null}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       <BottomSheet
         open={cartOpen}
