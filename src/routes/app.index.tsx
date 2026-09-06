@@ -81,6 +81,7 @@ function BusinessHome() {
 
         {homeQuery.isError ? (
           <ErrorState
+            showApsi
             title={t("home.error.title")}
             body={t("home.error.body")}
             onRetry={() => void homeQuery.refetch()}
