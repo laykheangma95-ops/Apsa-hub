@@ -20,7 +20,7 @@ import {
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { ApsiIllustration, ChannelBadge, LanguageToggle, StatusChip } from "@/design-system";
+import { Apsi, ChannelBadge, LanguageToggle, StatusChip } from "@/design-system";
 import i18n from "@/lib/i18n";
 
 export const Route = createFileRoute("/")({
@@ -355,7 +355,7 @@ function Landing() {
         </div>
 
         <div className="mt-6 flex items-center gap-3 rounded-2xl border border-action-primary/20 bg-action-primary-soft p-4">
-          <ApsiIllustration pose="merging" size={44} alt="" aria-hidden />
+          <Apsi emotion="merge" size="xs" alt="" />
           <p className="text-label text-action-primary">{t("landing.problem.result")}</p>
         </div>
       </Sec>
@@ -636,7 +636,7 @@ function Landing() {
         aria-labelledby="apsi-heading"
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 text-center">
-          <ApsiIllustration pose="waving" size={80} alt={t("brand.name")} />
+          <Apsi emotion="waving" size="md" alt={t("brand.name")} withCompanion />
           <h2 id="apsi-heading" className="text-h1 text-text-inverse">
             {t("landing.apsi.title")}
           </h2>

@@ -310,7 +310,7 @@ function DesignReference() {
             <EmptyState title={t("empty.title")} body={t("empty.body")} />
           </div>
           <div className="rounded-2xl border border-border-default">
-            <ErrorState onRetry={() => undefined} />
+            <ErrorState showApsi onRetry={() => undefined} />
           </div>
         </div>
       </Block>

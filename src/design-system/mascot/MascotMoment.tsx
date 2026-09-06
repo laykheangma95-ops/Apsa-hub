@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { Mascot } from "./Mascot";
 import { COMPANION_TOKEN } from "./mascot-assets";
-import { MASCOT_STATES, type MascotState } from "./mascot-states";
+import { getMascotStateSpec, type MascotState } from "./mascot-states";
 
 interface MascotMomentProps {
   state: MascotState;
@@ -29,7 +29,7 @@ export function MascotMoment({
   variant = "plain",
   className,
 }: MascotMomentProps) {
-  const spec = MASCOT_STATES[state];
+  const spec = getMascotStateSpec(state);
   const accent = spec.companion ? COMPANION_TOKEN[spec.companion] : "var(--action-primary)";
 
   return (

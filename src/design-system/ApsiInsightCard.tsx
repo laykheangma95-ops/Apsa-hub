@@ -1,12 +1,12 @@
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { ApsiIllustration, type ApsiPose } from "./ApsiIllustration";
+import { Apsi, type ApsiEmotion } from "./mascot";
 
 interface ApsiInsightCardProps {
   title: string;
   body: string;
-  pose?: ApsiPose;
+  emotion?: ApsiEmotion;
   onDismiss?: () => void;
   className?: string;
 }
@@ -15,7 +15,7 @@ interface ApsiInsightCardProps {
 export function ApsiInsightCard({
   title,
   body,
-  pose = "winking",
+  emotion = "thinking",
   onDismiss,
   className,
 }: ApsiInsightCardProps) {
@@ -28,7 +28,7 @@ export function ApsiInsightCard({
         className,
       )}
     >
-      <ApsiIllustration pose={pose} size={44} />
+      <Apsi emotion={emotion} size="xs" withCompanion />
       <div className="min-w-0 flex-1 pr-5">
         <p className="text-label text-text-primary">{title}</p>
         <p className="text-body-sm mt-0.5 text-text-secondary">{body}</p>
