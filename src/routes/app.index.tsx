@@ -35,7 +35,8 @@ export const Route = createFileRoute("/app/")({
       { property: "og:title", content: "Business Home — APSA" },
       {
         property: "og:description",
-        content: "Revenue, attention items, quick actions and metrics in one Khmer-first home screen.",
+        content:
+          "Revenue, attention items, quick actions and metrics in one Khmer-first home screen.",
       },
     ],
   }),
@@ -108,7 +109,6 @@ function BusinessHome() {
               </p>
               <Sparkline series={summary.revenueSeries} tone="success" />
             </section>
-
 
             {/* Needs attention comes before metrics, always. */}
             <section aria-labelledby="attention-heading">

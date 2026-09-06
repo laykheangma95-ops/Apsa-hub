@@ -83,9 +83,7 @@ export const listProductsFn = createServerFn()
 // ── getProductDetailFn ────────────────────────────────────────────────────────
 
 export const getProductDetailFn = createServerFn()
-  .validator((data: unknown) =>
-    z.object({ id: z.string().uuid("Invalid product ID") }).parse(data),
-  )
+  .validator((data: unknown) => z.object({ id: z.string().uuid("Invalid product ID") }).parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { getProductDetail } = await import("@/server/products/service");
@@ -96,9 +94,7 @@ export const getProductDetailFn = createServerFn()
 
 export const lookupBySkuFn = createServerFn()
   .validator((data: unknown) =>
-    z
-      .object({ sku: z.string().min(1).max(100, "SKU too long") })
-      .parse(data),
+    z.object({ sku: z.string().min(1).max(100, "SKU too long") }).parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -110,9 +106,7 @@ export const lookupBySkuFn = createServerFn()
 
 export const lookupByBarcodeFn = createServerFn()
   .validator((data: unknown) =>
-    z
-      .object({ barcode: z.string().min(1).max(100, "Barcode too long") })
-      .parse(data),
+    z.object({ barcode: z.string().min(1).max(100, "Barcode too long") }).parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -131,11 +125,7 @@ const variantInputSchema = z.object({
     .int("price_amount must be an integer")
     .min(0, "price_amount must be >= 0"),
   price_currency: currencySchema,
-  cost_amount: z
-    .number()
-    .int("cost_amount must be an integer")
-    .min(0)
-    .nullish(),
+  cost_amount: z.number().int("cost_amount must be an integer").min(0).nullish(),
   cost_currency: currencySchema.nullish(),
   weight_grams: z.number().int().min(0).nullish(),
 });
@@ -279,10 +269,7 @@ export const updateVariantFn = createServerFn()
 
 export const listCategoriesFn = createServerFn()
   .validator((data: unknown) =>
-    z
-      .object({ includeArchived: z.boolean().optional() })
-      .optional()
-      .parse(data),
+    z.object({ includeArchived: z.boolean().optional() }).optional().parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();

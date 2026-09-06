@@ -64,7 +64,12 @@ export function RecordPaymentSheet({
   const [reference, setReference] = useState("");
 
   return (
-    <BottomSheet open={open} onOpenChange={onOpenChange} title={t("order.paymentSheet.title")} snap="full">
+    <BottomSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t("order.paymentSheet.title")}
+      snap="full"
+    >
       <p className="text-body-sm text-text-secondary">{t("order.paymentSheet.body")}</p>
       <CurrencyInput
         className="mt-4"
@@ -112,7 +117,12 @@ export function ReturnSheet({
   const [restock, setRestock] = useState(true);
 
   return (
-    <BottomSheet open={open} onOpenChange={onOpenChange} title={t("order.returnSheet.title")} snap="half">
+    <BottomSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t("order.returnSheet.title")}
+      snap="half"
+    >
       <p className="text-body-sm text-text-secondary">{t("order.returnSheet.body")}</p>
       <div className="mt-4 flex flex-col gap-1.5">
         <Label htmlFor="return-reason" className="text-label text-text-secondary">
@@ -137,7 +147,9 @@ export function ReturnSheet({
           aria-hidden
           className={cn(
             "text-caption chip-text rounded-full px-2 py-0.5",
-            restock ? "bg-status-success-soft text-status-success-text" : "bg-surface-secondary text-text-secondary",
+            restock
+              ? "bg-status-success-soft text-status-success-text"
+              : "bg-surface-secondary text-text-secondary",
           )}
         >
           {restock ? "✓" : "—"}
@@ -175,7 +187,12 @@ export function RefundSheet({
   const [reason, setReason] = useState("");
 
   return (
-    <BottomSheet open={open} onOpenChange={onOpenChange} title={t("order.refundSheet.title")} snap="full">
+    <BottomSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t("order.refundSheet.title")}
+      snap="full"
+    >
       <p className="text-body-sm text-text-secondary">{t("order.refundSheet.body")}</p>
       <CurrencyInput
         className="mt-4"
@@ -229,7 +246,12 @@ export function ArrangeDeliverySheet({
   const [courierId, setCourierId] = useState(couriers[0]?.id ?? "");
 
   return (
-    <BottomSheet open={open} onOpenChange={onOpenChange} title={t("order.deliverySheet.title")} snap="half">
+    <BottomSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t("order.deliverySheet.title")}
+      snap="half"
+    >
       <p className="text-body-sm text-text-secondary">{t("order.deliverySheet.body")}</p>
       <div className="mt-4 space-y-2">
         {couriers.map((courier) => (

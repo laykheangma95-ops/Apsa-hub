@@ -28,7 +28,8 @@ export function Chip({
   ariaLabel,
   className,
 }: ChipProps) {
-  const selectionProps = role === "tab" ? { "aria-selected": selected } : { "aria-pressed": selected };
+  const selectionProps =
+    role === "tab" ? { "aria-selected": selected } : { "aria-pressed": selected };
 
   return (
     <button
@@ -53,7 +54,9 @@ export function Chip({
         <span
           className={cn(
             "text-caption tnum rounded-full px-1.5",
-            selected ? "bg-action-primary text-text-on-action" : "bg-surface-secondary text-text-muted",
+            selected
+              ? "bg-action-primary text-text-on-action"
+              : "bg-surface-secondary text-text-muted",
           )}
         >
           {count}

@@ -170,7 +170,9 @@ export async function addCustomerIdentity(
     .single();
 
   if (error || !data) {
-    throw new Error(`addCustomerIdentity: ${(error as { message?: string })?.message ?? "no data"}`);
+    throw new Error(
+      `addCustomerIdentity: ${(error as { message?: string })?.message ?? "no data"}`,
+    );
   }
   return data as CustomerIdentityRow;
 }
@@ -202,10 +204,12 @@ export async function findNotesByCustomer(
     .order("created_at", { ascending: false });
 
   if (error) throw new Error(`findNotesByCustomer: ${(error as { message: string }).message}`);
-  return (data ?? []).map((row: CustomerNoteRow & { profiles: { display_name: string | null } | null }) => ({
-    ...row,
-    author_display_name: row.profiles?.display_name ?? null,
-  }));
+  return (data ?? []).map(
+    (row: CustomerNoteRow & { profiles: { display_name: string | null } | null }) => ({
+      ...row,
+      author_display_name: row.profiles?.display_name ?? null,
+    }),
+  );
 }
 
 export async function createCustomerNote(
@@ -294,10 +298,7 @@ export async function ensureOrFindTag(
   return data as CustomerTagRow;
 }
 
-export async function assignTagToCustomer(
-  customerId: string,
-  tagId: string,
-): Promise<void> {
+export async function assignTagToCustomer(customerId: string, tagId: string): Promise<void> {
   const { error } = await db
     .from("customer_tag_assignments")
     .upsert(
@@ -308,10 +309,7 @@ export async function assignTagToCustomer(
   if (error) throw new Error(`assignTagToCustomer: ${(error as { message: string }).message}`);
 }
 
-export async function removeTagFromCustomer(
-  customerId: string,
-  tagId: string,
-): Promise<void> {
+export async function removeTagFromCustomer(customerId: string, tagId: string): Promise<void> {
   const { error } = await db
     .from("customer_tag_assignments")
     .delete()

@@ -253,9 +253,7 @@ export function PosCart({
         <div className="flex items-end justify-between">
           <span className="text-label text-text-secondary">{t("pos.total")}</span>
           <span className="flex flex-col items-end">
-            <span className="text-financial-lg text-text-primary">
-              {formatMoney(totals.total)}
-            </span>
+            <span className="text-financial-lg text-text-primary">{formatMoney(totals.total)}</span>
             <span className="text-data text-text-muted">
               {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
             </span>

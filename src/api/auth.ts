@@ -85,10 +85,7 @@ export const clearAuthCookieFn = createServerFn().handler(async (): Promise<void
   await clearSessionCookies();
 });
 
-function buildSessionResult(
-  user: AuthUserLike,
-  accessToken: string,
-): Exclude<SessionResult, null> {
+function buildSessionResult(user: AuthUserLike, accessToken: string): Exclude<SessionResult, null> {
   const baseSession = {
     userId: user.id,
     email: user.email ?? "",
@@ -115,8 +112,7 @@ type MembershipRow = {
 };
 
 export type AuthenticatedRouteResult =
-  | { ok: true; organizationId: string }
-  | { ok: false; redirect: Exclude<AuthRedirect, "/app"> };
+  { ok: true; organizationId: string } | { ok: false; redirect: Exclude<AuthRedirect, "/app"> };
 
 async function getMembershipRows(userId: string): Promise<{
   data: MembershipRow[] | null;
@@ -173,46 +169,45 @@ export async function resolveAuthenticatedRoute(
 //   - Refresh token is invalid/expired (session fully expired)
 //   - Supabase auth API is unreachable (treated as unauthenticated)
 
-export const getSessionFn = createServerFn().handler(
-  async (): Promise<SessionResult> => {
-    const { getCookie } = await import("@tanstack/react-start/server");
-    const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
-    const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
+export const getSessionFn = createServerFn().handler(async (): Promise<SessionResult> => {
+  const { getCookie } = await import("@tanstack/react-start/server");
+  const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
+  const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
 
-    if (!accessToken || !refreshToken) return null;
+  if (!accessToken || !refreshToken) return null;
 
-    // Dynamic import — keeps @/lib/supabase/server out of the client bundle.
-    const { createServerClient, createRefreshClient } = await import(
-      "@/lib/supabase/server"
-    );
+  // Dynamic import — keeps @/lib/supabase/server out of the client bundle.
+  const { createServerClient, createRefreshClient } = await import("@/lib/supabase/server");
 
-    // Validate the access token via Supabase Auth API.
-    const client = createServerClient(accessToken);
-    const { data: { user }, error } = await client.auth.getUser();
+  // Validate the access token via Supabase Auth API.
+  const client = createServerClient(accessToken);
+  const {
+    data: { user },
+    error,
+  } = await client.auth.getUser();
 
-    if (!error && user) {
-      return buildSessionResult(user, accessToken);
-    }
+  if (!error && user) {
+    return buildSessionResult(user, accessToken);
+  }
 
-    // Access token invalid or expired — try refresh.
-    const refreshClient = createRefreshClient();
-    const { data: refreshData, error: refreshError } = await refreshClient.auth.refreshSession({
-      refresh_token: refreshToken,
-    });
+  // Access token invalid or expired — try refresh.
+  const refreshClient = createRefreshClient();
+  const { data: refreshData, error: refreshError } = await refreshClient.auth.refreshSession({
+    refresh_token: refreshToken,
+  });
 
-    if (refreshError || !refreshData.session) {
-      // Refresh failed — session fully expired, clear cookies.
-      await clearSessionCookies();
-      return null;
-    }
+  if (refreshError || !refreshData.session) {
+    // Refresh failed — session fully expired, clear cookies.
+    await clearSessionCookies();
+    return null;
+  }
 
-    const { session } = refreshData;
-    // Write refreshed tokens back to cookies.
-    await writeSessionCookies(session.access_token, session.refresh_token);
+  const { session } = refreshData;
+  // Write refreshed tokens back to cookies.
+  await writeSessionCookies(session.access_token, session.refresh_token);
 
-    return buildSessionResult(session.user, session.access_token);
-  },
-);
+  return buildSessionResult(session.user, session.access_token);
+});
 
 // ── signInFn ──────────────────────────────────────────────────────────────────
 
@@ -265,10 +260,7 @@ export const signInFn = createServerFn()
         return { ok: true, redirectTo: routeResult.redirect };
       }
 
-      await writeSessionCookies(
-        authData.session.access_token,
-        authData.session.refresh_token,
-      );
+      await writeSessionCookies(authData.session.access_token, authData.session.refresh_token);
 
       return { ok: true, redirectTo: routeResult.ok ? "/app" : routeResult.redirect };
     } catch (error) {
@@ -334,10 +326,7 @@ export const signUpFn = createServerFn()
     // If Supabase issued a session immediately (email confirmation disabled),
     // set the session cookies so the user is logged in right away.
     if (authData.session) {
-      await writeSessionCookies(
-        authData.session.access_token,
-        authData.session.refresh_token,
-      );
+      await writeSessionCookies(authData.session.access_token, authData.session.refresh_token);
     }
 
     const emailVerificationRequired = !authData.session;
@@ -378,10 +367,11 @@ const VerifyEmailInput = z.object({
 
 export type VerifyEmailInput = z.infer<typeof VerifyEmailInput>;
 
-export interface VerifyEmailResult { ok: true }
+export interface VerifyEmailResult {
+  ok: true;
+}
 export type VerifyEmailError =
-  | { ok: false; code: "invalid_token" }
-  | { ok: false; code: "unexpected_error"; message: string };
+  { ok: false; code: "invalid_token" } | { ok: false; code: "unexpected_error"; message: string };
 
 export const verifyEmailFn = createServerFn()
   .validator((data: unknown) => VerifyEmailInput.parse(data))
@@ -406,10 +396,7 @@ export const verifyEmailFn = createServerFn()
       return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
     }
 
-    await writeSessionCookies(
-      authData.session.access_token,
-      authData.session.refresh_token,
-    );
+    await writeSessionCookies(authData.session.access_token, authData.session.refresh_token);
 
     return { ok: true };
   });

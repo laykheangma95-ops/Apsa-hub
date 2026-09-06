@@ -46,23 +46,20 @@ function findFiles(dir: string, exts: string[]): string[] {
   return results;
 }
 
-
 /**
  * Extract all static top-level import statements from source text.
  * Dynamic `await import(...)` and `import(...)` calls inside function bodies
  * are NOT returned — they're fine.
  */
 function staticImportLines(source: string): string[] {
-  return source
-    .split("\n")
-    .filter((line) => {
-      const trimmed = line.trim();
-      // Must start with `import` keyword (static declaration).
-      if (!trimmed.startsWith("import ") && !trimmed.startsWith("import{")) return false;
-      // Skip type-only imports — they're erased at compile time and never bundled.
-      if (/^import\s+type\b/.test(trimmed)) return false;
-      return true;
-    });
+  return source.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    // Must start with `import` keyword (static declaration).
+    if (!trimmed.startsWith("import ") && !trimmed.startsWith("import{")) return false;
+    // Skip type-only imports — they're erased at compile time and never bundled.
+    if (/^import\s+type\b/.test(trimmed)) return false;
+    return true;
+  });
 }
 
 /** Read source file, return empty string if it doesn't exist. */
@@ -79,9 +76,8 @@ describe("U1: src/api/* has no static import of @/lib/supabase/server", () => {
   for (const file of apiFiles) {
     it(`${file} — no static import of @/lib/supabase/server`, () => {
       const source = readSource(file);
-      const offending = staticImportLines(source).filter((line) =>
-        line.includes("@/lib/supabase/server") ||
-        line.includes("lib/supabase/server"),
+      const offending = staticImportLines(source).filter(
+        (line) => line.includes("@/lib/supabase/server") || line.includes("lib/supabase/server"),
       );
       expect(offending).toEqual([]);
     });
@@ -89,17 +85,13 @@ describe("U1: src/api/* has no static import of @/lib/supabase/server", () => {
 
   it("src/api/app-guard.ts — no static import of supabaseAdmin by name", () => {
     const source = readSource("src/api/app-guard.ts");
-    const offending = staticImportLines(source).filter((line) =>
-      line.includes("supabaseAdmin"),
-    );
+    const offending = staticImportLines(source).filter((line) => line.includes("supabaseAdmin"));
     expect(offending).toEqual([]);
   });
 
   it("src/api/auth.ts — no static import of server.ts", () => {
     const source = readSource("src/api/auth.ts");
-    const offending = staticImportLines(source).filter((line) =>
-      line.includes("supabase/server"),
-    );
+    const offending = staticImportLines(source).filter((line) => line.includes("supabase/server"));
     expect(offending).toEqual([]);
   });
 });
@@ -112,9 +104,8 @@ describe("U2: src/routes/* has no static import of @/lib/supabase/server", () =>
   for (const file of routeFiles) {
     it(`${file} — no static import of @/lib/supabase/server`, () => {
       const source = readSource(file);
-      const offending = staticImportLines(source).filter((line) =>
-        line.includes("@/lib/supabase/server") ||
-        line.includes("lib/supabase/server"),
+      const offending = staticImportLines(source).filter(
+        (line) => line.includes("@/lib/supabase/server") || line.includes("lib/supabase/server"),
       );
       expect(offending).toEqual([]);
     });
@@ -129,9 +120,8 @@ describe("U3: src/routes/* has no direct import of src/server/*", () => {
   for (const file of routeFiles) {
     it(`${file} — no import of src/server/* or @/server/*`, () => {
       const source = readSource(file);
-      const offending = staticImportLines(source).filter((line) =>
-        line.includes("/server/") ||
-        line.includes("@/server/"),
+      const offending = staticImportLines(source).filter(
+        (line) => line.includes("/server/") || line.includes("@/server/"),
       );
       // Allow @tanstack/react-start/server (cookie utilities) — that's a public npm package,
       // not the project's server-only Supabase module.
@@ -171,8 +161,8 @@ describe("U4: Handler bodies use await import for @/lib/supabase/server", () => 
     expect(source).toMatch(/await import\(["']@\/lib\/supabase\/server["']\)/);
     // Must NOT have a static top-level import from server.ts.
     const staticLines = staticImportLines(source);
-    const badLines = staticLines.filter((l) =>
-      l.includes("supabase/server") && !l.includes("@tanstack"),
+    const badLines = staticLines.filter(
+      (l) => l.includes("supabase/server") && !l.includes("@tanstack"),
     );
     expect(badLines).toEqual([]);
   });
@@ -202,9 +192,7 @@ describe("U5: Built client bundle contains no server-only leaks", () => {
       const content = fs.readFileSync(path.join(outputDir, jsFile), "utf-8");
       const found = content.includes("SUPABASE_SERVICE_ROLE_KEY");
       if (found) {
-        throw new Error(
-          `SUPABASE_SERVICE_ROLE_KEY leaked into client bundle: ${jsFile}`,
-        );
+        throw new Error(`SUPABASE_SERVICE_ROLE_KEY leaked into client bundle: ${jsFile}`);
       }
     }
     expect(true).toBe(true); // all files passed
@@ -215,9 +203,7 @@ describe("U5: Built client bundle contains no server-only leaks", () => {
       const content = fs.readFileSync(path.join(outputDir, jsFile), "utf-8");
       const found = content.includes("supabaseAdmin");
       if (found) {
-        throw new Error(
-          `supabaseAdmin leaked into client bundle: ${jsFile}`,
-        );
+        throw new Error(`supabaseAdmin leaked into client bundle: ${jsFile}`);
       }
     }
     expect(true).toBe(true);

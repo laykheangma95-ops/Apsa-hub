@@ -5,11 +5,7 @@
  */
 
 export type InventoryMovementTypeDb =
-  | "initial"
-  | "sale"
-  | "return"
-  | "manual_adjustment"
-  | "restock";
+  "initial" | "sale" | "return" | "manual_adjustment" | "restock";
 
 export const INVENTORY_MOVEMENT_TYPES: readonly InventoryMovementTypeDb[] = [
   "initial",

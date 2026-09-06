@@ -111,7 +111,9 @@ export function StaffDetailSheet({
             ) : null}
           </dl>
 
-          <p className="text-body text-text-secondary">{t(`team.roleDescription.${member.role}`)}</p>
+          <p className="text-body text-text-secondary">
+            {t(`team.roleDescription.${member.role}`)}
+          </p>
 
           {isOwner ? (
             <OperationalState

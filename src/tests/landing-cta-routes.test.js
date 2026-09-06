@@ -29,6 +29,6 @@ test("the generated TanStack route tree includes /sign-up and no stale /auth aut
 
 test("/app stays protected and still redirects unauthenticated users to /sign-in", () => {
   assert.ok(appRoute.includes('createFileRoute("/app")'));
-  assert.ok(appRoute.includes('throw redirect({ to: result.redirect })'));
-  assert.ok(appRoute.includes('/sign-in'));
+  assert.ok(appRoute.includes("throw redirect({ to: result.redirect })"));
+  assert.ok(appRoute.includes("/sign-in"));
 });

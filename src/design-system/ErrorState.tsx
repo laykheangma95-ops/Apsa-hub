@@ -14,7 +14,10 @@ export function ErrorState({ title, body, onRetry, className }: ErrorStateProps)
   const { t } = useTranslation();
 
   return (
-    <div className={cn("flex flex-col items-center px-6 py-10 text-center", className)} role="alert">
+    <div
+      className={cn("flex flex-col items-center px-6 py-10 text-center", className)}
+      role="alert"
+    >
       <ApsiIllustration pose="default" size={80} />
       <h3 className="text-h3 mt-4 text-text-primary">{title ?? t("error.title")}</h3>
       <p className="text-body mt-1 max-w-xs text-text-secondary">{body ?? t("error.body")}</p>

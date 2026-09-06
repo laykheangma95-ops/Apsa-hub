@@ -115,37 +115,80 @@ function Landing() {
 
   const cambodiaItems = [
     { icon: QrCode, title: t("landing.cambodia.khqr"), body: t("landing.cambodia.khqrBody") },
-    { icon: Banknote, title: t("landing.cambodia.currency"), body: t("landing.cambodia.currencyBody") },
-    { icon: Truck, title: t("landing.cambodia.couriers"), body: t("landing.cambodia.couriersBody") },
+    {
+      icon: Banknote,
+      title: t("landing.cambodia.currency"),
+      body: t("landing.cambodia.currencyBody"),
+    },
+    {
+      icon: Truck,
+      title: t("landing.cambodia.couriers"),
+      body: t("landing.cambodia.couriersBody"),
+    },
     { icon: Languages, title: t("landing.cambodia.khmer"), body: t("landing.cambodia.khmerBody") },
   ];
 
   const teamRoles = [
-    { title: t("landing.lteam.owner"), desc: t("landing.lteam.ownerDesc"), accent: "bg-action-primary text-text-inverse" },
-    { title: t("landing.lteam.manager"), desc: t("landing.lteam.managerDesc"), accent: "bg-companion-vela/20 text-companion-vela" },
-    { title: t("landing.lteam.sales"), desc: t("landing.lteam.salesDesc"), accent: "bg-companion-minto/20 text-companion-minto" },
-    { title: t("landing.lteam.cashier"), desc: t("landing.lteam.cashierDesc"), accent: "bg-companion-suri/20 text-companion-suri" },
-    { title: t("landing.lteam.cs"), desc: t("landing.lteam.csDesc"), accent: "bg-companion-luma/20 text-companion-luma" },
+    {
+      title: t("landing.lteam.owner"),
+      desc: t("landing.lteam.ownerDesc"),
+      accent: "bg-action-primary text-text-inverse",
+    },
+    {
+      title: t("landing.lteam.manager"),
+      desc: t("landing.lteam.managerDesc"),
+      accent: "bg-companion-vela/20 text-companion-vela",
+    },
+    {
+      title: t("landing.lteam.sales"),
+      desc: t("landing.lteam.salesDesc"),
+      accent: "bg-companion-minto/20 text-companion-minto",
+    },
+    {
+      title: t("landing.lteam.cashier"),
+      desc: t("landing.lteam.cashierDesc"),
+      accent: "bg-companion-suri/20 text-companion-suri",
+    },
+    {
+      title: t("landing.lteam.cs"),
+      desc: t("landing.lteam.csDesc"),
+      accent: "bg-companion-luma/20 text-companion-luma",
+    },
   ];
 
   return (
     <div className="min-h-screen bg-surface-primary text-text-primary">
-
       {/* ── Header ── */}
       <header className="sticky top-0 z-30 border-b border-border-default bg-surface-primary/90 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-3 px-5">
-          <Link to="/" className="text-h3 flex-1 font-semibold text-action-primary" aria-label={t("brand.name")}>
+          <Link
+            to="/"
+            className="text-h3 flex-1 font-semibold text-action-primary"
+            aria-label={t("brand.name")}
+          >
             {t("brand.name")}
           </Link>
 
-          <nav className="hidden items-center gap-6 md:flex" aria-label={t("landing.nav.primaryNav")}>
-            <a href="#product" className="text-label text-text-secondary transition-colors hover:text-text-primary">
+          <nav
+            className="hidden items-center gap-6 md:flex"
+            aria-label={t("landing.nav.primaryNav")}
+          >
+            <a
+              href="#product"
+              className="text-label text-text-secondary transition-colors hover:text-text-primary"
+            >
               {t("landing.nav.product")}
             </a>
-            <a href="#workflow" className="text-label text-text-secondary transition-colors hover:text-text-primary">
+            <a
+              href="#workflow"
+              className="text-label text-text-secondary transition-colors hover:text-text-primary"
+            >
               {t("landing.nav.workflow")}
             </a>
-            <a href="#cambodia" className="text-label text-text-secondary transition-colors hover:text-text-primary">
+            <a
+              href="#cambodia"
+              className="text-label text-text-secondary transition-colors hover:text-text-primary"
+            >
               {t("landing.nav.cambodia")}
             </a>
           </nav>
@@ -162,7 +205,11 @@ function Landing() {
             aria-label={mobileOpen ? t("landing.nav.closeMenu") : t("landing.nav.openMenu")}
             aria-expanded={mobileOpen}
           >
-            {mobileOpen ? <X className="size-5" aria-hidden /> : <Menu className="size-5" aria-hidden />}
+            {mobileOpen ? (
+              <X className="size-5" aria-hidden />
+            ) : (
+              <Menu className="size-5" aria-hidden />
+            )}
           </button>
         </div>
 
@@ -233,15 +280,34 @@ function Landing() {
             aria-label={t("landing.hero.inboxPreviewLabel")}
           >
             <div className="flex items-center gap-2 border-b border-border-default px-4 py-3">
-              <span className="text-label text-text-primary flex-1">{t("landing.inbox.title")}</span>
-              <span className="text-caption rounded-full bg-action-primary px-2 py-0.5 text-white">3</span>
+              <span className="text-label text-text-primary flex-1">
+                {t("landing.inbox.title")}
+              </span>
+              <span className="text-caption rounded-full bg-action-primary px-2 py-0.5 text-white">
+                3
+              </span>
             </div>
             <ul className="divide-y divide-border-default text-text-primary">
               {(
                 [
-                  { channel: "facebook", status: "unread", name: t("landing.hero.demoName1"), msg: t("landing.hero.demoMessage") },
-                  { channel: "instagram", status: "needs_reply", name: t("landing.hero.demoName2"), msg: t("landing.hero.demoCustomer") },
-                  { channel: "telegram", status: "follow_up", name: t("landing.hero.demoName3"), msg: t("landing.hero.demoOrder") },
+                  {
+                    channel: "facebook",
+                    status: "unread",
+                    name: t("landing.hero.demoName1"),
+                    msg: t("landing.hero.demoMessage"),
+                  },
+                  {
+                    channel: "instagram",
+                    status: "needs_reply",
+                    name: t("landing.hero.demoName2"),
+                    msg: t("landing.hero.demoCustomer"),
+                  },
+                  {
+                    channel: "telegram",
+                    status: "follow_up",
+                    name: t("landing.hero.demoName3"),
+                    msg: t("landing.hero.demoOrder"),
+                  },
                 ] as const
               ).map(({ channel, status, name, msg }) => (
                 <li key={channel} className="flex items-start gap-3 px-4 py-3">
@@ -264,7 +330,9 @@ function Landing() {
       {/* ── Problem ── */}
       <Sec id="product" className="bg-surface-secondary" aria-labelledby="problem-heading">
         <Eyebrow>{t("landing.problem.tag")}</Eyebrow>
-        <h2 id="problem-heading" className="text-h1 mt-4">{t("landing.problem.title")}</h2>
+        <h2 id="problem-heading" className="text-h1 mt-4">
+          {t("landing.problem.title")}
+        </h2>
         <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.problem.body")}</p>
 
         <div className="mt-8 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
@@ -295,7 +363,9 @@ function Landing() {
       {/* ── APSA Flow ── */}
       <Sec id="workflow" aria-labelledby="flow-heading">
         <Eyebrow>{t("landing.flow.badge")}</Eyebrow>
-        <h2 id="flow-heading" className="text-h1 mt-4">{t("landing.flow.title")}</h2>
+        <h2 id="flow-heading" className="text-h1 mt-4">
+          {t("landing.flow.title")}
+        </h2>
         <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.flow.body")}</p>
 
         <div
@@ -324,7 +394,10 @@ function Landing() {
             { n: "02", title: t("landing.flow.step3"), desc: t("landing.flow.step3desc") },
             { n: "03", title: t("landing.flow.step4"), desc: t("landing.flow.step4desc") },
           ].map(({ n, title, desc }) => (
-            <article key={n} className="rounded-2xl border border-border-default bg-surface-secondary p-5">
+            <article
+              key={n}
+              className="rounded-2xl border border-border-default bg-surface-secondary p-5"
+            >
               <span className="text-financial text-action-primary">{n}</span>
               <h3 className="text-h3 mt-2">{title}</h3>
               <p className="text-body-sm mt-1.5 text-text-secondary">{desc}</p>
@@ -338,7 +411,9 @@ function Landing() {
         <div className="grid gap-10 md:grid-cols-2 md:items-center">
           <div>
             <Eyebrow>{t("landing.inbox.badge")}</Eyebrow>
-            <h2 id="inbox-heading" className="text-h1 mt-4">{t("landing.inbox.title")}</h2>
+            <h2 id="inbox-heading" className="text-h1 mt-4">
+              {t("landing.inbox.title")}
+            </h2>
             <p className="text-body mt-3 text-text-secondary">{t("landing.inbox.body")}</p>
           </div>
 
@@ -371,8 +446,12 @@ function Landing() {
       {/* ── Message → Order ── */}
       <Sec aria-labelledby="msgorder-heading">
         <Eyebrow>{t("landing.msgToOrder.badge")}</Eyebrow>
-        <h2 id="msgorder-heading" className="text-h1 mt-4">{t("landing.msgToOrder.title")}</h2>
-        <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.msgToOrder.body")}</p>
+        <h2 id="msgorder-heading" className="text-h1 mt-4">
+          {t("landing.msgToOrder.title")}
+        </h2>
+        <p className="text-body mt-3 max-w-2xl text-text-secondary">
+          {t("landing.msgToOrder.body")}
+        </p>
 
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           {[
@@ -384,7 +463,9 @@ function Landing() {
               detail: (
                 <div className="mt-3 rounded-xl bg-surface-secondary p-3">
                   <p className="text-body-sm font-medium">"{t("landing.msgToOrder.step1msg")}"</p>
-                  <p className="text-caption mt-1 text-text-secondary">{t("landing.msgToOrder.step1detail")}</p>
+                  <p className="text-caption mt-1 text-text-secondary">
+                    {t("landing.msgToOrder.step1detail")}
+                  </p>
                 </div>
               ),
             },
@@ -395,7 +476,9 @@ function Landing() {
               icon: Package,
               detail: (
                 <div className="mt-3 rounded-xl bg-surface-secondary p-3">
-                  <p className="text-caption text-text-secondary">{t("landing.msgToOrder.step2hint")}</p>
+                  <p className="text-caption text-text-secondary">
+                    {t("landing.msgToOrder.step2hint")}
+                  </p>
                 </div>
               ),
             },
@@ -406,8 +489,12 @@ function Landing() {
               icon: Check,
               detail: (
                 <div className="mt-3 rounded-xl bg-surface-secondary p-3">
-                  <p className="text-label text-action-primary">{t("landing.msgToOrder.step3code")}</p>
-                  <p className="text-caption mt-1 text-text-secondary">{t("landing.msgToOrder.step3detail")}</p>
+                  <p className="text-label text-action-primary">
+                    {t("landing.msgToOrder.step3code")}
+                  </p>
+                  <p className="text-caption mt-1 text-text-secondary">
+                    {t("landing.msgToOrder.step3detail")}
+                  </p>
                 </div>
               ),
             },
@@ -432,7 +519,9 @@ function Landing() {
       {/* ── Business Operations ── */}
       <Sec className="bg-surface-secondary" aria-labelledby="ops-heading">
         <Eyebrow>{t("landing.ops.badge")}</Eyebrow>
-        <h2 id="ops-heading" className="text-h1 mt-4">{t("landing.ops.title")}</h2>
+        <h2 id="ops-heading" className="text-h1 mt-4">
+          {t("landing.ops.title")}
+        </h2>
         <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.ops.body")}</p>
 
         <div className="mt-8 grid gap-4 sm:grid-cols-2 md:grid-cols-3">
@@ -456,7 +545,9 @@ function Landing() {
         <div className="grid gap-10 md:grid-cols-2 md:items-center">
           <div>
             <Eyebrow>{t("landing.c360.badge")}</Eyebrow>
-            <h2 id="c360-heading" className="text-h1 mt-4">{t("landing.c360.title")}</h2>
+            <h2 id="c360-heading" className="text-h1 mt-4">
+              {t("landing.c360.title")}
+            </h2>
             <p className="text-body mt-3 text-text-secondary">{t("landing.c360.body")}</p>
           </div>
 
@@ -495,7 +586,9 @@ function Landing() {
       {/* ── Built for Cambodia ── */}
       <Sec id="cambodia" className="bg-surface-secondary" aria-labelledby="cambodia-heading">
         <Eyebrow>{t("landing.cambodia.badge")}</Eyebrow>
-        <h2 id="cambodia-heading" className="text-h1 mt-4">{t("landing.cambodia.title")}</h2>
+        <h2 id="cambodia-heading" className="text-h1 mt-4">
+          {t("landing.cambodia.title")}
+        </h2>
         <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.cambodia.body")}</p>
 
         <div className="mt-8 grid gap-4 sm:grid-cols-2 md:grid-cols-4">
@@ -517,7 +610,9 @@ function Landing() {
       {/* ── Team / Roles ── */}
       <Sec aria-labelledby="team-heading">
         <Eyebrow>{t("landing.lteam.badge")}</Eyebrow>
-        <h2 id="team-heading" className="text-h1 mt-4">{t("landing.lteam.title")}</h2>
+        <h2 id="team-heading" className="text-h1 mt-4">
+          {t("landing.lteam.title")}
+        </h2>
         <p className="text-body mt-3 max-w-2xl text-text-secondary">{t("landing.lteam.body")}</p>
 
         <div className="mt-8 grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
@@ -561,7 +656,9 @@ function Landing() {
         aria-labelledby="cta-heading"
       >
         <div className="mx-auto w-full max-w-3xl text-center">
-          <h2 id="cta-heading" className="text-h1">{t("landing.cta.title")}</h2>
+          <h2 id="cta-heading" className="text-h1">
+            {t("landing.cta.title")}
+          </h2>
           <p className="text-body mt-3 opacity-90">{t("landing.cta.body")}</p>
           <Button asChild size="lg" variant="secondary" className="tap-target press mt-6">
             <Link to="/sign-up">

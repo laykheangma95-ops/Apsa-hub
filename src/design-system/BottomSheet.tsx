@@ -108,9 +108,7 @@ export function BottomSheet({
             <div className="flex justify-center pt-3 pb-1">
               <span className="h-1.5 w-10 rounded-full bg-border-strong" aria-hidden />
             </div>
-            {title ? (
-              <h2 className="text-h3 px-5 pt-1 pb-3 text-text-primary">{title}</h2>
-            ) : null}
+            {title ? <h2 className="text-h3 px-5 pt-1 pb-3 text-text-primary">{title}</h2> : null}
             <div className="flex-1 overflow-y-auto px-5 pb-5">{children}</div>
           </motion.div>
         </div>

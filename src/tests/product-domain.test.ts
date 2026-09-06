@@ -34,13 +34,10 @@ let supabaseConfigured = false;
 
 beforeAll(() => {
   supabaseConfigured =
-    Boolean(process.env["VITE_SUPABASE_URL"]) &&
-    Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
+    Boolean(process.env["VITE_SUPABASE_URL"]) && Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
 
   if (!supabaseConfigured) {
-    console.warn(
-      "[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
+    console.warn("[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
   }
 });
 
@@ -204,10 +201,7 @@ describe("Test 2: Tenant isolation — Org A cannot read Org B product", () => {
       const { createProduct, getProductDetail } = await import("../server/products/service");
 
       // Create a product in Org B
-      const ctxB = makeCtxWithPerms(USER_ORG_B, ORG_B_ID, [
-        "products.create",
-        "products.read",
-      ]);
+      const ctxB = makeCtxWithPerms(USER_ORG_B, ORG_B_ID, ["products.create", "products.read"]);
       const orgBProduct = await createProduct(ctxB, {
         name_km: "ទំនិញអង្គការ B",
         initialVariant: { price_amount: 500, price_currency: "USD" },
@@ -425,13 +419,8 @@ describe("Test 10: Unauthorized update is denied", () => {
   it("updateVariant price change requires products.update_price", async () => {
     const { updateVariant } = await import("../server/products/service");
     // ctx has update_basic but not update_price
-    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
-      "products.read",
-      "products.update_basic",
-    ]);
-    await expectForbidden(() =>
-      updateVariant(ctx, FAKE_PRODUCT_ID, { price_amount: 9999 }),
-    );
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.read", "products.update_basic"]);
+    await expectForbidden(() => updateVariant(ctx, FAKE_PRODUCT_ID, { price_amount: 9999 }));
   });
 
   it("archiveProduct requires products.archive", async () => {
@@ -522,13 +511,9 @@ describe("Test 13: Barcode lookup is tenant-scoped (exact match only)", () => {
 describe("Test 14: Product detail returns only same-org variants", () => {
   it("variants returned by getProductDetail all have the same organization_id (requires DB)", async () => {
     await requireSupabase(async () => {
-      const { createProduct, getProductDetail, createVariant } = await import(
-        "../server/products/service"
-      );
-      const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
-        "products.create",
-        "products.read",
-      ]);
+      const { createProduct, getProductDetail, createVariant } =
+        await import("../server/products/service");
+      const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.create", "products.read"]);
 
       const product = await createProduct(ctx, {
         name_km: "ផលិតផលច្រើនប្រភេទ",
@@ -672,10 +657,7 @@ describe("Test 17: Cross-org workspace integrity (migration 020 trigger)", () =>
       // Attempt to create a product in Org A that references Org B's workspace.
       // The trigger (020) must reject this with a cross_tenant_workspace error.
       const { createProduct } = await import("../server/products/service");
-      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
-        "products.create",
-        "products.read",
-      ]);
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.create", "products.read"]);
 
       await expect(
         createProduct(ctxA, {
@@ -745,10 +727,7 @@ describe("Test 18: Cross-org category integrity (migration 020 trigger)", () => 
       });
 
       // Attempt to create a product in Org A referencing Org B's category_id
-      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
-        "products.create",
-        "products.read",
-      ]);
+      const ctxA = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["products.create", "products.read"]);
 
       await expect(
         createProduct(ctxA, {
@@ -762,9 +741,8 @@ describe("Test 18: Cross-org category integrity (migration 020 trigger)", () => 
 
   it("Org A cannot update a product to use Org B's category_id (requires DB)", async () => {
     await requireSupabase(async () => {
-      const { createCategory, createProduct, updateProduct } = await import(
-        "../server/products/service"
-      );
+      const { createCategory, createProduct, updateProduct } =
+        await import("../server/products/service");
 
       // Create a category in Org B
       const ctxB = makeCtxWithPerms(USER_ORG_B, ORG_B_ID, ["products.manage_categories"]);
@@ -806,7 +784,9 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     const dbError = new Error("connection timeout");
 
     mock.module("@/api/products", () => ({
-      listProductsFn: async () => { throw dbError; },
+      listProductsFn: async () => {
+        throw dbError;
+      },
       lookupByBarcodeFn: async () => null,
       lookupBySkuFn: async () => null,
     }));
@@ -823,7 +803,9 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     });
 
     mock.module("@/api/products", () => ({
-      listProductsFn: async () => { throw permError; },
+      listProductsFn: async () => {
+        throw permError;
+      },
       lookupByBarcodeFn: async () => null,
       lookupBySkuFn: async () => null,
     }));
@@ -842,7 +824,9 @@ describe("Test 19: Production list errors propagate — not masked as mock data"
     });
 
     mock.module("@/api/products", () => ({
-      listProductsFn: async () => { throw noSessionError; },
+      listProductsFn: async () => {
+        throw noSessionError;
+      },
       lookupByBarcodeFn: async () => null,
       lookupBySkuFn: async () => null,
     }));
@@ -860,7 +844,9 @@ describe("Test 20: Lookup server failures propagate — not converted to null", 
 
     mock.module("@/api/products", () => ({
       listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => { throw serverError; },
+      lookupByBarcodeFn: async () => {
+        throw serverError;
+      },
       lookupBySkuFn: async () => null,
     }));
 
@@ -876,7 +862,9 @@ describe("Test 20: Lookup server failures propagate — not converted to null", 
     mock.module("@/api/products", () => ({
       listProductsFn: async () => [],
       lookupByBarcodeFn: async () => null,
-      lookupBySkuFn: async () => { throw authError; },
+      lookupBySkuFn: async () => {
+        throw authError;
+      },
     }));
 
     const { lookupProductBySku } = await import("../lib/api/index");
@@ -891,7 +879,7 @@ describe("Test 21: Genuine not-found returns null for barcode/SKU lookups", () =
   it("lookupProductByBarcode() returns null when server returns not-found (null result)", async () => {
     mock.module("@/api/products", () => ({
       listProductsFn: async () => [],
-      lookupByBarcodeFn: async () => null,  // server returns null = genuine not-found
+      lookupByBarcodeFn: async () => null, // server returns null = genuine not-found
       lookupBySkuFn: async () => null,
     }));
 
@@ -1014,49 +1002,63 @@ describe("Test 23: Real barcode/SKU service lookups propagate second-query DB fa
 
   it("lookupByBarcode throws when the parent-product query fails", async () => {
     const { lookupByBarcode } = await import("../server/products/service");
-    await withRepositoryDb({
-      from: (table) => queryReturning(
-        table === "product_variants"
-          ? { data: variant, error: null }
-          : { data: null, error: { code: "XX000", message: "connection reset" } },
-      ),
-    }, async () => {
-      await expect(lookupByBarcode(ctx, "bc-123")).rejects.toThrow(
-        "findProductById: connection reset",
-      );
-    });
+    await withRepositoryDb(
+      {
+        from: (table) =>
+          queryReturning(
+            table === "product_variants"
+              ? { data: variant, error: null }
+              : { data: null, error: { code: "XX000", message: "connection reset" } },
+          ),
+      },
+      async () => {
+        await expect(lookupByBarcode(ctx, "bc-123")).rejects.toThrow(
+          "findProductById: connection reset",
+        );
+      },
+    );
   });
 
   it("lookupBySku throws when the parent-product query fails", async () => {
     const { lookupBySku } = await import("../server/products/service");
-    await withRepositoryDb({
-      from: (table) => queryReturning(
-        table === "product_variants"
-          ? { data: variant, error: null }
-          : { data: null, error: { code: "XX000", message: "upstream timeout" } },
-      ),
-    }, async () => {
-      await expect(lookupBySku(ctx, "SKU-001")).rejects.toThrow(
-        "findProductById: upstream timeout",
-      );
-    });
+    await withRepositoryDb(
+      {
+        from: (table) =>
+          queryReturning(
+            table === "product_variants"
+              ? { data: variant, error: null }
+              : { data: null, error: { code: "XX000", message: "upstream timeout" } },
+          ),
+      },
+      async () => {
+        await expect(lookupBySku(ctx, "SKU-001")).rejects.toThrow(
+          "findProductById: upstream timeout",
+        );
+      },
+    );
   });
 
   it("lookupByBarcode returns null for a genuine barcode miss", async () => {
     const { lookupByBarcode } = await import("../server/products/service");
-    await withRepositoryDb({
-      from: () => queryReturning({ data: null, error: null }),
-    }, async () => {
-      await expect(lookupByBarcode(ctx, "nonexistent-barcode")).resolves.toBeNull();
-    });
+    await withRepositoryDb(
+      {
+        from: () => queryReturning({ data: null, error: null }),
+      },
+      async () => {
+        await expect(lookupByBarcode(ctx, "nonexistent-barcode")).resolves.toBeNull();
+      },
+    );
   });
 
   it("lookupBySku returns null for a genuine SKU miss", async () => {
     const { lookupBySku } = await import("../server/products/service");
-    await withRepositoryDb({
-      from: () => queryReturning({ data: null, error: null }),
-    }, async () => {
-      await expect(lookupBySku(ctx, "nonexistent-sku")).resolves.toBeNull();
-    });
+    await withRepositoryDb(
+      {
+        from: () => queryReturning({ data: null, error: null }),
+      },
+      async () => {
+        await expect(lookupBySku(ctx, "nonexistent-sku")).resolves.toBeNull();
+      },
+    );
   });
 });

@@ -11,7 +11,13 @@ interface MetricTileProps {
   className?: string;
 }
 
-export function Sparkline({ series, tone = "info" }: { series: MetricPoint[]; tone?: "info" | "success" | "danger" }) {
+export function Sparkline({
+  series,
+  tone = "info",
+}: {
+  series: MetricPoint[];
+  tone?: "info" | "success" | "danger";
+}) {
   if (series.length < 2) return null;
   const values = series.map((p) => p.value);
   const min = Math.min(...values);
@@ -29,7 +35,13 @@ export function Sparkline({ series, tone = "info" }: { series: MetricPoint[]; to
 
   return (
     <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-8 w-full" aria-hidden>
-      <polyline points={points} fill="none" stroke={stroke} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      <polyline
+        points={points}
+        fill="none"
+        stroke={stroke}
+        strokeWidth="2"
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
   );
 }

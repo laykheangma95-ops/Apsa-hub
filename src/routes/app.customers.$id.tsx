@@ -124,8 +124,7 @@ function Customer360Screen() {
         ? t(`channel.${event.context}`)
         : (event.context ?? undefined),
     meta: fullTimestamp(event.at),
-    tone:
-      event.kind === "payment_confirmed" || event.kind === "delivered" ? "success" : "default",
+    tone: event.kind === "payment_confirmed" || event.kind === "delivered" ? "success" : "default",
   }));
 
   return (
@@ -145,7 +144,7 @@ function Customer360Screen() {
             <div className="min-w-0 flex-1">
               <h1 className="text-h2 truncate text-text-primary">{displayName}</h1>
               <p className="text-body-sm tnum text-text-secondary">
-                {sensitiveVisible ? (customer.phone || "—") : t("customer360.hidden")}
+                {sensitiveVisible ? customer.phone || "—" : t("customer360.hidden")}
               </p>
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 {customer.identities.map((identity) => (
@@ -291,7 +290,9 @@ function Customer360Screen() {
             </div>
 
             {notes.length === 0 ? (
-              <p className="text-body-sm mt-3 text-text-secondary">{t("customer360.noNotesBody")}</p>
+              <p className="text-body-sm mt-3 text-text-secondary">
+                {t("customer360.noNotesBody")}
+              </p>
             ) : (
               <ul className="mt-3 space-y-2">
                 {notes.map((note) => (
@@ -331,4 +332,3 @@ function Customer360Screen() {
     </div>
   );
 }
-

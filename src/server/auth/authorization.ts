@@ -99,10 +99,7 @@ export const AuthorizationService = {
    * organizationId must come from a trusted server-side source — never
    * pass in a value that came directly from a client request body.
    */
-  async forRequest(
-    userId: string,
-    organizationId: string,
-  ): Promise<AuthorizationContext> {
+  async forRequest(userId: string, organizationId: string): Promise<AuthorizationContext> {
     const ctx = await verifyActiveMembership(userId, organizationId);
     if (!ctx) {
       throw new UnauthorizedError("No active membership in this organization");
@@ -126,11 +123,7 @@ export const AuthorizationService = {
    * Check a permission without throwing — useful for conditional UI data.
    * Prefer authCtx.require() in server actions where access should be hard-denied.
    */
-  async can(
-    userId: string,
-    organizationId: string,
-    permissionKey: string,
-  ): Promise<boolean> {
+  async can(userId: string, organizationId: string, permissionKey: string): Promise<boolean> {
     const ctx = await verifyActiveMembership(userId, organizationId);
     if (!ctx) return false;
     return ctx.permissions.has(permissionKey);
