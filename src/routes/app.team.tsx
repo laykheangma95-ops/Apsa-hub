@@ -3,8 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { UserPlus } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { AppHeader, BottomNav, ListSkeleton } from "@/design-system";
+import { AppHeader, BottomNav, ListSkeleton, ScreenBleed } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { StaffRow } from "@/components/team/StaffRow";
 import { InviteStaffSheet } from "@/components/team/InviteStaffSheet";
@@ -66,28 +65,36 @@ function TeamScreen() {
   const ownerOnly = members.length === 1 && members[0]?.role === "owner";
 
   return (
-    <div className="min-h-dvh bg-surface-secondary pb-28">
+    <ScreenBleed bottom="nav" surface="raised">
+      {/*
+       * The header already names the workspace, so the screen does not repeat
+       * it; the one action it owns sits in the pinned bar within thumb reach
+       * instead of on a row of its own.
+       */}
       <AppHeader
-        title={workspaceName || t("team.title")}
-        subtitle={activeWorkspace ? t("team.workspace.type.business") : undefined}
+        title={t("team.title")}
+        subtitle={workspaceName || undefined}
         onShopSwitch={() => setSwitcherOpen(true)}
+        {...(permissions.manageTeam
+          ? {
+              action: (
+                <button
+                  type="button"
+                  onClick={() => setInviteOpen(true)}
+                  aria-label={t("team.inviteAction")}
+                  className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary text-text-on-action"
+                >
+                  <UserPlus className="size-5" aria-hidden />
+                </button>
+              ),
+            }
+          : {})}
       />
 
-      <main className="mx-auto w-full max-w-[560px] px-4 py-4 lg:max-w-[880px]">
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-          <div className="min-w-0">
-            <h1 className="text-h2 truncate text-text-primary">{t("team.title")}</h1>
-            <p className="text-caption break-words text-text-secondary">{t("team.subtitle")}</p>
-          </div>
-          {permissions.manageTeam ? (
-            <Button className="tap-target h-12" onClick={() => setInviteOpen(true)}>
-              <UserPlus className="size-4" aria-hidden />
-              <span>{t("team.inviteAction")}</span>
-            </Button>
-          ) : null}
-        </div>
+      <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 lg:max-w-[var(--screen-max-wide)]">
+        <p className="text-body-sm px-1 text-text-secondary">{t("team.subtitle")}</p>
 
-        <div className="mt-4">
+        <div className="mt-3">
           {!permissions.manageTeam ? (
             <OperationalState title={t("team.restricted.title")} body={t("team.restricted.body")} />
           ) : teamQuery.isLoading ? (
@@ -149,6 +156,6 @@ function TeamScreen() {
       />
 
       <BottomNav />
-    </div>
+    </ScreenBleed>
   );
 }

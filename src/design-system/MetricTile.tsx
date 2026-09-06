@@ -34,18 +34,33 @@ export function Sparkline({
         : "var(--action-primary)";
 
   return (
-    <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-8 w-full" aria-hidden>
+    <svg
+      viewBox="0 0 100 30"
+      preserveAspectRatio="none"
+      className="mt-2 h-7 w-full"
+      role="presentation"
+      aria-hidden
+    >
       <polyline
         points={points}
         fill="none"
         stroke={stroke}
         strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
       />
     </svg>
   );
 }
 
+/**
+ * One number in a two-up grid.
+ *
+ * Sized for the narrowest phone: at 320px each tile has ~140px of usable
+ * width, so the value drops to h2 rather than the 28px financial display —
+ * a large price at display size wrapped mid-number and read as two figures.
+ */
 export function MetricTile({ label, value, deltaPercent, series, className }: MetricTileProps) {
   const up = (deltaPercent ?? 0) >= 0;
   const Arrow = up ? TrendingUp : TrendingDown;
@@ -53,22 +68,22 @@ export function MetricTile({ label, value, deltaPercent, series, className }: Me
   return (
     <div
       className={cn(
-        "elevation-1 flex flex-col gap-1.5 rounded-2xl border border-border-default bg-surface-primary p-4",
+        "elevation-1 flex min-w-0 flex-col rounded-2xl border border-border-default bg-surface-primary px-3 py-3",
         className,
       )}
     >
-      <span className="text-label text-text-secondary">{label}</span>
-      <span className="text-financial-lg text-text-primary">{value}</span>
+      <span className="text-caption chip-text text-text-secondary">{label}</span>
+      <span className="text-h2 tnum mt-0.5 truncate text-text-primary">{value}</span>
       {deltaPercent !== undefined ? (
         <span
           className={cn(
-            "text-caption tnum inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5",
+            "text-caption tnum mt-1.5 inline-flex w-fit items-center gap-1 rounded-full px-1.5 py-0.5",
             up
               ? "bg-status-success-soft text-status-success-text"
               : "bg-status-danger-soft text-status-danger-text",
           )}
         >
-          <Arrow className="size-3" aria-hidden />
+          <Arrow className="size-3 shrink-0" aria-hidden />
           {percent(deltaPercent)}
         </span>
       ) : null}

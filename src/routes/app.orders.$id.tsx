@@ -6,12 +6,16 @@ import { Button } from "@/components/ui/button";
 import {
   AppHeader,
   ChannelBadge,
-  ListSkeleton,
+  DetailSkeleton,
+  InlineAction,
   Money as MoneyText,
+  Screen,
+  SecondaryAction,
   Section,
   SectionRow,
   SectionRows,
   StatusChip,
+  StatusHero,
   StickyActionBar,
   Timeline,
   type TimelineItem,
@@ -168,10 +172,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-page pb-24">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("order.title")} onBack={back} />
-        <ListSkeleton rows={5} />
-      </div>
+        <DetailSkeleton />
+      </Screen>
     );
   }
 
@@ -180,7 +184,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     if (kind === "unauthorized") return null; // redirecting, see the effect above
     const copy = errorCopy(kind);
     return (
-      <div className="min-h-dvh bg-surface-page pb-24">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("order.title")} onBack={back} />
         <OperationalState
           tone="danger"
@@ -188,7 +192,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           body={copy.body}
           onRetry={() => query.refetch()}
         />
-      </div>
+      </Screen>
     );
   }
 
@@ -236,44 +240,47 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     return <OperationalState tone="danger" title={copy.title} body={copy.body} className="mt-3" />;
   })();
 
+  const hasActions = canConfirm || canCancel;
+
   return (
     <div className="min-h-dvh bg-surface-page">
       <AppHeader title={order.code} subtitle={fullTimestamp(order.createdAt)} onBack={back} />
 
-      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
+      <div
+        className={cn(
+          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "pb-[var(--space-screen-bottom)]",
+        )}
+      >
         {notice ? (
           <p
             role="status"
-            className="text-body-sm rounded-xl bg-status-success-soft px-4 py-3 text-status-success-text"
+            className="text-body-sm rounded-2xl bg-status-success-soft px-4 py-3 text-status-success-text"
           >
             {notice}
           </p>
         ) : null}
 
-        <Section variant="plain">
-          <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-            <MoneyText value={order.total} showSecondary size="lg" />
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {order.lifecycleStatus ? (
-                <StatusChip status={order.lifecycleStatus} size="md" />
-              ) : null}
-              <StatusChip status={order.paymentStatus} size="md" />
-              <StatusChip status={order.fulfillmentStatus} size="md" />
-            </div>
-            <SectionRows className="mt-3 border-t border-border-default pt-2">
-              <SectionRow
-                label={t("order.source")}
-                value={
-                  order.source && isChannelSource(order.source) ? (
-                    <ChannelBadge channel={order.source} withLabel />
-                  ) : (
-                    t("order.sourceManual")
-                  )
-                }
-              />
-            </SectionRows>
-          </div>
-        </Section>
+        {/*
+         * One hero, one dominant reading: the money, then the lifecycle state
+         * the merchant is asked about, then payment and fulfilment demoted to
+         * supporting chips.
+         */}
+        <StatusHero
+          eyebrow={
+            order.source && isChannelSource(order.source) ? (
+              <ChannelBadge channel={order.source} withLabel />
+            ) : (
+              t("order.sourceManual")
+            )
+          }
+          headline={<MoneyText value={order.total} showSecondary size="lg" />}
+          {...(order.lifecycleStatus ? { primaryStatus: order.lifecycleStatus } : {})}
+          secondaryStatuses={[order.paymentStatus, order.fulfillmentStatus]}
+          {...(showStockConsequence
+            ? { nextStep: t("order.stockConsequence", { count: stockUnits }) }
+            : {})}
+        />
 
         <Section title={t("order.items")}>
           <ul className="divide-y divide-border-default">
@@ -320,27 +327,19 @@ function RealOrderDetailScreen({ id }: { id: string }) {
               </dd>
             </div>
           </dl>
-
-          {showStockConsequence ? (
-            <p className="text-caption mt-3 border-t border-border-default pt-3 text-text-muted">
-              {t("order.stockConsequence", { count: stockUnits })}
-            </p>
-          ) : null}
         </Section>
 
         <Section
           title={t("order.delivery")}
           action={
             latestDelivery ? (
-              <button
-                type="button"
+              <InlineAction
                 onClick={() =>
                   navigate({ to: "/app/deliveries/$id", params: { id: latestDelivery.id } })
                 }
-                className="text-label rounded-full px-1 py-2 text-action-primary"
               >
                 {t("order.viewDelivery")}
-              </button>
+              </InlineAction>
             ) : null
           }
         >
@@ -388,24 +387,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         {mutationErrorBanner}
       </div>
 
-      {canConfirm || canCancel ? (
-        <StickyActionBar aboveNav>
+      {hasActions ? (
+        <StickyActionBar
+          {...(canCancel
+            ? {
+                secondary: (
+                  <SecondaryAction tone="danger" onClick={() => setCancelOpen(true)}>
+                    {t("order.cancel")}
+                  </SecondaryAction>
+                ),
+              }
+            : {})}
+        >
           {canConfirm ? (
             <Button
-              className="tap-target h-12 w-full"
+              className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={confirmMutation.isPending}
               onClick={() => confirmMutation.mutate()}
             >
               {confirmMutation.isPending ? t("order.confirming") : t("order.confirmOrder")}
-            </Button>
-          ) : null}
-          {canCancel ? (
-            <Button
-              variant="ghost"
-              className="tap-target text-label h-11 w-full text-text-secondary"
-              onClick={() => setCancelOpen(true)}
-            >
-              {t("order.cancel")}
             </Button>
           ) : null}
         </StickyActionBar>
@@ -516,17 +516,17 @@ function MockOrderDetailScreen({ id }: { id: string }) {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-page pb-24">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("order.title")} onBack={back} />
-        <ListSkeleton rows={5} />
-      </div>
+        <DetailSkeleton />
+      </Screen>
     );
   }
 
   if (query.isError) {
     const denied = (query.error as Error).message === PERMISSION_DENIED;
     return (
-      <div className="min-h-dvh bg-surface-page pb-24">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("order.title")} onBack={back} />
         {denied ? (
           <OperationalState title={t("order.denied")} body={t("order.deniedBody")} />
@@ -537,7 +537,7 @@ function MockOrderDetailScreen({ id }: { id: string }) {
             onRetry={() => query.refetch()}
           />
         )}
-      </div>
+      </Screen>
     );
   }
 
@@ -593,29 +593,35 @@ function MockOrderDetailScreen({ id }: { id: string }) {
     <div className="min-h-dvh bg-surface-page">
       <AppHeader title={order.code} subtitle={fullTimestamp(order.createdAt)} onBack={back} />
 
-      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
+      <div
+        className={cn(
+          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "pb-[var(--space-screen-bottom)]",
+        )}
+      >
         {notice ? (
           <p
             role="status"
-            className="text-body-sm rounded-xl bg-status-success-soft px-4 py-3 text-status-success-text"
+            className="text-body-sm rounded-2xl bg-status-success-soft px-4 py-3 text-status-success-text"
           >
             {notice}
           </p>
         ) : null}
 
         {/* One hero number, then quiet supporting facts. */}
+        <StatusHero
+          eyebrow={<ChannelBadge channel={order.channel} withLabel />}
+          headline={<MoneyText value={order.total} showSecondary size="lg" />}
+          primaryStatus={order.paymentStatus}
+          secondaryStatuses={[order.fulfillmentStatus]}
+          {...(balance.amount > 0
+            ? { nextStep: t("order.balanceDue", { amount: formatMoney(balance) }) }
+            : {})}
+        />
+
         <Section variant="plain">
           <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-            <MoneyText value={order.total} showSecondary size="lg" />
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <StatusChip status={order.paymentStatus} size="md" />
-              <StatusChip status={order.fulfillmentStatus} size="md" />
-            </div>
-            <SectionRows className="mt-3 border-t border-border-default pt-2">
-              <SectionRow
-                label={t("order.source")}
-                value={<ChannelBadge channel={order.channel} withLabel />}
-              />
+            <SectionRows>
               <SectionRow label={t("order.placedBy")} value={staffName ?? "—"} />
             </SectionRows>
           </div>
@@ -625,13 +631,11 @@ function MockOrderDetailScreen({ id }: { id: string }) {
           title={t("order.customer")}
           action={
             customer ? (
-              <button
-                type="button"
+              <InlineAction
                 onClick={() => navigate({ to: "/app/customers/$id", params: { id: customer.id } })}
-                className="text-label rounded-full px-1 py-2 text-action-primary"
               >
                 {t("order.viewCustomer")}
-              </button>
+              </InlineAction>
             ) : null
           }
           variant={customer ? "card" : "plain"}
@@ -751,13 +755,11 @@ function MockOrderDetailScreen({ id }: { id: string }) {
           title={t("order.delivery")}
           action={
             delivery ? (
-              <button
-                type="button"
+              <InlineAction
                 onClick={() => navigate({ to: "/app/deliveries/$id", params: { id: delivery.id } })}
-                className="text-label rounded-full px-1 py-2 text-action-primary"
               >
                 {t("order.viewDelivery")}
-              </button>
+              </InlineAction>
             ) : null
           }
         >
@@ -791,24 +793,23 @@ function MockOrderDetailScreen({ id }: { id: string }) {
       </div>
 
       {primaryAction ? (
-        <StickyActionBar aboveNav>
-          <Button className="tap-target h-12 w-full" onClick={primaryAction.open}>
+        <StickyActionBar
+          {...(secondaryActions.length > 0
+            ? {
+                secondary: secondaryActions.map((action) => (
+                  <SecondaryAction key={action.key} onClick={action.open}>
+                    {action.label}
+                  </SecondaryAction>
+                )),
+              }
+            : {})}
+        >
+          <Button
+            className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
+            onClick={primaryAction.open}
+          >
             {primaryAction.label}
           </Button>
-          {secondaryActions.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {secondaryActions.map((action) => (
-                <Button
-                  key={action.key}
-                  variant="ghost"
-                  className="tap-target text-label h-11 flex-1 text-text-secondary"
-                  onClick={action.open}
-                >
-                  {action.label}
-                </Button>
-              ))}
-            </div>
-          ) : null}
         </StickyActionBar>
       ) : null}
 

@@ -25,38 +25,54 @@ const TONE: Record<AttentionItem["tone"], string> = {
 
 interface AttentionCardProps {
   item: AttentionItem;
-  onClick?: () => void;
+  onClick?: (() => void) | undefined;
   className?: string;
 }
 
+/**
+ * One thing waiting on the merchant, in one row: how many, what, and the way
+ * to go deal with it. The count leads because that is what a merchant scans
+ * for; the chevron only appears when the row actually goes somewhere, so a
+ * placeholder never pretends to be a link.
+ */
 export function AttentionCard({ item, onClick, className }: AttentionCardProps) {
   const { t } = useTranslation();
   const Icon = ICONS[item.id];
+  const label = t(`home.attentionItems.${item.id}`);
+
+  const body = (
+    <>
+      <span
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-2xl",
+          TONE[item.tone],
+        )}
+      >
+        <Icon className="size-[18px]" aria-hidden />
+      </span>
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span className="text-h2 tnum shrink-0 text-text-primary">{item.count}</span>
+        <span className="text-body-sm min-w-0 flex-1 text-text-secondary">{label}</span>
+      </span>
+      {onClick ? <ChevronRight className="size-4 shrink-0 text-text-muted" aria-hidden /> : null}
+    </>
+  );
+
+  const shared =
+    "flex w-full items-center gap-3 rounded-2xl border border-border-default bg-surface-primary px-3 py-2.5 text-left";
+
+  if (!onClick) {
+    return <div className={cn(shared, "tap-target", className)}>{body}</div>;
+  }
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className={cn(
-        "tap-target flex w-full items-center gap-3 rounded-2xl border border-border-default bg-surface-primary px-3 py-3 text-left transition-colors hover:bg-surface-secondary",
-        className,
-      )}
+      aria-label={t("home.attentionAction", { count: item.count, label })}
+      className={cn(shared, "press tap-target hover:bg-surface-secondary", className)}
     >
-      <span
-        className={cn(
-          "flex size-9 shrink-0 items-center justify-center rounded-xl",
-          TONE[item.tone],
-        )}
-      >
-        <Icon className="size-4" aria-hidden />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="text-financial block text-text-primary">{item.count}</span>
-        <span className="text-body-sm block text-text-secondary">
-          {t(`home.attentionItems.${item.id}`)}
-        </span>
-      </span>
-      <ChevronRight className="size-4 shrink-0 text-text-muted" aria-hidden />
+      {body}
     </button>
   );
 }

@@ -38,9 +38,11 @@ export function ApsiInsightCard({
           type="button"
           onClick={onDismiss}
           aria-label={t("common.dismiss")}
-          className="absolute top-2 right-2 flex size-6 items-center justify-center rounded-full text-text-muted"
+          // A 24px icon needs a 44px target around it — the glyph stays small,
+          // the thing a thumb has to hit does not.
+          className="press tap-target absolute top-0.5 right-0.5 flex items-center justify-center rounded-full text-text-muted"
         >
-          <X className="size-3.5" aria-hidden />
+          <X className="size-4" aria-hidden />
         </button>
       ) : null}
     </aside>

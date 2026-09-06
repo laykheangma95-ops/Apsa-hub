@@ -5,11 +5,15 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
   AppHeader,
-  ListSkeleton,
+  DetailSkeleton,
+  InlineAction,
+  Screen,
+  SecondaryAction,
   Section,
   SectionRow,
   SectionRows,
   StatusChip,
+  StatusHero,
   StickyActionBar,
   Timeline,
   type TimelineItem,
@@ -48,6 +52,7 @@ import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
 import { currentRole } from "@/lib/api";
 import { permissionsFor } from "@/lib/permissions";
+import { cn } from "@/lib/utils";
 import type { DeliveryAction } from "@/lib/api";
 import type { DeliveryStatus } from "@/types";
 
@@ -213,10 +218,10 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("delivery.title")} onBack={back} />
-        <ListSkeleton rows={5} />
-      </div>
+        <DetailSkeleton />
+      </Screen>
     );
   }
 
@@ -225,7 +230,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     if (kind === "unauthorized") return null; // redirecting, see the effect above
     const copy = errorCopy(kind);
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("delivery.title")} onBack={back} />
         <OperationalState
           tone="danger"
@@ -233,7 +238,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
           body={copy.body}
           onRetry={() => query.refetch()}
         />
-      </div>
+      </Screen>
     );
   }
 
@@ -263,6 +268,33 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     return <OperationalState tone="danger" title={copy.title} body={copy.body} className="mt-3" />;
   })();
 
+  /*
+   * A delivery has exactly one forward move at a time — the state machine says
+   * so. The old bar stacked up to four equally loud full-width buttons and left
+   * the merchant to work out which one was next; the transition that is legal
+   * now becomes the primary action, and the ways out stay quiet.
+   */
+  const advanceAction = canStartPreparingDelivery(d.status)
+    ? { label: t("delivery.startPreparing"), run: () => startPreparingMutation.mutate() }
+    : canMarkDeliveryReady(d.status)
+      ? { label: t("delivery.markReady"), run: () => markReadyMutation.mutate() }
+      : canMarkDeliveryInTransit(d.status)
+        ? { label: t("delivery.markInTransit"), run: () => markInTransitMutation.mutate() }
+        : canMarkDeliveryDelivered(d.status)
+          ? { label: t("delivery.markDelivered"), run: () => markDeliveredMutation.mutate() }
+          : null;
+
+  const exitActions = [
+    canMarkDeliveryFailed(d.status)
+      ? { key: "failed", label: t("delivery.markFailed"), open: () => setFailOpen(true) }
+      : null,
+    canCancelDelivery(d.status)
+      ? { key: "cancel", label: t("delivery.cancel"), open: () => setCancelOpen(true) }
+      : null,
+  ].filter(Boolean) as { key: string; label: string; open: () => void }[];
+
+  const hasActions = Boolean(advanceAction) || exitActions.length > 0;
+
   return (
     <div className="min-h-dvh bg-surface-page">
       <AppHeader
@@ -271,59 +303,66 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
         onBack={back}
       />
 
-      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
+      <div
+        className={cn(
+          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "pb-[var(--space-screen-bottom)]",
+        )}
+      >
         {notice ? (
           <p
             role="status"
-            className="text-body-sm rounded-xl bg-status-success-soft px-4 py-3 text-status-success-text"
+            className="text-body-sm rounded-2xl bg-status-success-soft px-4 py-3 text-status-success-text"
           >
             {notice}
           </p>
         ) : null}
 
-        <Section variant="plain">
-          <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-caption text-text-muted">{t("delivery.courier")}</p>
-                <p className="text-h3 truncate text-text-primary">{d.providerName}</p>
-              </div>
-              <StatusChip status={d.status} size="md" />
-            </div>
+        {/*
+         * Courier and state read first; the details and COD blocks below stay
+         * quiet and secondary. The hero deliberately carries no COD figure —
+         * COD is an operational amount to collect, never a payment signal, and
+         * it keeps its own labelled section so it cannot be read as one.
+         */}
+        <StatusHero
+          eyebrow={t("delivery.courier")}
+          headline={<p className="text-h1 truncate text-text-primary">{d.providerName}</p>}
+          support={
+            d.externalTrackingNumber ? (
+              <span className="tnum">
+                {t("delivery.tracking")}: {d.externalTrackingNumber}
+              </span>
+            ) : (
+              t("delivery.noTracking")
+            )
+          }
+          primaryStatus={d.status}
+        />
 
-            <SectionRows className="mt-3 border-t border-border-default pt-2">
+        <Section title={t("delivery.detailsTitle")}>
+          <SectionRows>
+            {order ? (
               <SectionRow
-                label={t("delivery.tracking")}
+                label={t("delivery.viewOrder")}
                 value={
-                  <span className="tnum">
-                    {d.externalTrackingNumber ?? t("delivery.noTracking")}
-                  </span>
+                  <InlineAction
+                    numeric
+                    onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
+                  >
+                    {order.code}
+                  </InlineAction>
                 }
               />
-              {order ? (
-                <SectionRow
-                  label={t("delivery.viewOrder")}
-                  value={
-                    <button
-                      type="button"
-                      onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
-                      className="text-label tnum text-action-primary"
-                    >
-                      {order.code}
-                    </button>
-                  }
-                />
-              ) : null}
-              {order ? (
-                <SectionRow
-                  label={t("delivery.orderFulfillment")}
-                  value={<StatusChip status={order.fulfillmentStatus} />}
-                />
-              ) : null}
-              <SectionRow label={t("delivery.created")} value={fullTimestamp(d.createdAt)} />
-              <SectionRow label={t("delivery.updated")} value={fullTimestamp(d.updatedAt)} />
-            </SectionRows>
-          </div>
+            ) : null}
+            {order ? (
+              <SectionRow
+                label={t("delivery.orderFulfillment")}
+                value={<StatusChip status={order.fulfillmentStatus} />}
+              />
+            ) : null}
+            <SectionRow label={t("delivery.created")} value={fullTimestamp(d.createdAt)} />
+            <SectionRow label={t("delivery.updated")} value={fullTimestamp(d.updatedAt)} />
+          </SectionRows>
         </Section>
 
         {d.codAmount ? (
@@ -344,69 +383,31 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
         </Section>
       </div>
 
-      {canStartPreparingDelivery(d.status) ||
-      canMarkDeliveryReady(d.status) ||
-      canMarkDeliveryInTransit(d.status) ||
-      canMarkDeliveryDelivered(d.status) ||
-      canCancelDelivery(d.status) ? (
-        <StickyActionBar aboveNav>
-          {canStartPreparingDelivery(d.status) ? (
+      {hasActions ? (
+        <StickyActionBar
+          {...(exitActions.length > 0
+            ? {
+                secondary: exitActions.map((action) => (
+                  <SecondaryAction
+                    key={action.key}
+                    tone="danger"
+                    disabled={anyPending}
+                    onClick={action.open}
+                  >
+                    {action.label}
+                  </SecondaryAction>
+                )),
+              }
+            : {})}
+        >
+          {advanceAction ? (
             <Button
-              className="tap-target h-12 w-full"
+              className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={anyPending}
-              onClick={() => startPreparingMutation.mutate()}
+              onClick={advanceAction.run}
             >
-              {t("delivery.startPreparing")}
+              {anyPending ? t("common.loading") : advanceAction.label}
             </Button>
-          ) : null}
-          {canMarkDeliveryReady(d.status) ? (
-            <Button
-              className="tap-target h-12 w-full"
-              disabled={anyPending}
-              onClick={() => markReadyMutation.mutate()}
-            >
-              {t("delivery.markReady")}
-            </Button>
-          ) : null}
-          {canMarkDeliveryInTransit(d.status) ? (
-            <Button
-              className="tap-target h-12 w-full"
-              disabled={anyPending}
-              onClick={() => markInTransitMutation.mutate()}
-            >
-              {t("delivery.markInTransit")}
-            </Button>
-          ) : null}
-          {canMarkDeliveryDelivered(d.status) ? (
-            <Button
-              className="tap-target h-12 w-full"
-              disabled={anyPending}
-              onClick={() => markDeliveredMutation.mutate()}
-            >
-              {t("delivery.markDelivered")}
-            </Button>
-          ) : null}
-          {canMarkDeliveryFailed(d.status) || canCancelDelivery(d.status) ? (
-            <div className="flex gap-2">
-              {canMarkDeliveryFailed(d.status) ? (
-                <Button
-                  variant="ghost"
-                  className="tap-target text-label h-11 flex-1 text-text-secondary"
-                  onClick={() => setFailOpen(true)}
-                >
-                  {t("delivery.markFailed")}
-                </Button>
-              ) : null}
-              {canCancelDelivery(d.status) ? (
-                <Button
-                  variant="ghost"
-                  className="tap-target text-label h-11 flex-1 text-text-secondary"
-                  onClick={() => setCancelOpen(true)}
-                >
-                  {t("delivery.cancelDelivery")}
-                </Button>
-              ) : null}
-            </div>
           ) : null}
         </StickyActionBar>
       ) : null}
@@ -458,17 +459,17 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("delivery.title")} onBack={back} />
-        <ListSkeleton rows={5} />
-      </div>
+        <DetailSkeleton />
+      </Screen>
     );
   }
 
   if (query.isError) {
     const denied = (query.error as Error).message === PERMISSION_DENIED;
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("delivery.title")} onBack={back} />
         {denied ? (
           <OperationalState title={t("delivery.denied")} body={t("delivery.deniedBody")} />
@@ -479,7 +480,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
             onRetry={() => query.refetch()}
           />
         )}
-      </div>
+      </Screen>
     );
   }
 
@@ -504,63 +505,70 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
     <div className="min-h-dvh bg-surface-page">
       <AppHeader title={t("delivery.title")} subtitle={delivery.trackingNumber} onBack={back} />
 
-      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
+      <div
+        className={cn(
+          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "pb-[var(--space-screen-bottom)]",
+        )}
+      >
         {notice ? (
           <p
             role="status"
-            className="text-body-sm rounded-xl bg-status-success-soft px-4 py-3 text-status-success-text"
+            className="text-body-sm rounded-2xl bg-status-success-soft px-4 py-3 text-status-success-text"
           >
             {notice}
           </p>
         ) : null}
 
-        <Section variant="plain">
-          <div className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-caption text-text-muted">{t("delivery.courier")}</p>
-                <p className="text-h3 text-text-primary">{delivery.courierName}</p>
-              </div>
-              <StatusChip status={status} size="md" />
-            </div>
+        <StatusHero
+          eyebrow={t("delivery.courier")}
+          headline={<p className="text-h1 truncate text-text-primary">{delivery.courierName}</p>}
+          support={
+            <span className="tnum">
+              {t("delivery.tracking")}: {delivery.trackingNumber}
+            </span>
+          }
+          primaryStatus={status}
+          {...(delivery.codAmount
+            ? { nextStep: t("delivery.codDue", { amount: formatMoney(delivery.codAmount) }) }
+            : {})}
+        />
 
-            <div className="mt-3 border-t border-border-default pt-3">
-              <DeliveryProgress status={status} />
-            </div>
+        <Section title={t("delivery.progress")}>
+          <DeliveryProgress status={status} />
+        </Section>
 
-            {failed ? (
-              <div className="mt-3 rounded-xl bg-status-danger-soft px-3 py-2">
-                <p className="text-body-sm text-status-danger-text">{t("delivery.failed")}</p>
-                {delivery.failureReason ? (
-                  <p className="text-caption text-status-danger-text">
-                    {t(`delivery.failReason.${delivery.failureReason}`)}
-                  </p>
-                ) : null}
-              </div>
+        {failed ? (
+          <div
+            role="alert"
+            className="rounded-2xl border border-status-danger-soft bg-status-danger-soft px-4 py-3"
+          >
+            <p className="text-label text-status-danger-text">{t("delivery.failed")}</p>
+            {delivery.failureReason ? (
+              <p className="text-body-sm mt-0.5 text-status-danger-text">
+                {t(`delivery.failReason.${delivery.failureReason}`)}
+              </p>
             ) : null}
-
-            <SectionRows className="mt-3 border-t border-border-default pt-2">
-              <SectionRow
-                label={t("delivery.tracking")}
-                value={<span className="tnum">{delivery.trackingNumber}</span>}
-              />
-              <SectionRow label={t("delivery.fee")} value={formatMoney(delivery.fee)} />
-              {order ? (
-                <SectionRow
-                  label={t("delivery.viewOrder")}
-                  value={
-                    <button
-                      type="button"
-                      onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
-                      className="text-label tnum text-action-primary"
-                    >
-                      {order.code}
-                    </button>
-                  }
-                />
-              ) : null}
-            </SectionRows>
           </div>
+        ) : null}
+
+        <Section title={t("delivery.detailsTitle")}>
+          <SectionRows>
+            <SectionRow label={t("delivery.fee")} value={formatMoney(delivery.fee)} />
+            {order ? (
+              <SectionRow
+                label={t("delivery.viewOrder")}
+                value={
+                  <InlineAction
+                    numeric
+                    onClick={() => navigate({ to: "/app/orders/$id", params: { id: order.id } })}
+                  >
+                    {order.code}
+                  </InlineAction>
+                }
+              />
+            ) : null}
+          </SectionRows>
         </Section>
 
         {delivery.codAmount ? (
@@ -602,44 +610,39 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
       </div>
 
       {showActions ? (
-        <StickyActionBar aboveNav>
-          {failed ? (
-            <>
-              <Button
-                className="tap-target h-12 w-full"
-                disabled={actionMutation.isPending}
-                onClick={() => actionMutation.mutate("retry")}
-              >
-                {t("delivery.retry")}
-              </Button>
-              <div className="flex gap-2">
-                <Button
-                  variant="ghost"
-                  className="tap-target text-label h-11 flex-1 text-text-secondary"
-                  disabled={actionMutation.isPending}
-                  onClick={() => actionMutation.mutate("reschedule")}
-                >
-                  {t("delivery.reschedule")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="tap-target text-label h-11 flex-1 text-text-secondary"
-                  disabled={actionMutation.isPending}
-                  onClick={() => actionMutation.mutate("return_to_shop")}
-                >
-                  {t("delivery.returnToShop")}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <Button
-              className="tap-target h-12 w-full"
-              disabled={actionMutation.isPending}
-              onClick={() => actionMutation.mutate("mark_delivered")}
-            >
-              {t("delivery.markDelivered")}
-            </Button>
-          )}
+        <StickyActionBar
+          {...(failed
+            ? {
+                secondary: (
+                  <>
+                    <SecondaryAction
+                      disabled={actionMutation.isPending}
+                      onClick={() => actionMutation.mutate("reschedule")}
+                    >
+                      {t("delivery.reschedule")}
+                    </SecondaryAction>
+                    <SecondaryAction
+                      disabled={actionMutation.isPending}
+                      onClick={() => actionMutation.mutate("return_to_shop")}
+                    >
+                      {t("delivery.returnToShop")}
+                    </SecondaryAction>
+                  </>
+                ),
+              }
+            : {})}
+        >
+          <Button
+            className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
+            disabled={actionMutation.isPending}
+            onClick={() => actionMutation.mutate(failed ? "retry" : "mark_delivered")}
+          >
+            {actionMutation.isPending
+              ? t("common.loading")
+              : failed
+                ? t("delivery.retry")
+                : t("delivery.markDelivered")}
+          </Button>
         </StickyActionBar>
       ) : null}
     </div>

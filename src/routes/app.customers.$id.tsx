@@ -7,15 +7,17 @@ import { Input } from "@/components/ui/input";
 import {
   AppHeader,
   ChannelBadge,
-  Chip,
-  ChipRow,
-  ListSkeleton,
+  DetailSkeleton,
+  Screen,
+  SecondaryAction,
   Section,
   SectionRow,
   SectionRows,
+  SegmentedControl,
   StatusChip,
   StickyActionBar,
   Timeline,
+  type Segment,
   type TimelineItem,
 } from "@/design-system";
 
@@ -24,7 +26,6 @@ import { addCustomerNote, getCustomer360 } from "@/lib/api";
 import { fullTimestamp, initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, usd } from "@/lib/money";
-import { cn } from "@/lib/utils";
 import type { CompanionColor, CustomerNote } from "@/types";
 
 export const Route = createFileRoute("/app/customers/$id")({
@@ -88,23 +89,23 @@ function Customer360Screen() {
 
   if (query.isLoading) {
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("customer360.title")} onBack={back} />
-        <ListSkeleton rows={6} />
-      </div>
+        <DetailSkeleton />
+      </Screen>
     );
   }
 
   if (query.isError) {
     return (
-      <div className="min-h-dvh bg-surface-page">
+      <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("customer360.title")} onBack={back} />
         <OperationalState
           title={t("customer360.notFound")}
           body={t("customer360.notFoundBody")}
           onRetry={() => query.refetch()}
         />
-      </div>
+      </Screen>
     );
   }
 
@@ -115,6 +116,13 @@ function Customer360Screen() {
     customer.orderCount > 0
       ? usd(Math.round(customer.lifetimeSpend.amount / customer.orderCount))
       : usd(0);
+
+  const tabSegments: Segment<Tab>[] = TABS.map((key) => ({
+    value: key,
+    label: t(`customer360.${key}`),
+    ...(key === "orders" && orders.length > 0 ? { count: orders.length } : {}),
+    ...(key === "notes" && notes.length > 0 ? { count: notes.length } : {}),
+  }));
 
   const timelineItems: TimelineItem[] = events.map((event) => ({
     id: event.id,
@@ -131,18 +139,23 @@ function Customer360Screen() {
     <div className="min-h-dvh bg-surface-page">
       <AppHeader title={displayName} subtitle={t("customer360.title")} onBack={back} />
 
-      <div className="stack-section mx-auto max-w-[560px] px-4 py-5 pb-[var(--space-screen-bottom)] lg:max-w-[880px]">
-        <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+      <div className="stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 pb-[var(--space-screen-bottom)] lg:max-w-[var(--screen-max-wide)]">
+        {/*
+         * Identity first, then the two numbers that decide how to treat this
+         * customer. Everything else is behind a tab — a phone screen of equally
+         * weighted CRM fields tells a merchant nothing.
+         */}
+        <section className="elevation-2 rounded-[26px] border border-action-primary-border bg-[linear-gradient(168deg,rgba(255,255,255,0.98)_0%,rgba(234,242,254,0.92)_100%)] px-4 py-4">
           <div className="flex items-start gap-3">
             <span
               aria-hidden
-              className="text-h3 flex size-12 shrink-0 items-center justify-center rounded-full text-text-inverse"
+              className="text-h3 flex size-14 shrink-0 items-center justify-center rounded-full text-text-inverse"
               style={{ backgroundColor: COMPANION_VAR[customer.companion] }}
             >
               {initials(displayName)}
             </span>
             <div className="min-w-0 flex-1">
-              <h1 className="text-h2 truncate text-text-primary">{displayName}</h1>
+              <h1 className="text-h1 truncate text-text-primary">{displayName}</h1>
               <p className="text-body-sm tnum text-text-secondary">
                 {sensitiveVisible ? customer.phone || "—" : t("customer360.hidden")}
               </p>
@@ -154,27 +167,27 @@ function Customer360Screen() {
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border-default pt-3">
-            <div>
-              <p className="text-caption text-text-muted">{t("customer.spend")}</p>
-              <p className="text-financial-lg text-text-primary">
+          <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-action-primary-border/70 pt-3">
+            <div className="min-w-0">
+              <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
+              <dd className="text-h2 tnum truncate text-text-primary">
                 {sensitiveVisible ? formatMoney(customer.lifetimeSpend) : t("customer360.hidden")}
-              </p>
+              </dd>
             </div>
-            <div>
-              <p className="text-caption text-text-muted">{t("customer.orders")}</p>
-              <p className="text-financial-lg text-text-primary">{customer.orderCount}</p>
+            <div className="min-w-0">
+              <dt className="text-caption text-text-muted">{t("customer.orders")}</dt>
+              <dd className="text-h2 tnum truncate text-text-primary">{customer.orderCount}</dd>
             </div>
-          </div>
+          </dl>
         </section>
 
-        <ChipRow role="tablist" label={t("customer360.title")}>
-          {TABS.map((key) => (
-            <Chip key={key} role="tab" selected={tab === key} onClick={() => setTab(key)}>
-              {t(`customer360.${key}`)}
-            </Chip>
-          ))}
-        </ChipRow>
+        <SegmentedControl
+          as="tabs"
+          segments={tabSegments}
+          value={tab}
+          onChange={setTab}
+          label={t("customer360.title")}
+        />
 
         {tab === "overview" ? (
           <Section title={t("customer360.overview")}>
@@ -272,20 +285,20 @@ function Customer360Screen() {
 
         {tab === "notes" ? (
           <Section title={t("customer360.notes")}>
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="flex flex-col gap-2">
               <Input
                 aria-label={t("customer360.addNote")}
                 placeholder={t("customer360.notePlaceholder")}
-                className="h-12"
+                className="h-12 rounded-2xl border-border-default"
                 value={noteDraft}
                 onChange={(e) => setNoteDraft(e.target.value)}
               />
               <Button
-                className="tap-target h-12"
+                className="press tap-target h-12 w-full rounded-2xl"
                 disabled={!noteDraft.trim() || noteMutation.isPending}
                 onClick={() => noteMutation.mutate(noteDraft.trim())}
               >
-                {t("customer360.saveNote")}
+                {noteMutation.isPending ? t("common.loading") : t("customer360.saveNote")}
               </Button>
             </div>
 
@@ -309,24 +322,26 @@ function Customer360Screen() {
         ) : null}
       </div>
 
-      <StickyActionBar aboveNav>
-        {activeConversationId ? (
-          <Button
-            className="tap-target h-12 w-full"
-            onClick={() => navigate({ to: "/app/inbox/$id", params: { id: activeConversationId } })}
-          >
-            {t("customer360.openConversation")}
-          </Button>
-        ) : null}
+      <StickyActionBar
+        {...(activeConversationId
+          ? {
+              secondary: (
+                <SecondaryAction onClick={() => navigate({ to: "/app/pos" })}>
+                  {t("customer360.createOrder")}
+                </SecondaryAction>
+              ),
+            }
+          : {})}
+      >
         <Button
-          variant={activeConversationId ? "ghost" : "default"}
-          className={cn(
-            "tap-target h-12 w-full",
-            activeConversationId ? "text-label text-text-secondary" : undefined,
-          )}
-          onClick={() => navigate({ to: "/app/pos" })}
+          className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
+          onClick={() =>
+            activeConversationId
+              ? navigate({ to: "/app/inbox/$id", params: { id: activeConversationId } })
+              : navigate({ to: "/app/pos" })
+          }
         >
-          {t("customer360.createOrder")}
+          {activeConversationId ? t("customer360.openConversation") : t("customer360.createOrder")}
         </Button>
       </StickyActionBar>
     </div>

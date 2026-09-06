@@ -290,9 +290,13 @@ describe("Error states are classified and mapped to translated copy, never raw e
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Loading and empty states use the existing APSA visual system", () => {
-  it("both the list and the real detail screen render ListSkeleton while loading", () => {
+  // The guarantee is that loading uses a design-system skeleton shaped like the
+  // screen it precedes, never an ad-hoc spinner: a list skeleton on the list, a
+  // detail skeleton on the detail screen (a list-shaped one there made the page
+  // visibly jump when the hero and sections landed).
+  it("both the list and the real detail screen render a design-system skeleton while loading", () => {
     expect(readSource(ORDER_LIST_ROUTE)).toMatch(/ordersQuery\.isLoading[\s\S]{0,80}ListSkeleton/);
-    expect(readSource(ORDER_DETAIL_ROUTE)).toMatch(/query\.isLoading[\s\S]{0,200}ListSkeleton/);
+    expect(readSource(ORDER_DETAIL_ROUTE)).toMatch(/query\.isLoading[\s\S]{0,200}DetailSkeleton/);
   });
 
   it("Orders screens use the Apsi-free OperationalState, never the Apsi-carrying EmptyState/ErrorState", () => {
