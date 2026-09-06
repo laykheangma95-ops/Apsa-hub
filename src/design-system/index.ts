@@ -14,6 +14,7 @@ export {
   companionSource,
   resolveMascotSource,
   type MascotProps,
+  type ApsiSize,
   type ApsiProps,
   type ApsiAnimation,
   type ApsiEmotion,

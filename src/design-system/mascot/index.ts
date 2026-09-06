@@ -1,4 +1,4 @@
-export { Mascot, type MascotProps } from "./Mascot";
+export { Mascot, type ApsiSize, type MascotProps } from "./Mascot";
 export { Apsi, type ApsiProps } from "./Apsi";
 export { MascotMoment } from "./MascotMoment";
 export {
