@@ -66,6 +66,8 @@ export function isProductionId(id: string): boolean {
 }
 
 export interface ConversationFilter {
+  cursor?: string;
+  limit?: number;
   status?: ConversationStatus | "all";
   channel?: Conversation["channel"] | "all";
   query?: string;
@@ -112,20 +114,19 @@ function mockGetConversations(filter?: ConversationFilter): Conversation[] {
  * getProducts()/getPosProducts() above.
  */
 export async function getConversations(filter?: ConversationFilter): Promise<Conversation[]> {
+  return (await getConversationPage(filter)).conversations;
+}
+
+export async function getConversationPage(
+  filter?: ConversationFilter,
+): Promise<{ conversations: Conversation[]; nextCursor: string | null }> {
   try {
     const { listConversationsFn } = await import("@/api/conversations");
-    const params: {
-      status?: ConversationStatus | "all";
-      channel?: Conversation["channel"] | "all";
-      query?: string;
-    } = {};
-    if (filter?.status) params.status = filter.status;
-    if (filter?.channel) params.channel = filter.channel;
-    if (filter?.query) params.query = filter.query;
-    const page = await listConversationsFn({ data: params });
-    return page.conversations as unknown as Conversation[];
+    const page = await listConversationsFn({ data: filter ?? {} });
+    return page as unknown as { conversations: Conversation[]; nextCursor: string | null };
   } catch (err) {
-    if (isDemoModeError(err)) return resolve(mockGetConversations(filter));
+    if (isDemoModeError(err))
+      return resolve({ conversations: mockGetConversations(filter), nextCursor: null });
     throw err;
   }
 }
@@ -172,9 +173,13 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
  */
 
 /** Mark a production conversation's unread count as cleared. Idempotent — safe to call repeatedly. */
-export async function markRealConversationRead(id: string): Promise<Conversation> {
+export async function markRealConversationRead(
+  id: string,
+  messageId: string,
+): Promise<Conversation> {
+  if (!isProductionId(id) || !isProductionId(messageId)) throw new Error("invalid_reference");
   const { markConversationReadFn } = await import("@/api/conversations");
-  const updated = await markConversationReadFn({ data: { conversationId: id } });
+  const updated = await markConversationReadFn({ data: { conversationId: id, messageId } });
   return updated as unknown as Conversation;
 }
 
@@ -183,6 +188,7 @@ export async function updateRealConversationStatus(
   id: string,
   status: ConversationStatus,
 ): Promise<Conversation> {
+  if (!isProductionId(id)) throw new Error("invalid_reference");
   const { updateConversationStatusFn } = await import("@/api/conversations");
   const updated = await updateConversationStatusFn({ data: { conversationId: id, status } });
   return updated as unknown as Conversation;
@@ -193,9 +199,17 @@ export async function assignRealConversation(
   id: string,
   assignedUserId: string | null,
 ): Promise<Conversation> {
+  if (!isProductionId(id) || (assignedUserId !== null && !isProductionId(assignedUserId)))
+    throw new Error("invalid_reference");
   const { assignConversationFn } = await import("@/api/conversations");
   const updated = await assignConversationFn({ data: { conversationId: id, assignedUserId } });
   return updated as unknown as Conversation;
+}
+
+export async function getOlderConversationMessages(id: string, beforeId: string) {
+  if (!isProductionId(id) || !isProductionId(beforeId)) throw new Error("invalid_reference");
+  const { listConversationMessagesFn } = await import("@/api/conversations");
+  return listConversationMessagesFn({ data: { conversationId: id, beforeId } });
 }
 
 export async function getCustomers(): Promise<Customer[]> {

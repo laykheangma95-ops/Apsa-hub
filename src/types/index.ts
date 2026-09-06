@@ -114,7 +114,7 @@ export type Currency = "USD" | "KHR";
 /** amount is ALWAYS an integer minor unit. USD = cents. KHR = riel (exponent 0). */
 export type Money = { amount: number; currency: Currency };
 
-export type Channel = "facebook" | "instagram" | "telegram" | "pos";
+export type Channel = "facebook" | "instagram" | "telegram" | "pos" | "other";
 
 export type Language = "km" | "en";
 
@@ -475,6 +475,9 @@ export interface Conversation {
    * Lets the Inbox list render a name without an N+1 customer lookup per row.
    */
   customerName?: string;
+  provider?: string;
+  providerConversationId?: string;
+  assignedStaffName?: string;
   channel: Channel;
   lastMessage: string;
   lastMessageAt: string;
@@ -484,6 +487,8 @@ export interface Conversation {
 }
 
 export interface ConversationDetail extends Conversation {
+  nextBeforeId?: string | null;
+  readThroughMessageId?: string | null;
   messages: Message[];
 }
 
