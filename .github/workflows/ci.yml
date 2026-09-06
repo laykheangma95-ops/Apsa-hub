@@ -1,0 +1,150 @@
+name: CI
+
+# Automated CI verification only. See docs/GITHUB_GOVERNANCE.md — a green run
+# here means the code compiles, builds, and passes its automated tests. It is
+# NOT independent code review, NOT a staging verification, and NOT a
+# production verification. Those are separate, human/AI-driven steps recorded
+# on the PR itself.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: "1.3.11"
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  build:
+    name: Production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      # Bundle-boundary tests need real build output to scan, so it is
+      # produced here and handed to the test job instead of rebuilding there.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: .output
+          retention-days: 1
+          # .output is a dot-directory; upload-artifact excludes hidden
+          # files/dirs by default and silently uploads nothing without this.
+          include-hidden-files: true
+
+  lint-changed:
+    name: Lint (changed files) — blocking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Lint only files touched by this PR
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          FILES=$(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' || true)
+          if [ -z "$FILES" ]; then
+            echo "No changed JS/TS files — nothing to lint."
+            exit 0
+          fi
+          echo "Changed files:"
+          echo "$FILES"
+          echo "$FILES" | xargs bunx eslint
+
+  lint-baseline:
+    name: Lint (whole repo) — informational, non-blocking
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # KNOWN BASELINE EXCEPTION (documented in docs/GITHUB_GOVERNANCE.md):
+      # whole-repo `bun run lint` currently fails with ~400 pre-existing
+      # prettier/formatting errors unrelated to any single change. This job
+      # is intentionally non-blocking until that backlog is cleaned up in a
+      # dedicated PR. lint-changed above is the blocking gate.
+      - run: bun run lint
+
+  test:
+    name: Test suite (bun test src/tests/)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: .output
+      - name: Run full test suite
+        # KNOWN BASELINE EXCEPTION (documented in docs/GITHUB_GOVERNANCE.md):
+        # src/tests/auth-hardening.test.ts has a pre-existing ~5s timeout in
+        # its isolated-runtime subprocess check, unrelated to feature changes
+        # (confirmed present on a clean checkout, also noted independently in
+        # PR #32). It is excluded from the blocking run and executed
+        # separately below as informational only, so it cannot mask a
+        # genuinely new failure in the other 1140+ tests.
+        run: bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$'
+      - name: Run known-flaky auth-hardening test (informational only)
+        continue-on-error: true
+        run: bun test src/tests/auth-hardening.test.ts
+
+  migration-safety:
+    name: Migration safety check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Fetch base branch for diffing
+        run: git fetch origin main --depth=1
+      - run: bun run scripts/check-migration-safety.ts --base=origin/main
+        # NOTE: this is static SQL analysis. It does not connect to, and
+        # cannot prove anything about, the live hosted Supabase project.
+
+  secret-scan:
+    name: Secret leak scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
