@@ -636,8 +636,18 @@ describe("Test 20: the API boundary schema accepts sourceConversationRef", () =>
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Test 21: regressions", () => {
-  it("no Payment domain file exists or was touched by this work", () => {
-    expect(fs.existsSync(path.resolve(process.cwd(), "src/server/payments"))).toBe(false);
+  it("this phase's Conversation/Smart-Action code never reaches into the Payment domain", () => {
+    // The Payment domain (src/server/payments/*) is built in a later, dedicated
+    // phase — see supabase/PAYMENTS.md. This phase's own code must not import it.
+    for (const file of [
+      "src/lib/conversation/smart-actions.ts",
+      "src/components/inbox/PrepareOrderSheet.tsx",
+      "src/components/inbox/SmartActionStrip.tsx",
+    ]) {
+      const source = readSource(file);
+      expect(source).not.toMatch(/from ["']@\/server\/payments/);
+      expect(source).not.toMatch(/from ["']@\/api\/payments["']/);
+    }
   });
 
   it("draft order creation still writes lifecycle 'draft' (SQL, unchanged by migration 030)", () => {

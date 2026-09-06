@@ -33,6 +33,12 @@ export type AuditAction =
   | "orders.update"
   | "payments.confirm"
   | "payments.override"
+  | "payments.record"
+  | "payments.mark_cod"
+  | "payments.manual_confirm"
+  | "payments.verify"
+  | "payments.reverse"
+  | "payments.refund"
   | "inventory.adjust"
   | "products.price_change"
   | "products.delete"
@@ -47,6 +53,8 @@ export type AuditAction =
 export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
   "orders.refund",
   "payments.override",
+  "payments.reverse",
+  "payments.refund",
   "inventory.adjust",
   "customers.export",
   "team.remove",
@@ -96,10 +104,7 @@ function buildAuditRow(ctx: AuthorizationContext, payload: AuditPayload) {
  * a security-correctness violation. This guard converts that silent failure into a
  * visible programming error caught at development time.
  */
-export async function auditLog(
-  ctx: AuthorizationContext,
-  payload: AuditPayload,
-): Promise<void> {
+export async function auditLog(ctx: AuthorizationContext, payload: AuditPayload): Promise<void> {
   if (MANDATORY_AUDIT_ACTIONS.has(payload.action)) {
     throw new Error(
       `[APSA] Programming error: action '${payload.action}' is a mandatory-audit action ` +
@@ -114,11 +119,15 @@ export async function auditLog(
     .insert(buildAuditRow(ctx, payload));
 
   if (error) {
-    console.error("[APSA] audit_log write failed (best-effort):", (error as { message?: string }).message, {
-      action: payload.action,
-      organizationId: ctx.organizationId,
-      actorUserId: ctx.userId,
-    });
+    console.error(
+      "[APSA] audit_log write failed (best-effort):",
+      (error as { message?: string }).message,
+      {
+        action: payload.action,
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+      },
+    );
   }
 }
 

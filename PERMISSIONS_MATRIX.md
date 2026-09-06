@@ -391,6 +391,19 @@ Cash-drawer sessions can be implemented later.
 | `payments.refund` | ✅ | ⚠️ | ❌ | ❌ | ❌ |
 | `payments.override_status` | ✅* | ❌ | ❌ | ❌ | ❌ |
 | `payments.view_provider_reference` | ✅ | ✅ | ⚠️ | ❌ | ❌ |
+| `payments.verify` | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `payments.reverse` | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `payments.reconcile` | ✅ | ✅ | ❌ | ❌ | ❌ |
+
+`payments.verify`, `payments.reverse` and `payments.reconcile` were added by the
+Payment Domain foundation phase (migration `036_payment_permissions.sql`) to make the
+verification model's finer distinctions enforceable: `payments.verify` gates escalating
+a payment past staff-level confirmation (manager re-confirmation, a future bank-adapter
+result, or flagging/clearing a mismatch or suspected duplicate) — the same Owner+Manager
+tier as `payments.view_provider_reference`; `payments.reverse` gates voiding a claimed or
+settled payment outright — the same Owner-only tier as `payments.refund` and
+`payments.override_status`; `payments.reconcile` gates the read-only organization-wide
+reconciliation aggregate — the same Owner+Manager tier as `financials.revenue` (§18).
 
 Manual confirmation and override should always be audited.
 
