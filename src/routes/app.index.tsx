@@ -81,6 +81,7 @@ function BusinessHome() {
 
         {homeQuery.isError ? (
           <ErrorState
+            showApsi
             title={t("home.error.title")}
             body={t("home.error.body")}
             onRetry={() => void homeQuery.refetch()}
@@ -172,6 +173,7 @@ function BusinessHome() {
 
             {!insightDismissed ? (
               <ApsiInsightCard
+                emotion="thinking"
                 title={t("home.apsi.title")}
                 body={t("home.apsi.body")}
                 onDismiss={() => setInsightDismissed(true)}

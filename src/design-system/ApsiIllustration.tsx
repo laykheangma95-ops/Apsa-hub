@@ -1,5 +1,5 @@
-import { Mascot } from "./mascot/Mascot";
-import type { MascotState } from "./mascot/mascot-states";
+import { Apsi } from "./mascot/Apsi";
+import type { ApsiEmotion } from "./mascot/apsi-emotions";
 
 export type ApsiPose = "default" | "waving" | "winking" | "typing" | "merging";
 
@@ -10,17 +10,17 @@ interface ApsiIllustrationProps {
   alt?: string;
 }
 
-const POSE_TO_STATE: Record<ApsiPose, MascotState> = {
+const POSE_TO_EMOTION: Record<ApsiPose, ApsiEmotion> = {
   default: "default",
-  waving: "greeting",
-  winking: "success",
+  waving: "waving",
+  winking: "winking",
   typing: "typing",
-  merging: "celebration",
+  merging: "merge",
 };
 
 /**
  * Legacy pose-based entry point, kept so existing screens keep working.
- * New code should use <Mascot state="..." /> from `@/design-system/mascot`.
+ * New code should use <Apsi emotion="..." /> from `@/design-system/mascot`.
  */
 export function ApsiIllustration({
   pose = "default",
@@ -28,5 +28,5 @@ export function ApsiIllustration({
   className,
   alt = "",
 }: ApsiIllustrationProps) {
-  return <Mascot state={POSE_TO_STATE[pose]} size={size} alt={alt} className={className} />;
+  return <Apsi emotion={POSE_TO_EMOTION[pose]} size={size} alt={alt} className={className} />;
 }

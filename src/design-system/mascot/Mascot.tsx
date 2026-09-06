@@ -2,16 +2,26 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   companionSource,
-  resolveMascotSource,
   COMPANION_TOKEN,
   type MascotSource,
 } from "./mascot-assets";
-import { MASCOT_STATES, type MascotState } from "./mascot-states";
+import {
+  apsiEmotions,
+  type ApsiAnimation,
+  type ApsiEmotion,
+} from "./apsi-emotions";
+import { resolveMascotEmotion, type MascotState } from "./mascot-states";
+
+export type ApsiSize = "xs" | "sm" | "md" | "lg" | "xl" | number;
 
 export interface MascotProps {
-  /** A named moment, never a raw pose. */
+  /** Legacy named-moment API. Prefer `emotion` for new work. */
   state?: MascotState;
-  size?: number;
+  /** Semantic emotion; screens never choose a raw file or pose. */
+  emotion?: ApsiEmotion;
+  size?: ApsiSize;
+  /** Overrides the emotion's default subtle motion. */
+  animation?: ApsiAnimation;
   /** Show the accent companion assigned to this state. */
   withCompanion?: boolean;
   /** Accessible label. Empty string (default) marks the mascot decorative. */
@@ -19,7 +29,26 @@ export interface MascotProps {
   className?: string | undefined;
 }
 
-function Frame({ source, size, alt }: { source: MascotSource; size: number; alt: string }) {
+const SIZE_CLASS: Record<Exclude<ApsiSize, number>, string> = {
+  xs: "size-10 sm:size-11",
+  sm: "size-14 sm:size-16",
+  md: "size-20 sm:size-24",
+  lg: "size-28 sm:size-32 lg:size-36",
+  xl: "size-36 sm:size-44 lg:size-52",
+};
+
+const MOTION_CLASS: Record<ApsiAnimation, string> = {
+  none: "",
+  float: "apsi-motion-float",
+  "gentle-bounce": "apsi-motion-bounce",
+  wave: "apsi-motion-wave",
+  blink: "apsi-motion-blink",
+  pulse: "apsi-motion-pulse",
+  celebrate: "apsi-motion-celebrate",
+  thinking: "apsi-motion-thinking",
+};
+
+function Frame({ source, size, alt }: { source: MascotSource; size: ApsiSize; alt: string }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -30,30 +59,29 @@ function Frame({ source, size, alt }: { source: MascotSource; size: number; alt:
     if (img?.complete && img.naturalWidth > 0) setLoaded(true);
   }, []);
 
-  if (source.kind !== "image") {
-    // Future Rive/Lottie/video renderers plug in here; the API above stays put.
-    return null;
-  }
+  const numericSize = typeof size === "number" ? size : undefined;
+  const sizeClass = typeof size === "number" ? "" : SIZE_CLASS[size];
+  const fallbackUrl = source.posterUrl ?? source.url;
 
   return (
     <div
       role={alt ? "img" : undefined}
       aria-label={alt || undefined}
       aria-hidden={alt === "" ? true : undefined}
-      className="relative shrink-0 overflow-hidden rounded-[38%]"
+      className={`relative aspect-square shrink-0 overflow-hidden rounded-[38%] ${sizeClass}`}
       style={{
-        width: size,
-        height: size,
+        width: numericSize,
+        height: numericSize,
         backgroundColor: loaded && !failed ? "transparent" : "var(--action-primary-soft)",
       }}
     >
       {failed ? null : (
         <img
           ref={imgRef}
-          src={source.url}
+          src={fallbackUrl}
           alt=""
-          width={size}
-          height={size}
+          width={numericSize}
+          height={numericSize}
           loading="lazy"
           decoding="async"
           onLoad={() => setLoaded(true)}
@@ -72,24 +100,32 @@ function Frame({ source, size, alt }: { source: MascotSource; size: number; alt:
  */
 export function Mascot({
   state = "default",
-  size = 96,
+  emotion,
+  size = "md",
+  animation,
   withCompanion = false,
   alt = "",
   className,
 }: MascotProps) {
-  const spec = MASCOT_STATES[state];
-  const source = resolveMascotSource(spec.asset, spec.pose);
+  const resolvedEmotion = emotion ?? resolveMascotEmotion(state);
+  const spec = apsiEmotions[resolvedEmotion];
+  const source = spec.source;
   const companion = withCompanion ? spec.companion : undefined;
+  const motion = animation ?? spec.animation;
+  const numericSize = typeof size === "number" ? size : undefined;
 
   return (
-    <div className={cn("relative inline-flex shrink-0", className)} style={{ width: size }}>
+    <div
+      className={cn("relative inline-flex shrink-0", MOTION_CLASS[motion], className)}
+      style={{ width: numericSize }}
+      data-apsi-emotion={resolvedEmotion}
+      data-apsi-media={source.kind}
+    >
       <Frame source={source} size={size} alt={alt} />
       {companion ? (
         <span
-          className="absolute -right-1 -bottom-1 overflow-hidden rounded-full"
+          className="absolute -right-[4%] -bottom-[4%] size-[42%] overflow-hidden rounded-full"
           style={{
-            width: Math.round(size * 0.42),
-            height: Math.round(size * 0.42),
             boxShadow: `0 0 0 2px var(--surface-primary), 0 6px 16px -8px ${COMPANION_TOKEN[companion]}`,
           }}
           aria-hidden
