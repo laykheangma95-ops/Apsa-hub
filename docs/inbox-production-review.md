@@ -1,12 +1,16 @@
 # Inbox / Conversation continuation review
 
-Base: `95718a4a39625736dee961960df9d7a31f8fd569` (main).
-Branch: `codex/inbox-conversation-production`.
+Original base: `95718a4a39625736dee961960df9d7a31f8fd569` (main, pre-Payment merge).
+Rebased onto: `9ac9929` (main, after PR #30 merged the Payment Domain).
+Branch: `claude/apsa-inbox-conversation-prod-m7abd9` (carries the Codex
+`codex/inbox-conversation-production` commit `eb4f1a7`, cherry-picked and
+renumbered).
 
 This continuation builds on the merged Conversation foundation in migrations
-031–033. Migrations 028–029 remain exclusively reserved for Claude/Sonnet's
-Payment rebuild. This change adds only migrations 034–035. No hosted migrations
-were applied, and no Payment-domain files or intent-engine files are in the diff.
+031–033. Migrations 034–036 are now occupied by the merged Payment Domain
+(PR #30). This change's migrations were renumbered to **037–038** to sit
+after the Payment migrations. No hosted migrations were applied, and no
+Payment-domain files or intent-engine files are in the diff.
 
 ## Architecture and behavior
 
@@ -186,8 +190,8 @@ handoff. Additional wrapper tests ensure non-UUID IDs never reach server functio
 
 ## Changed files
 
-- `supabase/migrations/034_conversation_read_identity.sql`
-- `supabase/migrations/035_conversation_ingestion.sql`
+- `supabase/migrations/037_conversation_read_identity.sql`
+- `supabase/migrations/038_conversation_ingestion.sql`
 - `src/server/conversations/{repository,service,types,errors}.ts`
 - `src/api/{conversations,inbox}.ts`
 - `src/lib/api/index.ts`, `src/lib/orders.ts`, `src/types/index.ts`

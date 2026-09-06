@@ -84,7 +84,7 @@ beforeAll(async () => {
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort()) {
     if (/^02[89]_/.test(name) || name.startsWith("030_")) continue; // Main 030 has an ambiguous overloaded-function COMMENT.
-    if (name.startsWith("034_")) {
+    if (name.startsWith("037_")) {
       // Existing history must migrate even after its assigned/sending staff left.
       await db.exec(`
         insert into auth.users(id,email) values('dddddddd-0000-4000-8000-000000000001','departed@test.invalid');
