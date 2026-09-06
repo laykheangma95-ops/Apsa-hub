@@ -48,6 +48,9 @@ jobs:
           name: build-output
           path: .output
           retention-days: 1
+          # .output is a dot-directory; upload-artifact excludes hidden
+          # files/dirs by default and silently uploads nothing without this.
+          include-hidden-files: true
 
   lint-changed:
     name: Lint (changed files) — blocking

@@ -115,26 +115,52 @@ If either of these is ever fixed, remove the corresponding carve-out from
 `.github/workflows/ci.yml` in the same PR that fixes it — do not leave stale
 exceptions in place.
 
-A third, newly discovered one, found _by_ building the migration-safety check
-below rather than pre-existing knowledge:
+A third one was found _by_ building the migration-safety check below, and is
+now resolved — kept here as a record of what the checker is for:
 
-3. **`supabase/migrations/030_order_conversation_source.sql`** already on `main`
-   defines a second, 8-argument overload of `public.create_order_v1` (alongside
-   migration 024's 7-argument version) and then does
+3. **RESOLVED (2026-09-06).** `supabase/migrations/030_order_conversation_source.sql`
+   previously defined a second, 8-argument overload of `public.create_order_v1`
+   (alongside migration 024's 7-argument version) and then did
    `COMMENT ON FUNCTION public.create_order_v1 IS ...` with no argument list —
-   this is ambiguous once both overloads exist and will fail migration
-   application on a fresh database. This is the same class of bug PR #32's
-   branch independently fixed on its own copy of a similarly-numbered
-   migration; this occurrence, on `main`'s migration 030, is still unfixed.
-   `scripts/check-migration-safety.ts` reports it as a `[baseline]` warning
-   (not blocking, since this governance PR must not modify feature code/migrations).
-   **Recommended follow-up**: a separate, small PR that qualifies the
-   `COMMENT ON FUNCTION` with the full 8-argument signature and adds an
-   explicit `REVOKE EXECUTE ... FROM PUBLIC, anon` for the new overload, the
-   same fix already proven out in PR #32. Migration 030 is not in
-   `supabase/hosted-migrations.lock.json` and per `APSA_BUILD_STATUS.md` has
-   never been applied to any hosted database, so fixing it in place (rather
-   than superseding it with a new migration number) is safe.
+   ambiguous once both overloads exist, and would have failed migration
+   application on a fresh database. This governance PR flagged it as a
+   `[baseline]` warning (not blocking, since a governance-only PR must not
+   modify feature code/migrations) and left it unfixed pending a follow-up.
+   PR #32 independently fixed the identical bug pattern on its own branch and
+   has since merged into `main`, which — per its description — included
+   qualifying this exact `COMMENT ON FUNCTION` with the full signature and
+   adding an explicit `REVOKE`/`GRANT EXECUTE`. After rebasing this branch
+   onto the post-#32 `main`, `scripts/check-migration-safety.ts` confirms
+   check 4 (ambiguous overloaded function references) reports **zero**
+   findings — see §4a.
+
+### 4a. Rebase-onto-main follow-ups (2026-09-06)
+
+After PR #32 merged, this branch was rebased onto the new `main` and every
+check re-run. Two issues surfaced that were specific to this governance PR's
+own new files/workflow, not to the rebase or to feature code — both fixed in
+the same push:
+
+- **`secret-scan` false positive**: Gitleaks' default `generic-api-key` rule
+  flagged the sha256 digest stored for `001_auth_profiles.sql` in
+  `supabase/hosted-migrations.lock.json` (line 7) — a 64-hex-char content hash
+  has the same entropy shape as an API key. Confirmed as a false positive (it
+  is a hash of already-public migration SQL, not a credential) by running
+  Gitleaks locally against the exact failing commit. Fixed by adding
+  `.gitleaks.toml`, which extends (not replaces) the default ruleset and adds
+  a single path-based allowlist entry for that one generated lock file —
+  every other file, including any future edit to the lock file's structure,
+  is still scanned normally.
+- **`test` job workflow bug**: the `build` job's `actions/upload-artifact@v4`
+  step uploaded the `.output` directory with `include-hidden-files` left at
+  its default (`false`). Since `.output` is itself a dot-prefixed directory,
+  upload-artifact silently uploaded zero files ("No files were found with the
+  provided path: .output"), which then made the `test` job's
+  `actions/download-artifact@v4` step fail outright ("Artifact not found").
+  Fixed by adding `include-hidden-files: true` to the upload step. This was a
+  bug in this PR's own `ci.yml`, not caused by the rebase or by anything in
+  PR #32 — surfaced only once the workflow actually ran on GitHub, since a
+  local `bun run build` doesn't go through `actions/upload-artifact` at all.
 
 ## 5. Independent review gate and review record
 
@@ -260,7 +286,11 @@ manual staging checks are for (§1, layer 3). Do not treat a clean
 ## 9. Security checks beyond migrations
 
 - **Secret scanning**: `secret-scan` CI job runs [Gitleaks](https://github.com/gitleaks/gitleaks)
-  (open-source, no paid service) against the PR diff.
+  (open-source, no paid service) against the PR diff. `.gitleaks.toml` extends
+  the default ruleset with one path allowlist entry for
+  `supabase/hosted-migrations.lock.json` (§4a) — do not add further entries to
+  it without the same standard of proof (reproduce the finding locally,
+  confirm it is not a real secret) that entry required.
 - **Server-only code entering the client bundle**: `src/tests/bundle-boundary.test.ts`,
   run in the `test` CI job against the real `.output` produced by the `build`
   job, checks for `supabaseAdmin` / `SUPABASE_SERVICE_ROLE_KEY` reachable from

@@ -1,0 +1,18 @@
+title = "APSA gitleaks config"
+
+# Extend, don't replace, gitleaks' default ruleset — we only add an
+# allowlist entry, not new rules or weaker detection.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated content-hash lock file — sha256 digests of migration file contents, not secrets"
+# supabase/hosted-migrations.lock.json (scripts/check-migration-safety.ts,
+# docs/GITHUB_GOVERNANCE.md §8) stores sha256(migration file contents) so CI
+# can detect if an already-hosted migration was edited. A 64-hex-char digest
+# has exactly the entropy shape gitleaks' generic-api-key rule looks for,
+# which is a false positive here — it is a hash of public, already-committed
+# SQL, not a credential. Everything else in the repo is still scanned.
+paths = [
+  '''supabase/hosted-migrations\.lock\.json''',
+]
