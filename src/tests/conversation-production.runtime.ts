@@ -83,7 +83,7 @@ beforeAll(async () => {
   for (const name of readdirSync("supabase/migrations")
     .filter((name) => /^\d+.*\.sql$/.test(name))
     .sort()) {
-    if (/^02[89]_/.test(name) || name.startsWith("030_")) continue; // Main 030 has an ambiguous overloaded-function COMMENT.
+    if (/^02[89]_/.test(name)) continue; // 028-029 remain exclusively reserved for Payment.
     if (name.startsWith("037_")) {
       // Existing history must migrate even after its assigned/sending staff left.
       await db.exec(`
@@ -500,21 +500,22 @@ describe("existing Order handoff and migration prerequisite", () => {
       await db.exec("reset role");
     }
   });
-  it("records the clean-main 030 failure, then tests its unchanged function body in isolation", async () => {
-    const migration = readFileSync("supabase/migrations/030_order_conversation_source.sql", "utf8");
-    await expect(db.exec(migration)).rejects.toThrow(
-      'function name "public.create_order_v1" is not unique',
-    );
-    // Diagnostic fixture only: remove the ambiguous metadata COMMENT, not any
-    // executable Order logic. Deployment remains blocked on main's 030 repair.
-    await db.exec(
-      migration.slice(0, migration.lastIndexOf("COMMENT ON FUNCTION public.create_order_v1")),
-    );
-    const privilege = await row(`select has_function_privilege('authenticated',
+  it("migration 030 applied cleanly and secured the new create_order_v1 overload", async () => {
+    // Migration 030 already ran in beforeAll (fixed: the COMMENT now names the
+    // full 8-argument identity, so it is no longer ambiguous against the
+    // 7-argument overload from migration 024; the new overload's EXECUTE grant
+    // is explicitly revoked from PUBLIC/anon/authenticated and granted only to
+    // service_role). Confirm both the migration itself and the fix here.
+    for (const roleName of ["anon", "authenticated"]) {
+      const privilege = await row(
+        `select has_function_privilege('${roleName}',
+        'public.create_order_v1(uuid,uuid,text,jsonb,uuid,uuid,bigint,text)', 'EXECUTE') as exposed`,
+      );
+      expect(privilege.exposed).toBe(false);
+    }
+    const servicePrivilege = await row(`select has_function_privilege('service_role',
       'public.create_order_v1(uuid,uuid,text,jsonb,uuid,uuid,bigint,text)', 'EXECUTE') as exposed`);
-    // A second existing prerequisite: this overload defaults to PUBLIC execute.
-    // No application permission gate can secure that direct RPC exposure.
-    expect(privilege.exposed).toBe(true);
+    expect(servicePrivilege.exposed).toBe(true);
   });
   it("real Conversation and Customer reach Smart Actions, Draft and existing Confirm", async () => {
     const service = await import("../server/conversations/service");
