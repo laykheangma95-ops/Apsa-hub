@@ -21,14 +21,7 @@ const POSE_EMOTION: Record<ApsiPose, ApsiEmotion> = {
   merging: "merge",
 };
 
-export function EmptyState({
-  title,
-  body,
-  action,
-  emotion,
-  pose,
-  className,
-}: EmptyStateProps) {
+export function EmptyState({ title, body, action, emotion, pose, className }: EmptyStateProps) {
   const resolvedEmotion = emotion ?? (pose ? POSE_EMOTION[pose] : "sleepy");
 
   return (

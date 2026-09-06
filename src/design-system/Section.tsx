@@ -28,11 +28,7 @@ export function Section({
     <section className={cn("flex flex-col gap-2", className)}>
       {title || action ? (
         <div className="flex min-w-0 items-center justify-between gap-3 px-1">
-          {title ? (
-            <h2 className="text-label min-w-0 text-text-secondary">{title}</h2>
-          ) : (
-            <span />
-          )}
+          {title ? <h2 className="text-label min-w-0 text-text-secondary">{title}</h2> : <span />}
           {action}
         </div>
       ) : null}
@@ -52,9 +48,7 @@ export function Section({
 
 /** Divider-separated rows inside a single Section card — never a nested card. */
 export function SectionRows({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <div className={cn("divide-y divide-border-default", className)}>{children}</div>
-  );
+  return <div className={cn("divide-y divide-border-default", className)}>{children}</div>;
 }
 
 export function SectionRow({

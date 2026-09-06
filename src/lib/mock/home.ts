@@ -45,7 +45,12 @@ export const homeSummaries: Record<MetricRange, HomeSummary> = {
       { id: "low_stock", count: 2, tone: "danger" },
     ],
     metrics: [
-      { id: "orders", value: "214", deltaPercent: 8.1, series: series([28, 33, 30, 38, 35, 24, 26]) },
+      {
+        id: "orders",
+        value: "214",
+        deltaPercent: 8.1,
+        series: series([28, 33, 30, 38, 35, 24, 26]),
+      },
       {
         id: "new_customers",
         value: "41",

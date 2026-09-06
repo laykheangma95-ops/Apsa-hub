@@ -78,7 +78,7 @@ Jobs, and what each one is (and isn't) proof of:
 | `typecheck`        | Yes                                     | `tsc --noEmit` is clean                                                                                                                                                                                                                                                                                          |
 | `build`            | Yes                                     | `vite build` / Nitro build succeeds — also produces `.output` for the bundle-boundary scan                                                                                                                                                                                                                       |
 | `lint-changed`     | Yes                                     | ESLint is clean on the files this PR actually touches                                                                                                                                                                                                                                                            |
-| `lint-baseline`    | **No** (informational)                  | Whole-repo lint status — see §4 for why                                                                                                                                                                                                                                                                          |
+| `lint-baseline`    | Yes                                     | ESLint is clean across the whole repo                                                                                                                                                                                                                                                                            |
 | `test`             | Yes (with one documented exception, §4) | `bun test src/tests/` passes — this includes the domain test suites (order, product, inventory, payment, conversation, delivery, customer), `tenant-isolation.test.ts`, `rpc-security.test.ts`, `bundle-boundary.test.ts` (server/client boundary + built-bundle secret scan), and the Khmer/localization suites |
 | `migration-safety` | Yes                                     | See §4 (Migration Safety Check)                                                                                                                                                                                                                                                                                  |
 | `secret-scan`      | Yes                                     | Gitleaks finds no committed secrets in the diff                                                                                                                                                                                                                                                                  |
@@ -93,17 +93,9 @@ exactly what independent review (§5) exists to cover.
 ## 4. Known, documented baseline exceptions
 
 Per this governance phase's instructions, CI must not become a permanently
-failing gate over pre-existing, out-of-scope issues. Two are known today:
+failing gate over pre-existing, out-of-scope issues. One is known today:
 
-1. **Whole-repo `bun run lint`**: currently reports ~400 pre-existing
-   prettier/formatting errors across files this governance change does not
-   touch (confirmed independently in PR #32's own verification table: "395
-   errors / 12 warnings — not worse than main"). Fixing this repo-wide is a
-   dedicated cleanup PR, not a side effect of unrelated work. `lint-baseline`
-   runs it as `continue-on-error: true` so the trend is visible without
-   blocking every PR; `lint-changed` is the actual blocking gate and lints
-   only files touched by the PR's diff.
-2. **`src/tests/auth-hardening.test.ts`**: its "runs isolated runtime checks
+1. **`src/tests/auth-hardening.test.ts`**: its "runs isolated runtime checks
    without mutating the shared test module cache" test spawns a subprocess
    and times out (~5s) on a clean checkout, independent of any feature
    change — also independently confirmed in PR #32. The `test` CI job
@@ -111,9 +103,23 @@ failing gate over pre-existing, out-of-scope issues. Two are known today:
    separately as `continue-on-error: true`, so a real new failure elsewhere in
    the 1140+ other tests is never masked by this pre-existing flake.
 
-If either of these is ever fixed, remove the corresponding carve-out from
-`.github/workflows/ci.yml` in the same PR that fixes it — do not leave stale
-exceptions in place.
+If this is ever fixed, remove the carve-out from `.github/workflows/ci.yml`
+in the same PR that fixes it — do not leave stale exceptions in place.
+
+**Resolved:** whole-repo `bun run lint` previously reported ~400 pre-existing
+prettier/formatting errors (confirmed in PR #32's verification table: "395
+errors / 12 warnings — not worse than main") and ran as `continue-on-error:
+true` (`lint-baseline`, informational only). A dedicated cleanup pass fixed
+all 395 errors (391 via `eslint --fix` for prettier/formatting, 4 by removing
+redundant `require()` calls in `src/tests/route-guard.test.ts` where `fs`/
+`path` were already imported at module scope) with no runtime behavior
+change. `lint-baseline` is now a blocking gate like `lint-changed`. 12
+pre-existing warnings remain (`react-refresh/only-export-components` on
+files that export both components and constants/hooks, one
+`react-hooks/exhaustive-deps` in `src/routes/app.pos.tsx`) — these need a
+structural refactor (splitting exports into new files, or restructuring a
+`useMemo`) rather than a mechanical fix, and `app.pos.tsx` is Lovable-owned
+UI (POS), so they're left as-is; ESLint does not fail the build on warnings.
 
 A third one was found _by_ building the migration-safety check below, and is
 now resolved — kept here as a record of what the checker is for:

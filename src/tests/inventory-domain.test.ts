@@ -40,13 +40,10 @@ let supabaseConfigured = false;
 
 beforeAll(() => {
   supabaseConfigured =
-    Boolean(process.env["VITE_SUPABASE_URL"]) &&
-    Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
+    Boolean(process.env["VITE_SUPABASE_URL"]) && Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
 
   if (!supabaseConfigured) {
-    console.warn(
-      "[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
+    console.warn("[SKIP] Live DB tests require VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
   }
 });
 
@@ -239,20 +236,17 @@ describe("Test 13: Cross-org location_id is rejected", () => {
     const { recordMovement } = await import("../server/inventory/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["inventory.receive_stock"]);
 
-    await withInventoryDb(
-      { product_variants: variantRow, locations: noRow },
-      async () => {
-        await expect(
-          recordMovement(ctx, {
-            productId: PRODUCT_ID,
-            variantId: VARIANT_ID,
-            locationId: LOCATION_ID,
-            quantityDelta: 10,
-            movementType: "restock",
-          }),
-        ).rejects.toThrow(/Location not found/i);
-      },
-    );
+    await withInventoryDb({ product_variants: variantRow, locations: noRow }, async () => {
+      await expect(
+        recordMovement(ctx, {
+          productId: PRODUCT_ID,
+          variantId: VARIANT_ID,
+          locationId: LOCATION_ID,
+          quantityDelta: 10,
+          movementType: "restock",
+        }),
+      ).rejects.toThrow(/Location not found/i);
+    });
   });
 });
 
@@ -383,7 +377,10 @@ describe("Test 4: Zero delta is denied", () => {
 
   it("Zod schema rejects zero at the API boundary", async () => {
     const { z } = await import("zod");
-    const schema = z.number().int().refine((n) => n !== 0, "quantity_delta must not be zero");
+    const schema = z
+      .number()
+      .int()
+      .refine((n) => n !== 0, "quantity_delta must not be zero");
     expect(() => schema.parse(0)).toThrow(/not be zero/i);
     expect(() => schema.parse(5)).not.toThrow();
     expect(() => schema.parse(-5)).not.toThrow();
@@ -672,9 +669,8 @@ describe("Test 10: Movement history preserves repository (newest-first) order", 
       },
     ];
 
-    const result = await withInventoryDb(
-      { inventory_movements: { data: rows, error: null } },
-      () => listMovementHistory(ctx, { variant_id: VARIANT_ID }),
+    const result = await withInventoryDb({ inventory_movements: { data: rows, error: null } }, () =>
+      listMovementHistory(ctx, { variant_id: VARIANT_ID }),
     );
 
     expect(result.map((m) => m.id)).toEqual(["m-3", "m-2", "m-1"]);
@@ -710,7 +706,8 @@ describe("Test 11: Duplicate reference is treated as an idempotent conflict, not
       data: null,
       error: {
         code: "23505",
-        message: 'duplicate key value violates unique constraint "uniq_inventory_movements_reference"',
+        message:
+          'duplicate key value violates unique constraint "uniq_inventory_movements_reference"',
       },
     };
 

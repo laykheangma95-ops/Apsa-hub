@@ -77,20 +77,14 @@ jobs:
           echo "$FILES" | xargs bunx eslint
 
   lint-baseline:
-    name: Lint (whole repo) — informational, non-blocking
+    name: Lint (whole repo) — blocking
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      # KNOWN BASELINE EXCEPTION (documented in docs/GITHUB_GOVERNANCE.md):
-      # whole-repo `bun run lint` currently fails with ~400 pre-existing
-      # prettier/formatting errors unrelated to any single change. This job
-      # is intentionally non-blocking until that backlog is cleaned up in a
-      # dedicated PR. lint-changed above is the blocking gate.
       - run: bun run lint
 
   test:

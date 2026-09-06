@@ -24,14 +24,7 @@ export type ApsiEmotion =
   | "merge";
 
 export type ApsiAnimation =
-  | "none"
-  | "float"
-  | "gentle-bounce"
-  | "wave"
-  | "blink"
-  | "pulse"
-  | "celebrate"
-  | "thinking";
+  "none" | "float" | "gentle-bounce" | "wave" | "blink" | "pulse" | "celebrate" | "thinking";
 
 export type ApsiSurface = "marketing" | "onboarding" | "moment" | "empty" | "insight";
 

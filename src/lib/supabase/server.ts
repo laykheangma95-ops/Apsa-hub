@@ -34,8 +34,8 @@ export const COOKIE_OPTIONS = {
 type AdminClient = ReturnType<typeof createClient<Database>>;
 
 function buildAdminClient(): AdminClient {
-  const supabaseUrl = process.env['VITE_SUPABASE_URL'];
-  const serviceRoleKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  const supabaseUrl = process.env["VITE_SUPABASE_URL"];
+  const serviceRoleKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];
 
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error(
@@ -71,8 +71,8 @@ export const supabaseAdmin: AdminClient = new Proxy({} as AdminClient, {
  * Never use this for privileged admin operations — use supabaseAdmin for those.
  */
 export function createServerClient(accessToken: string) {
-  const url = process.env['VITE_SUPABASE_URL']!;
-  const anonKey = process.env['VITE_SUPABASE_ANON_KEY']!;
+  const url = process.env["VITE_SUPABASE_URL"]!;
+  const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
 
   return createClient<Database>(url, anonKey, {
     global: {
@@ -92,8 +92,8 @@ export function createServerClient(accessToken: string) {
  * Does NOT carry a user JWT — call refreshSession({ refresh_token }) on it.
  */
 export function createRefreshClient() {
-  const url = process.env['VITE_SUPABASE_URL']!;
-  const anonKey = process.env['VITE_SUPABASE_ANON_KEY']!;
+  const url = process.env["VITE_SUPABASE_URL"]!;
+  const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
 
   return createClient<Database>(url, anonKey, {
     auth: {

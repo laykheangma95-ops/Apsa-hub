@@ -68,10 +68,7 @@ export async function insertMovement(
 export function isDuplicateReferenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const code = (err as Error & { code?: string }).code;
-  return (
-    code === PG_UNIQUE_VIOLATION ||
-    err.message.includes("uniq_inventory_movements_reference")
-  );
+  return code === PG_UNIQUE_VIOLATION || err.message.includes("uniq_inventory_movements_reference");
 }
 
 export async function listMovements(

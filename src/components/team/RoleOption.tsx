@@ -35,7 +35,9 @@ export function RoleOption({ role, selected, onSelect }: RoleOptionProps) {
           {t(`team.roleDescription.${role}`)}
         </span>
       </span>
-      {selected ? <Check className="mt-0.5 size-5 shrink-0 text-action-primary" aria-hidden /> : null}
+      {selected ? (
+        <Check className="mt-0.5 size-5 shrink-0 text-action-primary" aria-hidden />
+      ) : null}
     </button>
   );
 }

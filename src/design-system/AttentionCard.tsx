@@ -1,4 +1,11 @@
-import { AlertTriangle, ChevronRight, MessageSquare, Truck, Wallet, type LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronRight,
+  MessageSquare,
+  Truck,
+  Wallet,
+  type LucideIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { AttentionItem } from "@/types";
@@ -35,7 +42,12 @@ export function AttentionCard({ item, onClick, className }: AttentionCardProps) 
         className,
       )}
     >
-      <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-xl", TONE[item.tone])}>
+      <span
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-xl",
+          TONE[item.tone],
+        )}
+      >
         <Icon className="size-4" aria-hidden />
       </span>
       <span className="min-w-0 flex-1">

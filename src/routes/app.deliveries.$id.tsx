@@ -295,7 +295,9 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
               <SectionRow
                 label={t("delivery.tracking")}
                 value={
-                  <span className="tnum">{d.externalTrackingNumber ?? t("delivery.noTracking")}</span>
+                  <span className="tnum">
+                    {d.externalTrackingNumber ?? t("delivery.noTracking")}
+                  </span>
                 }
               />
               {order ? (
@@ -493,11 +495,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
       detail: event.context ?? undefined,
       meta: fullTimestamp(event.at),
       tone:
-        event.status === "delivered"
-          ? "success"
-          : event.status === "failed"
-            ? "danger"
-            : "default",
+        event.status === "delivered" ? "success" : event.status === "failed" ? "danger" : "default",
     }));
 
   const showActions = failed || status === "in_transit";

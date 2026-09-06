@@ -60,9 +60,7 @@ function TeamScreen() {
 
   const members = useMemo(() => {
     const base = [...(teamQuery.data ?? []), ...extra];
-    return base
-      .filter((m) => !removed.includes(m.id))
-      .map((m) => roleChanges[m.id] ?? m);
+    return base.filter((m) => !removed.includes(m.id)).map((m) => roleChanges[m.id] ?? m);
   }, [teamQuery.data, extra, removed, roleChanges]);
 
   const ownerOnly = members.length === 1 && members[0]?.role === "owner";
@@ -91,10 +89,7 @@ function TeamScreen() {
 
         <div className="mt-4">
           {!permissions.manageTeam ? (
-            <OperationalState
-              title={t("team.restricted.title")}
-              body={t("team.restricted.body")}
-            />
+            <OperationalState title={t("team.restricted.title")} body={t("team.restricted.body")} />
           ) : teamQuery.isLoading ? (
             <ListSkeleton rows={4} />
           ) : teamQuery.isError ? (

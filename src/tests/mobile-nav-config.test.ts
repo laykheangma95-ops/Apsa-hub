@@ -1,20 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import {
-  getBusinessNavConfig,
-  resolveMobileNavActiveTab,
-} from "@/design-system/mobile-nav-config";
+import { getBusinessNavConfig, resolveMobileNavActiveTab } from "@/design-system/mobile-nav-config";
 
 describe("mobile nav config", () => {
   it("keeps the online-seller primary tab order stable", () => {
     const config = getBusinessNavConfig("online-seller");
 
-    expect(config.tabs.map((tab) => tab.id)).toEqual([
-      "home",
-      "inbox",
-      "resolve",
-      "sales",
-      "more",
-    ]);
+    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "inbox", "resolve", "sales", "more"]);
   });
 
   it("includes the required resolve actions with honest availability states", () => {
@@ -28,9 +19,7 @@ describe("mobile nav config", () => {
       "check-payment",
       "track-delivery",
     ]);
-    expect(actions.find((action) => action.id === "find-customer")?.availability).toBe(
-      "assistive",
-    );
+    expect(actions.find((action) => action.id === "find-customer")?.availability).toBe("assistive");
     expect(actions.filter((action) => action.availability === "coming-soon").length).toBe(4);
   });
 
@@ -48,12 +37,6 @@ describe("mobile nav config", () => {
   it("keeps a future mart variant available without changing the current shell", () => {
     const config = getBusinessNavConfig("mart");
 
-    expect(config.tabs.map((tab) => tab.id)).toEqual([
-      "home",
-      "sales",
-      "resolve",
-      "stock",
-      "more",
-    ]);
+    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "sales", "resolve", "stock", "more"]);
   });
 });

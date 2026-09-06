@@ -79,7 +79,11 @@ export function PosCustomerSheet({ open, onOpenChange, onSelect }: PosCustomerSh
             />
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" className="tap-target flex-1" onClick={() => setCreating(false)}>
+            <Button
+              variant="outline"
+              className="tap-target flex-1"
+              onClick={() => setCreating(false)}
+            >
               {t("common.cancel")}
             </Button>
             <Button
@@ -107,10 +111,7 @@ export function PosCustomerSheet({ open, onOpenChange, onSelect }: PosCustomerSh
           ) : null}
 
           {!customersQuery.isPending && !customersQuery.isError && results.length === 0 ? (
-            <PosNotice
-              title={t("pos.customer.empty.title")}
-              body={t("pos.customer.empty.body")}
-            />
+            <PosNotice title={t("pos.customer.empty.title")} body={t("pos.customer.empty.body")} />
           ) : null}
 
           {results.length > 0 ? (

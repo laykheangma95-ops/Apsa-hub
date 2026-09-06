@@ -1,7 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import { BottomSheet, CustomerSummaryCard, ErrorState, SkeletonBlock, StatusChip } from "@/design-system";
+import {
+  BottomSheet,
+  CustomerSummaryCard,
+  ErrorState,
+  SkeletonBlock,
+  StatusChip,
+} from "@/design-system";
 import { getCustomerOrders } from "@/lib/api";
 import { fullTimestamp } from "@/lib/format";
 import { formatMoney } from "@/lib/money";

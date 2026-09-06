@@ -198,11 +198,7 @@ process.env["VITE_SUPABASE_ANON_KEY"] = "anon-test-key";
 const authModule = await import("@/api/auth");
 const appGuardModule = await import("@/api/app-guard");
 
-const {
-  COOKIE_ACCESS_TOKEN,
-  COOKIE_REFRESH_TOKEN,
-  signInFn,
-} = authModule;
+const { COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN, signInFn } = authModule;
 const { checkAppGuardFn } = appGuardModule;
 
 beforeEach(() => {

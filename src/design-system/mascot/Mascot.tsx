@@ -1,15 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import {
-  companionSource,
-  COMPANION_TOKEN,
-  type MascotSource,
-} from "./mascot-assets";
-import {
-  apsiEmotions,
-  type ApsiAnimation,
-  type ApsiEmotion,
-} from "./apsi-emotions";
+import { companionSource, COMPANION_TOKEN, type MascotSource } from "./mascot-assets";
+import { apsiEmotions, type ApsiAnimation, type ApsiEmotion } from "./apsi-emotions";
 import { resolveMascotEmotion, type MascotState } from "./mascot-states";
 
 export type ApsiSize = "xs" | "sm" | "md" | "lg" | "xl" | number;

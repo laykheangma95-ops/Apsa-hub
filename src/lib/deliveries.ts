@@ -101,9 +101,16 @@ const DELIVERY_TRANSITIONS: Readonly<Record<RealDeliveryStatus, readonly RealDel
   cancelled: [],
 };
 
-const TERMINAL_DELIVERY_STATUSES: readonly RealDeliveryStatus[] = ["delivered", "failed", "cancelled"];
+const TERMINAL_DELIVERY_STATUSES: readonly RealDeliveryStatus[] = [
+  "delivered",
+  "failed",
+  "cancelled",
+];
 
-export function isValidDeliveryTransition(from: RealDeliveryStatus, to: RealDeliveryStatus): boolean {
+export function isValidDeliveryTransition(
+  from: RealDeliveryStatus,
+  to: RealDeliveryStatus,
+): boolean {
   return DELIVERY_TRANSITIONS[from].includes(to);
 }
 

@@ -16,10 +16,7 @@ import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 
-const routeCode = fs.readFileSync(
-  path.resolve(process.cwd(), "src/routes/app.tsx"),
-  "utf-8",
-);
+const routeCode = fs.readFileSync(path.resolve(process.cwd(), "src/routes/app.tsx"), "utf-8");
 
 // ── U1: beforeLoad guard is used, not useEffect ───────────────────────────────
 
@@ -46,12 +43,7 @@ describe("U2: Guard uses cookie-based session via server function", () => {
   });
 
   it("app-guard.ts imports getSessionFn from @/api/auth", () => {
-    const fs = require("fs");
-    const path = require("path");
-    const guardCode = fs.readFileSync(
-      path.resolve(process.cwd(), "src/api/app-guard.ts"),
-      "utf-8",
-    );
+    const guardCode = fs.readFileSync(path.resolve(process.cwd(), "src/api/app-guard.ts"), "utf-8");
     expect(guardCode).toMatch(/from "@\/api\/auth"/);
     expect(guardCode).toMatch(/getSessionFn/);
   });
@@ -95,12 +87,7 @@ describe("U4: Organization identity comes from server lookup, not client input",
   });
 
   it("guard server function file uses supabaseAdmin for org lookup", () => {
-    const fs = require("fs");
-    const path = require("path");
-    const guardCode = fs.readFileSync(
-      path.resolve(process.cwd(), "src/api/app-guard.ts"),
-      "utf-8",
-    );
+    const guardCode = fs.readFileSync(path.resolve(process.cwd(), "src/api/app-guard.ts"), "utf-8");
     expect(guardCode).toMatch(/supabaseAdmin/);
     expect(guardCode).toMatch(/memberships/);
   });

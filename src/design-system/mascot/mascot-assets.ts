@@ -23,13 +23,7 @@ export type CompanionName = "nilo" | "minto" | "vela" | "suri" | "luma";
  * state can be upgraded from static art to Lottie/Rive/video/3D by swapping the
  * source object only — no component or screen changes.
  */
-export type MascotMediaKind =
-  | "image"
-  | "animated-webp"
-  | "lottie"
-  | "rive"
-  | "video"
-  | "3d";
+export type MascotMediaKind = "image" | "animated-webp" | "lottie" | "rive" | "video" | "3d";
 
 export interface MascotSource {
   kind: MascotMediaKind;

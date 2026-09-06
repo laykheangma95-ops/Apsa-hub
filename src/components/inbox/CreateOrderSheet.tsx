@@ -28,8 +28,7 @@ interface CreateOrderSheetProps {
   onCreated: (order: Order) => void;
 }
 
-const chipClass =
-  "tap-target rounded-full border px-4 text-label transition-colors";
+const chipClass = "tap-target rounded-full border px-4 text-label transition-colors";
 
 export function CreateOrderSheet({
   open,
@@ -135,7 +134,9 @@ export function CreateOrderSheet({
         handleOpenChange(false);
       }, 1100);
     } catch (error) {
-      setFailure(error instanceof Error && error.message === PERMISSION_DENIED ? "permission" : "generic");
+      setFailure(
+        error instanceof Error && error.message === PERMISSION_DENIED ? "permission" : "generic",
+      );
       setSubmitting(false);
     }
   }
@@ -229,7 +230,11 @@ export function CreateOrderSheet({
 
               <div className="flex items-center justify-between gap-3">
                 <span className="text-label text-text-secondary">{t("createOrder.quantity")}</span>
-                <QuantityStepper value={quantity} onChange={setQuantity} {...(product.stock != null ? { max: product.stock } : {})} />
+                <QuantityStepper
+                  value={quantity}
+                  onChange={setQuantity}
+                  {...(product.stock != null ? { max: product.stock } : {})}
+                />
               </div>
 
               <div className="flex items-center justify-between">

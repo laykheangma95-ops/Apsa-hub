@@ -54,9 +54,9 @@ export async function verifyActiveMembership(
 
   if (rpError) return null;
 
-  const permissionIds = ((rolePermissions ?? []) as unknown as Array<{ permission_id: string }>).map(
-    (rp) => rp.permission_id,
-  );
+  const permissionIds = (
+    (rolePermissions ?? []) as unknown as Array<{ permission_id: string }>
+  ).map((rp) => rp.permission_id);
 
   let permissions = new Set<string>();
   if (permissionIds.length > 0) {

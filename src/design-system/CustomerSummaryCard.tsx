@@ -30,10 +30,7 @@ export function CustomerSummaryCard({
 
   return (
     <section
-      className={cn(
-        "rounded-2xl border border-border-default bg-surface-primary p-4",
-        className,
-      )}
+      className={cn("rounded-2xl border border-border-default bg-surface-primary p-4", className)}
     >
       <div className="flex items-start gap-3">
         <span
@@ -61,7 +58,9 @@ export function CustomerSummaryCard({
         </div>
         <div>
           <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
-          <dd className="text-financial text-text-primary">{formatMoney(customer.lifetimeSpend)}</dd>
+          <dd className="text-financial text-text-primary">
+            {formatMoney(customer.lifetimeSpend)}
+          </dd>
         </div>
         <div>
           <dt className="text-caption text-text-muted">{t("customer.lastPurchase")}</dt>

@@ -75,7 +75,12 @@ const ALL_STATUSES: StatusKey[] = [
 const TOKEN_GROUPS: { name: string; vars: string[] }[] = [
   {
     name: "Brand & action",
-    vars: ["--brand-primary", "--action-primary", "--action-primary-hover", "--action-primary-soft"],
+    vars: [
+      "--brand-primary",
+      "--action-primary",
+      "--action-primary-hover",
+      "--action-primary-soft",
+    ],
   },
   {
     name: "Surface",
@@ -235,7 +240,12 @@ function DesignReference() {
 
           <div className="space-y-2 rounded-2xl border border-border-default p-4">
             <MessageBubble
-              message={{ id: "m1", direction: "inbound", body: "មានពណ៌ខ្មៅ size M អត់?", at: new Date().toISOString() }}
+              message={{
+                id: "m1",
+                direction: "inbound",
+                body: "មានពណ៌ខ្មៅ size M អត់?",
+                at: new Date().toISOString(),
+              }}
             />
             <MessageBubble
               message={{
@@ -247,11 +257,20 @@ function DesignReference() {
               }}
             />
             <MessageBubble
-              message={{ id: "m3", direction: "system", body: "Order APSA-0143 created", at: new Date().toISOString() }}
+              message={{
+                id: "m3",
+                direction: "system",
+                body: "Order APSA-0143 created",
+                at: new Date().toISOString(),
+              }}
             />
           </div>
 
-          <CustomerSummaryCard customer={customer} displayName={localName(customer, language)} onViewProfile={() => undefined} />
+          <CustomerSummaryCard
+            customer={customer}
+            displayName={localName(customer, language)}
+            onViewProfile={() => undefined}
+          />
 
           <div className="grid grid-cols-2 gap-2">
             {homeSummaries.today.metrics.map((metric) => (

@@ -18,12 +18,13 @@ export const Route = createFileRoute("/design-mascot")({
       {
         name: "description",
         content:
-           "Every APSA mascot emotion, companion accent, placement and future-ready asset in one reference.",
+          "Every APSA mascot emotion, companion accent, placement and future-ready asset in one reference.",
       },
       { property: "og:title", content: "Apsi mascot system — APSA" },
       {
         property: "og:description",
-         content: "The official Apsi visual language: 16 named emotions, companions and asset names.",
+        content:
+          "The official Apsi visual language: 16 named emotions, companions and asset names.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -40,8 +41,8 @@ function MascotReference() {
       <div className="mx-auto w-full max-w-4xl">
         <h1 className="text-h1">Apsi mascot system</h1>
         <p className="text-body mt-2 max-w-xl text-text-secondary">
-          Screens name an emotion, never a pose or a file. Current stills preserve the approved
-          Apsi artwork; future animation swaps happen in one registry.
+          Screens name an emotion, never a pose or a file. Current stills preserve the approved Apsi
+          artwork; future animation swaps happen in one registry.
         </p>
 
         <section className="mt-10">
@@ -64,7 +65,8 @@ function MascotReference() {
                   <p className="text-body-sm mt-3 text-text-secondary">{spec.intent}</p>
                   <p className="text-caption mt-2 text-text-secondary">{spec.placement}</p>
                   <p className="text-caption mt-2 text-text-muted">
-                    {spec.surface} · {spec.loop ? "loops" : "plays once"} · {spec.animation} · {spec.source.kind}
+                    {spec.surface} · {spec.loop ? "loops" : "plays once"} · {spec.animation} ·{" "}
+                    {spec.source.kind}
                   </p>
                 </li>
               );

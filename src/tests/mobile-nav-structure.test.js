@@ -6,12 +6,15 @@ import path from "node:path";
 const root = process.cwd();
 const appRoute = fs.readFileSync(path.join(root, "src/routes/app.tsx"), "utf8");
 const bottomNav = fs.readFileSync(path.join(root, "src/design-system/BottomNav.tsx"), "utf8");
-const navConfig = fs.readFileSync(path.join(root, "src/design-system/mobile-nav-config.ts"), "utf8");
+const navConfig = fs.readFileSync(
+  path.join(root, "src/design-system/mobile-nav-config.ts"),
+  "utf8",
+);
 
 test("/app stays protected with beforeLoad redirects", () => {
   assert.ok(appRoute.includes("beforeLoad"));
   assert.ok(appRoute.includes("checkAppGuardFn"));
-  assert.ok(appRoute.includes('throw redirect({ to: result.redirect })'));
+  assert.ok(appRoute.includes("throw redirect({ to: result.redirect })"));
 });
 
 test("online-seller mobile tab order stays Home Inbox Resolve Sales More", () => {

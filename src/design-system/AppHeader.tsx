@@ -77,7 +77,12 @@ export function AppHeader({
           <span className="min-w-0 flex-1">
             <span className="text-h3 block truncate">{title}</span>
             {subtitle ? (
-              <span className={cn("text-caption block", gradient ? "opacity-85" : "text-text-secondary")}>
+              <span
+                className={cn(
+                  "text-caption block",
+                  gradient ? "opacity-85" : "text-text-secondary",
+                )}
+              >
                 {subtitle}
               </span>
             ) : null}

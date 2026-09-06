@@ -90,8 +90,7 @@ beforeAll(() => {
   // SUPABASE_SERVICE_ROLE_KEY. Checking these here ensures the skip logic in
   // requireSupabase() correctly reflects real connectivity, not a var-name mismatch.
   supabaseConfigured =
-    Boolean(process.env["VITE_SUPABASE_URL"]) &&
-    Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
+    Boolean(process.env["VITE_SUPABASE_URL"]) && Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]);
 
   if (!supabaseConfigured) {
     console.warn(
@@ -216,9 +215,9 @@ describe("U2: auditLog() rejects mandatory-audit actions (Blocker 4 guard)", () 
     } as unknown as Parameters<typeof auditLog>[0];
 
     for (const action of MANDATORY_AUDIT_ACTIONS) {
-      await expect(
-        auditLog(fakeCtx, { action, resourceType: "test" }),
-      ).rejects.toThrow(/mandatory-audit/);
+      await expect(auditLog(fakeCtx, { action, resourceType: "test" })).rejects.toThrow(
+        /mandatory-audit/,
+      );
     }
   });
 
@@ -278,11 +277,7 @@ describe("U3: MANDATORY_AUDIT_ACTIONS set is correct", () => {
   });
 
   it("does not contain low-risk actions", () => {
-    const lowRisk: AuditAction[] = [
-      "auth.sign_in",
-      "auth.sign_out",
-      "orders.create",
-    ];
+    const lowRisk: AuditAction[] = ["auth.sign_in", "auth.sign_out", "orders.create"];
     for (const action of lowRisk) {
       expect(MANDATORY_AUDIT_ACTIONS.has(action)).toBe(false);
     }
@@ -309,23 +304,17 @@ describe("Test 1: Authorized member can access own organization", () => {
 describe("Test 2: Member cannot read another organization", () => {
   it("Owner of Org A cannot access Org B", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_B_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_A_OWNER, ORG_B_ID));
   });
 
   it("Owner of Org B cannot access Org A", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_ORG_B_OWNER, ORG_A_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_B_OWNER, ORG_A_ID));
   });
 
   it("Manager of Org A cannot access Org B even if they know the ID", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_B_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_B_ID));
   });
 });
 
@@ -340,18 +329,14 @@ describe("Test 3: Member cannot update another organization", () => {
     expect(ctx.can("organization.update")).toBe(true);
 
     // But they cannot construct a context for Org B to call org.update there
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_B_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_A_MANAGER, ORG_B_ID));
   });
 });
 
 describe("Test 4: Guessed org ID is rejected", () => {
   it("Using a valid UUID that is not a real org returns unauthorized", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_ORG_A_OWNER, FAKE_ORG_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_ORG_A_OWNER, FAKE_ORG_ID));
   });
 
   it("AuthorizationService.can returns false for fake org", async () => {
@@ -367,25 +352,19 @@ describe("Test 4: Guessed org ID is rejected", () => {
 describe("Test 5: Manipulated organization input is rejected", () => {
   it("User with no membership cannot access Org A", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_A_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_A_ID));
   });
 
   it("User with no membership cannot access Org B either", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_B_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_NO_MEMBERSHIP, ORG_B_ID));
   });
 
   it("Completely unknown user ID cannot access any org", async () => {
     const unknownUserId = "00000000-0000-0000-0000-000000000000";
-    const result = await AuthorizationService.can(
-      unknownUserId,
-      ORG_A_ID,
-      "orders.read",
-    ).catch(() => false);
+    const result = await AuthorizationService.can(unknownUserId, ORG_A_ID, "orders.read").catch(
+      () => false,
+    );
     expect(result).toBe(false);
   });
 });
@@ -393,36 +372,26 @@ describe("Test 5: Manipulated organization input is rejected", () => {
 describe("Test 6: Suspended membership is denied", () => {
   it("Suspended member cannot access the organization", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_SUSPENDED, ORG_A_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_SUSPENDED, ORG_A_ID));
   });
 });
 
 describe("Test 7: Removed membership is denied", () => {
   it("Removed member cannot access the organization", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest(USER_REMOVED, ORG_A_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest(USER_REMOVED, ORG_A_ID));
   });
 });
 
 describe("Test 8: Unauthenticated access is denied", () => {
   it("Empty-string userId cannot access any org", async () => {
-    const result = await AuthorizationService.can(
-      "",
-      ORG_A_ID,
-      "orders.read",
-    ).catch(() => false);
+    const result = await AuthorizationService.can("", ORG_A_ID, "orders.read").catch(() => false);
     expect(result).toBe(false);
   });
 
   it("forRequest with empty userId throws", async () => {
     if (!supabaseConfigured) return;
-    await expectForbidden(() =>
-      AuthorizationService.forRequest("", ORG_A_ID),
-    );
+    await expectForbidden(() => AuthorizationService.forRequest("", ORG_A_ID));
   });
 });
 
@@ -551,9 +520,7 @@ describe("Test 12: Final owner downgrade is blocked", () => {
     //           WHERE user_id = '<USER_ORG_A_OWNER>' AND organization_id = '<ORG_A_ID>';
     //   3. Expect ERROR: last_owner_protection: cannot demote or deactivate the last active owner
 
-    console.info(
-      "[TEST 12] Last owner downgrade is enforced by the same trigger as Test 11.",
-    );
+    console.info("[TEST 12] Last owner downgrade is enforced by the same trigger as Test 11.");
     expect(true).toBe(true);
   });
 });
