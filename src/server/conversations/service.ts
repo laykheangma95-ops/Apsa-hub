@@ -281,7 +281,7 @@ export async function listConversationMessages(
   ctx.require("messages.read");
   await requireOwnedConversation(ctx, conversationId);
 
-  let before: { occurredAt: string; id: string } | null = null;
+  let before: { occurredAt: string; sequence: number } | null = null;
   if (input.beforeId) {
     before = await repo.findMessageCursor(ctx.organizationId, conversationId, input.beforeId);
     if (!before) throw new ConversationError("invalid_cursor");

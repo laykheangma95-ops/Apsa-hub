@@ -69,14 +69,36 @@ export function conversationPostgrest(db: PGlite) {
         return chain;
       },
       or(filter: string) {
-        const match =
-          /^(last_message_at|occurred_at)\.lt\.([^,]+),and\(\1\.eq\.([^,]+),id\.lt\.([^)]+)\)$/.exec(
+        // Conversation-list keyset pagination ties break on `id` (a UUID);
+        // message keyset pagination ties break on `sequence` (a bigint) —
+        // see repository.ts's listMessagesBefore for why. Two distinct,
+        // narrow patterns, so an unrecognized filter still fails loudly
+        // rather than being silently misinterpreted.
+        const conversationMatch =
+          /^last_message_at\.lt\.([^,]+),and\(last_message_at\.eq\.([^,]+),id\.lt\.([^)]+)\)$/.exec(
             filter,
           );
-        if (!match || match[2] !== match[3])
-          throw new Error(`Unexpected repository filter ${filter}`);
-        where.push(`(${match[1]},id) < (${bind(match[2])}::timestamptz,${bind(match[4])}::uuid)`);
-        return chain;
+        if (conversationMatch) {
+          if (conversationMatch[1] !== conversationMatch[2])
+            throw new Error(`Unexpected repository filter ${filter}`);
+          where.push(
+            `(last_message_at,id) < (${bind(conversationMatch[1])}::timestamptz,${bind(conversationMatch[3])}::uuid)`,
+          );
+          return chain;
+        }
+        const messageMatch =
+          /^occurred_at\.lt\.([^,]+),and\(occurred_at\.eq\.([^,]+),sequence\.lt\.([^)]+)\)$/.exec(
+            filter,
+          );
+        if (messageMatch) {
+          if (messageMatch[1] !== messageMatch[2])
+            throw new Error(`Unexpected repository filter ${filter}`);
+          where.push(
+            `(occurred_at,sequence) < (${bind(messageMatch[1])}::timestamptz,${bind(messageMatch[3])}::bigint)`,
+          );
+          return chain;
+        }
+        throw new Error(`Unexpected repository filter ${filter}`);
       },
       async execute() {
         try {

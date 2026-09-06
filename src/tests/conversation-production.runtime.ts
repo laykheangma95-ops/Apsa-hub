@@ -461,9 +461,15 @@ describe("real repository and service through local SQL", () => {
     );
   });
   it("a delayed message outside the first page can be marked read when loaded", async () => {
+    // 51 messages share one occurred_at (a plausible provider burst or
+    // backfill), so the 50-message window must exclude exactly one of them.
+    // Pagination ties break on `sequence` (arrival order), not on the
+    // random `id` UUID — so the excluded one is deterministically the
+    // earliest arrival (history-0) on every run, never an arbitrary one.
     const service = await import("../server/conversations/service");
     const thread = await ensure(orgA, "deep-history", "identity-a");
-    for (let i = 0; i < 51; i++) await ingest(orgA, thread.id, `history-${i}`);
+    const history: { id: string; sequence: number }[] = [];
+    for (let i = 0; i < 51; i++) history.push(await ingest(orgA, thread.id, `history-${i}`));
     const late = await ingest(
       orgA,
       thread.id,
@@ -472,14 +478,77 @@ describe("real repository and service through local SQL", () => {
       "2020-01-01T00:00:00Z",
     );
     const detail = await service.getConversationDetail(context(), thread.id);
+    const earliestOfBatch = history[0]!;
+    const shownIds = new Set(detail.messages.map((message) => message.id));
+    // Exactly one of the 51 tied-timestamp messages is excluded from the
+    // 50-message window, and it is deterministically the earliest arrival
+    // (lowest sequence) — never an arbitrary one chosen by UUID comparison.
+    expect(shownIds.has(earliestOfBatch.id)).toBe(false);
+    expect(history.slice(1).every((message) => shownIds.has(message.id))).toBe(true);
+    // readThroughMessageId anchors on the batch's true latest arrival —
+    // never on late-history, which stays outside the window on occurred_at
+    // alone (delayed provider timestamps must remain unread regardless of
+    // arrival order — see migration 037's header comment).
+    expect(detail.readThroughMessageId).toBe(history[50]!.id);
     await service.markConversationRead(context(), thread.id, detail.readThroughMessageId!);
     expect(await unread(userA, thread.id)).toBe(1);
+    // The "older" page must surface every message the first page excluded —
+    // the batch's earliest arrival and the delayed message — with nothing
+    // duplicated and nothing skipped.
     const older = await service.listConversationMessages(context(), thread.id, {
       beforeId: detail.nextBeforeId!,
     });
+    expect(older.messages.map((message) => message.id).sort()).toEqual(
+      [earliestOfBatch.id, late.id].sort(),
+    );
     expect(older.readThroughMessageId).toBe(late.id);
     await service.markConversationRead(context(), thread.id, older.readThroughMessageId!);
     expect(await unread(userA, thread.id)).toBe(0);
+    // Older-page reads must never regress the marker: re-marking read with
+    // a message from earlier in the batch (lower sequence than what is
+    // already recorded) must be a no-op, and repeated marks of the same
+    // watermark must stay monotonic (greatest(), not overwrite).
+    await service.markConversationRead(context(), thread.id, earliestOfBatch.id);
+    await service.markConversationRead(context(), thread.id, detail.readThroughMessageId!);
+    expect(await unread(userA, thread.id)).toBe(0);
+  });
+  it("message pagination ties break by arrival sequence, never by the random id UUID", async () => {
+    // Direct proof that the tie-break key is `sequence`: three messages
+    // share one occurred_at, with ids chosen so that sorting by id DESC
+    // would produce the OPPOSITE page split from sorting by sequence DESC.
+    // If the repository ever regresses to breaking ties on `id`, this test
+    // fails deterministically — not probabilistically like the UUID-driven
+    // scenario this replaces.
+    const service = await import("../server/conversations/service");
+    const thread = await ensure(orgA, "tie-break-determinism", "identity-a");
+    const tiedAt = "2026-01-01T00:00:00Z";
+    const oldestArrival = "ffffffff-0000-4000-8000-000000000001"; // largest id, lowest sequence
+    const middleArrival = "80000000-0000-4000-8000-000000000002";
+    const newestArrival = "00000000-0000-4000-8000-000000000003"; // smallest id, highest sequence
+    for (const [id, ref] of [
+      [oldestArrival, "tie-1"],
+      [middleArrival, "tie-2"],
+      [newestArrival, "tie-3"],
+    ] as const) {
+      await db.query(
+        `insert into messages(id,organization_id,conversation_id,provider_message_id,direction,sender_type,body,occurred_at)
+         values($1,$2,$3,$4,'inbound','customer','tied',$5)`,
+        [id, orgA, thread.id, ref, tiedAt],
+      );
+    }
+    const page = await service.listConversationMessages(context(), thread.id, { limit: 2 });
+    const pageIds = page.messages.map((message) => message.id);
+    // The two most-recently-ARRIVED messages must be shown — an id-DESC
+    // tie-break would instead have shown the two with the numerically
+    // largest id (oldestArrival, middleArrival) and hidden newestArrival.
+    expect(pageIds.sort()).toEqual([middleArrival, newestArrival].sort());
+    expect(pageIds).not.toContain(oldestArrival);
+    expect(page.readThroughMessageId).toBe(newestArrival);
+    const older = await service.listConversationMessages(context(), thread.id, {
+      beforeId: page.nextBeforeId!,
+    });
+    expect(older.messages.map((message) => message.id)).toEqual([oldestArrival]);
+    expect(older.readThroughMessageId).toBe(oldestArrival);
   });
 });
 

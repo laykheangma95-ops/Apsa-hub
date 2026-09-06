@@ -50,6 +50,16 @@ arriving after the displayed snapshot remain unread. Older message pages also
 return a read-through marker so delayed messages beyond the first page can be
 cleared once loaded. Each staff member's state is independent.
 
+Message pagination (`listRecentMessages`, `listMessagesBefore`) orders by
+`occurred_at` first, breaking ties on `sequence` — not on the message `id`.
+`occurred_at` is provider-supplied and can repeat across many messages (a
+burst, a coarse provider timestamp, a backfill); `sequence` is the same
+per-conversation arrival counter the read-marker watermark is keyed on, so a
+tie is always split consistently with arrival order. Breaking ties on `id`
+(a random UUID, unrelated to arrival order) let an arbitrary split of a
+tied-timestamp batch decide the page boundary, making the boundary — and the
+auto-mark-on-open watermark it feeds — non-deterministic for that batch.
+
 The original `conversations.unread_count` column remains for compatibility;
 production reads replace it with the requesting user's derived count. The
 Inbox unread filter and count use that derived value. Existing operational
@@ -154,7 +164,7 @@ credentials.
 
 | Gate | Result |
 | --- | --- |
-| New local SQL/service/repository runtime | 29 passed, 0 failed |
+| New local SQL/service/repository runtime | 30 passed, 0 failed |
 | Focused Conversation, Inbox, Smart Actions, Khmer, Customer, Order, tenant and bundle regressions | 715 passed, 0 failed |
 | Typecheck | Passed |
 | Changed TypeScript file lint | Passed, no warnings |

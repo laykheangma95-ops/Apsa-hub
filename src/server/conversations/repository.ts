@@ -294,6 +294,19 @@ const MAX_MESSAGE_LIMIT = 200;
  * The most recent `limit` messages for a conversation, returned OLDEST FIRST
  * (matching the UI's rendering order and the intent engine's bounded-context
  * contract — see migration 032's header comment).
+ *
+ * Tie-break on `sequence`, not `id`. `occurred_at` is provider-supplied and
+ * can repeat across many messages (a burst, a coarse-grained provider
+ * timestamp, a backfill); `id` is a random UUID with no relationship to
+ * arrival order. `sequence` is the per-conversation ingestion counter
+ * (migration 037) and is unique, so ordering by (occurred_at, sequence)
+ * gives a fully deterministic order where every tie is broken consistently
+ * with true arrival order — the same order the read-marker watermark
+ * (mark_conversation_read, keyed on sequence) already uses. Breaking ties by
+ * `id` instead let an arbitrary, UUID-dependent split of a tied-timestamp
+ * batch decide which message anchors the page, making the "load older
+ * messages" boundary — and therefore the auto-mark-on-open read watermark —
+ * non-deterministic for that batch.
  */
 export async function listRecentMessages(
   organizationId: string,
@@ -308,7 +321,7 @@ export async function listRecentMessages(
     .eq("conversation_id", conversationId)
     .eq("organization_id", organizationId)
     .order("occurred_at", { ascending: false })
-    .order("id", { ascending: false })
+    .order("sequence", { ascending: false })
     .limit(boundedLimit);
 
   if (error) throw databaseError(error);
@@ -321,10 +334,10 @@ export async function findMessageCursor(
   organizationId: string,
   conversationId: string,
   messageId: string,
-): Promise<{ occurredAt: string; id: string } | null> {
+): Promise<{ occurredAt: string; sequence: number } | null> {
   const { data, error } = await db
     .from("messages")
-    .select("occurred_at, id")
+    .select("occurred_at, sequence")
     .eq("id", messageId)
     .eq("conversation_id", conversationId)
     .eq("organization_id", organizationId)
@@ -332,7 +345,7 @@ export async function findMessageCursor(
 
   if (error && error.code !== "PGRST116") throw databaseError(error);
   if (!data) return null;
-  return { occurredAt: data.occurred_at as string, id: data.id as string };
+  return { occurredAt: data.occurred_at as string, sequence: data.sequence as number };
 }
 
 export interface MessagePage {
@@ -344,11 +357,18 @@ export interface MessagePage {
 /**
  * Older-message pagination for the Conversation screen's "load earlier
  * messages" scroll-up gesture. Returned oldest-first within the page.
+ *
+ * Anchored on (occurred_at, sequence) — see listRecentMessages' header
+ * comment for why `sequence`, not `id`, is the tie-break. The anchor itself
+ * is never trusted from the browser: callers resolve `before` via
+ * findMessageCursor, which re-reads it from the DB scoped to this org and
+ * conversation, so a foreign/forged message id fails closed before this
+ * function ever runs (see service.ts's listConversationMessages).
  */
 export async function listMessagesBefore(
   organizationId: string,
   conversationId: string,
-  before: { occurredAt: string; id: string } | null,
+  before: { occurredAt: string; sequence: number } | null,
   limit = DEFAULT_MESSAGE_LIMIT,
 ): Promise<MessagePage> {
   const boundedLimit = Math.min(limit, MAX_MESSAGE_LIMIT);
@@ -359,12 +379,12 @@ export async function listMessagesBefore(
     .eq("conversation_id", conversationId)
     .eq("organization_id", organizationId)
     .order("occurred_at", { ascending: false })
-    .order("id", { ascending: false })
+    .order("sequence", { ascending: false })
     .limit(boundedLimit + 1);
 
   if (before) {
     query = query.or(
-      `occurred_at.lt.${before.occurredAt},and(occurred_at.eq.${before.occurredAt},id.lt.${before.id})`,
+      `occurred_at.lt.${before.occurredAt},and(occurred_at.eq.${before.occurredAt},sequence.lt.${before.sequence})`,
     );
   }
 
