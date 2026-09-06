@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import {
+  APSI_EMOTION_KEYS,
   COMPANION_MEANING,
   COMPANION_TOKEN,
   COMPANION_URL,
-  MASCOT_STATES,
-  MASCOT_STATE_KEYS,
-  Mascot,
+  Apsi,
+  apsiEmotions,
   MascotMoment,
   type CompanionName,
 } from "@/design-system/mascot";
@@ -18,12 +18,12 @@ export const Route = createFileRoute("/design-mascot")({
       {
         name: "description",
         content:
-          "Every APSA mascot state, its companion accent, intent and future animation brief, in one reference.",
+           "Every APSA mascot emotion, companion accent, placement and future-ready asset in one reference.",
       },
       { property: "og:title", content: "Apsi mascot system — APSA" },
       {
         property: "og:description",
-        content: "The official Apsi visual language: 14 named states, companions and asset names.",
+         content: "The official Apsi visual language: 16 named emotions, companions and asset names.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -40,30 +40,31 @@ function MascotReference() {
       <div className="mx-auto w-full max-w-4xl">
         <h1 className="text-h1">Apsi mascot system</h1>
         <p className="text-body mt-2 max-w-xl text-text-secondary">
-          Screens name a moment, never a pose or a file. Artwork below is placeholder stills taken
-          from the brand guide; swapping in animation happens in one place.
+          Screens name an emotion, never a pose or a file. Current stills preserve the approved
+          Apsi artwork; future animation swaps happen in one registry.
         </p>
 
         <section className="mt-10">
-          <h2 className="text-h2">States</h2>
+          <h2 className="text-h2">Emotions</h2>
           <ul className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {MASCOT_STATE_KEYS.map((key) => {
-              const spec = MASCOT_STATES[key];
+            {APSI_EMOTION_KEYS.map((key) => {
+              const spec = apsiEmotions[key];
               return (
                 <li
                   key={key}
                   className="rounded-2xl border border-border-default bg-surface-secondary p-4"
                 >
                   <div className="flex items-start gap-3">
-                    <Mascot state={key} size={72} withCompanion />
+                    <Apsi emotion={key} size="sm" withCompanion />
                     <div className="min-w-0">
-                      <p className="text-label text-text-primary">{key}</p>
+                      <p className="text-label text-text-primary">{spec.label}</p>
                       <p className="text-caption text-text-muted">{spec.asset}</p>
                     </div>
                   </div>
                   <p className="text-body-sm mt-3 text-text-secondary">{spec.intent}</p>
+                  <p className="text-caption mt-2 text-text-secondary">{spec.placement}</p>
                   <p className="text-caption mt-2 text-text-muted">
-                    {spec.surface} · {spec.loop ? "loops" : "plays once"} · {spec.motion}
+                    {spec.surface} · {spec.loop ? "loops" : "plays once"} · {spec.animation} · {spec.source.kind}
                   </p>
                 </li>
               );
@@ -91,14 +92,14 @@ function MascotReference() {
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <MascotMoment
               variant="card"
-              state="payment-success"
+              state="approved"
               title="Payment received"
               body="$19.80 confirmed for order APSA-0143."
               action={<Button className="tap-target">View order</Button>}
             />
             <MascotMoment
               variant="card"
-              state="achievement"
+              state="excited"
               title="100 orders this month"
               body="Your best month yet — keep the replies fast."
             />
