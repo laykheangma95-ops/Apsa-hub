@@ -589,6 +589,36 @@ identically to path (1) for anyone who reaches it via a Smart Action.
 
 ### 18. Payments
 
+**Payment → Order integration (2026-09-06, pending independent review):**
+Additive migrations 039–040 introduce the independent Order refund axis and
+make Payment transactions the sole authority for Order financial state.
+Partial/full refunds preserve paid receipt status; immutable events derive
+refund and net totals across split Payments. Order-before-Payment locks serialize
+financial RPCs, and database guards reject unsupported Order status claims.
+The legacy Order payment API remains present but fails closed.
+Refund retry keys are optional for compatibility; clients must supply/reuse
+one for safe automatic retry. Historical Payment principal/events are preserved.
+Migration 040 audits and recomputes existing Order axes, including legacy paid
+claims without Payment records. No hosted migration has been applied.
+The foundation notes below describe the earlier phase.
+
+**Verification for this integration:** `bun test src/tests/` passed (1,064
+top-level tests, zero failures, including isolated Payment and PostgreSQL suites).
+The new PGlite suite executes the actual migrations and covers 20 cases, including
+both approved refund examples, split payments, reversals, evidence/COD isolation,
+idempotent recording/refunds, cross-tenant attacks, forced transaction rollback,
+legacy backfill audit, and Order stock consumption/restoration. Typecheck,
+changed-file ESLint, production build, and bundle-boundary checks passed.
+Live Supabase checks were skipped; no hosted migrations were applied.
+PGlite serializes one connection, so queued concurrent calls do not establish
+independent PostgreSQL session lock-contention coverage.
+
+**Rollout limits:** 039 must commit before 040 uses the new history enum value.
+040 intentionally reclassifies legacy paid Order claims unsupported by Payment
+records and appends migration history entries. Review that reconciliation before
+any separately authorized hosted rollout. The feature is ready for independent
+review; it has not been merged or applied to production.
+
 **Status:** `PARTIAL` — Backend foundation BUILT; not applied to hosted Supabase; no UI
 
 **What exists today (backend foundation — 2026-09-05):**

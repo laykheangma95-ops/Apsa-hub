@@ -126,6 +126,7 @@ export interface ReversePaymentRpcResult {
 
 /** Result envelope returned by refund_payment_v1. */
 export interface RefundPaymentRpcResult {
+  replayed?: boolean;
   status: string;
   current?: string;
   reason?: string;

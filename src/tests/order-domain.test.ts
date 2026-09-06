@@ -129,6 +129,7 @@ const ALL_ORDER_PERMS = [
   "orders.confirm",
   "orders.apply_discount",
   "payments.confirm",
+  "payments.manual_confirm",
 ];
 
 // ── Fixture UUIDs ─────────────────────────────────────────────────────────────
@@ -193,6 +194,7 @@ function fieldNames(interfaceBody: string): string[] {
  */
 function executableSql(sql: string): string {
   return sql
+    .replace(/\r\n/g, "\n")
     .split("\n")
     .filter((line) => !line.trim().startsWith("--"))
     .join("\n");
@@ -893,7 +895,7 @@ describe("Test 11: Payment transitions", () => {
       { tables: { orders: orderRow({ payment_status: "paid" }) } },
       async (recorded) => {
         const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "unpaid"));
-        expect(err.message).toContain("Cannot move payment status from 'paid' to 'unpaid'");
+        expect(err.message).toContain("deprecated");
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
         return recorded;
       },
@@ -901,35 +903,25 @@ describe("Test 11: Payment transitions", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("the service performs a valid payment transition through the RPC", async () => {
+  it("even a fully permissioned caller cannot independently pay an Order", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
-
-    const calls = await withOrderDb(
-      {
-        tables: {
-          orders: orderRow({ payment_status: "unpaid" }),
-          order_items: oneLine,
-          order_status_history: itemRows([]),
-        },
-        rpc: { transition_order_status_v1: { data: { status: "success" }, error: null } },
-      },
-      async (recorded) => {
-        await transitionPaymentStatus(ctx, ORDER_ID, "paid", "Cash at counter");
-        return recorded;
-      },
-    );
-
-    expect(calls[0]!.fn).toBe("transition_order_status_v1");
-    expect(calls[0]!.args["p_axis"]).toBe("payment");
-    expect(calls[0]!.args["p_expected_from"]).toBe("unpaid");
-    expect(calls[0]!.args["p_to"]).toBe("paid");
-    expect(calls[0]!.args["p_changed_by"]).toBe(USER_ORG_A);
+    const calls = await withOrderDb({}, async (recorded) => {
+      const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
+      expect(err.message).toContain("deprecated");
+      expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
+      return recorded;
+    });
+    expect(calls).toHaveLength(0);
   });
 
-  it("payment transitions require payments.confirm", async () => {
+  it("legacy payments.confirm alone cannot authorize the deprecated API", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
-    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read", "orders.update"]);
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, [
+      "orders.read",
+      "orders.update",
+      "payments.confirm",
+    ]);
     await expectForbidden(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
   });
 });
@@ -1003,7 +995,7 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
   });
 
   it("a cancelled order accepts no further transition on any axis", async () => {
-    const { transitionPaymentStatus, transitionFulfillmentStatus, transitionLifecycleStatus } =
+    const { transitionFulfillmentStatus, transitionLifecycleStatus } =
       await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
@@ -1015,7 +1007,6 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       },
       async () => {
         for (const call of [
-          () => transitionPaymentStatus(ctx, ORDER_ID, "paid"),
           () => transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
           () => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
         ]) {
@@ -1035,7 +1026,7 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       { tables: { orders: orderRow({ lifecycle_status: "completed" }) } },
       async () => {
         const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "failed"));
-        expect(err.message).toContain("completed");
+        expect(err.message).toContain("deprecated");
       },
     );
   });
@@ -1088,7 +1079,7 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
     expect(sql).toMatch(/'stale'/);
   });
 
-  it("a concurrent transition is surfaced as a conflict, not silently overwritten", async () => {
+  it("the deprecated API rejects without reaching the concurrent transition RPC", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
@@ -1104,7 +1095,7 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       },
       async () => {
         const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "pending"));
-        expect(err.message).toContain("changed concurrently");
+        expect(err.message).toContain("deprecated");
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
       },
     );
@@ -1363,7 +1354,7 @@ describe("Test 17: Browser direct writes are denied", () => {
 });
 
 describe("Test 18: Server-authorized write path", () => {
-  it("a fully permissioned caller completes the whole create → confirm → pay flow", async () => {
+  it("create and confirm work while independent payment is rejected", async () => {
     const { createOrder, transitionLifecycleStatus, transitionPaymentStatus } =
       await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
@@ -1421,11 +1412,11 @@ describe("Test 18: Server-authorized write path", () => {
         rpc: { transition_order_status_v1: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
-        await transitionPaymentStatus(ctx, ORDER_ID, "paid");
+        await expect(transitionPaymentStatus(ctx, ORDER_ID, "paid")).rejects.toThrow("deprecated");
         return recorded;
       },
     );
-    expect(payCalls[0]!.args["p_to"]).toBe("paid");
+    expect(payCalls).toHaveLength(0);
   });
 });
 

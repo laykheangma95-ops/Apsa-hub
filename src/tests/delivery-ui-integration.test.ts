@@ -22,7 +22,7 @@ import * as path from "path";
 const ROOT = process.cwd();
 
 function readSource(relPath: string): string {
-  return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8");
+  return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8").replace(/\r\n/g, "\n");
 }
 
 const API_INDEX = "src/lib/api/index.ts";
@@ -94,7 +94,10 @@ describe("Security boundary: client never supplies organization_id/user_id", () 
 
   it("the create-delivery sheet never constructs a payload with organizationId/userId", () => {
     const sheet = readSource(CREATE_DELIVERY_SHEET);
-    const submitFn = sheet.slice(sheet.indexOf("async function submit()"), sheet.indexOf("const failureCopy"));
+    const submitFn = sheet.slice(
+      sheet.indexOf("async function submit()"),
+      sheet.indexOf("const failureCopy"),
+    );
     for (const forbidden of ["organizationId", "organization_id", "userId", "user_id"]) {
       expect(submitFn).not.toContain(forbidden);
     }
@@ -131,7 +134,9 @@ describe("Security boundary: client never supplies organization_id/user_id", () 
       apiIndex.indexOf("export function isProductionId"),
       apiIndex.indexOf("export interface ConversationFilter"),
     );
-    expect(fn).toMatch(/\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}/i);
+    expect(fn).toMatch(
+      /\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}/i,
+    );
   });
 });
 
@@ -243,7 +248,9 @@ describe("Cancellation drives order fulfillment via the server only, never reset
 
   it("cancelling invalidates the linked order's query so the authoritative unfulfilled state is re-read", () => {
     const route = readSource(DELIVERY_DETAIL_ROUTE);
-    expect(route).toMatch(/invalidateQueries\(\{ queryKey: \["order", "real", detail\?\.orderId\] \}\)/);
+    expect(route).toMatch(
+      /invalidateQueries\(\{ queryKey: \["order", "real", detail\?\.orderId\] \}\)/,
+    );
   });
 
   it("the Order screen lists deliveries by order id so a cancelled+replaced delivery both stay visible in history", () => {
@@ -390,7 +397,12 @@ describe("Scope discipline: no Payment-domain, Conversation, or POS code touched
   });
 
   it("no new file imports conversation or POS modules", () => {
-    for (const file of [DELIVERIES_LIB, DELIVERY_DETAIL_ROUTE, CREATE_DELIVERY_SHEET, REASON_SHEET]) {
+    for (const file of [
+      DELIVERIES_LIB,
+      DELIVERY_DETAIL_ROUTE,
+      CREATE_DELIVERY_SHEET,
+      REASON_SHEET,
+    ]) {
       const src = readSource(file);
       expect(src).not.toMatch(/@\/lib\/mock\/conversations|@\/server\/pos/);
     }

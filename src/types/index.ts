@@ -325,7 +325,7 @@ export type OrderSource = Channel | "manual";
 /** One entry in an order's immutable status-change trail (production path only). */
 export interface OrderStatusHistoryEntry {
   id: string;
-  axis: "lifecycle" | "payment" | "fulfillment";
+  axis: "lifecycle" | "payment" | "fulfillment" | "refund";
   fromStatus: string;
   toStatus: string;
   changedBy: string | null;

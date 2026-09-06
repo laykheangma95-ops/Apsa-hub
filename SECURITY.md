@@ -914,6 +914,14 @@ Use:
 
 High-value refunds may later require stronger authorization.
 
+Order payment and refund state are derived by the Payment transaction, with
+same-organization checks and Order serialization enforced in PostgreSQL.
+Refunds preserve a fully paid Order's `payment_status = paid`; the separate
+`refund_status` is `none`, `partial`, or `full`, derived from append-only
+Payment refund events. Neither `payments.confirm` nor an Order transition
+may bypass `payments.*` settlement/refund permissions. Evidence and Delivery
+COD status are never settlement authority.
+
 ---
 
 # 44. INVENTORY SECURITY

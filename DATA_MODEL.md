@@ -1345,6 +1345,50 @@ completed_at
 
 Refund should not be represented by simply changing payment amount.
 
+## Approved Payment → Order financial authority (2026-09-06)
+
+Payment settlement and the Order financial axes must commit in one PostgreSQL
+transaction. Payment permissions are the only financial write authority.
+
+Refunds do not undo the fact that money was received. An Order that was fully
+paid remains `payment_status = paid` after both partial and full refunds.
+Use a separate `refund_status = none | partial | full` axis:
+
+- A $100 paid Order refunded $20 is `paid / partial`.
+- A $100 paid Order refunded $100 is `paid / full`.
+- Never represent a refund with `payment_status = failed` or `unpaid`.
+- Derive refunded and net amounts from immutable Payment events. Never change
+  the original Payment amount or rewrite settled financial history.
+- Aggregate every Payment for the Order; neither one refunded Payment nor one
+  reversed Payment determines the whole Order's state.
+- Reversals invalidate settlement; refunds preserve received-payment history.
+  Delivery COD status alone never proves settlement.
+
+The old independent Order payment transition must fail closed. No browser or
+unrelated Order operation may claim financial state without Payment records.
+
+Aggregate mapping: principal is the immutable `created` event amount; refunded
+amount is the sum of immutable `refund` events. Valid received amount includes
+principal for paid/refunded Payments and only already-refunded amounts for a
+subsequently reversed/failed Payment. Net held amount is received minus refunded.
+Order payment state is paid when positive valid received amount covers the Order
+total; otherwise pending when any valid receipt or pending Payment exists, failed
+when only failed attempts remain, and unpaid otherwise. Recording/evidence alone
+cannot produce paid. A zero-total Order with no Payment remains unpaid.
+
+Refund status is none at zero refunded amount, full when all valid received funds
+have been refunded, and partial otherwise. This comparison includes overpayments
+and all split Payments, rather than classifying a refund of just one Payment as
+a full Order refund. An underfunded Order does not become paid merely by refunding
+its partial receipts. A later reversal still removes its invalidated unrefunded
+settlement. Order lifecycle and inventory are not changed by refunds/reversals.
+
+Recording retry keys remain organization-scoped. Refund APIs accept an optional
+idempotency key scoped to the Payment; clients must reuse it when retrying the
+same refund action. Replay returns the original event result, and conflicting
+amount/reason reuse fails. Legacy callers without a key retain non-idempotent
+refund behavior and must not automatically retry an uncertain response.
+
 ---
 
 # 54. DELIVERY
