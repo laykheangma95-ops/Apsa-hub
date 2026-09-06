@@ -42,7 +42,10 @@ export function StaffRow({ member, onOpen }: StaffRowProps) {
         </span>
       </span>
 
-      <StatusChip status={member.status === "invited" ? "invited" : "active"} className="shrink-0" />
+      <StatusChip
+        status={member.status === "invited" ? "invited" : "active"}
+        className="shrink-0"
+      />
       <ChevronRight className="size-4 shrink-0 text-text-secondary" aria-hidden />
     </button>
   );

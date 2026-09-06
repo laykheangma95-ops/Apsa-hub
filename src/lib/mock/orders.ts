@@ -256,6 +256,5 @@ export const orders: Order[] = [
   },
 ];
 
-
 /** Next code the mock order factory will hand out. */
 export const nextOrderSequence = 143;

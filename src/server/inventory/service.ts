@@ -90,7 +90,11 @@ function mapMovement(row: InventoryMovementRow): InventoryMovementDetail {
   };
 }
 
-function mapStock(variantId: string, productId: string, rows: InventoryStockRow[]): VariantStockDetail {
+function mapStock(
+  variantId: string,
+  productId: string,
+  rows: InventoryStockRow[],
+): VariantStockDetail {
   return {
     variantId,
     productId,
@@ -156,26 +160,23 @@ export async function recordMovement(
   input: RecordMovementInput,
 ): Promise<InventoryMovementDetail> {
   if (!INVENTORY_MOVEMENT_TYPES.includes(input.movementType)) {
-    throw Object.assign(
-      new Error(`Invalid movement_type: ${String(input.movementType)}`),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error(`Invalid movement_type: ${String(input.movementType)}`), {
+      statusCode: 400,
+    });
   }
 
   if (!Number.isInteger(input.quantityDelta) || input.quantityDelta === 0) {
-    throw Object.assign(
-      new Error("quantity_delta must be a non-zero integer"),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error("quantity_delta must be a non-zero integer"), {
+      statusCode: 400,
+    });
   }
 
   ctx.require(requiredPermissionFor(input.movementType));
 
   if (input.movementType === "manual_adjustment" && !input.reason?.trim()) {
-    throw Object.assign(
-      new Error("reason is required for manual_adjustment movements"),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error("reason is required for manual_adjustment movements"), {
+      statusCode: 400,
+    });
   }
 
   // Tenant ownership: reject guessed/cross-org product, variant, location IDs
@@ -185,10 +186,9 @@ export async function recordMovement(
     throw Object.assign(new Error("Variant not found"), { statusCode: 404 });
   }
   if (variant.product_id !== input.productId) {
-    throw Object.assign(
-      new Error("variant_id does not belong to the given product_id"),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error("variant_id does not belong to the given product_id"), {
+      statusCode: 400,
+    });
   }
 
   if (input.locationId != null) {

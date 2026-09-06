@@ -35,7 +35,8 @@ export const Route = createFileRoute("/app/")({
       { property: "og:title", content: "Business Home — APSA" },
       {
         property: "og:description",
-        content: "Revenue, attention items, quick actions and metrics in one Khmer-first home screen.",
+        content:
+          "Revenue, attention items, quick actions and metrics in one Khmer-first home screen.",
       },
     ],
   }),
@@ -81,6 +82,7 @@ function BusinessHome() {
 
         {homeQuery.isError ? (
           <ErrorState
+            showApsi
             title={t("home.error.title")}
             body={t("home.error.body")}
             onRetry={() => void homeQuery.refetch()}
@@ -108,7 +110,6 @@ function BusinessHome() {
               </p>
               <Sparkline series={summary.revenueSeries} tone="success" />
             </section>
-
 
             {/* Needs attention comes before metrics, always. */}
             <section aria-labelledby="attention-heading">
@@ -172,6 +173,7 @@ function BusinessHome() {
 
             {!insightDismissed ? (
               <ApsiInsightCard
+                emotion="thinking"
                 title={t("home.apsi.title")}
                 body={t("home.apsi.body")}
                 onDismiss={() => setInsightDismissed(true)}

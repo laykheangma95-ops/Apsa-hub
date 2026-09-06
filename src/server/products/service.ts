@@ -182,9 +182,7 @@ export async function getProductCatalog(
     variantsByProduct.set(v.product_id, list);
   }
 
-  return products.map((p) =>
-    mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost),
-  );
+  return products.map((p) => mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost));
 }
 
 export async function getProductDetail(
@@ -264,17 +262,15 @@ export async function createProduct(
 
   // Validate money: price_amount must be a non-negative integer.
   if (!Number.isInteger(initialVariant.price_amount) || initialVariant.price_amount < 0) {
-    throw Object.assign(
-      new Error("price_amount must be a non-negative integer (minor units)"),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
+      statusCode: 400,
+    });
   }
   if (initialVariant.cost_amount != null) {
     if (!Number.isInteger(initialVariant.cost_amount) || initialVariant.cost_amount < 0) {
-      throw Object.assign(
-        new Error("cost_amount must be a non-negative integer (minor units)"),
-        { statusCode: 400 },
-      );
+      throw Object.assign(new Error("cost_amount must be a non-negative integer (minor units)"), {
+        statusCode: 400,
+      });
     }
     if (!initialVariant.cost_currency) {
       throw Object.assign(new Error("cost_currency is required when cost_amount is set"), {
@@ -364,10 +360,9 @@ export async function createVariant(
   }
 
   if (!Number.isInteger(input.price_amount) || input.price_amount < 0) {
-    throw Object.assign(
-      new Error("price_amount must be a non-negative integer (minor units)"),
-      { statusCode: 400 },
-    );
+    throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
+      statusCode: 400,
+    });
   }
 
   const canViewCost = ctx.can("products.view_cost");
@@ -399,10 +394,8 @@ export async function updateVariant(
   patch: UpdateVariantInput,
 ): Promise<ProductVariantDetail> {
   // Price changes require products.update_price; basic fields require products.update_basic.
-  const isChangingPrice =
-    patch.price_amount !== undefined || patch.price_currency !== undefined;
-  const isChangingCost =
-    patch.cost_amount !== undefined || patch.cost_currency !== undefined;
+  const isChangingPrice = patch.price_amount !== undefined || patch.price_currency !== undefined;
+  const isChangingCost = patch.cost_amount !== undefined || patch.cost_currency !== undefined;
 
   if (isChangingPrice) ctx.require("products.update_price");
   else ctx.require("products.update_basic");
@@ -416,10 +409,9 @@ export async function updateVariant(
 
   if (patch.price_amount !== undefined) {
     if (!Number.isInteger(patch.price_amount) || patch.price_amount < 0) {
-      throw Object.assign(
-        new Error("price_amount must be a non-negative integer (minor units)"),
-        { statusCode: 400 },
-      );
+      throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
+        statusCode: 400,
+      });
     }
   }
 

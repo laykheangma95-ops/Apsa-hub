@@ -1,52 +1,142 @@
-import type {
-  CustomerEvent,
-  CustomerNote,
-  Delivery,
-  OrderEvent,
-  PaymentRecord,
-} from "@/types";
+import type { CustomerEvent, CustomerNote, Delivery, OrderEvent, PaymentRecord } from "@/types";
 import { usd } from "@/lib/money";
 
 export const orderEvents: Record<string, OrderEvent[]> = {
   "ord-1": [
-    { id: "oe-1", kind: "created", at: "2026-09-02T05:12:00.000Z", actor: "Lyda", context: "instagram" },
-    { id: "oe-2", kind: "payment_confirmed", at: "2026-09-02T05:20:00.000Z", actor: "Lyda", context: "khqr" },
+    {
+      id: "oe-1",
+      kind: "created",
+      at: "2026-09-02T05:12:00.000Z",
+      actor: "Lyda",
+      context: "instagram",
+    },
+    {
+      id: "oe-2",
+      kind: "payment_confirmed",
+      at: "2026-09-02T05:20:00.000Z",
+      actor: "Lyda",
+      context: "khqr",
+    },
     { id: "oe-3", kind: "packing_started", at: "2026-09-02T06:00:00.000Z", actor: "Ratana" },
     { id: "oe-4", kind: "in_transit", at: "2026-09-02T08:10:00.000Z", context: "J&T Express" },
     { id: "oe-5", kind: "delivered", at: "2026-09-02T12:40:00.000Z", context: "J&T Express" },
   ],
   "ord-2": [
-    { id: "oe-6", kind: "created", at: "2026-09-01T09:20:00.000Z", actor: "Lyda", context: "facebook" },
-    { id: "oe-7", kind: "payment_confirmed", at: "2026-09-01T09:35:00.000Z", actor: "Lyda", context: "bank_transfer" },
+    {
+      id: "oe-6",
+      kind: "created",
+      at: "2026-09-01T09:20:00.000Z",
+      actor: "Lyda",
+      context: "facebook",
+    },
+    {
+      id: "oe-7",
+      kind: "payment_confirmed",
+      at: "2026-09-01T09:35:00.000Z",
+      actor: "Lyda",
+      context: "bank_transfer",
+    },
     { id: "oe-8", kind: "delivered", at: "2026-09-01T15:05:00.000Z", context: "VET Express" },
   ],
   "ord-5": [
-    { id: "oe-9", kind: "created", at: "2026-08-30T04:00:00.000Z", actor: "Lyda", context: "instagram" },
-    { id: "oe-10", kind: "note", at: "2026-08-30T04:20:00.000Z", actor: "Lyda", context: "Customer will send the transfer slip tonight." },
+    {
+      id: "oe-9",
+      kind: "created",
+      at: "2026-08-30T04:00:00.000Z",
+      actor: "Lyda",
+      context: "instagram",
+    },
+    {
+      id: "oe-10",
+      kind: "note",
+      at: "2026-08-30T04:20:00.000Z",
+      actor: "Lyda",
+      context: "Customer will send the transfer slip tonight.",
+    },
     { id: "oe-11", kind: "packing_started", at: "2026-08-30T06:10:00.000Z", actor: "Ratana" },
   ],
   "ord-6": [
-    { id: "oe-12", kind: "created", at: "2026-08-26T07:40:00.000Z", actor: "Sokchea", context: "telegram" },
-    { id: "oe-13", kind: "payment_confirmed", at: "2026-08-26T08:00:00.000Z", actor: "Sokchea", context: "bank_transfer" },
+    {
+      id: "oe-12",
+      kind: "created",
+      at: "2026-08-26T07:40:00.000Z",
+      actor: "Sokchea",
+      context: "telegram",
+    },
+    {
+      id: "oe-13",
+      kind: "payment_confirmed",
+      at: "2026-08-26T08:00:00.000Z",
+      actor: "Sokchea",
+      context: "bank_transfer",
+    },
     { id: "oe-14", kind: "picked_up", at: "2026-08-26T10:30:00.000Z", context: "Capital Express" },
     { id: "oe-15", kind: "in_transit", at: "2026-08-26T11:00:00.000Z", context: "Capital Express" },
   ],
   "ord-7": [
-    { id: "oe-16", kind: "created", at: "2026-09-03T02:10:00.000Z", actor: "Ratana", context: "telegram" },
+    {
+      id: "oe-16",
+      kind: "created",
+      at: "2026-09-03T02:10:00.000Z",
+      actor: "Ratana",
+      context: "telegram",
+    },
     { id: "oe-17", kind: "picked_up", at: "2026-09-03T04:00:00.000Z", context: "Grab Express" },
     { id: "oe-18", kind: "in_transit", at: "2026-09-03T04:20:00.000Z", context: "Grab Express" },
   ],
   "ord-8": [
-    { id: "oe-19", kind: "created", at: "2026-08-24T03:00:00.000Z", actor: "Lyda", context: "facebook" },
-    { id: "oe-20", kind: "payment_failed", at: "2026-08-24T03:40:00.000Z", actor: "Lyda", context: "khqr" },
-    { id: "oe-21", kind: "cancelled", at: "2026-08-24T09:00:00.000Z", actor: "Sokchea", context: "Customer changed their mind." },
+    {
+      id: "oe-19",
+      kind: "created",
+      at: "2026-08-24T03:00:00.000Z",
+      actor: "Lyda",
+      context: "facebook",
+    },
+    {
+      id: "oe-20",
+      kind: "payment_failed",
+      at: "2026-08-24T03:40:00.000Z",
+      actor: "Lyda",
+      context: "khqr",
+    },
+    {
+      id: "oe-21",
+      kind: "cancelled",
+      at: "2026-08-24T09:00:00.000Z",
+      actor: "Sokchea",
+      context: "Customer changed their mind.",
+    },
   ],
   "ord-9": [
-    { id: "oe-22", kind: "created", at: "2026-08-12T06:00:00.000Z", actor: "Lyda", context: "instagram" },
-    { id: "oe-23", kind: "payment_confirmed", at: "2026-08-12T06:15:00.000Z", actor: "Lyda", context: "cash" },
+    {
+      id: "oe-22",
+      kind: "created",
+      at: "2026-08-12T06:00:00.000Z",
+      actor: "Lyda",
+      context: "instagram",
+    },
+    {
+      id: "oe-23",
+      kind: "payment_confirmed",
+      at: "2026-08-12T06:15:00.000Z",
+      actor: "Lyda",
+      context: "cash",
+    },
     { id: "oe-24", kind: "delivered", at: "2026-08-13T10:00:00.000Z", context: "VET Express" },
-    { id: "oe-25", kind: "returned", at: "2026-08-16T04:00:00.000Z", actor: "Ratana", context: "Wrong size." },
-    { id: "oe-26", kind: "refunded", at: "2026-08-16T05:30:00.000Z", actor: "Sokchea", context: "bank_transfer" },
+    {
+      id: "oe-25",
+      kind: "returned",
+      at: "2026-08-16T04:00:00.000Z",
+      actor: "Ratana",
+      context: "Wrong size.",
+    },
+    {
+      id: "oe-26",
+      kind: "refunded",
+      at: "2026-08-16T05:30:00.000Z",
+      actor: "Sokchea",
+      context: "bank_transfer",
+    },
   ],
 };
 
@@ -142,7 +232,12 @@ export const deliveries: Delivery[] = [
       { id: "de-1", status: "requested", at: "2026-08-26T09:00:00.000Z" },
       { id: "de-2", status: "accepted", at: "2026-08-26T09:30:00.000Z" },
       { id: "de-3", status: "picked_up", at: "2026-08-26T10:30:00.000Z" },
-      { id: "de-4", status: "in_transit", at: "2026-08-26T11:00:00.000Z", context: "Toul Kork hub" },
+      {
+        id: "de-4",
+        status: "in_transit",
+        at: "2026-08-26T11:00:00.000Z",
+        context: "Toul Kork hub",
+      },
     ],
   },
   {
@@ -199,7 +294,12 @@ export const deliveries: Delivery[] = [
       { id: "de-15", status: "accepted", at: "2026-08-30T07:00:00.000Z" },
       { id: "de-16", status: "picked_up", at: "2026-08-30T08:15:00.000Z" },
       { id: "de-17", status: "in_transit", at: "2026-08-30T08:45:00.000Z" },
-      { id: "de-18", status: "failed", at: "2026-08-30T13:20:00.000Z", context: "No answer after three calls." },
+      {
+        id: "de-18",
+        status: "failed",
+        at: "2026-08-30T13:20:00.000Z",
+        context: "No answer after three calls.",
+      },
     ],
   },
 ];
@@ -238,19 +338,34 @@ export const customerEvents: Record<string, CustomerEvent[]> = {
   ],
   "cus-2": [
     { id: "ce-6", kind: "order_created", at: "2026-08-30T04:00:00.000Z", context: "APSA-0141" },
-    { id: "ce-7", kind: "delivery_created", at: "2026-08-30T06:30:00.000Z", context: "VET Express" },
+    {
+      id: "ce-7",
+      kind: "delivery_created",
+      at: "2026-08-30T06:30:00.000Z",
+      context: "VET Express",
+    },
   ],
   "cus-4": [
     { id: "ce-8", kind: "order_created", at: "2026-08-26T07:40:00.000Z", context: "APSA-0136" },
     { id: "ce-9", kind: "payment_confirmed", at: "2026-08-26T08:00:00.000Z", context: "APSA-0136" },
-    { id: "ce-10", kind: "delivery_created", at: "2026-08-26T09:00:00.000Z", context: "Capital Express" },
+    {
+      id: "ce-10",
+      kind: "delivery_created",
+      at: "2026-08-26T09:00:00.000Z",
+      context: "Capital Express",
+    },
   ],
   "cus-5": [
     { id: "ce-11", kind: "order_created", at: "2026-09-02T05:12:00.000Z", context: "APSA-0139" },
     { id: "ce-12", kind: "delivered", at: "2026-09-02T12:40:00.000Z", context: "APSA-0139" },
   ],
   "cus-7": [
-    { id: "ce-13", kind: "conversation_opened", at: "2026-09-03T01:00:00.000Z", context: "telegram" },
+    {
+      id: "ce-13",
+      kind: "conversation_opened",
+      at: "2026-09-03T01:00:00.000Z",
+      context: "telegram",
+    },
     { id: "ce-14", kind: "order_created", at: "2026-09-03T02:10:00.000Z", context: "APSA-0142" },
   ],
 };

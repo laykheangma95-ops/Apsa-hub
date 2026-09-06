@@ -21,10 +21,7 @@ const DOT_TONE: Record<NonNullable<TimelineItem["tone"]>, string> = {
 export function Timeline({ items, className }: { items: TimelineItem[]; className?: string }) {
   return (
     <ol className={cn("relative space-y-4 pl-5", className)}>
-      <span
-        aria-hidden
-        className="absolute top-1.5 bottom-1.5 left-[5px] w-px bg-border-default"
-      />
+      <span aria-hidden className="absolute top-1.5 bottom-1.5 left-[5px] w-px bg-border-default" />
       {items.map((item) => (
         <li key={item.id} className="relative">
           <span
@@ -35,9 +32,7 @@ export function Timeline({ items, className }: { items: TimelineItem[]; classNam
             )}
           />
           <p className="text-body-sm text-text-primary">{item.title}</p>
-          {item.detail ? (
-            <p className="text-body-sm text-text-secondary">{item.detail}</p>
-          ) : null}
+          {item.detail ? <p className="text-body-sm text-text-secondary">{item.detail}</p> : null}
           {item.meta ? <p className="text-caption text-text-muted">{item.meta}</p> : null}
         </li>
       ))}

@@ -149,7 +149,15 @@ describe("isValidDeliveryTransition mirrors the server state machine exactly", (
 
   it("terminal statuses (delivered/failed/cancelled) allow no further transition", () => {
     for (const terminal of ["delivered", "failed", "cancelled"] as const) {
-      for (const to of ["pending", "preparing", "ready", "in_transit", "delivered", "failed", "cancelled"] as const) {
+      for (const to of [
+        "pending",
+        "preparing",
+        "ready",
+        "in_transit",
+        "delivered",
+        "failed",
+        "cancelled",
+      ] as const) {
         expect(isValidDeliveryTransition(terminal, to)).toBe(false);
       }
     }
@@ -171,7 +179,15 @@ describe("isTerminalDeliveryStatus / isActiveDeliveryStatus", () => {
   });
 
   it("isActiveDeliveryStatus is exactly the negation of terminal", () => {
-    for (const status of ["pending", "preparing", "ready", "in_transit", "delivered", "failed", "cancelled"] as const) {
+    for (const status of [
+      "pending",
+      "preparing",
+      "ready",
+      "in_transit",
+      "delivered",
+      "failed",
+      "cancelled",
+    ] as const) {
       expect(isActiveDeliveryStatus(status)).toBe(!isTerminalDeliveryStatus(status));
     }
   });
@@ -225,9 +241,9 @@ describe("canCreateDeliveryForOrder", () => {
   });
 
   it("is false when the order is not confirmed (draft/completed/cancelled lifecycle)", () => {
-    expect(canCreateDeliveryForOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(
-      false,
-    );
+    expect(
+      canCreateDeliveryForOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" }),
+    ).toBe(false);
     expect(
       canCreateDeliveryForOrder({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" }),
     ).toBe(false);
@@ -272,9 +288,9 @@ describe("classifyDeliveryError", () => {
     expect(classifyDeliveryError(withStatusCode("Delivery is already in that status", 409))).toBe(
       "invalid",
     );
-    expect(
-      classifyDeliveryError(withStatusCode("Order already has an active delivery", 409)),
-    ).toBe("invalid");
+    expect(classifyDeliveryError(withStatusCode("Order already has an active delivery", 409))).toBe(
+      "invalid",
+    );
   });
 
   it("falls back to message pattern-matching when statusCode is missing", () => {
@@ -286,7 +302,9 @@ describe("classifyDeliveryError", () => {
     );
     expect(classifyDeliveryError(new Error("Delivery not found"))).toBe("not_found");
     expect(
-      classifyDeliveryError(new Error("Delivery changed concurrently (now ready) — re-read and retry")),
+      classifyDeliveryError(
+        new Error("Delivery changed concurrently (now ready) — re-read and retry"),
+      ),
     ).toBe("stale");
     expect(classifyDeliveryError(new Error("Cannot move delivery from 'pending' to 'ready'"))).toBe(
       "invalid",
@@ -294,7 +312,7 @@ describe("classifyDeliveryError", () => {
   });
 
   it("an unrecognized error is 'server_error', never leaking raw text through classification", () => {
-    expect(classifyDeliveryError(new Error("relation \"deliveries\" does not exist"))).toBe(
+    expect(classifyDeliveryError(new Error('relation "deliveries" does not exist'))).toBe(
       "server_error",
     );
     expect(classifyDeliveryError("not an Error instance")).toBe("server_error");

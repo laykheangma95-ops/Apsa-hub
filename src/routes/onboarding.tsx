@@ -19,7 +19,7 @@ import { createOrganizationFn, slugSchema } from "@/api/org";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApsiIllustration } from "@/design-system";
+import { Apsi } from "@/design-system";
 import { useTranslation } from "@/lib/i18n";
 import { slugify } from "@/lib/slug";
 
@@ -148,7 +148,7 @@ function OnboardingPage() {
     <div className="flex min-h-screen flex-col bg-background px-4 py-8">
       <div className="mx-auto w-full max-w-sm space-y-6">
         <div className="flex flex-col items-center text-center">
-          <ApsiIllustration pose="waving" size={88} />
+          <Apsi emotion="waving" size="md" withCompanion />
           <h1 className="mt-4 text-2xl font-semibold tracking-tight text-foreground">
             {t("onboarding.title")}
           </h1>

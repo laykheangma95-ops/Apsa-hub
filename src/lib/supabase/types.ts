@@ -8,13 +8,7 @@
  *   supabase gen types typescript --project-id oelvsbgslkziumbhjzvv --schema public > src/lib/supabase/types.ts
  */
 
-export type Json =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: Json | undefined }
-  | Json[];
+export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
 export type UserStatus = "active" | "suspended" | "deleted";
 export type OrganizationStatus = "active" | "suspended" | "deleted";
@@ -23,12 +17,7 @@ export type WorkspaceStatus = "active" | "archived";
 export type LocationType = "branch" | "warehouse" | "virtual";
 export type LocationStatus = "active" | "closed";
 export type MembershipStatus = "active" | "invited" | "suspended" | "removed";
-export type SystemRoleKey =
-  | "OWNER"
-  | "MANAGER"
-  | "CASHIER"
-  | "SALES"
-  | "CUSTOMER_SERVICE";
+export type SystemRoleKey = "OWNER" | "MANAGER" | "CASHIER" | "SALES" | "CUSTOMER_SERVICE";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type CustomerStatus = "active" | "archived";
 export type IdentityProvider =
@@ -43,25 +32,14 @@ export type IdentityProvider =
 export type CategoryStatus = "ACTIVE" | "ARCHIVED";
 export type ProductStatus = "DRAFT" | "ACTIVE" | "ARCHIVED";
 export type VariantStatus = "ACTIVE" | "ARCHIVED";
-export type InventoryMovementType =
-  | "initial"
-  | "sale"
-  | "return"
-  | "manual_adjustment"
-  | "restock";
+export type InventoryMovementType = "initial" | "sale" | "return" | "manual_adjustment" | "restock";
 export type OrderLifecycleStatus = "draft" | "confirmed" | "completed" | "cancelled";
 export type OrderPaymentStatus = "unpaid" | "pending" | "paid" | "failed";
 export type OrderFulfillmentStatus = "unfulfilled" | "processing" | "fulfilled" | "cancelled";
 export type OrderSource = "POS" | "FACEBOOK" | "INSTAGRAM" | "TELEGRAM" | "MANUAL";
 export type OrderStatusAxis = "lifecycle" | "payment" | "fulfillment";
 export type DeliveryStatus =
-  | "pending"
-  | "preparing"
-  | "ready"
-  | "in_transit"
-  | "delivered"
-  | "failed"
-  | "cancelled";
+  "pending" | "preparing" | "ready" | "in_transit" | "delivered" | "failed" | "cancelled";
 
 export interface Database {
   public: {
@@ -1077,8 +1055,7 @@ export type TablesInsert<T extends keyof Database["public"]["Tables"]> =
   Database["public"]["Tables"][T]["Insert"];
 export type TablesUpdate<T extends keyof Database["public"]["Tables"]> =
   Database["public"]["Tables"][T]["Update"];
-export type Enums<T extends keyof Database["public"]["Enums"]> =
-  Database["public"]["Enums"][T];
+export type Enums<T extends keyof Database["public"]["Enums"]> = Database["public"]["Enums"][T];
 
 export type Profile = Tables<"profiles">;
 export type Organization = Tables<"organizations">;

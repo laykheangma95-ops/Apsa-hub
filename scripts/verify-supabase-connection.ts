@@ -119,10 +119,7 @@ async function checkAnonConnectivity() {
       ok("auth.getSession()", "Supabase API reachable with anon key");
     }
   } catch (e) {
-    fail(
-      "auth.getSession()",
-      e instanceof Error ? e.message : String(e),
-    );
+    fail("auth.getSession()", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -157,10 +154,7 @@ async function checkServiceRoleConnectivity() {
       ok("Service-role DB query", "profiles table reachable");
     }
   } catch (e) {
-    fail(
-      "Service-role DB query",
-      e instanceof Error ? e.message : String(e),
-    );
+    fail("Service-role DB query", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -246,9 +240,7 @@ async function checkSystemRolesSeed() {
       }
     }
 
-    const permCount = await admin
-      .from("permissions")
-      .select("id", { head: true, count: "exact" });
+    const permCount = await admin.from("permissions").select("id", { head: true, count: "exact" });
     if (permCount.error) {
       fail("Permission count", permCount.error.message);
     } else {

@@ -1,0 +1,45 @@
+# APSA CODEOWNERS
+#
+# This repository currently has exactly one collaborator (@laykheangma95-ops,
+# repo admin) — see docs/GITHUB_GOVERNANCE.md §6 for why that means CODEOWNERS
+# cannot yet provide a second human reviewer, and why "Independent review" for
+# now means a recorded AI review (docs/GITHUB_GOVERNANCE.md §5), not a second
+# GitHub approval. CODEOWNERS is still worth having: it documents which paths
+# are critical, and it will start doing real work the moment a second
+# collaborator with write access joins the repo.
+#
+# Do not add anyone here who is not an actual collaborator on this repository.
+# A name here that GitHub cannot resolve as having repo access is silently
+# ignored by GitHub's review-request feature, which defeats the point.
+
+# Default owner for anything not matched below.
+*                                   @laykheangma95-ops
+
+# Auth / security
+/supabase/migrations/001_auth_profiles.sql       @laykheangma95-ops
+/supabase/migrations/006_memberships.sql         @laykheangma95-ops
+/supabase/migrations/007_rls_deferred_member_policies.sql @laykheangma95-ops
+/src/lib/supabase/                               @laykheangma95-ops
+/src/tests/auth-hardening.test.ts                @laykheangma95-ops
+/src/tests/tenant-isolation.test.ts              @laykheangma95-ops
+/src/tests/rpc-security.test.ts                  @laykheangma95-ops
+/SECURITY.md                                     @laykheangma95-ops
+
+# Migrations (all of them — schema/RLS/RPC changes are high-blast-radius)
+/supabase/                                       @laykheangma95-ops
+
+# Payments
+/src/tests/payment-domain.test.ts                @laykheangma95-ops
+/DATA_MODEL.md                                   @laykheangma95-ops
+
+# Orders
+/src/tests/order-domain.test.ts                  @laykheangma95-ops
+/src/tests/order-inventory-integration.test.ts   @laykheangma95-ops
+
+# Conversations / Inbox
+/src/tests/conversation-domain.test.ts           @laykheangma95-ops
+
+# Deployment / CI / governance
+/.github/                                        @laykheangma95-ops
+/vite.config.ts                                  @laykheangma95-ops
+/scripts/                                        @laykheangma95-ops

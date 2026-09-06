@@ -407,6 +407,29 @@ describe("Payment transaction authority and isolation", () => {
     expect((await f.state(order)).payment_status).toBe("pending");
   });
 
+  it("financial trigger helpers are private and financial RPCs remain service-role only", async () => {
+    const helpers = [
+      "check_payment_cross_tenant_refs()",
+      "guard_order_financial_state()",
+      "assert_payment_order_consistency()",
+    ];
+    const rpcs = [
+      "record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)",
+      "verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)",
+      "reverse_payment_v1(uuid,uuid,uuid,text)",
+      "refund_payment_v1(uuid,uuid,uuid,bigint,text,text)",
+    ];
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      for (const signature of [...helpers, ...rpcs]) {
+        const result = await f.db.query(
+          "select has_function_privilege($1,$2,'EXECUTE') as allowed",
+          [role, `public.${signature}`],
+        );
+        expect(result.rows[0]!.allowed).toBe(role === "service_role" && rpcs.includes(signature));
+      }
+    }
+  });
+
   it("old Order RPC, direct status writes and authenticated Payment RPC access cannot bypass authority", async () => {
     const order = await f.newOrder();
     expect(

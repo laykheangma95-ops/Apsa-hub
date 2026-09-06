@@ -125,6 +125,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.check_payment_cross_tenant_refs()
+  FROM PUBLIC, anon, authenticated, service_role;
+
 -- Keep historical bodies/signatures private; wrappers retain API compatibility.
 ALTER FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)
   RENAME TO record_payment_before_order_v1;
@@ -273,10 +276,14 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text),
-  public.verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb),
-  public.reverse_payment_v1(uuid,uuid,uuid,text),
-  public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.reverse_payment_v1(uuid,uuid,uuid,text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text)
+  FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text),
   public.verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb),
   public.reverse_payment_v1(uuid,uuid,uuid,text),
@@ -343,6 +350,8 @@ END;
 $$;
 CREATE TRIGGER order_financial_authority BEFORE INSERT OR UPDATE ON public.orders
   FOR EACH ROW EXECUTE FUNCTION public.guard_order_financial_state();
+REVOKE ALL ON FUNCTION public.guard_order_financial_state()
+  FROM PUBLIC, anon, authenticated, service_role;
 
 -- Direct privileged Payment writes cannot commit inconsistent Order axes.
 CREATE FUNCTION public.assert_payment_order_consistency() RETURNS trigger
@@ -365,3 +374,5 @@ CREATE CONSTRAINT TRIGGER payment_order_consistency
 CREATE CONSTRAINT TRIGGER payment_event_order_consistency
   AFTER INSERT ON public.payment_events DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION public.assert_payment_order_consistency();
+REVOKE ALL ON FUNCTION public.assert_payment_order_consistency()
+  FROM PUBLIC, anon, authenticated, service_role;

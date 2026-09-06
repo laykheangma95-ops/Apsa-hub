@@ -23,13 +23,15 @@ export type CompanionName = "nilo" | "minto" | "vela" | "suri" | "luma";
  * state can be upgraded from static art to Lottie/Rive/video/3D by swapping the
  * source object only — no component or screen changes.
  */
-export type MascotMediaKind = "image" | "lottie" | "rive" | "video";
+export type MascotMediaKind = "image" | "animated-webp" | "lottie" | "rive" | "video" | "3d";
 
 export interface MascotSource {
   kind: MascotMediaKind;
   /** Stable asset name, e.g. `apsi-payment-success`. */
   name: string;
   url: string;
+  /** Static fallback for motion and interactive formats. */
+  posterUrl?: string;
   /** True while the frame is stand-in art taken from the brand guide sheet. */
   placeholder: boolean;
 }

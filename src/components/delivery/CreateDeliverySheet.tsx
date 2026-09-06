@@ -94,7 +94,10 @@ export function CreateDeliverySheet({
   }
 
   const failureCopy: Record<CreateFailure, { title: string; body: string }> = {
-    permission: { title: t("delivery.create.permission.title"), body: t("delivery.create.permission.body") },
+    permission: {
+      title: t("delivery.create.permission.title"),
+      body: t("delivery.create.permission.body"),
+    },
     invalidOrder: {
       title: t("delivery.create.invalidOrder.title"),
       body: t("delivery.create.invalidOrder.body"),

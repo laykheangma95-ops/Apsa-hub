@@ -42,8 +42,10 @@ describe("U2: Old (non-canonical) permission keys are deleted", () => {
   it("deletes inbox.reply", () => expect(migrationSql).toMatch(/DELETE.*inbox\.reply/s));
   it("deletes inbox.assign", () => expect(migrationSql).toMatch(/DELETE.*inbox\.assign/s));
   it("deletes deliveries.read", () => expect(migrationSql).toMatch(/DELETE.*deliveries\.read/s));
-  it("deletes deliveries.create", () => expect(migrationSql).toMatch(/DELETE.*deliveries\.create/s));
-  it("deletes deliveries.update", () => expect(migrationSql).toMatch(/DELETE.*deliveries\.update/s));
+  it("deletes deliveries.create", () =>
+    expect(migrationSql).toMatch(/DELETE.*deliveries\.create/s));
+  it("deletes deliveries.update", () =>
+    expect(migrationSql).toMatch(/DELETE.*deliveries\.update/s));
   it("deletes org.read", () => expect(migrationSql).toMatch(/DELETE.*org\.read/s));
   it("deletes org.update", () => expect(migrationSql).toMatch(/DELETE.*org\.update/s));
 });
