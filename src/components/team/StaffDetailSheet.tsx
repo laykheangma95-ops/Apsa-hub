@@ -4,7 +4,13 @@ import { Button } from "@/components/ui/button";
 import { BottomSheet, StatusChip } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { INVITABLE_ROLES, RoleOption } from "@/components/team/RoleOption";
-import { cancelInvite, changeStaffRole, removeStaff, resendInvite } from "@/lib/api";
+import {
+  cancelInvite,
+  changeStaffRole,
+  reactivateStaff,
+  removeStaff,
+  resendInvite,
+} from "@/lib/api";
 import type { Staff, StaffRole } from "@/types";
 
 interface StaffDetailSheetProps {
@@ -13,6 +19,15 @@ interface StaffDetailSheetProps {
   onOpenChange: (open: boolean) => void;
   onChanged: (member: Staff) => void;
   onRemoved: (id: string) => void;
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function StaffDetailSheet({
@@ -26,17 +41,20 @@ export function StaffDetailSheet({
   const [editingRole, setEditingRole] = useState(false);
   const [role, setRole] = useState<StaffRole>("sales");
   const [notice, setNotice] = useState<string | null>(null);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!member) return;
     setEditingRole(false);
     setNotice(null);
+    setInviteLink(null);
     setRole(member.role === "owner" ? "manager" : member.role);
   }, [member]);
 
   const isOwner = member?.role === "owner";
   const isPending = member?.status === "invited";
+  const isSuspended = member?.status === "suspended";
 
   async function saveRole() {
     if (!member) return;
@@ -67,11 +85,26 @@ export function StaffDetailSheet({
     }
   }
 
+  async function reactivate() {
+    if (!member) return;
+    setBusy(true);
+    try {
+      const updated = await reactivateStaff(member.id);
+      onChanged(updated);
+      setNotice(t("team.detail.reactivated"));
+    } catch {
+      setNotice(t("team.owner.protectedBody"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function invitationAction(kind: "resend" | "cancel") {
     if (!member) return;
     setBusy(true);
     if (kind === "resend") {
-      await resendInvite(member.id);
+      const result = await resendInvite(member.id);
+      setInviteLink(result.inviteLink ?? null);
       setNotice(t("team.pending.resent"));
     } else {
       await cancelInvite(member.id);
@@ -79,6 +112,12 @@ export function StaffDetailSheet({
       onOpenChange(false);
     }
     setBusy(false);
+  }
+
+  async function copyLink() {
+    if (!inviteLink) return;
+    const ok = await copyToClipboard(inviteLink);
+    if (ok) setNotice(t("team.pending.linkCopied"));
   }
 
   return (
@@ -92,7 +131,7 @@ export function StaffDetailSheet({
       {member ? (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
-            <StatusChip status={isPending ? "invited" : "active"} size="md" />
+            <StatusChip status={member.status ?? "active"} size="md" />
             <span className="text-label text-text-primary">{t(`team.role.${member.role}`)}</span>
           </div>
 
@@ -126,6 +165,16 @@ export function StaffDetailSheet({
             <p className="text-caption text-text-secondary" role="status">
               {notice}
             </p>
+          ) : null}
+
+          {inviteLink ? (
+            <Button
+              variant="outline"
+              className="tap-target h-12 w-full"
+              onClick={() => void copyLink()}
+            >
+              {t("team.pending.copyLink")}
+            </Button>
           ) : null}
 
           {!isOwner && editingRole ? (
@@ -178,6 +227,14 @@ export function StaffDetailSheet({
                     {t("team.pending.cancel")}
                   </Button>
                 </>
+              ) : isSuspended ? (
+                <Button
+                  className="tap-target h-12 w-full"
+                  disabled={busy}
+                  onClick={() => void reactivate()}
+                >
+                  {t("team.detail.reactivate")}
+                </Button>
               ) : (
                 <>
                   <Button

@@ -15,6 +15,16 @@ import { useLanguage } from "@/lib/i18n";
 import { permissionsFor } from "@/lib/permissions";
 import type { Staff } from "@/types";
 
+/**
+ * Best-effort UI classification only — real authorization always happens
+ * server-side (src/server/team/service.ts ctx.require calls). This just
+ * decides which empty state copy to show; getting it wrong never weakens
+ * enforcement.
+ */
+function isPermissionDeniedError(error: unknown): boolean {
+  return error instanceof Error && /permission|membership/i.test(error.message);
+}
+
 export const Route = createFileRoute("/app/team")({
   head: () => ({
     meta: [
@@ -100,12 +110,19 @@ function TeamScreen() {
           ) : teamQuery.isLoading ? (
             <ListSkeleton rows={4} />
           ) : teamQuery.isError ? (
-            <OperationalState
-              title={t("team.error.title")}
-              body={t("team.error.body")}
-              tone="danger"
-              onRetry={() => void teamQuery.refetch()}
-            />
+            isPermissionDeniedError(teamQuery.error) ? (
+              <OperationalState
+                title={t("team.restricted.title")}
+                body={t("team.restricted.body")}
+              />
+            ) : (
+              <OperationalState
+                title={t("team.error.title")}
+                body={t("team.error.body")}
+                tone="danger"
+                onRetry={() => void teamQuery.refetch()}
+              />
+            )
           ) : (
             <>
               {ownerOnly ? (

@@ -23,6 +23,7 @@ import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
 import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppTeamRouteImport } from './routes/app.team'
+import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
@@ -98,6 +99,11 @@ const AppTeamRoute = AppTeamRouteImport.update({
   path: '/team',
   getParentRoute: () => AppRoute,
 } as any)
+const InviteTokenRoute = InviteTokenRouteImport.update({
+  id: '/invite/$token',
+  path: '/invite/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppCustomersIdRoute = AppCustomersIdRouteImport.update({
   id: '/customers/$id',
   path: '/customers/$id',
@@ -133,6 +139,7 @@ export interface FileRoutesByFullPath {
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -152,6 +159,7 @@ export interface FileRoutesByTo {
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -173,6 +181,7 @@ export interface FileRoutesById {
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -195,6 +204,7 @@ export interface FileRouteTypes {
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -214,6 +224,7 @@ export interface FileRouteTypes {
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -234,6 +245,7 @@ export interface FileRouteTypes {
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -251,6 +263,7 @@ export interface RootRouteChildren {
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
+  InviteTokenRoute: typeof InviteTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -353,6 +366,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamRouteImport
       parentRoute: typeof AppRoute
     }
+    '/invite/$token': {
+      id: '/invite/$token'
+      path: '/invite/$token'
+      fullPath: '/invite/$token'
+      preLoaderRoute: typeof InviteTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/app/customers/$id': {
       id: '/app/customers/$id'
       path: '/customers/$id'
@@ -440,6 +460,7 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  InviteTokenRoute: InviteTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

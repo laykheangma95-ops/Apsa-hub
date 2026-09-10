@@ -45,6 +45,7 @@ export type AuditAction =
   | "customers.export"
   | "team.invite"
   | "team.remove"
+  | "team.reactivate"
   | "team.role_change"
   | "org.update"
   | "org.ownership_transfer";
@@ -58,6 +59,7 @@ export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
   "inventory.adjust",
   "customers.export",
   "team.remove",
+  "team.reactivate",
   "team.role_change",
   "org.ownership_transfer",
 ]);

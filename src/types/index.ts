@@ -147,6 +147,7 @@ export type StatusKey =
   | "out_of_stock"
   | "active"
   | "invited"
+  | "suspended"
   // Production Order domain (src/server/orders/state-machine.ts). Distinct
   // vocabulary from the mock statuses above — see that file for why.
   | "draft"
@@ -494,7 +495,7 @@ export interface ConversationDetail extends Conversation {
 
 export type StaffRole = "owner" | "manager" | "cashier" | "sales" | "customer_service";
 
-export type StaffStatus = "active" | "invited";
+export type StaffStatus = "active" | "invited" | "suspended";
 
 export interface Staff {
   id: string;
