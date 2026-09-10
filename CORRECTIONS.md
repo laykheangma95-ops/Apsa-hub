@@ -39,7 +39,23 @@ Corrections are listed newest first.
 
 # 3. ACTIVE CORRECTIONS
 
-No corrections have been recorded yet.
+---
+
+### CORRECTION-001
+
+**Date:** 2026-09-10
+**Affects:** PERMISSIONS_MATRIX.md, supabase/migrations/042_team_permissions.sql, src/server/team/service.ts
+**Section:** §7 TEAM & MEMBERSHIP — `team.update_role` / `team.roles_assign`, ⚠️ (limited/conditional) for MANAGER
+**Original:** PERMISSIONS_MATRIX.md marks `team.update_role` as ⚠️ for MANAGER without defining what the limit is. Migration 042 (PR #39) granted MANAGER the `team.roles_assign` permission unconditionally — resolving the ⚠️ to unrestricted role-assignment authority, equal to OWNER's.
+**Correction:** MANAGER role authority is LIMITED as follows:
+- OWNER may assign/change the MANAGER role (promote to Manager, demote a Manager, or change a Manager's own role).
+- MANAGER may assign/change only roles strictly BELOW Manager: Cashier, Sales, Customer Service.
+- MANAGER may NOT: assign the Manager role to anyone; modify a membership whose current role is Manager (including their own); promote anyone to a role equal to or higher than their own; modify the Owner's membership.
+- No staff member (Owner included, by the pre-existing last-owner-protection rule; every other role, by permission) may promote themselves.
+This is enforced server-side in `src/server/team/service.ts` (`assertRoleAuthority()`), not by the `team.roles_assign` DB grant alone — the permission system is a coarse bit, not fine-grained by role hierarchy, so the DB grant to MANAGER stays as migration 042 wrote it and the cap lives in application code.
+**Reason:** Independent review of PR #39 flagged the unconditional grant as an overstatement of the matrix's ⚠️ marker and a merge blocker. Project owner resolved the ambiguity directly.
+
+---
 
 This section will be updated as decisions evolve, errors are found, or earlier guidance is superseded.
 

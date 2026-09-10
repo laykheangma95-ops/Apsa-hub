@@ -11,6 +11,7 @@ import {
   removeStaff,
   resendInvite,
 } from "@/lib/api";
+import { classifyTeamActionError } from "@/lib/team-errors";
 import type { Staff, StaffRole } from "@/types";
 
 interface StaffDetailSheetProps {
@@ -27,6 +28,25 @@ async function copyToClipboard(text: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Maps a thrown server error to user-facing copy. Every mutating action in
+ * this sheet (role change, remove, reactivate, resend, cancel) can fail for
+ * several distinct reasons — owner protection, a Manager-authority cap
+ * (CORRECTION-001), or an unrelated network/DB failure — and each must read
+ * as what actually happened, not be papered over with "ownership is
+ * protected" regardless of cause.
+ */
+function teamActionErrorMessage(t: ReturnType<typeof useTranslation>["t"], err: unknown): string {
+  switch (classifyTeamActionError(err)) {
+    case "owner_protected":
+      return t("team.owner.protectedBody");
+    case "insufficient_authority":
+      return t("team.detail.insufficientAuthority");
+    default:
+      return t("team.detail.actionError");
   }
 }
 
@@ -64,8 +84,8 @@ export function StaffDetailSheet({
       onChanged(updated);
       setEditingRole(false);
       setNotice(t("team.detail.roleUpdated"));
-    } catch {
-      setNotice(t("team.owner.protectedBody"));
+    } catch (err) {
+      setNotice(teamActionErrorMessage(t, err));
     } finally {
       setBusy(false);
     }
@@ -78,8 +98,8 @@ export function StaffDetailSheet({
       await removeStaff(member.id);
       onRemoved(member.id);
       onOpenChange(false);
-    } catch {
-      setNotice(t("team.owner.protectedBody"));
+    } catch (err) {
+      setNotice(teamActionErrorMessage(t, err));
     } finally {
       setBusy(false);
     }
@@ -92,8 +112,8 @@ export function StaffDetailSheet({
       const updated = await reactivateStaff(member.id);
       onChanged(updated);
       setNotice(t("team.detail.reactivated"));
-    } catch {
-      setNotice(t("team.owner.protectedBody"));
+    } catch (err) {
+      setNotice(teamActionErrorMessage(t, err));
     } finally {
       setBusy(false);
     }
@@ -102,16 +122,21 @@ export function StaffDetailSheet({
   async function invitationAction(kind: "resend" | "cancel") {
     if (!member) return;
     setBusy(true);
-    if (kind === "resend") {
-      const result = await resendInvite(member.id);
-      setInviteLink(result.inviteLink ?? null);
-      setNotice(t("team.pending.resent"));
-    } else {
-      await cancelInvite(member.id);
-      onRemoved(member.id);
-      onOpenChange(false);
+    try {
+      if (kind === "resend") {
+        const result = await resendInvite(member.id);
+        setInviteLink(result.inviteLink ?? null);
+        setNotice(t("team.pending.resent"));
+      } else {
+        await cancelInvite(member.id);
+        onRemoved(member.id);
+        onOpenChange(false);
+      }
+    } catch (err) {
+      setNotice(teamActionErrorMessage(t, err));
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   async function copyLink() {

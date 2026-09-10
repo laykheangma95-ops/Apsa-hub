@@ -44,6 +44,8 @@ export type AuditAction =
   | "products.delete"
   | "customers.export"
   | "team.invite"
+  | "team.invite_resend"
+  | "team.invite_cancel"
   | "team.remove"
   | "team.reactivate"
   | "team.role_change"

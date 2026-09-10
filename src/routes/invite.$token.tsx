@@ -12,6 +12,13 @@
  * matches the invited address. All of that is re-verified server-side by
  * acceptInvitationFn / the accept_invitation() RPC; this page only decides
  * what to show.
+ *
+ * Error handling: both the preview load and the accept call are network
+ * requests and can fail for reasons that have nothing to do with the
+ * invitation itself (offline, a 5xx, a timeout). Every branch below is
+ * try/caught so a failure always lands on a visible, recoverable error
+ * state — never an infinite "loading"/"accepting" spinner or a button that
+ * silently stops responding.
  */
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -28,6 +35,7 @@ export const Route = createFileRoute("/invite/$token")({
 
 type PreviewState =
   | { kind: "loading" }
+  | { kind: "error" }
   | { kind: "unauthenticated" }
   | { kind: "not_found" }
   | { kind: "expired" }
@@ -41,7 +49,15 @@ type PreviewState =
       callerEmail: string;
     };
 
-type AcceptState = "idle" | "accepting" | "success" | "already_member" | "error";
+type AcceptState =
+  | { kind: "idle" }
+  | { kind: "accepting" }
+  | { kind: "success" }
+  | { kind: "already_member" }
+  | {
+      kind: "error";
+      code: "not_found" | "expired" | "already_used" | "email_mismatch" | "generic";
+    };
 
 function InviteAcceptPage() {
   const { t } = useTranslation();
@@ -49,45 +65,79 @@ function InviteAcceptPage() {
   const { token } = Route.useParams();
 
   const [preview, setPreview] = useState<PreviewState>({ kind: "loading" });
-  const [acceptState, setAcceptState] = useState<AcceptState>("idle");
+  const [acceptState, setAcceptState] = useState<AcceptState>({ kind: "idle" });
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const { getInvitationPreviewFn } = await import("@/api/team");
-      const result = await getInvitationPreviewFn({ data: { token } });
-      if (cancelled) return;
-      if (result.status === "unauthenticated") {
-        setPreview({ kind: "unauthenticated" });
-      } else if (result.status === "pending") {
-        setPreview({
-          kind: "pending",
-          ...(result.organizationName ? { organizationName: result.organizationName } : {}),
-          role: result.role ?? "",
-          invitedEmail: result.invitedEmail ?? "",
-          ...(result.emailMatchesCaller !== undefined
-            ? { emailMatchesCaller: result.emailMatchesCaller }
-            : {}),
-          callerEmail: result.callerEmail,
-        });
-      } else {
-        setPreview({ kind: result.status });
+      try {
+        const { getInvitationPreviewFn } = await import("@/api/team");
+        const result = await getInvitationPreviewFn({ data: { token } });
+        if (cancelled) return;
+        if (result.status === "unauthenticated") {
+          setPreview({ kind: "unauthenticated" });
+        } else if (result.status === "pending") {
+          setPreview({
+            kind: "pending",
+            ...(result.organizationName ? { organizationName: result.organizationName } : {}),
+            role: result.role ?? "",
+            invitedEmail: result.invitedEmail ?? "",
+            ...(result.emailMatchesCaller !== undefined
+              ? { emailMatchesCaller: result.emailMatchesCaller }
+              : {}),
+            callerEmail: result.callerEmail,
+          });
+        } else {
+          setPreview({ kind: result.status });
+        }
+      } catch {
+        // Network failure, server error, etc. — never leave the page stuck
+        // on "Checking your invite…" forever.
+        if (!cancelled) setPreview({ kind: "error" });
       }
     }
     void load();
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, loadAttempt]);
+
+  function retryLoad() {
+    setPreview({ kind: "loading" });
+    setLoadAttempt((n) => n + 1);
+  }
 
   async function accept() {
-    setAcceptState("accepting");
-    const { acceptInvitationFn } = await import("@/api/team");
-    const result = await acceptInvitationFn({ data: { token } });
-    if (result.ok) {
-      setAcceptState(result.alreadyMember ? "already_member" : "success");
-    } else {
-      setAcceptState("error");
+    setAcceptState({ kind: "accepting" });
+    try {
+      const { acceptInvitationFn } = await import("@/api/team");
+      const result = await acceptInvitationFn({ data: { token } });
+      if (result.ok) {
+        setAcceptState({ kind: result.alreadyMember ? "already_member" : "success" });
+        return;
+      }
+      if (result.code === "unauthenticated") {
+        // Session expired between preview and accept — send them back through
+        // the sign-in prompt rather than reporting a generic failure.
+        setPreview({ kind: "unauthenticated" });
+        setAcceptState({ kind: "idle" });
+        return;
+      }
+      setAcceptState({
+        kind: "error",
+        code:
+          result.code === "not_found" ||
+          result.code === "expired" ||
+          result.code === "already_used" ||
+          result.code === "email_mismatch"
+            ? result.code
+            : "generic",
+      });
+    } catch {
+      // Network failure, timeout, unexpected 5xx — the button must not stay
+      // permanently disabled on "Joining…".
+      setAcceptState({ kind: "error", code: "generic" });
     }
   }
 
@@ -102,6 +152,15 @@ function InviteAcceptPage() {
           <p className="text-center text-sm text-muted-foreground" role="status">
             {t("inviteAccept.loading")}
           </p>
+        ) : null}
+
+        {preview.kind === "error" ? (
+          <OperationalState
+            title={t("inviteAccept.title")}
+            body={t("inviteAccept.loadError")}
+            tone="danger"
+            onRetry={retryLoad}
+          />
         ) : null}
 
         {preview.kind === "unauthenticated" ? (
@@ -158,10 +217,10 @@ function InviteAcceptPage() {
                 })}
                 tone="danger"
               />
-            ) : acceptState === "success" || acceptState === "already_member" ? (
+            ) : acceptState.kind === "success" || acceptState.kind === "already_member" ? (
               <div className="space-y-3">
                 <p className="text-sm text-foreground">
-                  {acceptState === "success"
+                  {acceptState.kind === "success"
                     ? t("inviteAccept.success", { org: preview.organizationName ?? "" })
                     : t("inviteAccept.alreadyMember")}
                 </p>
@@ -169,13 +228,33 @@ function InviteAcceptPage() {
                   {t("inviteAccept.goToApp")}
                 </Button>
               </div>
+            ) : acceptState.kind === "error" ? (
+              <OperationalState
+                title={t("inviteAccept.title")}
+                body={
+                  acceptState.code === "not_found"
+                    ? t("inviteAccept.notFound")
+                    : acceptState.code === "expired"
+                      ? t("inviteAccept.expired")
+                      : acceptState.code === "already_used"
+                        ? t("inviteAccept.alreadyUsed")
+                        : acceptState.code === "email_mismatch"
+                          ? t("inviteAccept.emailMismatch", {
+                              invitedEmail: preview.invitedEmail,
+                              yourEmail: preview.callerEmail,
+                            })
+                          : t("inviteAccept.acceptError")
+                }
+                tone="danger"
+                onRetry={() => setAcceptState({ kind: "idle" })}
+              />
             ) : (
               <Button
                 className="h-12 w-full"
-                disabled={acceptState === "accepting"}
+                disabled={acceptState.kind === "accepting"}
                 onClick={() => void accept()}
               >
-                {acceptState === "accepting"
+                {acceptState.kind === "accepting"
                   ? t("inviteAccept.accepting")
                   : t("inviteAccept.accept")}
               </Button>

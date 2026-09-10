@@ -5,6 +5,10 @@
 --          is NOT NULL, so a person without a profile row cannot get a
 --          membership directly — this table is the minimal staging area that
 --          lets an owner/manager invite someone who has no account yet.
+--          accept_invitation() reactivates a prior suspended/removed membership
+--          row for the same (user, org) in place rather than inserting a
+--          second row, since memberships carries no full-history uniqueness
+--          constraint (only the partial active/invited index).
 -- Tables: invitations
 -- Classification: tenant-private (scoped to organization_id)
 -- Indexes: (organization_id, lower(email)) unique WHERE status='pending' (duplicate-invite guard);
@@ -117,11 +121,11 @@ SECURITY DEFINER
 SET search_path = public, auth
 AS $$
 DECLARE
-  v_user_id     UUID;
-  v_user_email  TEXT;
-  v_invitation  public.invitations%ROWTYPE;
-  v_lock_key    BIGINT;
-  v_existing    UUID;
+  v_user_id      UUID;
+  v_user_email   TEXT;
+  v_invitation   public.invitations%ROWTYPE;
+  v_lock_key     BIGINT;
+  v_existing     public.memberships%ROWTYPE;
 BEGIN
   v_user_id := auth.uid();
   IF v_user_id IS NULL THEN
@@ -163,22 +167,38 @@ BEGIN
     RETURN jsonb_build_object('status', 'email_mismatch');
   END IF;
 
-  SELECT organization_id INTO v_existing
+  -- Look for ANY prior membership row for this (user, org) pair — not only
+  -- active/invited. Deactivation never deletes the row (src/server/team/service.ts
+  -- setMembershipStatus), so a previously suspended/removed member who is
+  -- re-invited and accepts must be REACTIVATED on their existing row, never
+  -- inserted as a second row: memberships has no unique constraint across all
+  -- statuses (only the partial index on active/invited), so without this
+  -- check a suspend → re-invite → accept cycle would silently duplicate the
+  -- person in the roster.
+  SELECT * INTO v_existing
   FROM public.memberships
   WHERE user_id = v_user_id
     AND organization_id = v_invitation.organization_id
-    AND status IN ('active', 'invited')
+  ORDER BY joined_at DESC
   LIMIT 1;
 
-  IF v_existing IS NOT NULL THEN
+  IF v_existing.id IS NOT NULL AND v_existing.status IN ('active', 'invited') THEN
     UPDATE public.invitations
       SET status = 'accepted', accepted_at = NOW(), accepted_user_id = v_user_id
       WHERE id = v_invitation.id;
     RETURN jsonb_build_object('status', 'already_member', 'org_id', v_invitation.organization_id);
   END IF;
 
-  INSERT INTO public.memberships (user_id, organization_id, role_id, status, invited_by)
-  VALUES (v_user_id, v_invitation.organization_id, v_invitation.role_id, 'active', v_invitation.invited_by);
+  IF v_existing.id IS NOT NULL THEN
+    -- Prior row exists but is suspended/removed — reactivate it in place
+    -- (same membership id, same user_id) rather than inserting a duplicate.
+    UPDATE public.memberships
+      SET status = 'active', role_id = v_invitation.role_id, invited_by = v_invitation.invited_by
+      WHERE id = v_existing.id;
+  ELSE
+    INSERT INTO public.memberships (user_id, organization_id, role_id, status, invited_by)
+    VALUES (v_user_id, v_invitation.organization_id, v_invitation.role_id, 'active', v_invitation.invited_by);
+  END IF;
 
   UPDATE public.invitations
     SET status = 'accepted', accepted_at = NOW(), accepted_user_id = v_user_id

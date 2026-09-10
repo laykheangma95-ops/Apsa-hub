@@ -13,17 +13,8 @@ import { currentRole, getTeam, getWorkspaces } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { permissionsFor } from "@/lib/permissions";
+import { isPermissionDeniedError } from "@/lib/team-errors";
 import type { Staff } from "@/types";
-
-/**
- * Best-effort UI classification only — real authorization always happens
- * server-side (src/server/team/service.ts ctx.require calls). This just
- * decides which empty state copy to show; getting it wrong never weakens
- * enforcement.
- */
-function isPermissionDeniedError(error: unknown): boolean {
-  return error instanceof Error && /permission|membership/i.test(error.message);
-}
 
 export const Route = createFileRoute("/app/team")({
   head: () => ({

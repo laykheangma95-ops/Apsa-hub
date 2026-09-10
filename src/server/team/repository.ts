@@ -160,6 +160,14 @@ export async function findInvitationById(
   return data ? (data as InvitationRow) : null;
 }
 
+/**
+ * Exact, case-insensitive-by-normalization match — the email is always
+ * stored lowercased/trimmed by createInvitation, so an exact `.eq()` against
+ * a lowercased/trimmed input is both correct and precise. `.ilike()` was
+ * used previously, which treats `%`/`_` in the input as SQL wildcards and
+ * risks matching an unrelated pending invite (e.g. an invite for `%@a.com`
+ * would match every pending invite in the org).
+ */
 export async function findPendingInvitationByEmail(
   organizationId: string,
   email: string,
@@ -169,13 +177,28 @@ export async function findPendingInvitationByEmail(
     .select("*")
     .eq("organization_id", organizationId)
     .eq("status", "pending")
-    .ilike("email", email.trim())
+    .eq("email", email.trim().toLowerCase())
     .maybeSingle();
 
   if (error) {
     throw new Error(`findPendingInvitationByEmail: ${(error as { message: string }).message}`);
   }
   return data ? (data as InvitationRow) : null;
+}
+
+/**
+ * Thrown when an insert violates the partial unique index on
+ * (organization_id, lower(email)) WHERE status='pending' (Postgres 23505).
+ * Distinguishes "someone already has a pending invite for this address" from
+ * a generic DB failure so the service layer can map it to the same
+ * `duplicate_invitation` TeamError as the pre-check, closing the race where
+ * two concurrent invites for the same address are submitted at once.
+ */
+export class InvitationConflictError extends Error {
+  constructor() {
+    super("invitation_conflict");
+    this.name = "InvitationConflictError";
+  }
 }
 
 export async function createInvitation(
@@ -203,10 +226,35 @@ export async function createInvitation(
     .select("*")
     .single();
 
-  if (error || !data) {
-    throw new Error(`createInvitation: ${(error as { message?: string })?.message ?? "no data"}`);
+  if (error) {
+    if ((error as { code?: string }).code === "23505") {
+      throw new InvitationConflictError();
+    }
+    throw new Error(`createInvitation: ${(error as { message?: string }).message ?? "no data"}`);
   }
+  if (!data) throw new Error("createInvitation: no data");
   return data as InvitationRow;
+}
+
+/**
+ * Flips a stale (expired but still `pending`) invitation row to `expired`.
+ * This frees the partial unique index on (organization_id, lower(email))
+ * WHERE status='pending' so the same address can be re-invited — see
+ * inviteStaff() in ./service.ts, which calls this instead of leaving an
+ * expired invite permanently blocking a re-invite.
+ */
+export async function expireInvitation(
+  organizationId: string,
+  invitationId: string,
+): Promise<void> {
+  const { error } = await db
+    .from("invitations")
+    .update({ status: "expired" })
+    .eq("id", invitationId)
+    .eq("organization_id", organizationId)
+    .eq("status", "pending");
+
+  if (error) throw new Error(`expireInvitation: ${(error as { message: string }).message}`);
 }
 
 /** Resend: rotates the token and expiry on the existing pending row (never a new row). */

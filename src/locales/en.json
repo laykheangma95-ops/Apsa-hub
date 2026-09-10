@@ -1124,6 +1124,7 @@
       "contactInvalid": "That phone number or email does not look right.",
       "ownerNotOffered": "Only the owner can hand over ownership, so Owner is not offered here.",
       "duplicate": "This person already has a pending invite. Use Resend from their staff detail instead.",
+      "insufficientAuthority": "Only the owner can invite or change a Manager.",
       "error": "Could not send the invite. Please try again.",
       "linkTitle": "Invite link",
       "linkHint": "APSA does not send this automatically yet — copy it and share it with them.",
@@ -1139,7 +1140,9 @@
       "removeAccess": "Remove access",
       "roleUpdated": "Role updated.",
       "reactivate": "Give access back",
-      "reactivated": "Access restored."
+      "reactivated": "Access restored.",
+      "actionError": "Something went wrong. Please try again.",
+      "insufficientAuthority": "Only the owner can change or remove another manager."
     },
     "pending": {
       "resend": "Resend invite",
@@ -1187,6 +1190,8 @@
   "inviteAccept": {
     "title": "Team invite",
     "loading": "Checking your invite…",
+    "loadError": "Could not load this invite. Check your connection and try again.",
+    "acceptError": "Could not accept this invite. Please try again.",
     "signInRequired": "Sign in or create an account with {{email}} to accept this invite.",
     "signIn": "Sign in",
     "signUp": "Create account",

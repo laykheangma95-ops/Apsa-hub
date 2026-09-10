@@ -8,6 +8,7 @@ export type TeamErrorCode =
   | "owner_role_forbidden"
   | "cannot_modify_owner"
   | "last_owner_protected"
+  | "insufficient_role_authority"
   | "invalid_input";
 
 export class TeamError extends Error {
@@ -21,7 +22,8 @@ export class TeamError extends Error {
         ? 409
         : code === "owner_role_forbidden" ||
             code === "cannot_modify_owner" ||
-            code === "last_owner_protected"
+            code === "last_owner_protected" ||
+            code === "insufficient_role_authority"
           ? 403
           : code === "invitation_expired" ||
               code === "invitation_already_used" ||

@@ -35,6 +35,7 @@ import {
 import * as RealAuthorization from "../server/auth/authorization";
 import * as RealAudit from "../server/auth/audit";
 import type { InvitationRow, MembershipWithProfileAndRole } from "../server/team/types";
+import { InvitationConflictError } from "../server/team/repository";
 
 const ORG_A = "aaaaaaaa-0000-0000-0000-000000000001";
 const ORG_B = "bbbbbbbb-0000-0000-0000-000000000002";
@@ -120,11 +121,16 @@ function installRepoMock(overrides: Partial<Record<string, unknown>> = {}): Repo
     createInvitation: mock(async () => {
       throw new Error("createInvitation not stubbed");
     }),
+    expireInvitation: mock(async () => {}),
     reissueInvitation: mock(async () => null as InvitationRow | null),
     cancelInvitation: mock(async () => null as InvitationRow | null),
     findInvitationByTokenHash: mock(async () => null as InvitationRow | null),
     findOrganizationDisplayName: mock(async () => "Angkor Coffee"),
     findRoleById: mock(async () => null),
+    // Real class, not a mock — service.ts does `err instanceof repo.InvitationConflictError`
+    // to detect a 23505 unique-violation from createInvitation(), so the mocked
+    // module must export the real class for that check to work.
+    InvitationConflictError,
     ...overrides,
   };
 
@@ -300,6 +306,91 @@ describe("2. Owner invites, 4. Duplicate invite handling", () => {
     ).rejects.toThrow(/duplicate_invitation/);
     expect(repo["createInvitation"]).not.toHaveBeenCalled();
   });
+
+  it("an EXPIRED pending invite is retired (not left blocking) so the same email can be re-invited", async () => {
+    installPassthroughAuthMocks();
+    const staleInvite = invitationRow({
+      id: "inv-stale",
+      organization_id: ORG_A,
+      email: "ghost@example.com",
+      expires_at: "2000-01-01T00:00:00.000Z", // long past
+    });
+    const fresh = invitationRow({
+      id: "inv-fresh",
+      organization_id: ORG_A,
+      email: "ghost@example.com",
+    });
+    const repo = installRepoMock({
+      findPendingInvitationByEmail: mock(async () => staleInvite),
+      expireInvitation: mock(async () => {}),
+      createInvitation: mock(async () => fresh),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "ghost@example.com",
+      displayName: "Ghost",
+      role: "sales",
+    });
+
+    // The stale row is flipped to expired (freeing the partial unique index)
+    // BEFORE the new row is inserted — never the reverse, and never skipped.
+    expect(repo["expireInvitation"]).toHaveBeenCalledWith(ORG_A, "inv-stale");
+    expect(repo["createInvitation"]).toHaveBeenCalledTimes(1);
+    expect(result.invitation.id).toBe("inv-fresh");
+  });
+
+  it("re-inviting the same address twice in quick succession maps a 23505 unique-violation race to duplicate_invitation", async () => {
+    installPassthroughAuthMocks();
+    // Both callers pass the pre-check (findPendingInvitationByEmail returns
+    // null for both, as it would for two concurrent requests) — the DB's
+    // unique index is the real guard for the loser of the race.
+    const repo = installRepoMock({
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => {
+        throw new InvitationConflictError();
+      }),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await expect(
+      inviteStaff(ctx, { email: "race@example.com", displayName: "Race", role: "sales" }),
+    ).rejects.toThrow(/duplicate_invitation/);
+    expect(repo["createInvitation"]).toHaveBeenCalledTimes(1);
+  });
+
+  it("a non-conflict createInvitation failure propagates as-is, not as duplicate_invitation", async () => {
+    installPassthroughAuthMocks();
+    installRepoMock({
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => {
+        throw new Error("createInvitation: connection reset");
+      }),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await expect(
+      inviteStaff(ctx, { email: "db-down@example.com", displayName: "X", role: "sales" }),
+    ).rejects.toThrow(/connection reset/);
+  });
 });
 
 // ── 5. Role change ────────────────────────────────────────────────────────────
@@ -335,6 +426,411 @@ describe("5. Role change", () => {
 
     expect(result.role).toBe("manager");
     expect(auditLogRequired).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── 13. Manager role authority cap (CORRECTION-001) ─────────────────────────────
+// PERMISSIONS_MATRIX.md §7 marks `team.update_role` ⚠️ for MANAGER; migration
+// 042 grants `team.roles_assign` to MANAGER as a coarse DB permission bit.
+// CORRECTION-001 (CORRECTIONS.md, owner-approved) resolves the ⚠️ to: Owner
+// may assign/change Manager; Manager may assign/change only roles strictly
+// BELOW Manager, and may never touch a membership that is currently Manager
+// (including their own) or assign the Manager role to anyone.
+
+describe("13. Manager role authority cap (CORRECTION-001)", () => {
+  it("a Manager CANNOT invite someone as Manager", async () => {
+    installPassthroughAuthMocks();
+    const repo = installRepoMock({ findPendingInvitationByEmail: mock(async () => null) });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(
+      inviteStaff(ctx, { email: "peer@example.com", displayName: "Peer", role: "manager" }),
+    ).rejects.toThrow(/insufficient_role_authority/);
+    expect(repo["createInvitation"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CAN invite someone as Cashier/Sales/Customer Service", async () => {
+    installPassthroughAuthMocks();
+    const created = invitationRow({ id: "inv-below", organization_id: ORG_A });
+    const repo = installRepoMock({
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => created),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "junior@example.com",
+      displayName: "Junior",
+      role: "cashier",
+    });
+
+    expect(result.invitation.id).toBe("inv-below");
+    expect(repo["createInvitation"]).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Owner CAN invite someone as Manager", async () => {
+    installPassthroughAuthMocks();
+    const created = invitationRow({ id: "inv-mgr", organization_id: ORG_A });
+    installRepoMock({
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => created),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "newmgr@example.com",
+      displayName: "New Manager",
+      role: "manager",
+    });
+
+    expect(result.invitation.id).toBe("inv-mgr");
+  });
+
+  it("a Manager CANNOT change the role of another Manager's membership", async () => {
+    installPassthroughAuthMocks();
+    const otherManager = membershipRow({
+      id: "m-peer-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+    });
+    const repo = installRepoMock({ findMembershipById: mock(async () => otherManager) });
+    const { changeRole } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.roles_assign"],
+      isOwner: false,
+    });
+
+    await expect(changeRole(ctx, "m-peer-manager", "cashier")).rejects.toThrow(
+      /insufficient_role_authority/,
+    );
+    expect(repo["updateMembershipRole"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CANNOT promote a Cashier to Manager", async () => {
+    installPassthroughAuthMocks();
+    const cashier = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+    });
+    const repo = installRepoMock({ findMembershipById: mock(async () => cashier) });
+    const { changeRole } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.roles_assign"],
+      isOwner: false,
+    });
+
+    await expect(changeRole(ctx, "m-cashier", "manager")).rejects.toThrow(
+      /insufficient_role_authority/,
+    );
+    expect(repo["updateMembershipRole"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CANNOT change their OWN membership's role (self-promotion/self-protection, same as any other Manager row)", async () => {
+    installPassthroughAuthMocks();
+    const selfMembership = membershipRow({
+      id: "m-self",
+      organization_id: ORG_A,
+      user_id: "u-manager",
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+    });
+    const repo = installRepoMock({ findMembershipById: mock(async () => selfMembership) });
+    const { changeRole } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.roles_assign"],
+      isOwner: false,
+    });
+
+    await expect(changeRole(ctx, "m-self", "cashier")).rejects.toThrow(
+      /insufficient_role_authority/,
+    );
+    expect(repo["updateMembershipRole"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CAN change a Cashier's role to Sales (a role change strictly below Manager, both ends)", async () => {
+    installPassthroughAuthMocks();
+    const cashier = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+    });
+    const updated = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+      role: { name: "Sales", system_role: "SALES" },
+    });
+    const repo = installRepoMock({
+      findMembershipById: mock(async () => cashier),
+      updateMembershipRole: mock(async () => updated),
+    });
+    const { changeRole } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.roles_assign"],
+      isOwner: false,
+    });
+
+    const result = await changeRole(ctx, "m-cashier", "sales");
+
+    expect(result.role).toBe("sales");
+    expect(repo["updateMembershipRole"]).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Owner CAN demote a Manager to Cashier", async () => {
+    const { auditLogRequired } = installPassthroughAuthMocks();
+    const manager = membershipRow({
+      id: "m-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+    });
+    const updated = membershipRow({
+      id: "m-manager",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+    });
+    installRepoMock({
+      findMembershipById: mock(async () => manager),
+      updateMembershipRole: mock(async () => updated),
+    });
+    const { changeRole } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.roles_assign"],
+      isOwner: true,
+    });
+
+    const result = await changeRole(ctx, "m-manager", "cashier");
+
+    expect(result.role).toBe("cashier");
+    expect(auditLogRequired).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Manager CANNOT deactivate another Manager", async () => {
+    installPassthroughAuthMocks();
+    const otherManager = membershipRow({
+      id: "m-peer-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+    });
+    const repo = installRepoMock({ findMembershipById: mock(async () => otherManager) });
+    const { deactivateMember } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.remove"],
+      isOwner: false,
+    });
+
+    await expect(deactivateMember(ctx, "m-peer-manager")).rejects.toThrow(
+      /insufficient_role_authority/,
+    );
+    expect(repo["updateMembershipStatus"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CANNOT reactivate another (suspended) Manager", async () => {
+    installPassthroughAuthMocks();
+    const suspendedManager = membershipRow({
+      id: "m-peer-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+      status: "suspended",
+    });
+    const repo = installRepoMock({ findMembershipById: mock(async () => suspendedManager) });
+    const { reactivateMember } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.remove"],
+      isOwner: false,
+    });
+
+    await expect(reactivateMember(ctx, "m-peer-manager")).rejects.toThrow(
+      /insufficient_role_authority/,
+    );
+    expect(repo["updateMembershipStatus"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CAN deactivate a Cashier (a below-Manager staff member)", async () => {
+    const { auditLogRequired } = installPassthroughAuthMocks();
+    const cashier = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+      status: "active",
+    });
+    const suspended = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+      status: "suspended",
+    });
+    installRepoMock({
+      findMembershipById: mock(async () => cashier),
+      updateMembershipStatus: mock(async () => suspended),
+    });
+    const { deactivateMember } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.remove"],
+      isOwner: false,
+    });
+
+    const result = await deactivateMember(ctx, "m-cashier");
+
+    expect(result.status).toBe("suspended");
+    expect(auditLogRequired).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Owner CAN deactivate a Manager", async () => {
+    const { auditLogRequired } = installPassthroughAuthMocks();
+    const manager = membershipRow({
+      id: "m-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+      status: "active",
+    });
+    const suspended = membershipRow({
+      id: "m-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+      status: "suspended",
+    });
+    installRepoMock({
+      findMembershipById: mock(async () => manager),
+      updateMembershipStatus: mock(async () => suspended),
+    });
+    const { deactivateMember } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.remove"],
+      isOwner: true,
+    });
+
+    const result = await deactivateMember(ctx, "m-manager");
+
+    expect(result.status).toBe("suspended");
+    expect(auditLogRequired).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── 14. Resend/cancel invitation are audit logged ───────────────────────────────
+
+describe("14. Resend/cancel invitation are audit logged", () => {
+  it("resendInvite audit-logs team.invite_resend with the invitation's email", async () => {
+    const { auditLog } = installPassthroughAuthMocks();
+    const existing = invitationRow({
+      id: "inv-1",
+      organization_id: ORG_A,
+      email: "staff@example.com",
+    });
+    const reissued = invitationRow({
+      id: "inv-1",
+      organization_id: ORG_A,
+      email: "staff@example.com",
+    });
+    installRepoMock({
+      findInvitationById: mock(async () => existing),
+      reissueInvitation: mock(async () => reissued),
+    });
+    const { resendInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await resendInvite(ctx, "inv-1");
+
+    expect(auditLog).toHaveBeenCalledTimes(1);
+    const [, entry] = auditLog.mock.calls[0] as [unknown, { action: string; resourceId: string }];
+    expect(entry.action).toBe("team.invite_resend");
+    expect(entry.resourceId).toBe("inv-1");
+  });
+
+  it("cancelInvite audit-logs team.invite_cancel", async () => {
+    const { auditLog } = installPassthroughAuthMocks();
+    const cancelled = invitationRow({
+      id: "inv-2",
+      organization_id: ORG_A,
+      email: "gone@example.com",
+      status: "cancelled",
+    });
+    installRepoMock({ cancelInvitation: mock(async () => cancelled) });
+    const { cancelInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await cancelInvite(ctx, "inv-2");
+
+    expect(auditLog).toHaveBeenCalledTimes(1);
+    const [, entry] = auditLog.mock.calls[0] as [unknown, { action: string; resourceId: string }];
+    expect(entry.action).toBe("team.invite_cancel");
+    expect(entry.resourceId).toBe("inv-2");
+  });
+
+  it("a not-found resend/cancel never reaches the audit log", async () => {
+    const { auditLog } = installPassthroughAuthMocks();
+    installRepoMock({
+      findInvitationById: mock(async () => null),
+      cancelInvitation: mock(async () => null),
+    });
+    const { resendInvite, cancelInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await expect(resendInvite(ctx, "inv-missing")).rejects.toThrow(/invitation_not_found/);
+    await expect(cancelInvite(ctx, "inv-missing")).rejects.toThrow(/invitation_not_found/);
+    expect(auditLog).not.toHaveBeenCalled();
   });
 });
 
@@ -623,6 +1119,26 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     expect(sql).toMatch(/r\.system_role = 'OWNER'/);
     expect(sql).toMatch(/invalid_invitation_role/);
   });
+
+  // No live Supabase project is configured in this environment (see the PR's
+  // own "Known risks" / "Live-Supabase end-to-end verification" note), so
+  // this is a structural check on the PL/pgSQL text, same limitation as the
+  // rest of this describe block — not a substitute for exercising
+  // accept_invitation() against a real Postgres instance.
+  it("accepting an invite REACTIVATES an existing suspended/removed membership in place, never a second INSERT", () => {
+    // The existing-membership lookup is no longer restricted to active/invited
+    // — it must see a suspended/removed row too, or reactivation can't happen.
+    expect(sql).toMatch(
+      /SELECT \* INTO v_existing\s+FROM public\.memberships\s+WHERE user_id = v_user_id\s+AND organization_id = v_invitation\.organization_id\s+ORDER BY joined_at DESC/,
+    );
+    // A prior non-active/invited row is reactivated via UPDATE ... status = 'active' ...
+    expect(sql).toMatch(/UPDATE public\.memberships\s+SET status = 'active'/);
+    // Exactly one INSERT into memberships in the whole function, reached only
+    // when no prior row exists at all (the ELSE branch).
+    const insertCount = (sql.match(/INSERT INTO public\.memberships/g) ?? []).length;
+    expect(insertCount).toBe(1);
+    expect(sql).toMatch(/ELSE\s+INSERT INTO public\.memberships/);
+  });
 });
 
 describe("12. Migration safety — 042_team_permissions.sql", () => {
@@ -640,5 +1156,61 @@ describe("12. Migration safety — 042_team_permissions.sql", () => {
   it("does not introduce a new permission key or a second role/permission table", () => {
     expect(sql).not.toMatch(/CREATE TABLE/i);
     expect(sql).not.toMatch(/INSERT INTO public\.permissions/);
+  });
+
+  it("documents that the grant is capped by CORRECTION-001, not unrestricted", () => {
+    expect(sql).toMatch(/CORRECTION-001/);
+  });
+});
+
+// ── 16. Client-side team error classification (src/lib/team-errors.ts) ─────────
+// Pure functions shared by src/routes/app.team.tsx, StaffDetailSheet.tsx and
+// InviteStaffSheet.tsx to decide which empty/error state to show. Exercised
+// directly (no component rendering — this test suite has no such harness;
+// see route-guard.test.ts for the established structural-only alternative
+// this replaces for anything that can instead be plain, testable logic).
+
+describe("16. Client-side team error classification (src/lib/team-errors.ts)", () => {
+  it("isPermissionDeniedError matches only the exact access-denied messages the server throws", async () => {
+    const { isPermissionDeniedError } = await import("../lib/team-errors");
+
+    expect(isPermissionDeniedError(new Error("Missing permission: team.read"))).toBe(true);
+    expect(isPermissionDeniedError(new Error("No active organization membership"))).toBe(true);
+    expect(isPermissionDeniedError(new Error("Not authenticated"))).toBe(true);
+  });
+
+  it("isPermissionDeniedError does NOT misclassify a DB/repository failure as permission denied", async () => {
+    const { isPermissionDeniedError } = await import("../lib/team-errors");
+
+    // This exact message shape is what repo.listMemberships()'s catch throws
+    // (src/server/team/repository.ts) — it contains "Membership" and would
+    // have matched the old /permission|membership/i regex.
+    expect(isPermissionDeniedError(new Error("listMemberships: connection reset"))).toBe(false);
+    expect(isPermissionDeniedError(new Error("Internal server error"))).toBe(false);
+    expect(isPermissionDeniedError("not even an Error")).toBe(false);
+  });
+
+  it("classifyTeamActionError distinguishes owner-protection, authority-cap, and generic failures", async () => {
+    const { classifyTeamActionError } = await import("../lib/team-errors");
+
+    expect(classifyTeamActionError(new Error("cannot_modify_owner"))).toBe("owner_protected");
+    expect(classifyTeamActionError(new Error("last_owner_protected"))).toBe("owner_protected");
+    expect(classifyTeamActionError(new Error("insufficient_role_authority"))).toBe(
+      "insufficient_authority",
+    );
+    // A reactivate-specific regression: a network/DB failure must not be
+    // reported as "ownership is protected".
+    expect(classifyTeamActionError(new Error("fetch failed"))).toBe("generic");
+    expect(classifyTeamActionError(new Error("membership_not_found"))).toBe("generic");
+  });
+
+  it("classifyInviteError distinguishes duplicate, authority-cap, and generic failures", async () => {
+    const { classifyInviteError } = await import("../lib/team-errors");
+
+    expect(classifyInviteError(new Error("duplicate_invitation"))).toBe("duplicate");
+    expect(classifyInviteError(new Error("insufficient_role_authority"))).toBe(
+      "insufficient_authority",
+    );
+    expect(classifyInviteError(new Error("invalid_input"))).toBe("generic");
   });
 });

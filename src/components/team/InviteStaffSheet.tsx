@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { BottomSheet } from "@/design-system";
 import { INVITABLE_ROLES, RoleOption } from "@/components/team/RoleOption";
 import { inviteStaff, type InviteStaffResult } from "@/lib/api";
+import { classifyInviteError } from "@/lib/team-errors";
 import type { Staff, StaffRole } from "@/types";
 
 interface InviteStaffSheetProps {
@@ -77,12 +78,16 @@ export function InviteStaffSheet({ open, onOpenChange, onInvited }: InviteStaffS
         onOpenChange(false);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "";
-      setFormError(
-        message.includes("duplicate_invitation")
-          ? t("team.invite.duplicate")
-          : t("team.invite.error"),
-      );
+      switch (classifyInviteError(err)) {
+        case "duplicate":
+          setFormError(t("team.invite.duplicate"));
+          break;
+        case "insufficient_authority":
+          setFormError(t("team.invite.insufficientAuthority"));
+          break;
+        default:
+          setFormError(t("team.invite.error"));
+      }
     } finally {
       setSaving(false);
     }

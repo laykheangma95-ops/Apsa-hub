@@ -16,6 +16,13 @@
  *   - A non-owner actor can never modify a membership whose CURRENT role is
  *     OWNER (change its role or its active/suspended status) — closes the
  *     "manager disables/demotes the owner" escalation path.
+ *   - Manager authority is capped strictly BELOW Manager (CORRECTION-001,
+ *     see CORRECTIONS.md): a non-owner can never assign the Manager role,
+ *     and can never modify a membership whose CURRENT role is Manager
+ *     (role change, deactivate, or reactivate). Migration 042 grants
+ *     `team.roles_assign` to the MANAGER system role as a coarse permission
+ *     bit only — assertRoleAuthority() below is what keeps that grant from
+ *     being read as "Manager may promote/demote peers or self-promote".
  *   - Every query is scoped by ctx.organizationId, which itself is derived
  *     server-side from the caller's verified membership — Org A can never
  *     reach Org B's roster, regardless of any id passed in.
@@ -64,6 +71,25 @@ function roleKeyFromRoleId(roleId: string): StaffRoleKey {
 function assertInvitableRole(role: string): asserts role is InvitableRoleKey {
   if (!(role in ROLE_KEY_TO_ID)) {
     throw new TeamError("owner_role_forbidden");
+  }
+}
+
+/**
+ * CORRECTION-001 (2026-09-10, owner-approved): Manager's `team.roles_assign`
+ * grant (migration 042) is capped strictly BELOW Manager.
+ *   - Owner may assign/change the Manager role.
+ *   - Manager may assign/change only roles below Manager (Cashier, Sales,
+ *     Customer Service) and may never touch a membership that is CURRENTLY
+ *     Manager (another manager's, or their own — self-promotion/self-protection
+ *     is denied the same way as any other manager row, which is intentional:
+ *     the owner is the only actor who can grant or take away Manager).
+ *   - Owner is never subject to this cap — call this only for the branches
+ *     that already know the actor is not the owner.
+ */
+function assertRoleAuthority(ctx: AuthorizationContext, role: StaffRoleKey): void {
+  if (ctx.isOwner()) return;
+  if (role === "manager" || role === "owner") {
+    throw new TeamError("insufficient_role_authority");
   }
 }
 
@@ -137,22 +163,45 @@ export async function inviteStaff(
 ): Promise<InviteStaffResult> {
   ctx.require("team.invite");
   assertInvitableRole(input.role);
+  assertRoleAuthority(ctx, input.role);
 
   const email = input.email.trim().toLowerCase();
   if (!email) throw new TeamError("invalid_input");
 
   const existingPending = await repo.findPendingInvitationByEmail(ctx.organizationId, email);
-  if (existingPending) throw new TeamError("duplicate_invitation");
+  if (existingPending) {
+    // A pending invite whose TTL has already elapsed never got flipped to
+    // `expired` by anything (nothing sweeps it) — it must not permanently
+    // block re-inviting the same address. Retire the stale row first so the
+    // partial unique index on (organization_id, lower(email)) WHERE
+    // status='pending' has room for the new one; a genuinely still-pending
+    // invite is the only case that is a real duplicate.
+    if (new Date(existingPending.expires_at).getTime() <= Date.now()) {
+      await repo.expireInvitation(ctx.organizationId, existingPending.id);
+    } else {
+      throw new TeamError("duplicate_invitation");
+    }
+  }
 
   const rawToken = generateInviteToken();
-  const invitation = await repo.createInvitation(ctx.organizationId, {
-    email,
-    role_id: ROLE_KEY_TO_ID[input.role],
-    token_hash: hashInviteToken(rawToken),
-    invited_by: ctx.userId,
-    invited_display_name: input.displayName.trim() || null,
-    expires_at: inviteExpiryFromNow(),
-  });
+  let invitation;
+  try {
+    invitation = await repo.createInvitation(ctx.organizationId, {
+      email,
+      role_id: ROLE_KEY_TO_ID[input.role],
+      token_hash: hashInviteToken(rawToken),
+      invited_by: ctx.userId,
+      invited_display_name: input.displayName.trim() || null,
+      expires_at: inviteExpiryFromNow(),
+    });
+  } catch (err) {
+    // Two concurrent invites for the same address can both pass the
+    // pre-check above and race to insert — the unique index is the real
+    // guard; map its violation to the same error the pre-check would have
+    // thrown, rather than surfacing a raw 500.
+    if (err instanceof repo.InvitationConflictError) throw new TeamError("duplicate_invitation");
+    throw err;
+  }
 
   await auditLog(ctx, {
     action: "team.invite",
@@ -191,6 +240,16 @@ export async function resendInvite(
   });
   if (!updated) throw new TeamError("invitation_not_found");
 
+  // Best-effort, same tier as team.invite (creating the original invite) —
+  // resend mints a fresh credential (new token, new expiry) and is worth a
+  // record, but should not block a legitimate resend if the audit write fails.
+  await auditLog(ctx, {
+    action: "team.invite_resend",
+    resourceType: "invitations",
+    resourceId: updated.id,
+    afterJson: { email: updated.email },
+  });
+
   return {
     invitation: {
       id: updated.id,
@@ -212,6 +271,14 @@ export async function cancelInvite(
   ctx.require("team.invite");
   const cancelled = await repo.cancelInvitation(ctx.organizationId, invitationId);
   if (!cancelled) throw new TeamError("invitation_not_found");
+
+  await auditLog(ctx, {
+    action: "team.invite_cancel",
+    resourceType: "invitations",
+    resourceId: invitationId,
+    afterJson: { email: cancelled.email },
+  });
+
   return invitationId;
 }
 
@@ -235,7 +302,16 @@ export async function changeRole(
     // (memberships_last_owner_protection) is the final authority, but this
     // gives a clean application-level error first.
     await assertOwnerWouldRemain(ctx.organizationId, target.user_id);
+  } else {
+    // CORRECTION-001: a non-owner can never touch a membership that is
+    // CURRENTLY Manager — this also covers a Manager targeting their own
+    // membership (currentRole === "manager"), closing self-promotion/
+    // self-protection through this path the same way as any other row.
+    assertRoleAuthority(ctx, currentRole);
   }
+  // CORRECTION-001: a non-owner can never assign the Manager role, to
+  // themselves or anyone else.
+  assertRoleAuthority(ctx, role);
 
   const updated = await repo.updateMembershipRole(
     ctx.organizationId,
@@ -271,8 +347,15 @@ async function setMembershipStatus(
   if (!target) throw new TeamError("membership_not_found");
 
   const currentRole = roleKeyFromRoleId(target.role_id);
-  if (currentRole === "owner" && !ctx.isOwner()) {
-    throw new TeamError("cannot_modify_owner");
+  if (currentRole === "owner") {
+    if (!ctx.isOwner()) throw new TeamError("cannot_modify_owner");
+  } else {
+    // CORRECTION-001: a non-owner can never deactivate/reactivate a
+    // membership that is CURRENTLY Manager — including their own, the same
+    // as changeRole above. `team.remove` (granted to Manager since the
+    // original 003 seed) authorizes deactivating below-Manager staff, not
+    // peer Managers.
+    assertRoleAuthority(ctx, currentRole);
   }
 
   if (status === "suspended" && currentRole === "owner") {
