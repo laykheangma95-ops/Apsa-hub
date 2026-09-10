@@ -2135,3 +2135,112 @@ describe("Test 35: listPayments cannot leak an evidence-derived reference throug
     expect(authorizedSummary!.note).toBe("2nd installment, customer asked for table 4.");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PER-ORDER SETTLEMENT (overpayment / needs-review)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 36: getOrderSettlement reads order_payment_totals and flags overpayment", () => {
+  function totalsRow(overrides: Record<string, unknown> = {}): QueryResult {
+    return {
+      data: {
+        order_id: ORDER_ID,
+        organization_id: ORG_A_ID,
+        total_minor: 10000,
+        currency: "USD",
+        received_minor: 10000,
+        refunded_minor: 0,
+        has_pending: false,
+        has_failed: false,
+        net_minor: 10000,
+        payment_status: "paid",
+        refund_status: "none",
+        ...overrides,
+      },
+      error: null,
+    };
+  }
+
+  it("requires payments.reconcile", async () => {
+    const { getOrderSettlement } = await import("../server/payments/reconciliation");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"]);
+    await expectForbidden(() => getOrderSettlement(ctx, ORDER_ID));
+  });
+
+  it("an order belonging to another organization is reported not-found", async () => {
+    const { getOrderSettlement } = await import("../server/payments/reconciliation");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+
+    await withPaymentDb({ tables: { order_payment_totals: noRow } }, async () => {
+      const err = await expectRejects(() => getOrderSettlement(ctx, ORDER_ID));
+      expect(err.message).toMatch(/not found/i);
+      expect((err as Error & { statusCode?: number }).statusCode).toBe(404);
+    });
+  });
+
+  it("exact settlement (net == total) is not flagged overpaid", async () => {
+    const { getOrderSettlement } = await import("../server/payments/reconciliation");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+
+    const settlement = await withPaymentDb({ tables: { order_payment_totals: totalsRow() } }, () =>
+      getOrderSettlement(ctx, ORDER_ID),
+    );
+
+    expect(settlement.overpaid).toBe(false);
+    expect(settlement.overpaidAmount).toBeNull();
+    expect(settlement.paymentStatus).toBe("paid");
+    expect(settlement.refundStatus).toBe("none");
+  });
+
+  it("net settlement above the order total is flagged overpaid with the exact excess", async () => {
+    const { getOrderSettlement } = await import("../server/payments/reconciliation");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+
+    // Split payments (e.g. $100 + $10 against a $100 order) aggregate into a
+    // single ledger-derived net_minor, exactly like order_payment_totals does.
+    const settlement = await withPaymentDb(
+      {
+        tables: {
+          order_payment_totals: totalsRow({ received_minor: 11000, net_minor: 11000 }),
+        },
+      },
+      () => getOrderSettlement(ctx, ORDER_ID),
+    );
+
+    expect(settlement.overpaid).toBe(true);
+    expect(settlement.overpaidAmount).toEqual({ amount: 1000, currency: "USD" });
+    // Coarse axis is unaffected by the overpayment fact — still 'paid'/'none',
+    // per CORRECTIONS.md's approved semantics (no new enum value introduced).
+    expect(settlement.paymentStatus).toBe("paid");
+  });
+
+  it("a partially received (underpaid) order is reported accurately without a spurious overpaid flag", async () => {
+    const { getOrderSettlement } = await import("../server/payments/reconciliation");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+
+    const settlement = await withPaymentDb(
+      {
+        tables: {
+          order_payment_totals: totalsRow({
+            received_minor: 0,
+            net_minor: 0,
+            has_pending: true,
+            payment_status: "pending",
+          }),
+        },
+      },
+      () => getOrderSettlement(ctx, ORDER_ID),
+    );
+
+    expect(settlement.overpaid).toBe(false);
+    expect(settlement.overpaidAmount).toBeNull();
+    expect(settlement.netMinor).toEqual({ amount: 0, currency: "USD" });
+    expect(settlement.totalMinor).toEqual({ amount: 10000, currency: "USD" });
+  });
+
+  it("getOrderSettlement takes no client-supplied organization parameter", () => {
+    const src = readSource("src/server/payments/reconciliation.ts");
+    expect(src).toMatch(/export async function getOrderSettlement\(\s*ctx: AuthorizationContext/);
+    expect(src).toContain("repo.getOrderPaymentTotals(ctx.organizationId, orderId)");
+  });
+});

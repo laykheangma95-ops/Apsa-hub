@@ -43,6 +43,7 @@ import type {
   CorrectPaymentRpcResult,
   ListPaymentsOptions,
   PaymentReconciliationRow,
+  OrderPaymentTotalsRow,
 } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -278,6 +279,30 @@ export async function getReconciliationSummary(
 
   if (error) throw new Error(`getReconciliationSummary: ${errMessage(error)}`);
   return (data ?? []) as PaymentReconciliationRow[];
+}
+
+/**
+ * One order's ledger-derived settlement totals (order_payment_totals view,
+ * migration 040) — org-scoped. Returns null both for an order that does not
+ * exist and for one belonging to another organization, same non-disclosure
+ * posture as findPaymentById/findOrderForOrg.
+ */
+export async function getOrderPaymentTotals(
+  organizationId: string,
+  orderId: string,
+): Promise<OrderPaymentTotalsRow | null> {
+  const { data, error } = await db
+    .from("order_payment_totals")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .single();
+
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`getOrderPaymentTotals: ${errMessage(error)}`);
+  }
+  return (data ?? null) as OrderPaymentTotalsRow | null;
 }
 
 // ── Cross-domain ownership checks (read-only, org-scoped) ─────────────────────

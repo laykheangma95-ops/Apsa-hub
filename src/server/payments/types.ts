@@ -160,3 +160,24 @@ export interface PaymentReconciliationRow {
   payment_count: number;
   amount_minor_total: number;
 }
+
+/**
+ * One row of the order_payment_totals view (migration 040) — Payment-ledger-
+ * derived per-order settlement totals (received/refunded/net vs the order
+ * total). The status fields are declared locally rather than imported from
+ * @/server/orders, preserving the Payment domain's one-way isolation from
+ * the Order domain (see src/tests/payment-domain.runtime.ts Test 25).
+ */
+export interface OrderPaymentTotalsRow {
+  order_id: string;
+  organization_id: string;
+  total_minor: number;
+  currency: PaymentCurrency;
+  received_minor: number;
+  refunded_minor: number;
+  has_pending: boolean;
+  has_failed: boolean;
+  net_minor: number;
+  payment_status: "unpaid" | "pending" | "paid" | "failed";
+  refund_status: "none" | "partial" | "full";
+}

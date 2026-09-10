@@ -295,6 +295,17 @@ Two currencies are never summed together (no implicit exchange rate).
 labels ("needs review") rather than accusatory ones, per `SECURITY.md`'s guidance
 against labeling staff actions as theft/fraud.
 
+**Per-order settlement:** `getOrderSettlement(ctx, orderId)` (same file, same
+`payments.reconcile` gate) reads one order's row from migration 040's
+`order_payment_totals` view — the same ledger-derived received/refunded/net
+totals that view already uses internally to keep `orders.payment_status` and
+`refund_status` in sync — and reports `overpaid`/`overpaidAmount` when net
+settlement exceeds the order total. This is a read-only addition: it never
+changes `payment_status` or `refund_status`, which stay governed exclusively
+by migration 040's `sync_order_payment_state` (a fully paid order stays
+`paid`; refunds live on their own `refund_status` axis, per `CORRECTIONS.md`'s
+approved semantics).
+
 ---
 
 ## 13. Migration rollout order
