@@ -15,6 +15,7 @@ const ICONS: Record<AttentionItem["id"], LucideIcon> = {
   awaiting_payment: Wallet,
   awaiting_delivery: Truck,
   low_stock: AlertTriangle,
+  orders_needing_action: AlertTriangle,
 };
 
 const TONE: Record<AttentionItem["tone"], string> = {

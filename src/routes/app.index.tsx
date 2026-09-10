@@ -1,11 +1,10 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { TrendingDown, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { getActiveShop, getHomeSummary } from "@/lib/api";
-import { localName, percent } from "@/lib/format";
+import { localName } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import { useLanguage } from "@/lib/i18n";
 import {
@@ -21,12 +20,10 @@ import {
   QuickActionGrid,
   ScreenBleed,
   SegmentedControl,
-  Sparkline,
   type QuickActionId,
   type Segment,
 } from "@/design-system";
 import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
-import { cn } from "@/lib/utils";
 import type { AttentionItem, MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
@@ -60,6 +57,7 @@ const ATTENTION_ROUTE: Partial<Record<AttentionItem["id"], "/app/inbox" | "/app/
   unread_conversations: "/app/inbox",
   awaiting_payment: "/app/orders",
   awaiting_delivery: "/app/orders",
+  orders_needing_action: "/app/orders",
 };
 
 function BusinessHome() {
@@ -78,7 +76,7 @@ function BusinessHome() {
   });
 
   const summary = homeQuery.data;
-  const isEmpty = summary && summary.revenue.amount === 0;
+  const isEmpty = summary && !summary.hasActivity;
   const unread = summary?.attention.find((item) => item.id === "unread_conversations")?.count ?? 0;
 
   const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
@@ -182,16 +180,29 @@ function BusinessHome() {
                 label={t("home.overview")}
               />
 
-              <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-                <p className="text-label text-text-secondary">{t("home.revenue")}</p>
-                <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <p className="text-financial-lg min-w-0 text-text-primary">
-                    {formatMoney(summary.revenue)}
-                  </p>
-                  <RevenueDelta value={summary.revenueDeltaPercent} />
-                </div>
-                <Sparkline series={summary.revenueSeries} tone="success" />
-              </section>
+              {summary.financialsAvailable ? (
+                <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+                  <p className="text-label text-text-secondary">{t("home.revenue")}</p>
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    {summary.revenues.length > 0 ? (
+                      summary.revenues.map((revenue) => (
+                        <p
+                          key={revenue.currency}
+                          className="text-financial-lg min-w-0 text-text-primary"
+                        >
+                          {formatMoney(revenue)}
+                        </p>
+                      ))
+                    ) : (
+                      <p className="text-body-sm text-text-secondary">{t("home.noSettledSales")}</p>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <p className="px-1 text-body-sm text-text-secondary">
+                  {t("home.financialsUnavailable")}
+                </p>
+              )}
 
               <div className="grid grid-cols-2 gap-2">
                 {summary.metrics.map((metric) => (
@@ -253,25 +264,5 @@ function BusinessHome() {
         </ul>
       </BottomSheet>
     </ScreenBleed>
-  );
-}
-
-/** Direction is carried by an arrow and a sign, never by the colour alone. */
-function RevenueDelta({ value }: { value: number }) {
-  const up = value >= 0;
-  const Arrow = up ? TrendingUp : TrendingDown;
-
-  return (
-    <span
-      className={cn(
-        "text-caption tnum inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5",
-        up
-          ? "bg-status-success-soft text-status-success-text"
-          : "bg-status-danger-soft text-status-danger-text",
-      )}
-    >
-      <Arrow className="size-3" aria-hidden />
-      {percent(value)}
-    </span>
   );
 }

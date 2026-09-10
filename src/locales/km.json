@@ -348,14 +348,17 @@
   "home": {
     "greeting": "អរុណសួស្តី {{name}}",
     "subtitle": "នេះជាអ្វីដែលកំពុងកើតឡើងថ្ងៃនេះ។",
-    "revenue": "ចំណូល",
+    "revenue": "ការលក់បានទូទាត់សុទ្ធ",
+    "noSettledSales": "មិនមានការលក់ដែលបានទូទាត់ក្នុងរយៈពេលនេះទេ",
+    "financialsUnavailable": "អ្នកមិនមានសិទ្ធិមើលចំនួនហិរញ្ញវត្ថុទេ។",
     "attention": "ត្រូវការការយកចិត្តទុកដាក់",
     "attentionSubtitle": "អ្វីដែលត្រូវធ្វើឥឡូវនេះ",
     "attentionItems": {
       "unread_conversations": "សារមិនទាន់អាន",
       "awaiting_payment": "ការបញ្ជាទិញរង់ចាំការទូទាត់",
       "awaiting_delivery": "ការបញ្ជាទិញរង់ចាំដឹកជញ្ជូន",
-      "low_stock": "ទំនិញស្តុកតិច"
+      "low_stock": "ទំនិញអស់ស្តុក",
+      "orders_needing_action": "ការបញ្ជាទិញត្រូវការចាត់ការ"
     },
     "quickActions": "សកម្មភាពរហ័ស",
     "actions": {
@@ -374,7 +377,10 @@
       "orders": "ការបញ្ជាទិញ",
       "new_customers": "អតិថិជនថ្មី",
       "avg_order": "មធ្យមភាគការបញ្ជាទិញ",
-      "messages": "សារ"
+      "messages": "សារ",
+      "pending_payments": "ការទូទាត់កំពុងរង់ចាំ",
+      "delivery_actions": "ការងារដឹកជញ្ជូន",
+      "low_stock": "អស់ស្តុក"
     },
     "apsi": {
       "title": "អ្នកបានឆ្លើយសារ ២៦ ថ្ងៃនេះ។",

@@ -348,14 +348,17 @@
   "home": {
     "greeting": "Good morning, {{name}}",
     "subtitle": "Here's what's happening today.",
-    "revenue": "Revenue",
+    "revenue": "Net paid sales",
+    "noSettledSales": "No settled sales in this period",
+    "financialsUnavailable": "You do not have permission to view financial totals.",
     "attention": "Needs attention",
     "attentionSubtitle": "What to do now",
     "attentionItems": {
       "unread_conversations": "Unread conversations",
       "awaiting_payment": "Orders awaiting payment",
       "awaiting_delivery": "Orders waiting for delivery",
-      "low_stock": "Low stock products"
+      "low_stock": "Out-of-stock products",
+      "orders_needing_action": "Orders needing action"
     },
     "quickActions": "Quick actions",
     "actions": {
@@ -374,7 +377,10 @@
       "orders": "Orders",
       "new_customers": "New customers",
       "avg_order": "Average order",
-      "messages": "Messages"
+      "messages": "Messages",
+      "pending_payments": "Pending payments",
+      "delivery_actions": "Delivery actions",
+      "low_stock": "Out of stock"
     },
     "apsi": {
       "title": "You replied to 26 messages today.",

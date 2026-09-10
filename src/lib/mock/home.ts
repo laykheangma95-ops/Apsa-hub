@@ -7,9 +7,8 @@ const series = (values: number[]) =>
 export const homeSummaries: Record<MetricRange, HomeSummary> = {
   today: {
     greetingName: "សុខជា",
-    revenue: usd(1298050),
-    revenueDeltaPercent: 16.5,
-    revenueSeries: series([320, 410, 380, 520, 610, 580, 760]),
+    revenues: [usd(1298050)],
+    financialsAvailable: true,
     attention: [
       { id: "unread_conversations", count: 7, tone: "info" },
       { id: "awaiting_payment", count: 3, tone: "warning" },
@@ -32,12 +31,12 @@ export const homeSummaries: Record<MetricRange, HomeSummary> = {
         series: series([12, 18, 15, 24, 22, 19, 26]),
       },
     ],
+    hasActivity: true,
   },
   week: {
     greetingName: "សុខជា",
-    revenue: usd(6412075),
-    revenueDeltaPercent: 9.8,
-    revenueSeries: series([820, 910, 1080, 1220, 1010, 1340, 1450]),
+    revenues: [usd(6412075)],
+    financialsAvailable: true,
     attention: [
       { id: "unread_conversations", count: 7, tone: "info" },
       { id: "awaiting_payment", count: 3, tone: "warning" },
@@ -70,12 +69,12 @@ export const homeSummaries: Record<MetricRange, HomeSummary> = {
         series: series([98, 112, 104, 121, 96, 102, 109]),
       },
     ],
+    hasActivity: true,
   },
   month: {
     greetingName: "សុខជា",
-    revenue: usd(24980420),
-    revenueDeltaPercent: 22.3,
-    revenueSeries: series([3200, 3600, 4100, 3900, 4400, 4800, 5200]),
+    revenues: [usd(24980420)],
+    financialsAvailable: true,
     attention: [
       { id: "unread_conversations", count: 7, tone: "info" },
       { id: "awaiting_payment", count: 3, tone: "warning" },
@@ -108,5 +107,6 @@ export const homeSummaries: Record<MetricRange, HomeSummary> = {
         series: series([420, 448, 460, 431, 470, 442, 433]),
       },
     ],
+    hasActivity: true,
   },
 };

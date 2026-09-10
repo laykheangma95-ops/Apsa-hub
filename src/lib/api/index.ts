@@ -13,7 +13,6 @@ import {
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
-import { homeSummaries } from "@/lib/mock/home";
 import { orders, nextOrderSequence } from "@/lib/mock/orders";
 import { couriers, shops, staff, activeShopId, workspaces } from "@/lib/mock/shop";
 import {
@@ -74,7 +73,18 @@ export interface ConversationFilter {
 }
 
 export async function getHomeSummary(range: MetricRange = "today"): Promise<HomeSummary> {
-  return resolve(homeSummaries[range]);
+  try {
+    const { getHomeSummaryFn } = await import("@/api/home");
+    return await getHomeSummaryFn({ data: { range } });
+  } catch (err) {
+    // Auth, authorization and server failures must remain visible in production.
+    // Mock data is only valid outside TanStack Start's HTTP runtime.
+    if (isDemoModeError(err)) {
+      const { homeSummaries } = await import("@/lib/mock/home");
+      return resolve(homeSummaries[range]);
+    }
+    throw err;
+  }
 }
 
 function mockGetConversations(filter?: ConversationFilter): Conversation[] {

@@ -549,7 +549,12 @@ export interface Shop {
 }
 
 export interface AttentionItem {
-  id: "unread_conversations" | "awaiting_payment" | "awaiting_delivery" | "low_stock";
+  id:
+    | "unread_conversations"
+    | "awaiting_payment"
+    | "awaiting_delivery"
+    | "low_stock"
+    | "orders_needing_action";
   count: number;
   tone: "info" | "warning" | "danger";
 }
@@ -562,7 +567,7 @@ export interface MetricPoint {
 export interface Metric {
   id: string;
   value: string;
-  deltaPercent: number;
+  deltaPercent: number | null;
   series: MetricPoint[];
 }
 
@@ -570,9 +575,10 @@ export type MetricRange = "today" | "week" | "month";
 
 export interface HomeSummary {
   greetingName: string;
-  revenue: Money;
-  revenueDeltaPercent: number;
-  revenueSeries: MetricPoint[];
+  /** Per-currency net settlement from Payment's ledger-derived view. */
+  revenues: Money[];
+  financialsAvailable: boolean;
   attention: AttentionItem[];
   metrics: Metric[];
+  hasActivity: boolean;
 }
