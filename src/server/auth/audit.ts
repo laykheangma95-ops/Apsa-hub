@@ -44,7 +44,17 @@ export type AuditAction =
   | "products.delete"
   | "customers.export"
   | "team.invite"
+  | "team.invite_resend"
+  | "team.invite_cancel"
+  // Written directly by the accept_invitation() RPC (migration 041) into
+  // audit_logs, not via auditLog()/auditLogRequired() — the invitee has no
+  // AuthorizationContext yet at accept time, and the write must be atomic
+  // with the membership mutation inside that SECURITY DEFINER transaction.
+  // Listed here purely as documentation of the vocabulary; no TypeScript
+  // call site emits it.
+  | "team.invite_accept"
   | "team.remove"
+  | "team.reactivate"
   | "team.role_change"
   | "org.update"
   | "org.ownership_transfer";
@@ -58,6 +68,7 @@ export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
   "inventory.adjust",
   "customers.export",
   "team.remove",
+  "team.reactivate",
   "team.role_change",
   "org.ownership_transfer",
 ]);

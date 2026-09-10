@@ -418,6 +418,7 @@
     "picked_up": "Picked up",
     "active": "Active",
     "invited": "Invite pending",
+    "suspended": "Access removed",
     "draft": "Draft",
     "completed": "Completed",
     "unpaid": "Unpaid",
@@ -1121,7 +1122,15 @@
       "nameRequired": "Please enter a name.",
       "contactRequired": "Please enter a phone number or email.",
       "contactInvalid": "That phone number or email does not look right.",
-      "ownerNotOffered": "Only the owner can hand over ownership, so Owner is not offered here."
+      "ownerNotOffered": "Only the owner can hand over ownership, so Owner is not offered here.",
+      "duplicate": "This person already has a pending invite. Use Resend from their staff detail instead.",
+      "insufficientAuthority": "Only the owner can invite or change a Manager.",
+      "error": "Could not send the invite. Please try again.",
+      "linkTitle": "Invite link",
+      "linkHint": "APSA does not send this automatically yet — copy it and share it with them.",
+      "copyLink": "Copy invite link",
+      "linkCopied": "Link copied.",
+      "done": "Done"
     },
     "detail": {
       "workspace": "Business",
@@ -1129,12 +1138,18 @@
       "changeRole": "Change role",
       "saveRole": "Save role",
       "removeAccess": "Remove access",
-      "roleUpdated": "Role updated."
+      "roleUpdated": "Role updated.",
+      "reactivate": "Give access back",
+      "reactivated": "Access restored.",
+      "actionError": "Something went wrong. Please try again.",
+      "insufficientAuthority": "Only the owner can change or remove another manager."
     },
     "pending": {
       "resend": "Resend invite",
       "cancel": "Cancel invite",
-      "resent": "Invitation sent again."
+      "resent": "Invitation sent again.",
+      "copyLink": "Copy invite link",
+      "linkCopied": "Link copied."
     },
     "owner": {
       "protectedTitle": "Ownership is protected",
@@ -1171,5 +1186,26 @@
       "slugTaken": "That business address is already taken. Please choose another one.",
       "generic": "We could not create your business right now. Please try again."
     }
+  },
+  "inviteAccept": {
+    "title": "Team invite",
+    "loading": "Checking your invite…",
+    "loadError": "Could not load this invite. Check your connection and try again.",
+    "acceptError": "Could not accept this invite. Please try again.",
+    "signInRequired": "Sign in or create an account with {{email}} to accept this invite.",
+    "signIn": "Sign in",
+    "signUp": "Create account",
+    "afterAuthHint": "After signing in, open this invite link again to finish.",
+    "summary": "{{org}} invited you as {{role}}.",
+    "emailMismatch": "This invite is for {{invitedEmail}}, but you are signed in as {{yourEmail}}. Sign in with the invited address instead.",
+    "accept": "Accept invite",
+    "accepting": "Joining…",
+    "success": "You're in. Welcome to {{org}}.",
+    "alreadyMember": "You already have access to this business.",
+    "goToApp": "Go to APSA",
+    "notFound": "This invite link is not valid.",
+    "expired": "This invite has expired. Ask the owner to resend it.",
+    "alreadyUsed": "This invite has already been used or cancelled.",
+    "authorityDenied": "This invite can no longer be completed. Ask the business owner to resend it."
   }
 }

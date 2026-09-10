@@ -13,6 +13,7 @@ import { currentRole, getTeam, getWorkspaces } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { permissionsFor } from "@/lib/permissions";
+import { isPermissionDeniedError } from "@/lib/team-errors";
 import type { Staff } from "@/types";
 
 export const Route = createFileRoute("/app/team")({
@@ -100,12 +101,19 @@ function TeamScreen() {
           ) : teamQuery.isLoading ? (
             <ListSkeleton rows={4} />
           ) : teamQuery.isError ? (
-            <OperationalState
-              title={t("team.error.title")}
-              body={t("team.error.body")}
-              tone="danger"
-              onRetry={() => void teamQuery.refetch()}
-            />
+            isPermissionDeniedError(teamQuery.error) ? (
+              <OperationalState
+                title={t("team.restricted.title")}
+                body={t("team.restricted.body")}
+              />
+            ) : (
+              <OperationalState
+                title={t("team.error.title")}
+                body={t("team.error.body")}
+                tone="danger"
+                onRetry={() => void teamQuery.refetch()}
+              />
+            )
           ) : (
             <>
               {ownerOnly ? (
