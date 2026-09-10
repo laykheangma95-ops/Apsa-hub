@@ -1412,6 +1412,23 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     expect(sql).toMatch(/lower\(v_invitation\.email\)\s*!=\s*lower\(v_user_email\)/);
   });
 
+  // Independent review (round 3): the identity feeding that email-match check
+  // must come from auth.users — the record Supabase Auth itself manages —
+  // never from public.profiles.email, which is writable by the authenticated
+  // user themselves via the "profiles_update_own" RLS policy
+  // (001_auth_profiles.sql) with no server-side revalidation against
+  // auth.users. Reading profiles.email for this check would let any
+  // authenticated caller rewrite their own profile row to the invited
+  // address and satisfy email-match with no inbox/account proof at all.
+  it("the email used for that match comes from auth.users, never the client-writable public.profiles table", () => {
+    expect(sql).toMatch(/SELECT email INTO v_user_email FROM auth\.users WHERE id = v_user_id/);
+    // The old profiles-sourced identity line must be gone, not just
+    // superseded — public.profiles still appears elsewhere in this file
+    // (legitimate FK references on invited_by/accepted_user_id), so this
+    // targets exactly the removed identity-lookup shape.
+    expect(sql).not.toMatch(/SELECT email INTO v_user_email FROM public\.profiles/);
+  });
+
   it("invitations table has no client-facing RLS policy at all (service-role/RPC only)", () => {
     expect(sql).toMatch(/invitations_select_blocked.*USING \(false\)/s);
     expect(sql).toMatch(/invitations_insert_blocked.*WITH CHECK \(false\)/s);
@@ -1448,6 +1465,33 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     const insertCount = (sql.match(/INSERT INTO public\.memberships/g) ?? []).length;
     expect(insertCount).toBe(1);
     expect(sql).toMatch(/ELSE\s+INSERT INTO public\.memberships/);
+  });
+
+  // Independent review (round 3): the advisory lock above is keyed on the
+  // INVITATION id, so it only serializes two accepts of the SAME invitation.
+  // Two DIFFERENT invitations targeting the same membership — or a
+  // concurrent changeRole/deactivateMember/reactivateMember service-layer
+  // call on that row — were not serialized against each other at all, which
+  // could let the authority check below read a row a concurrent writer was
+  // mid-mutation on (a TOCTOU). FOR UPDATE closes that: this transaction
+  // blocks until any such concurrent writer of the row commits, then
+  // re-reads it, so the authority check and the reactivation UPDATE always
+  // act on the same, current row.
+  it("the existing-membership lookup row-locks with FOR UPDATE, serializing concurrent accepts/role-changes on the same membership", () => {
+    expect(sql).toMatch(
+      /ORDER BY \(status IN \('active', 'invited'\)\) DESC, joined_at DESC\s+LIMIT 1\s+FOR UPDATE;/,
+    );
+    // The lock must be acquired (i.e. the SELECT must run) before the
+    // authority check and the UPDATE that overwrites role_id — a lock taken
+    // after either would not prevent the race it exists to close.
+    const lockIndex = sql.indexOf("LIMIT 1\n  FOR UPDATE;");
+    const authorityCheckIndex = sql.indexOf(
+      "IF v_existing_is_guarded AND v_invitation.issued_by_role != 'OWNER' THEN",
+    );
+    const updateIndex = sql.indexOf("SET status = 'active', role_id = v_invitation.role_id");
+    expect(lockIndex).toBeGreaterThan(-1);
+    expect(authorityCheckIndex).toBeGreaterThan(lockIndex);
+    expect(updateIndex).toBeGreaterThan(authorityCheckIndex);
   });
 
   // CORRECTION-001 round 2: the accept-path authority re-check. Independent
@@ -1508,6 +1552,32 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     const returnSuccessIndex = sql.indexOf("'status', 'success'");
     expect(auditIndex).toBeGreaterThan(-1);
     expect(returnSuccessIndex).toBeGreaterThan(auditIndex);
+  });
+
+  // Independent review (round 3, folding in a related finding): reactivation
+  // is the one path through this function that can silently change a role —
+  // before_json previously only recorded {invitation_id, reactivated}, which
+  // can't answer "changed from what". It now also carries the membership's
+  // PRIOR role_id/status, read (and row-locked, per the FOR UPDATE test
+  // above) before the UPDATE that overwrites them — matching the
+  // {before, after} shape src/server/auth/audit.ts#auditLogRequired already
+  // uses for team.role_change/team.reactivate. A fresh INSERT has no prior
+  // state, so that branch keeps the narrower shape.
+  it("reactivation's audit row carries the membership's PRIOR role_id/status in before_json, not just a reactivated flag", () => {
+    const caseStart = sql.indexOf("WHEN v_reactivated THEN jsonb_build_object(");
+    const caseEnd = sql.indexOf(
+      "ELSE jsonb_build_object('invitation_id', v_invitation.id, 'reactivated', v_reactivated)",
+    );
+    expect(caseStart).toBeGreaterThan(-1);
+    expect(caseEnd).toBeGreaterThan(caseStart);
+    const reactivatedBranch = sql.slice(caseStart, caseEnd);
+    expect(reactivatedBranch).toMatch(/'role_id', v_existing\.role_id/);
+    expect(reactivatedBranch).toMatch(/'status', v_existing\.status/);
+    // The fresh-membership (non-reactivation) branch stays minimal — there
+    // is no prior row to describe.
+    expect(sql).toMatch(
+      /ELSE jsonb_build_object\('invitation_id', v_invitation\.id, 'reactivated', v_reactivated\)/,
+    );
   });
 });
 

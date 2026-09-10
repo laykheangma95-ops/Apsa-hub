@@ -142,6 +142,24 @@ CREATE POLICY "invitations_delete_blocked" ON public.invitations FOR DELETE USIN
 -- role. A Manager-issued invitation can never reactivate (or otherwise
 -- overwrite the role_id of) a membership that is currently Owner- or
 -- Manager-grade, regardless of what role the invitation itself offers.
+--
+-- Round 3 (independent re-review of round 2's fix) closed two more gaps in
+-- this same function, both structural rather than authority-model changes:
+--   1. The email-match check now reads auth.users.email, not
+--      public.profiles.email — the latter is writable by the authenticated
+--      user themselves (RLS policy "profiles_update_own"), so it must never
+--      be the thing that proves "this is the invited address".
+--   2. The existing-membership lookup is now `SELECT ... FOR UPDATE`. The
+--      advisory lock above only serializes two accepts of the SAME
+--      invitation; it does nothing for two different invitations (or a
+--      concurrent changeRole/deactivateMember/reactivateMember call) aimed
+--      at the same membership row, which could otherwise let the authority
+--      check above run against a row another transaction is mid-mutation
+--      on. FOR UPDATE closes that window: this transaction blocks until any
+--      concurrent writer of that row commits, then re-reads it, so the
+--      authority check and the reactivation UPDATE always act on the same,
+--      current row a concurrent transaction cannot invalidate out from
+--      under them.
 CREATE OR REPLACE FUNCTION public.accept_invitation(p_token_hash TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -163,7 +181,18 @@ BEGIN
     RAISE EXCEPTION 'unauthenticated: auth.uid() is null — caller must be authenticated';
   END IF;
 
-  SELECT email INTO v_user_email FROM public.profiles WHERE id = v_user_id;
+  -- Independent review (round 3): identity for the email-match check below
+  -- must come from auth.users, the record Supabase Auth itself manages —
+  -- never from public.profiles.email, which is client-writable via the
+  -- "profiles_update_own" RLS policy (001_auth_profiles.sql) with no
+  -- server-side revalidation against auth.users. Reading profiles.email
+  -- here would let any authenticated caller rewrite their own profile row
+  -- to the invited address and satisfy the email-match check with no
+  -- inbox/account proof at all — auth.users.email is the same source
+  -- src/api/auth.ts#getSessionFn already trusts (via auth.getUser()), so
+  -- this keeps the RPC's notion of "the caller's email" consistent with the
+  -- rest of the app.
+  SELECT email INTO v_user_email FROM auth.users WHERE id = v_user_id;
   IF v_user_email IS NULL THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
@@ -209,12 +238,27 @@ BEGIN
   -- older terminal one, then fall back to the most recent row overall, so a
   -- historical anomaly (multiple rows for the same user/org) can never pick
   -- a stale suspended/removed row out from under a live membership.
+  --
+  -- Independent review (round 3): FOR UPDATE row-locks whichever membership
+  -- row this resolves to, for the rest of this transaction. The advisory
+  -- lock above is keyed on the INVITATION id, so it only serializes two
+  -- accepts of the *same* invitation — it does nothing for two DIFFERENT
+  -- invitations (or a concurrent changeRole/deactivateMember/reactivateMember
+  -- service-layer call) targeting the same membership. Without this lock, the
+  -- authority check below could read v_existing before a concurrent writer
+  -- commits a role/status change to the same row, act on stale data, and
+  -- overwrite that writer's result once its own lock releases (a classic
+  -- TOCTOU). FOR UPDATE makes this transaction block until any such
+  -- concurrent writer commits, then re-reads the now-current row, so the
+  -- authority check and the UPDATE below always agree with each other and
+  -- with whatever else touched this row concurrently.
   SELECT * INTO v_existing
   FROM public.memberships
   WHERE user_id = v_user_id
     AND organization_id = v_invitation.organization_id
   ORDER BY (status IN ('active', 'invited')) DESC, joined_at DESC
-  LIMIT 1;
+  LIMIT 1
+  FOR UPDATE;
 
   IF v_existing.id IS NOT NULL AND v_existing.status IN ('active', 'invited') THEN
     UPDATE public.invitations
@@ -273,6 +317,16 @@ BEGIN
   -- mutation above and the invitee has no AuthorizationContext yet — there
   -- is no separate audit system here, just the same table written from
   -- inside this transaction instead of from the app layer.
+  --
+  -- Independent review (round 3): before_json now also carries the prior
+  -- role_id/status on reactivation (v_existing was read, and row-locked,
+  -- before the UPDATE above — this is genuinely its pre-mutation state),
+  -- matching the {before, after} shape src/server/auth/audit.ts#auditLogRequired
+  -- already uses for team.role_change/team.reactivate. Without this, the one
+  -- audit path that can silently change a role (reactivation) was the one
+  -- path that couldn't answer "changed from what". A fresh membership INSERT
+  -- has no meaningful "before" state, so that case keeps the original,
+  -- narrower shape.
   INSERT INTO public.audit_logs (
     organization_id, actor_user_id, action, resource_type, resource_id, before_json, after_json
   ) VALUES (
@@ -281,7 +335,15 @@ BEGIN
     'team.invite_accept',
     'memberships',
     v_membership_id::TEXT,
-    jsonb_build_object('invitation_id', v_invitation.id, 'reactivated', v_reactivated),
+    CASE
+      WHEN v_reactivated THEN jsonb_build_object(
+        'invitation_id', v_invitation.id,
+        'reactivated', v_reactivated,
+        'role_id', v_existing.role_id,
+        'status', v_existing.status
+      )
+      ELSE jsonb_build_object('invitation_id', v_invitation.id, 'reactivated', v_reactivated)
+    END,
     jsonb_build_object('role_id', v_invitation.role_id, 'status', 'active')
   );
 
