@@ -10,23 +10,31 @@
  *
  * ── ARCHITECTURE INVARIANTS ──────────────────────────────────────────────────
  *
- * PAYMENT ↔ ORDER SEPARATION (FOUNDATION PHASE — READ BEFORE CHANGING THIS FILE)
- *   This file NEVER imports @/server/orders and NEVER writes to the `orders`
- *   table, directly or through any RPC. orders.payment_status (migration 023)
- *   remains exactly as it is today: a manually-driven axis, moved only by
- *   src/server/orders/service.ts#transitionPaymentStatus behind
- *   `payments.confirm`, completely unmodified by this phase.
+ * PAYMENT ↔ ORDER AUTHORITY (READ BEFORE CHANGING THIS FILE)
+ *   This file NEVER imports @/server/orders and NEVER issues its own write to
+ *   the `orders` table. That has not changed — but what it means has.
  *
- *   Making this Payment domain the authoritative driver of
- *   orders.payment_status is EXPLICITLY OUT OF SCOPE for this phase (see the
- *   task brief's "Payment / Order separation" section) — that transactional
- *   integration is the next phase's work, and it must be done the same way
- *   migration 026 wired Inventory into Order: as ONE atomic RPC-level change,
- *   never as two sequential service calls that could crash between them. Nothing
- *   here should be "helpfully" wired to call transitionPaymentStatus — doing so
- *   would let a screenshot-derived evidence attachment or a lone staff click
- *   silently become Order truth, which is the exact failure mode SECURITY.md
- *   §41 and this domain's evidence model exist to prevent.
+ *   Since migration 039 this Payment domain IS the sole authoritative driver
+ *   of orders.payment_status. The write happens inside the payment RPCs
+ *   themselves: record/verify/reverse/refund_payment_v1 each call
+ *   sync_order_payment_status_v1 in the SAME transaction as the payment write,
+ *   exactly the way migration 026 wired Inventory into Order. Order status and
+ *   payment record therefore commit together or not at all.
+ *
+ *   Nothing here should EVER be "helpfully" wired to call
+ *   the Order domain's transitionPaymentStatus (which now refuses every call
+ *   anyway — note this file deliberately never writes that name followed by a
+ *   parenthesis, so the structural call-site test stays meaningful) or to
+ *   write orders directly. Two sequential service calls could crash between
+ *   them and leave "payment recorded but order unpaid" — the failure this
+ *   design exists to make impossible. Keeping the bridge in SQL is also what
+ *   keeps a screenshot-derived evidence attachment or a lone staff click from
+ *   silently becoming Order truth (SECURITY.md §41).
+ *
+ *   The rule that decides the order's status — NET SETTLED AMOUNT (settled
+ *   amounts minus refunds and reversals) compared against the order total —
+ *   lives in ./settlement.ts, pure and exhaustively tested. Partial
+ *   settlement is never 'paid'; see supabase/PAYMENTS.md §1a.
  *
  * EVIDENCE IS NEVER FINANCIAL AUTHORITY
  *   attachEvidence() cannot move `status` or `verification_state` — it calls

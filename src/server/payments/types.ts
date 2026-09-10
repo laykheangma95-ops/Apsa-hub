@@ -159,3 +159,29 @@ export interface PaymentReconciliationRow {
   payment_count: number;
   amount_minor_total: number;
 }
+
+/**
+ * One row of the order_payment_settlement view (migration 039) — live
+ * per-order settlement truth. This is where 'partial' and 'overpaid' are
+ * preserved, since orders.payment_status is deliberately coarse.
+ */
+export interface OrderSettlementRow {
+  order_id: string;
+  organization_id: string;
+  currency: PaymentCurrency;
+  order_total_minor: number;
+  net_settled_minor: number;
+  outstanding_minor: number;
+  over_settled_minor: number;
+  has_pending_payment: boolean;
+  has_failed_payment: boolean;
+  settlement_state: "unsettled" | "partial" | "settled" | "overpaid";
+  order_payment_status: "unpaid" | "pending" | "paid" | "failed";
+}
+
+/** Filter/pagination options for settlement reads. All org-scoped by the repository. */
+export interface ListOrderSettlementsOptions {
+  order_id?: string | undefined;
+  settlement_state?: OrderSettlementRow["settlement_state"] | undefined;
+  limit?: number | undefined;
+}

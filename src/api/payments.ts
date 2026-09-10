@@ -256,3 +256,32 @@ export const getPaymentReconciliationFn = createServerFn().handler(async () => {
   const { getReconciliationSummary } = await import("@/server/payments/reconciliation");
   return getReconciliationSummary(authCtx);
 });
+
+// ── Settlement reads (migration 039) ─────────────────────────────────────────
+//
+// orders.payment_status is coarse (unpaid/pending/paid/failed) and cannot
+// express "half settled" or "more money arrived than was owed". These two
+// handlers are where that finer truth is readable. orderId is the only input;
+// organization_id and user_id come from the verified session/membership as
+// everywhere else in this file.
+
+export const getOrderSettlementFn = createServerFn()
+  .inputValidator((data: unknown) => z.object({ orderId: z.string().uuid() }).parse(data))
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getOrderSettlement } = await import("@/server/payments/reconciliation");
+    return getOrderSettlement(authCtx, data.orderId);
+  });
+
+export const getOrderSettlementIssuesFn = createServerFn()
+  .inputValidator((data: unknown) =>
+    z
+      .object({ limit: z.number().int().positive().max(200).optional() })
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getOrderSettlementIssues } = await import("@/server/payments/reconciliation");
+    return getOrderSettlementIssues(authCtx, { ...(data?.limit ? { limit: data.limit } : {}) });
+  });

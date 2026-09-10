@@ -16,11 +16,15 @@
  *   supabase-js has no client-side transaction, so the transaction has to
  *   live in the database — the RPC IS that transaction.
  *
- *   There is deliberately NO generic update function here, and NO function
- *   anywhere in this file that writes to the `orders` table. The Payment
- *   domain never mutates orders.payment_status in this phase — that
- *   integration is explicit, future work (see src/server/payments/service.ts
- *   header).
+ *   There is deliberately NO generic update function here, and NO function in
+ *   this file that writes to the `orders` table from TypeScript. Since
+ *   migration 039 the Payment domain IS the sole authoritative driver of
+ *   orders.payment_status — but that write happens inside the payment RPCs
+ *   themselves (sync_order_payment_status_v1, called from
+ *   record/verify/reverse/refund_payment_v1), in the same transaction as the
+ *   payment write. This layer still never imports @/server/orders and never
+ *   issues a second, separate call that could crash between the two — see
+ *   supabase/PAYMENTS.md §1.
  *
  * `supabaseAdmin as any` is used because payments / payment_events /
  * payment_evidence are not yet in the generated Supabase types (migrations
@@ -44,6 +48,8 @@ import type {
   CorrectPaymentRpcResult,
   ListPaymentsOptions,
   PaymentReconciliationRow,
+  OrderSettlementRow,
+  ListOrderSettlementsOptions,
 } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -277,6 +283,28 @@ export async function getReconciliationSummary(
 
   if (error) throw new Error(`getReconciliationSummary: ${errMessage(error)}`);
   return (data ?? []) as PaymentReconciliationRow[];
+}
+
+/**
+ * Per-order settlement truth from the order_payment_settlement view
+ * (migration 039). Org-scoped like every other read here, so one tenant's
+ * payments can never appear in another tenant's settlement figures — the view
+ * itself also joins payments to orders on organization_id, so the scoping is
+ * enforced twice, independently.
+ */
+export async function listOrderSettlements(
+  organizationId: string,
+  opts: ListOrderSettlementsOptions = {},
+): Promise<OrderSettlementRow[]> {
+  let query = db.from("order_payment_settlement").select("*").eq("organization_id", organizationId);
+
+  if (opts.order_id) query = query.eq("order_id", opts.order_id);
+  if (opts.settlement_state) query = query.eq("settlement_state", opts.settlement_state);
+  if (opts.limit) query = query.limit(opts.limit);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`listOrderSettlements: ${errMessage(error)}`);
+  return (data ?? []) as OrderSettlementRow[];
 }
 
 // ── Cross-domain ownership checks (read-only, org-scoped) ─────────────────────

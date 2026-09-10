@@ -35,9 +35,9 @@ Concretely:
   `refund_payment_v1` each call a new function, `sync_order_payment_status_v1`
   (migration 039), inside their own transaction — never a second, separate
   TypeScript call that could crash between the two writes.
-- `sync_order_payment_status_v1` recomputes `orders.payment_status` from a
-  **deterministic aggregate** over that order's payments — `paid` beats `pending`
-  beats `failed` beats `unpaid` — and applies it via the existing
+- `sync_order_payment_status_v1` recomputes `orders.payment_status` from the
+  **net settled amount** — settled payment amounts minus refunds and reversals,
+  compared against the order's own total — and applies it via the existing
   `transition_order_status_v1` (migration 026), never by writing the column
   directly. See §1a below for the exact rule.
 - The Order domain's own generic mutator, `transitionPaymentStatus()`
@@ -50,36 +50,89 @@ Concretely:
   Conversation and Delivery never called it in the first place (their own
   structural tests already proved that) and are unaffected.
 
-### 1a. The aggregate rule
+### 1a. The settlement rule: an amount, not a flag
 
-`orders.payment_status` has no `refunded`/`partially_paid` state of its own — it
+`orders.payment_status` has no `partially_paid`/`overpaid` state of its own — it
 stays coarse by design (task brief: "Order payment axis: unpaid, pending, paid,
-failed"). An order may have more than one payment over its life (a failed attempt
-then a successful one; a payment later fully refunded and re-collected another
-way), so the coarse status is recomputed from ALL of that order's payments on every
-mutation, never copied from "the payment that just changed":
+failed"). **Coarse does not mean approximate.** Whether an order is paid is an
+AMOUNT question, so it is answered by comparing money that actually settled
+against the order's own authoritative total (`orders.total_minor`, itself
+DB-constrained to equal subtotal − discount + delivery, migration 023):
 
 ```
-ANY payment.status = 'paid'                              -> order 'paid'
-else ANY payment.status = 'pending'                       -> order 'pending'
-else ANY payment.status = 'failed'                        -> order 'failed'
-else (no payments, or all reversed/refunded, nothing else active) -> order 'unpaid'
+NET SETTLED = settled payment amounts − refunds − reversals
+
+net > 0 AND net >= orders.total_minor  ->  'paid'     (exactly settled, or overpaid)
+net > 0 AND net <  orders.total_minor  ->  'pending'  (PARTIAL — never 'paid')
+net = 0 AND a pending payment exists    ->  'pending'
+net = 0 AND only failed payments exist  ->  'failed'
+otherwise                                ->  'unpaid'
 ```
 
-`paid` wins unconditionally. This is what makes the **PAID RULE** (task brief) hold
-even with multiple payment attempts: once ANY payment for an order has been
-staff/manager/bank-verified, an unrelated second attempt failing or being reversed
-can never silently downgrade the order. Only reversing/fully-refunding the PAID
-payment itself removes it from the aggregate — and even then the order only moves
-down to whatever the *remaining* payments still support, never straight to
-`unpaid` if another payment is still active. Refund/reversal history is never lost
-by this collapse: the detailed truth stays fully visible in
-`payments`/`payment_events` and the reconciliation view (§12); this function only
-ever writes the coarse summary the Order axis was designed to hold.
+What each payment status contributes to NET SETTLED:
+
+| Payment `status` | Contributes |
+|---|---|
+| `paid` | its amount, **minus** whatever has since been refunded |
+| `refunded` | same arithmetic — exactly 0 by construction |
+| `pending` | 0 — a claim, not money (unverified records, evidence-backed records and unsettled COD all sit here) |
+| `failed` | 0 — the claim was found not to hold up |
+| `reversed` | 0 — the entire claim was voided, its refunds included |
+
+The `net > 0` guard matters for a zero-total order: without it an order with no
+payments at all would satisfy `0 >= 0` and be reported paid.
+
+> **This rule replaced a financial-integrity bug.** The first draft of this
+> integration derived the order's status from the EXISTENCE of a settled payment
+> row ("any payment is paid → order is paid"). Under that rule a **$10** settled
+> payment against a **$100** order marked the order fully paid, and a $20 partial
+> refund of a fully-paid $100 order did not un-pay it. Settlement is an amount, so
+> the rule sums amounts.
+
+**Partial refunds resynchronize the order.** `refund_payment_v1` calls the sync on
+**every** refund, not only a full one: $100 order, $100 paid, $20 refunded leaves
+$80 net settled, so the order stops being `paid`. `payments.amount_minor` is still
+never mutated — the refunded total is derived by summing the payment's append-only
+`refund` events, so the original claim stays visible (DATA_MODEL.md §53).
+
+**Currency safety.** Only payments in the ORDER's currency are summed; two
+currencies are never added and no exchange rate is invented (ARCHITECTURE.md).
+Everything is BIGINT integer minor units — no NUMERIC, no float, no rounding, and
+`settlement.ts` rejects a non-integer outright rather than rounding it into a
+comparison.
+
+**Overpayment (net > total)** keeps the coarse axis at `paid` — the order genuinely
+is covered — and adds **no** new `order_payment_status` enum value. The excess is
+preserved, not discarded, in four places:
+
+1. `sync_order_payment_status_v1`'s return envelope (`over_settled_minor`,
+   `settlement_state`, `needs_review`), returned on the no-change path too, so an
+   overpayment found on an already-`paid` order still surfaces;
+2. the `order_status_history.reason` text stamped at the moment it happened;
+3. **`public.order_payment_settlement`** (migration 039) — a live view giving every
+   order its total, net settled, outstanding, over-settled and
+   `settlement_state` (`unsettled`/`partial`/`settled`/`overpaid`). Never a cache:
+   derived from `payments` + their append-only refund events + the order total, so
+   it cannot drift or need backfilling (same philosophy as `inventory_stock` and
+   `payment_reconciliation_summary`);
+4. `reconciliation.ts#getOrderSettlement` / `#getOrderSettlementIssues` (gated on
+   `payments.read` / `payments.reconcile`), exposed through
+   `getOrderSettlementFn` / `getOrderSettlementIssuesFn`.
+
+Only `overpaid` is flagged `needsReview` — more money arrived than was ever owed,
+which no legitimate workflow produces on its own. A *partially* settled order is an
+ordinary Cambodian deposit/instalment state and is listed for follow-up, never
+flagged as an anomaly.
+
+**The rule is specified once, in TypeScript.** `src/server/payments/settlement.ts`
+is the pure, exhaustively tested statement of it — the same division of labour
+`state-machine.ts` already has with `verify_payment_v1`. The SQL function is how
+the rule is applied *atomically*; that module is what the rule *is*. Structural
+tests assert the two agree.
 
 `PAYMENT_TRANSITIONS.paid` (`src/server/orders/state-machine.ts`) gained exits to
-`pending`/`failed`/`unpaid` to describe this — reachable only through the aggregate
-recompute above, never through `transitionPaymentStatus()`.
+`pending`/`failed`/`unpaid` to describe this — reachable only through the
+settlement recompute above, never through `transitionPaymentStatus()`.
 
 ---
 
@@ -151,10 +204,13 @@ can arrive with no manual step at all — the core product principle: *"APSA mus
 support payments with or without bank API."*
 
 Since migration 039, every one of these transitions also recomputes
-`orders.payment_status` in the same transaction (§1a) — `staff_confirmed` /
-`manager_verified` / `bank_verified` are the ONLY targets that can ever make an
-order `paid` anywhere in APSA; `mismatch` can move it down to `failed`, but only
-when no other payment for that order is still `paid`.
+`orders.payment_status` in the same transaction (§1a). `staff_confirmed` /
+`manager_verified` / `bank_verified` are the only targets that can move money
+into the settled total at all — but they make the ORDER `paid` only if the
+resulting net settled amount actually covers the order total: verifying a
+deposit that covers half the order leaves the order `pending`. `mismatch`
+removes that payment's money from the total again, which downgrades the order
+only if the remaining payments no longer cover it.
 
 ---
 
@@ -250,17 +306,19 @@ Nothing is ever deleted or destructively rewritten:
 - **Reversal** (`reverse_payment_v1`): requires a reason; moves `status` to the
   terminal `reversed`; appends a `reversal` event. Allowed only from `pending`/`paid`.
   Since migration 039, recomputes `orders.payment_status` (§1a) in the same
-  transaction — if another payment for the order is still `paid`, the order
-  correctly stays `paid`; a reversal never downgrades an order a DIFFERENT
-  payment already settled.
+  transaction: the reversed payment's whole amount (its own refunds included)
+  stops counting toward net settled, so the order stays `paid` if the REMAINING
+  payments still cover its total and drops if they no longer do. A reversal never
+  downgrades an order that other payments still fully cover, and never leaves one
+  marked paid whose money has gone.
 - **Refund** (`refund_payment_v1`): refunded amount is **derived** by summing prior
   `refund` events for the payment — `payments.amount_minor` is never mutated
   (`DATA_MODEL.md` §53). Supports partial refunds; `status` moves to `refunded` only
   once the cumulative refunded total equals the original amount. Since migration
-  039, recomputes `orders.payment_status` (§1a) ONLY on the transition to fully
-  `refunded` — a partial refund leaves the payment (and therefore the order) at
-  `paid`; refunded amounts are tracked in `payment_events`/reconciliation, never on
-  the order itself.
+  039, recomputes `orders.payment_status` (§1a) on **every** refund, partial ones
+  included — a $20 refund against a fully-paid $100 order leaves $80 net settled,
+  so the order stops being `paid`. (Syncing only on a FULL refund was the
+  partial-refund half of the financial-integrity bug §1a describes.)
 - **Correction** (`correct_payment_v1`): narrow by design — may only update
   `reference`/`note` (never amount/method/currency, since a wrong amount is a
   reversal-and-re-record situation, not a paperwork fix). Requires
@@ -273,12 +331,13 @@ Nothing is ever deleted or destructively rewritten:
 every role, including `service_role` — this is not merely an RLS policy that a
 service-role bypass could defeat.
 
-The Order axis has no `refunded` state of its own (§1a) — after a full refund or a
-reversal, `sync_order_payment_status_v1` recomputes the order down to whatever the
-*remaining* payments still support (another `paid` payment keeps it `paid`; a
-remaining `pending` one moves it to `pending`; otherwise it returns to `unpaid`).
-"Recompute safely" means exactly this: never a blind downgrade, always a fresh
-aggregate over the order's current payments.
+The Order axis has no `refunded` state of its own (§1a) — after any refund or
+reversal, `sync_order_payment_status_v1` recomputes the order from the net settled
+amount that remains (still covering the total keeps it `paid`; a shortfall with
+money still in play makes it `pending`; nothing left makes it `unpaid`).
+"Recompute safely" means exactly this: never a blind downgrade, never a stale
+`paid`, always a fresh amount-based recomputation over the order's current
+payments.
 
 ---
 
@@ -391,7 +450,7 @@ against labeling staff actions as theft/fraud.
 | 34 | `034_payments_domain.sql` | Enums, `payments`/`payment_events`/`payment_evidence` tables, cross-tenant triggers, append-only trigger on `payment_events`, RLS, `payment_reconciliation_summary` view |
 | 35 | `035_payment_rpc.sql` | `record_payment_v1`, `attach_payment_evidence_v1`, `verify_payment_v1`, `reverse_payment_v1`, `refund_payment_v1`, `correct_payment_v1`, privilege grants |
 | 36 | `036_payment_permissions.sql` | Seeds the finer-grained `payments.*` permission keys and role grants |
-| 39 | `039_payment_order_integration.sql` | Adds `sync_order_payment_status_v1`; `CREATE OR REPLACE`s `record_payment_v1`/`verify_payment_v1`/`reverse_payment_v1`/`refund_payment_v1` (same signatures) to call it. No table/column/enum change. |
+| 39 | `039_payment_order_integration.sql` | Adds `sync_order_payment_status_v1` (net-settlement rule, §1a) and the `order_payment_settlement` view; `CREATE OR REPLACE`s `record_payment_v1`/`verify_payment_v1`/`reverse_payment_v1`/`refund_payment_v1` (same signatures) to call it. No table/column/enum change. |
 
 Numbered 034–036 (and, for the integration, 039) because the repository's `main`
 branch had already advanced past the task brief's original 028–029 placeholder
@@ -427,30 +486,48 @@ integration) and 034–036 already being applied; it adds no new dependency.
    order's `payment_status` is unaffected (still `'pending'`, no duplicate history row).
 3. `attachEvidence` — attach a screenshot to the payment; confirm `payments.status`,
    `verification_state`, AND `orders.payment_status` are all unchanged.
-4. `verifyPayment(..., 'staff_confirmed')` — confirm the payment's `status` becomes
-   `paid`, an immutable `staff_confirmed` event is recorded with the acting user id,
-   AND `orders.payment_status` becomes `'paid'` in the same transaction (a second
-   `order_status_history` row, `axis='payment'`, `from='pending'`, `to='paid'`).
-5. Attempt a direct `UPDATE`/`DELETE` on a `payment_events` row via the SQL editor as
+4. **PARTIAL SETTLEMENT — the case this checklist exists for.** On a $100 order,
+   record and `verifyPayment(..., 'staff_confirmed')` a **$10** payment. Confirm the
+   payment's `status` becomes `paid` and its `staff_confirmed` event is recorded —
+   but `orders.payment_status` is `'pending'`, **NOT** `'paid'`. Then check
+   `SELECT * FROM order_payment_settlement WHERE order_id = ...`:
+   `net_settled_minor = 1000`, `outstanding_minor = 9000`,
+   `settlement_state = 'partial'`.
+5. Settle the remaining $90 (a second payment, verified). Confirm net settled now
+   equals the order total, `settlement_state = 'settled'`, and only NOW does
+   `orders.payment_status` become `'paid'` — with an `order_status_history` row
+   (`axis='payment'`, `to='paid'`) whose `reason` carries the settlement figures.
+6. Attempt a direct `UPDATE`/`DELETE` on a `payment_events` row via the SQL editor as
    `service_role` — confirm it is rejected by `block_payment_event_mutation`.
-6. `refundPayment` for a partial amount, then again for the remainder — confirm the
-   payment's `status` stays `paid` after the first call (and `orders.payment_status`
-   stays `'paid'` too — no order consequence from a partial refund) and both become
-   `'refunded'`/`'unpaid'` respectively only after the second call, with two separate
-   `refund` events on the payment and one new `order_status_history` row.
-7. Attempt any of the six RPCs (or `sync_order_payment_status_v1` directly) as the
+7. **PARTIAL REFUND.** `refundPayment` $20 against that fully-settled $100 order.
+   Confirm the payment's own `status` stays `paid` (it is only partially refunded),
+   `payments.amount_minor` is unchanged, a `refund` event exists — and
+   `orders.payment_status` has dropped OUT of `'paid'` to `'pending'`, with
+   `net_settled_minor = 8000` and `settlement_state = 'partial'`. Then refund the
+   remaining $80: the payment becomes `'refunded'`, the order `'unpaid'`,
+   `settlement_state = 'unsettled'`, and both `refund` events remain.
+8. **OVERPAYMENT.** On a fresh $100 order, settle $110 (e.g. two verified payments).
+   Confirm `orders.payment_status` is `'paid'` (the order IS covered), no new enum
+   value appeared on that column, and `order_payment_settlement` reports
+   `settlement_state = 'overpaid'` with `over_settled_minor = 1000`.
+   `getOrderSettlementIssues` must list that order under `overpaid` with
+   `needsReview: true`.
+9. Attempt any of the six RPCs (or `sync_order_payment_status_v1` directly) as the
    `anon` or `authenticated` role directly against PostgREST — confirm
-   `permission denied for function ...` for every one of them.
-8. Record a SECOND payment against a different, already-`'paid'` order, then let
-   that second payment's verification fail (`mismatch`) — confirm the order STAYS
-   `'paid'` (the aggregate rule, §1a: an unrelated failed attempt never downgrades
-   an order a different payment already settled).
-9. Reverse the payment that made an order `'paid'` (with no other active payment on
-   that order) — confirm `orders.payment_status` recomputes to `'unpaid'`, and that
-   the original `payments` row (now `status='reversed'`) and its full event history
-   remain visible and unmodified.
-10. Confirm a COD payment (`method: 'cod'`) leaves the order at `'pending'`, not
+   `permission denied for function ...` for every one of them. Do the same for
+   `SELECT * FROM order_payment_settlement`.
+10. On a fully-settled order, record a SECOND payment and let its verification fail
+    (`mismatch`) — confirm the order STAYS `'paid'`: the failed attempt never
+    counted toward net settled, so removing it changes nothing (§1a).
+11. Reverse the payment that fully settled an order (no other active payment on it)
+    — confirm `orders.payment_status` recomputes to `'unpaid'`, `net_settled_minor`
+    returns to 0, and the original `payments` row (now `status='reversed'`) and its
+    full event history remain visible and unmodified.
+12. Confirm a COD payment (`method: 'cod'`) leaves the order at `'pending'`, not
     `'paid'`, until a subsequent `verifyPayment` call — Delivery's own status
     transitions (`create_delivery_v1`/`transition_delivery_status_v1`, migration 027)
     must never move `orders.payment_status` regardless of how far the delivery
     progresses.
+13. **Cross-tenant.** As Org A, call `getOrderSettlement` with an Org B order id —
+    confirm `null` (indistinguishable from a nonexistent order), and that Org B's
+    payments never appear in any Org A settlement figure.

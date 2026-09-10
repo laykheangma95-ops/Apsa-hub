@@ -16,7 +16,8 @@
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
 import type { Money, Currency } from "@/types";
-import type { PaymentReconciliationRow } from "./types";
+import type { PaymentReconciliationRow, OrderSettlementRow } from "./types";
+import { classifySettlement, type OrderSettlementState } from "./settlement";
 
 export interface ReconciliationBucket {
   count: number;
@@ -206,4 +207,110 @@ export async function getReconciliationSummary(
   }
 
   return Array.from(byCurrency.values());
+}
+
+// ── Per-order settlement (where 'partial' and 'overpaid' are preserved) ──────
+
+export interface OrderSettlementDetail {
+  orderId: string;
+  /** The order's own authoritative total (orders.total_minor, migration 023). */
+  orderTotal: Money;
+  /** Settled payment amounts minus refunds and reversals. */
+  netSettled: Money;
+  /** Still owed. Zero once fully settled. */
+  outstanding: Money;
+  /** Settled money in EXCESS of the order total. Zero unless overpaid. */
+  overSettled: Money;
+  state: OrderSettlementState;
+  /** The coarse orders.payment_status these figures produced. */
+  orderPaymentStatus: string;
+  /**
+   * True only for `overpaid` — more money settled than was ever owed, which
+   * no legitimate workflow produces on its own and which a human must
+   * resolve (refund the excess, or correct the order). A partially settled
+   * order is NOT flagged: deposits and instalments are ordinary here.
+   */
+  needsReview: boolean;
+}
+
+function mapSettlement(row: OrderSettlementRow): OrderSettlementDetail {
+  const currency = row.currency as Currency;
+  // The view already computed these; classifySettlement re-derives state and
+  // the coarse status from the same figures so the thresholds exist in
+  // exactly ONE place in TypeScript (./settlement.ts) rather than being
+  // restated here and drifting from the SQL.
+  const settlement = classifySettlement(
+    {
+      netSettledMinor: row.net_settled_minor,
+      hasPendingPayment: row.has_pending_payment,
+      hasFailedPayment: row.has_failed_payment,
+    },
+    row.order_total_minor,
+  );
+
+  return {
+    orderId: row.order_id,
+    orderTotal: { amount: settlement.orderTotalMinor, currency },
+    netSettled: { amount: settlement.netSettledMinor, currency },
+    outstanding: { amount: settlement.outstandingMinor, currency },
+    overSettled: { amount: settlement.overSettledMinor, currency },
+    state: settlement.state,
+    orderPaymentStatus: settlement.orderPaymentStatus,
+    needsReview: settlement.needsReview,
+  };
+}
+
+/**
+ * Settlement detail for one order. Gated on payments.read (the same
+ * permission as reading the order's payments themselves — these are the same
+ * facts, aggregated).
+ *
+ * Org-scoped: an order belonging to another organization returns null,
+ * exactly as a nonexistent one does, so a guessed UUID reveals nothing.
+ */
+export async function getOrderSettlement(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<OrderSettlementDetail | null> {
+  ctx.require("payments.read");
+
+  const rows = await repo.listOrderSettlements(ctx.organizationId, {
+    order_id: orderId,
+    limit: 1,
+  });
+  const row = rows[0];
+  return row ? mapSettlement(row) : null;
+}
+
+/**
+ * Orders whose settlement does not cleanly match their total — the
+ * reconciliation worklist. Overpaid orders come first: they are the
+ * needs-review condition (money arrived that was never owed), whereas
+ * partially settled orders are an ordinary deposit/instalment state shown for
+ * follow-up, not suspicion.
+ *
+ * Gated on payments.reconcile, like every other org-wide financial-position
+ * read in this module.
+ */
+export async function getOrderSettlementIssues(
+  ctx: AuthorizationContext,
+  opts: { limit?: number } = {},
+): Promise<{ overpaid: OrderSettlementDetail[]; partiallySettled: OrderSettlementDetail[] }> {
+  ctx.require("payments.reconcile");
+
+  const [overpaidRows, partialRows] = await Promise.all([
+    repo.listOrderSettlements(ctx.organizationId, {
+      settlement_state: "overpaid",
+      ...(opts.limit ? { limit: opts.limit } : {}),
+    }),
+    repo.listOrderSettlements(ctx.organizationId, {
+      settlement_state: "partial",
+      ...(opts.limit ? { limit: opts.limit } : {}),
+    }),
+  ]);
+
+  return {
+    overpaid: overpaidRows.map(mapSettlement),
+    partiallySettled: partialRows.map(mapSettlement),
+  };
 }

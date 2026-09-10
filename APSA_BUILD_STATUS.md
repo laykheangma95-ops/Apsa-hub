@@ -599,7 +599,8 @@ not applied to hosted Supabase; no UI
 | Migration 034: payments/payment_events/payment_evidence domain | WRITTEN | `supabase/migrations/034_payments_domain.sql` |
 | Migration 035: Payment RPCs (record/evidence/verify/reverse/refund/correct) | WRITTEN | `supabase/migrations/035_payment_rpc.sql` |
 | Migration 036: `payments.*` permission vocabulary (§17) | WRITTEN | `supabase/migrations/036_payment_permissions.sql` |
-| Migration 039: Payment ↔ Order transactional integration (`sync_order_payment_status_v1`) | WRITTEN | `supabase/migrations/039_payment_order_integration.sql` |
+| Migration 039: Payment ↔ Order transactional integration (`sync_order_payment_status_v1` + `order_payment_settlement` view) | WRITTEN | `supabase/migrations/039_payment_order_integration.sql` |
+| Settlement rule (pure spec: net settled vs order total) | BUILT | `src/server/payments/settlement.ts` |
 | Payment domain (types/state-machine/repository/service/integrations/reconciliation) | BUILT | `src/server/payments/` |
 | Payment server functions | BUILT | `src/api/payments.ts` |
 | Payment domain tests (71 tests) | PASSING | `src/tests/payment-domain.test.ts` |
@@ -624,10 +625,17 @@ integration is wired.
 `orders.payment_status` (unpaid/pending/paid/failed). `record_payment_v1` /
 `verify_payment_v1` / `reverse_payment_v1` / `refund_payment_v1` each call a new
 `sync_order_payment_status_v1` function — inside their own transaction, never a
-second TypeScript call — which recomputes the order's coarse payment status from a
-deterministic aggregate over ALL of its payments (`paid` beats `pending` beats
-`failed` beats `unpaid`) and applies it via the existing `transition_order_status_v1`
-(migration 026), the same pattern used for the Inventory integration. The Order
+second TypeScript call — which recomputes the order's coarse payment status from
+the NET SETTLED AMOUNT (settled payment amounts minus refunds and reversals,
+integer minor units, order currency only) compared against `orders.total_minor`,
+and applies it via the existing `transition_order_status_v1` (migration 026), the
+same pattern used for the Inventory integration. **Partial settlement is never
+`paid`** ($10 against a $100 order leaves the order `pending`), **every refund —
+partial ones included — resynchronizes the order**, and **overpayment** keeps the
+coarse axis at `paid` while preserving the excess as a needs-review condition in
+the `order_payment_settlement` view and `reconciliation.ts`. The rule is specified
+once in `src/server/payments/settlement.ts` (pure, exhaustively tested) and
+implemented atomically by the SQL. The Order
 domain's own generic mutator, `transitionPaymentStatus()`
 (`src/server/orders/service.ts`), now unconditionally refuses every call (403 for a
 caller lacking `payments.confirm`, else 409 pointing at the Payment Domain) — closing

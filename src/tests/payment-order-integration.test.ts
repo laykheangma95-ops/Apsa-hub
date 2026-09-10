@@ -13,58 +13,62 @@
  * of the legacy direct-mutation path in src/server/orders/service.ts.
  *
  * Coverage:
- *   AGGREGATE RULE
- *     1.  paid > pending > failed > unpaid precedence, in that order
- *     2.  every EXISTS check is organization_id- AND order_id-scoped
- *     3.  the order row is locked (FOR UPDATE) before the aggregate decision
- *     4.  a no-op is a real early return, not a wasted transition call
- *   WIRING — one atomic function, not a TypeScript sequence
- *     5.  record_payment_v1 syncs on both the replay path and the normal path
- *     6.  verify_payment_v1 syncs after the payments UPDATE, using the
- *         payment's own order_id (never a parameter the caller could vary)
- *     7.  reverse_payment_v1 syncs after marking the payment reversed
- *     8.  refund_payment_v1 syncs ONLY inside the fully-refunded branch —
- *         a partial refund never touches the order
- *     9.  correct_payment_v1 and attach_payment_evidence_v1 are untouched by
- *         this migration — neither ever moves `status`, so neither has an
- *         Order consequence (SECURITY.md §41)
- *   PAID RULE (task brief, verbatim)
- *    10.  the sync target can only be 'paid' when a payment's own status is
- *         'paid' — never derived from verification_state directly
- *    11.  evidence attachment cannot reach the sync function at all
+ *   SETTLEMENT RULE — executable, against src/server/payments/settlement.ts
+ *     1.  net settled < order total is NEVER paid ($100 order + $10 settled)
+ *     2.  net settled == order total is paid (incl. two $50 payments)
+ *     3.  net settled > order total is overpayment — coarse status stays
+ *         'paid', the excess and needs-review flag are preserved
+ *     4.  refunds subtract: $100 paid + $20 refund is no longer paid; a full
+ *         refund returns the order to unpaid
+ *     5.  reversals remove the whole claim, refunds included
+ *     6.  pending / evidence-only / unsettled-COD / failed never count as money
+ *     7.  duplicate retries and concurrent settlements cannot double-count
+ *     8.  currency-safe, integer-only money (non-integer input is rejected)
+ *   SETTLEMENT RULE — the SQL implements the same thing
+ *     9.  sync_order_payment_status_v1 sums AMOUNTS against orders.total_minor
+ *         (never "does a paid row exist"), BIGINT only, order currency only
+ *    10.  overpayment truth preserved in SQL: return envelope on both paths,
+ *         the immutable history reason, and the order_payment_settlement view
+ *    11.  the order row is locked BEFORE the aggregate (concurrency), and a
+ *         no-op still returns early
+ *    12.  the aggregate and its refund sub-scan are organization-scoped
  *   COD
- *    12.  a COD payment still starts 'pending' — recording COD is not itself
- *         settlement; only a later verifyPayment can move the order to paid
- *    13.  the Delivery migration still makes no reference to `payments` or
- *         `orders.payment_status`, and this migration adds nothing there
+ *    13.  the Delivery migration still makes no executable reference to
+ *         payments or orders.payment_status; this migration adds nothing there
  *   ORDER-SIDE CLOSURE
  *    14.  transitionPaymentStatus() refuses unconditionally now (TypeScript)
  *    15.  the permission gate still runs first — unauthorized stays 403
  *    16.  PAYMENT_TRANSITIONS.paid gained exits; the edges match what
  *         sync_order_payment_status_v1 can legitimately produce
+ *   WIRING — one atomic function, not a TypeScript sequence
+ *     5b. record_payment_v1 syncs on both the replay path and the normal path
+ *     6b. verify_payment_v1 syncs after the payments UPDATE, using the
+ *         payment's own order_id (never a parameter the caller could vary)
+ *     7b. reverse_payment_v1 syncs after marking the payment reversed
+ *     8b. refund_payment_v1 syncs on EVERY refund, partial ones included —
+ *         the partial-refund regression this PR fixes
+ *     9b. correct_payment_v1 and attach_payment_evidence_v1 are untouched —
+ *         neither moves `status`, so neither has an Order consequence
+ *         (SECURITY.md §41)
  *   TENANT ISOLATION
  *    17.  sync_order_payment_status_v1 takes p_organization_id and is
  *         revoked from anon/authenticated, granted only to service_role
- *    18.  the order lookup and every payments aggregate query are scoped by
- *         organization_id, not just order_id
+ *    18.  no query filters by order_id alone
+ *    19b. one tenant's payments cannot reach another tenant's settlement —
+ *         repository read, service reads and server functions are all
+ *         org-scoped and permission-gated
  *   IDEMPOTENCY
- *    19.  a replayed record_payment_v1 call still syncs safely (no double
- *         financial write — this is a read-then-conditional-transition, not
- *         a second INSERT)
+ *    19.  a replayed record_payment_v1 call syncs safely (no double financial
+ *         write), and the uniqueness that makes that true lives in the index
  *   ATOMICITY / NO TWO-STEP SEQUENCE
- *    20.  src/server/payments/service.ts and repository.ts are still
- *         untouched — the bridge is SQL calling SQL, not TypeScript calling
- *         TypeScript (re-asserts payment-domain.test.ts's "Test 25" boundary
- *         still holds after this migration)
+ *    20.  src/server/payments/service.ts and repository.ts still never import
+ *         the Order domain — the bridge is SQL calling SQL
  *    21.  each payment RPC's Order consequence is reached only AFTER its own
- *         payments/payment_events writes are already in the same function
- *         body (ordering, not just presence)
+ *         payments/payment_events writes, in the same function body
  *   MIGRATION HYGIENE
- *    22.  039 is additive only — no DROP/TRUNCATE, no new table/column/index/
- *         enum value, and it does not redefine transition_order_status_v1
- *         itself (026 still owns that function)
- *    23.  039 does not modify 023/026/034/035/036 — those files carry no
- *         reference to sync_order_payment_status_v1
+ *    22.  039 is additive only — no DROP/TRUNCATE, no new table/column/enum
+ *         value, and it does not redefine transition_order_status_v1 itself
+ *    23.  039 does not modify 023/026/034/035/036
  *
  * Run: bun test src/tests/payment-order-integration.test.ts
  */
@@ -74,6 +78,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import {
+  computeOrderSettlement,
+  classifySettlement,
+  settlementFactsFromPayments,
+  type SettlementPayment,
+} from "../server/payments/settlement";
 
 // ── Context factory (mirrors order-domain.test.ts / payment-domain.test.ts) ──
 
@@ -187,70 +197,459 @@ const reverseFn = () => functionBody("reverse_payment_v1");
 const refundFn = () => functionBody("refund_payment_v1");
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AGGREGATE RULE
+// SETTLEMENT RULE — executable (src/server/payments/settlement.ts is the spec)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// These run the real rule, not a description of it. The SQL in migration 039
+// implements the same rule atomically; the structural tests further down
+// assert the two agree.
+
+const USD = "USD";
+
+/** A settled payment of `amountMinor`, optionally partially refunded. */
+function settled(amountMinor: number, refundedMinor = 0): SettlementPayment {
+  return { amountMinor, currency: USD, status: "paid", refundedMinor };
+}
+
+function pendingPayment(amountMinor: number): SettlementPayment {
+  return { amountMinor, currency: USD, status: "pending", refundedMinor: 0 };
+}
+
+describe("Test 1: net settled < order total is NEVER paid", () => {
+  it("$100 order + $10 settled → NOT paid (the bug this rule replaced)", () => {
+    const s = computeOrderSettlement([settled(1000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(1000);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.orderPaymentStatus).not.toBe("paid");
+    expect(s.state).toBe("partial");
+    expect(s.outstandingMinor).toBe(9000);
+  });
+
+  it("$100 order + $50 settled + $50 still pending → NOT paid", () => {
+    const s = computeOrderSettlement([settled(5000), pendingPayment(5000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(5000);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.state).toBe("partial");
+    expect(s.hasPendingPayment).toBe(true);
+  });
+
+  it("a nearly-complete settlement is still not paid — one minor unit short", () => {
+    const s = computeOrderSettlement([settled(9999)], USD, 10000);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.outstandingMinor).toBe(1);
+  });
+});
+
+describe("Test 2: net settled == order total is paid", () => {
+  it("$100 order + $100 settled → paid", () => {
+    const s = computeOrderSettlement([settled(10000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+    expect(s.state).toBe("settled");
+    expect(s.outstandingMinor).toBe(0);
+    expect(s.overSettledMinor).toBe(0);
+    expect(s.needsReview).toBe(false);
+  });
+
+  it("$100 order + two $50 settled payments → paid (amounts aggregate)", () => {
+    const s = computeOrderSettlement([settled(5000), settled(5000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+    expect(s.state).toBe("settled");
+  });
+
+  it("an order with no payments is never paid, even at a zero total", () => {
+    const s = computeOrderSettlement([], USD, 0);
+    expect(s.orderPaymentStatus).toBe("unpaid");
+    expect(s.state).toBe("unsettled");
+  });
+});
+
+describe("Test 3: net settled > order total is overpayment, preserved not discarded", () => {
+  it("$100 order + $110 settled → coarse 'paid', excess preserved, needs review", () => {
+    const s = computeOrderSettlement([settled(11000)], USD, 10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+    expect(s.state).toBe("overpaid");
+    expect(s.overSettledMinor).toBe(1000);
+    expect(s.outstandingMinor).toBe(0);
+    expect(s.needsReview).toBe(true);
+  });
+
+  it("overpayment via several payments is detected the same way", () => {
+    const s = computeOrderSettlement([settled(6000), settled(6000)], USD, 10000);
+    expect(s.state).toBe("overpaid");
+    expect(s.overSettledMinor).toBe(2000);
+    expect(s.needsReview).toBe(true);
+  });
+
+  it("a partially settled order is NOT flagged for review — deposits are ordinary", () => {
+    const s = computeOrderSettlement([settled(5000)], USD, 10000);
+    expect(s.state).toBe("partial");
+    expect(s.needsReview).toBe(false);
+  });
+
+  it("the coarse axis gains no new enum value for overpayment", async () => {
+    const { ORDER_PAYMENT_STATUSES } = await import("../server/orders/state-machine");
+    expect(ORDER_PAYMENT_STATUSES).toEqual(["unpaid", "pending", "paid", "failed"]);
+    expect(ORDER_PAYMENT_STATUSES as readonly string[]).not.toContain("overpaid");
+    expect(ORDER_PAYMENT_STATUSES as readonly string[]).not.toContain("partially_paid");
+  });
+});
+
+describe("Test 4: refunds subtract from net settled", () => {
+  it("$100 paid → $20 refund → net $80 → NOT paid any more", () => {
+    const s = computeOrderSettlement([settled(10000, 2000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(8000);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.orderPaymentStatus).not.toBe("paid");
+    expect(s.state).toBe("partial");
+    expect(s.outstandingMinor).toBe(2000);
+  });
+
+  it("$100 paid → full refund → net $0 → unpaid", () => {
+    // refund_payment_v1 flips status to 'refunded' once refunds equal the
+    // amount; either representation nets to zero.
+    const fullyRefunded: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "refunded",
+      refundedMinor: 10000,
+    };
+    const s = computeOrderSettlement([fullyRefunded], USD, 10000);
+    expect(s.netSettledMinor).toBe(0);
+    expect(s.orderPaymentStatus).toBe("unpaid");
+    expect(s.state).toBe("unsettled");
+  });
+
+  it("a refund on one of two payments leaves the other's money counted", () => {
+    const s = computeOrderSettlement([settled(5000, 5000), settled(5000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(5000);
+    expect(s.orderPaymentStatus).toBe("pending");
+  });
+});
+
+describe("Test 5: reversals remove the whole claim", () => {
+  it("two settled payments, one reversed → only the remaining one counts", () => {
+    const reversed: SettlementPayment = {
+      amountMinor: 5000,
+      currency: USD,
+      status: "reversed",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([settled(5000), reversed], USD, 10000);
+    expect(s.netSettledMinor).toBe(5000);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.state).toBe("partial");
+  });
+
+  it("reversing the only payment of a fully paid order un-pays it", () => {
+    const reversed: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "reversed",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([reversed], USD, 10000);
+    expect(s.netSettledMinor).toBe(0);
+    expect(s.orderPaymentStatus).toBe("unpaid");
+  });
+
+  it("a reversal of a partially refunded payment removes it whole, refunds included", () => {
+    const reversed: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "reversed",
+      refundedMinor: 2000,
+    };
+    const s = computeOrderSettlement([reversed, settled(10000)], USD, 10000);
+    // Only the live payment counts — the reversed one contributes 0, not 8000.
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+  });
+});
+
+describe("Test 6: unsettled claims never count as money", () => {
+  it("a pending (unverified / evidence-only) payment contributes nothing", () => {
+    const s = computeOrderSettlement([pendingPayment(10000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(0);
+    expect(s.orderPaymentStatus).toBe("pending");
+    expect(s.state).toBe("unsettled");
+  });
+
+  it("an unsettled COD collection contributes nothing until it is verified", () => {
+    const codPending: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "pending",
+      refundedMinor: 0,
+    };
+    expect(computeOrderSettlement([codPending], USD, 10000).orderPaymentStatus).toBe("pending");
+    // ...and once staff confirm collection, the same amount settles it.
+    expect(computeOrderSettlement([settled(10000)], USD, 10000).orderPaymentStatus).toBe("paid");
+  });
+
+  it("a failed payment contributes nothing and reports 'failed' when it is all there is", () => {
+    const failed: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "failed",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([failed], USD, 10000);
+    expect(s.netSettledMinor).toBe(0);
+    expect(s.orderPaymentStatus).toBe("failed");
+  });
+
+  it("a failed attempt cannot un-pay an order other payments fully cover", () => {
+    const failed: SettlementPayment = {
+      amountMinor: 10000,
+      currency: USD,
+      status: "failed",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([settled(10000), failed], USD, 10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+  });
+
+  it("the amount math and the classification are separable, and agree", () => {
+    const payments = [settled(6000, 1000), pendingPayment(2000)];
+    const facts = settlementFactsFromPayments(payments, USD);
+    expect(facts).toEqual({
+      netSettledMinor: 5000,
+      hasPendingPayment: true,
+      hasFailedPayment: false,
+    });
+    expect(classifySettlement(facts, 10000)).toEqual(computeOrderSettlement(payments, USD, 10000));
+  });
+});
+
+describe("Test 7: duplicate retries and concurrency", () => {
+  it("a retried record produces ONE payment row, so the amount is counted once", () => {
+    // record_payment_v1's idempotency key means the retry returns the existing
+    // payment rather than inserting a second one — the settled set contains
+    // one row, not two. (The SQL-level guarantee is asserted structurally in
+    // "Test 19: replay path" below.)
+    const s = computeOrderSettlement([settled(10000)], USD, 10000);
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.orderPaymentStatus).toBe("paid");
+  });
+
+  it("a duplicate_suspected payment is 'pending' and cannot double-count until reviewed", () => {
+    const duplicateSuspected = pendingPayment(10000);
+    const s = computeOrderSettlement([settled(10000), duplicateSuspected], USD, 10000);
+    // The flagged duplicate adds nothing while it awaits review.
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.state).toBe("settled");
+    expect(s.overSettledMinor).toBe(0);
+  });
+
+  it("if a flagged duplicate is later accepted, the excess surfaces as overpayment", () => {
+    const s = computeOrderSettlement([settled(10000), settled(10000)], USD, 10000);
+    expect(s.state).toBe("overpaid");
+    expect(s.overSettledMinor).toBe(10000);
+    expect(s.needsReview).toBe(true);
+  });
+
+  it("two concurrent settlements are order-independent — the rule is a pure aggregate", () => {
+    // Whichever transaction commits second recomputes over BOTH rows (it holds
+    // the order lock and re-reads), so the final state is the same either way.
+    const a = settled(5000);
+    const b = settled(5000);
+    const first = computeOrderSettlement([a, b], USD, 10000);
+    const second = computeOrderSettlement([b, a], USD, 10000);
+    expect(first).toEqual(second);
+    expect(first.orderPaymentStatus).toBe("paid");
+  });
+});
+
+describe("Test 8: currency safety and integer-only money", () => {
+  it("a payment in another currency is never summed into the order's total", () => {
+    const khr: SettlementPayment = {
+      amountMinor: 400000,
+      currency: "KHR",
+      status: "paid",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([khr], USD, 10000);
+    expect(s.netSettledMinor).toBe(0);
+    expect(s.orderPaymentStatus).toBe("unpaid");
+  });
+
+  it("mixed currencies count only the order's own", () => {
+    const khr: SettlementPayment = {
+      amountMinor: 400000,
+      currency: "KHR",
+      status: "paid",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([settled(10000), khr], USD, 10000);
+    expect(s.netSettledMinor).toBe(10000);
+    expect(s.state).toBe("settled");
+  });
+
+  it("a non-integer amount is rejected outright, never rounded into a comparison", () => {
+    const bad: SettlementPayment = {
+      amountMinor: 100.5,
+      currency: USD,
+      status: "paid",
+      refundedMinor: 0,
+    };
+    expect(() => computeOrderSettlement([bad], USD, 10000)).toThrow(/integer minor amount/);
+    expect(() =>
+      classifySettlement(
+        { netSettledMinor: 0.1, hasPendingPayment: false, hasFailedPayment: false },
+        100,
+      ),
+    ).toThrow(/integer minor amount/);
+  });
+
+  it("KHR (a zero-decimal currency) settles by the same integer rule", () => {
+    const khr: SettlementPayment = {
+      amountMinor: 400000,
+      currency: "KHR",
+      status: "paid",
+      refundedMinor: 0,
+    };
+    const s = computeOrderSettlement([khr], "KHR", 400000);
+    expect(s.orderPaymentStatus).toBe("paid");
+    expect(s.state).toBe("settled");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SETTLEMENT RULE — the SQL implements the same thing
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("Test 1: paid > pending > failed > unpaid precedence", () => {
-  it("the aggregate is an IF/ELSIF chain checking 'paid' first", () => {
+describe("Test 9: sync_order_payment_status_v1 compares an AMOUNT against the order total", () => {
+  it("sums payment amounts rather than testing for the existence of a paid row", () => {
     const body = syncFn();
-    const paidIdx = body.indexOf("status = 'paid'");
-    const pendingIdx = body.indexOf("status = 'pending'");
-    const failedIdx = body.indexOf("status = 'failed'");
-    expect(paidIdx).toBeGreaterThan(-1);
-    expect(pendingIdx).toBeGreaterThan(paidIdx);
-    expect(failedIdx).toBeGreaterThan(pendingIdx);
+    expect(body).toMatch(/SUM\(/);
+    expect(body).toMatch(/p\.amount_minor/);
+    expect(body).toMatch(/v_order\.total_minor/);
+    // The old, buggy shape: a bare EXISTS over status='paid' deciding the axis.
+    expect(body).not.toMatch(/IF EXISTS \(\s*SELECT 1 FROM public\.payments/);
   });
 
-  it("falls through to 'unpaid' when no payment is paid/pending/failed", () => {
+  it("only 'paid' and 'refunded' amounts are settled; pending/failed/reversed contribute nothing", () => {
     const body = syncFn();
-    expect(body).toMatch(/ELSE\s+v_target := 'unpaid';/);
+    expect(body).toMatch(/WHEN p\.status IN \('paid', 'refunded'\)/);
   });
 
-  it("every branch assigns v_target from the order_payment_status enum, nothing client-shaped", () => {
+  it("subtracts refunds derived from the append-only refund events", () => {
     const body = syncFn();
-    expect(body).toMatch(/v_target public\.order_payment_status;/);
-    for (const value of ["'paid'", "'pending'", "'failed'", "'unpaid'"]) {
-      expect(body).toContain(`v_target := ${value}`);
-    }
-  });
-});
-
-describe("Test 2: every aggregate check is organization- and order-scoped", () => {
-  it("each EXISTS clause filters by both order_id and organization_id", () => {
-    const body = syncFn();
-    const clauses = body.match(
-      /WHERE order_id = p_order_id AND organization_id = p_organization_id/g,
-    );
-    // paid, pending, failed — three EXISTS checks, all identically scoped.
-    expect(clauses?.length).toBe(3);
+    expect(body).toMatch(/event_type = 'refund'/);
+    expect(body).toMatch(/p\.amount_minor - COALESCE\(r\.refunded_minor, 0\)/);
   });
 
-  it("the order lookup itself is scoped the same way", () => {
+  it("'paid' requires net > 0 AND net >= total — a zero-total order with no payments is not paid", () => {
     expect(syncFn()).toMatch(
-      /WHERE id = p_order_id AND organization_id = p_organization_id\s+FOR UPDATE/,
+      /IF v_net_settled > 0 AND v_net_settled >= v_order\.total_minor THEN\s+v_target := 'paid';/,
     );
+  });
+
+  it("partial settlement falls to 'pending', never 'paid'", () => {
+    expect(syncFn()).toMatch(
+      /ELSIF v_net_settled > 0 OR v_has_pending THEN\s+v_target := 'pending';/,
+    );
+  });
+
+  it("only the order's own currency is summed — no implicit exchange rate", () => {
+    expect(syncFn()).toMatch(/p\.currency = v_order\.currency/);
+  });
+
+  it("every monetary variable is BIGINT — no NUMERIC, no float, no rounding", () => {
+    const body = syncFn();
+    expect(body).toMatch(/v_net_settled\s+BIGINT/);
+    expect(body).toMatch(/v_over_settled BIGINT/);
+    expect(body).not.toMatch(/NUMERIC|DOUBLE PRECISION|::float|REAL\b/i);
+    expect(body).not.toMatch(/ROUND\(/i);
+  });
+
+  it("the settlement thresholds match settlement.ts exactly", () => {
+    const body = syncFn();
+    // unsettled / partial / settled / overpaid, same boundaries as the module.
+    expect(body).toMatch(/WHEN v_net_settled = 0\s+THEN 'unsettled'/);
+    expect(body).toMatch(/WHEN v_net_settled < v_order\.total_minor THEN 'partial'/);
+    expect(body).toMatch(/WHEN v_net_settled = v_order\.total_minor THEN 'settled'/);
+    expect(body).toMatch(/ELSE\s+'overpaid'/);
   });
 });
 
-describe("Test 3: the order row is locked before any decision is made", () => {
-  it("FOR UPDATE appears before the first EXISTS check", () => {
+describe("Test 10: overpayment truth is preserved in SQL too", () => {
+  it("the sync function returns the settlement figures on BOTH the changed and no-change paths", () => {
+    const body = syncFn();
+    expect(body).toMatch(/'over_settled_minor', v_over_settled/);
+    expect(body).toMatch(/'settlement_state',\s+v_state/);
+    expect(body).toMatch(/'needs_review',\s+v_state = 'overpaid'/);
+    // no_change path concatenates the same facts object rather than dropping it.
+    expect(body).toMatch(/'no_change'.*\)\s*\n?\s*\|\| v_facts/s);
+  });
+
+  it("the settlement figures are stamped into the immutable history reason", () => {
+    expect(syncFn()).toMatch(/format\(' \[settled %s of %s %s; %s\]'/);
+  });
+
+  it("a live order_payment_settlement view exposes per-order settlement, including overpaid", () => {
+    const sql = integrationBody();
+    expect(sql).toMatch(/CREATE OR REPLACE VIEW public\.order_payment_settlement/);
+    expect(sql).toMatch(/security_invoker = true/);
+    expect(sql).toMatch(/over_settled_minor/);
+    expect(sql).toMatch(/'overpaid'/);
+    expect(sql).toMatch(/REVOKE ALL ON public\.order_payment_settlement FROM anon, authenticated/);
+  });
+
+  it("the view derives from the same immutable sources — never a stored balance column", () => {
+    const sql = integrationBody();
+    const viewStart = sql.indexOf("CREATE OR REPLACE VIEW public.order_payment_settlement");
+    const view = sql.slice(viewStart);
+    expect(view).toMatch(/FROM public\.orders o/);
+    expect(view).toMatch(/FROM public\.payments p/);
+    expect(view).toMatch(/event_type = 'refund'/);
+    // No ALTER TABLE adding a cached settlement column anywhere.
+    expect(sql).not.toMatch(/ADD COLUMN/i);
+  });
+
+  it("the view is org-scoped on the join itself, not only by the caller's filter", () => {
+    const sql = integrationBody();
+    const viewStart = sql.indexOf("CREATE OR REPLACE VIEW public.order_payment_settlement");
+    const view = sql.slice(viewStart);
+    expect(view).toMatch(/p\.organization_id = o\.organization_id/);
+    expect(view).toMatch(/p\.currency = o\.currency/);
+  });
+});
+
+describe("Test 11: the order row is locked BEFORE the settlement aggregate", () => {
+  it("FOR UPDATE precedes the SUM — otherwise two concurrent settlements could each miss the other", () => {
     const body = syncFn();
     const lockIdx = body.indexOf("FOR UPDATE");
-    const firstExists = body.indexOf("EXISTS (");
+    const sumIdx = body.indexOf("SUM(");
     expect(lockIdx).toBeGreaterThan(-1);
-    expect(firstExists).toBeGreaterThan(lockIdx);
+    expect(sumIdx).toBeGreaterThan(lockIdx);
   });
-});
 
-describe("Test 4: a no-op is a real early return", () => {
-  it("the function returns before calling transition_order_status_v1 when nothing changed", () => {
+  it("a no-op still returns early, before calling transition_order_status_v1", () => {
     const body = syncFn();
     const noChangeIdx = body.indexOf("'no_change'");
     const transitionCallIdx = body.indexOf("public.transition_order_status_v1(");
     expect(noChangeIdx).toBeGreaterThan(-1);
     expect(transitionCallIdx).toBeGreaterThan(noChangeIdx);
-    expect(body).toMatch(
-      /IF v_order\.payment_status = v_target THEN\s+RETURN jsonb_build_object\('status', 'no_change'/,
+  });
+});
+
+describe("Test 12: the aggregate is organization- and order-scoped", () => {
+  it("the settlement scan filters by order_id AND organization_id", () => {
+    expect(syncFn()).toMatch(
+      /WHERE p\.order_id = p_order_id\s+AND p\.organization_id = p_organization_id/,
+    );
+  });
+
+  it("the refund sub-scan is organization-scoped too", () => {
+    expect(syncFn()).toMatch(/AND e\.organization_id = p\.organization_id/);
+  });
+
+  it("the order lookup is scoped the same way", () => {
+    expect(syncFn()).toMatch(
+      /WHERE id = p_order_id AND organization_id = p_organization_id\s+FOR UPDATE/,
     );
   });
 });
@@ -320,26 +719,35 @@ describe("Test 7: reverse_payment_v1 syncs after marking the payment reversed", 
   });
 });
 
-describe("Test 8: refund_payment_v1 syncs ONLY on a full refund", () => {
-  it("the sync call is nested inside the 'fully refunded' branch, not unconditional", () => {
+describe("Test 8: refund_payment_v1 syncs on EVERY refund, partial ones included", () => {
+  it("the sync call is OUTSIDE the fully-refunded branch — a partial refund must resync too", () => {
     const body = refundFn();
     const fullBranchIdx = body.indexOf("IF v_new_total = v_payment.amount_minor THEN");
-    const syncIdx = body.indexOf("public.sync_order_payment_status_v1(");
     const branchEndIdx = body.indexOf("END IF;", fullBranchIdx);
+    const syncIdx = body.indexOf("public.sync_order_payment_status_v1(");
     expect(fullBranchIdx).toBeGreaterThan(-1);
-    expect(syncIdx).toBeGreaterThan(fullBranchIdx);
-    expect(syncIdx).toBeLessThan(branchEndIdx);
+    expect(branchEndIdx).toBeGreaterThan(fullBranchIdx);
+    // The regression this guards: syncing only on a full refund would leave a
+    // $100 order marked paid after $20 of its money went back to the customer.
+    expect(syncIdx).toBeGreaterThan(branchEndIdx);
   });
 
-  it("appears exactly once — a partial refund path has no second, unconditional call", () => {
+  it("appears exactly once, on the unconditional path", () => {
     expect(refundFn().match(/public\.sync_order_payment_status_v1\(/g)?.length).toBe(1);
   });
 
-  it("the refund event insert happens before the conditional sync, not after", () => {
+  it("the refund event insert and any status flip both happen before the sync", () => {
     const body = refundFn();
     const eventIdx = body.indexOf("INSERT INTO public.payment_events");
+    const statusIdx = body.indexOf("UPDATE public.payments SET status = 'refunded'");
     const syncIdx = body.indexOf("public.sync_order_payment_status_v1(");
     expect(eventIdx).toBeLessThan(syncIdx);
+    expect(statusIdx).toBeGreaterThan(-1);
+    expect(statusIdx).toBeLessThan(syncIdx);
+  });
+
+  it("payments.amount_minor is never mutated by a refund — the original claim survives", () => {
+    expect(refundFn()).not.toMatch(/UPDATE public\.payments\s+SET amount_minor/);
   });
 });
 
@@ -541,12 +949,76 @@ describe("Test 19: a replayed record_payment_v1 call syncs safely, never a secon
   });
 
   it("sync_order_payment_status_v1 itself is read-then-conditional-transition, not a write on every call", () => {
-    // Test 4 already proves the no-op early return exists; this test proves
+    // Test 11 already proves the no-op early return exists; this test proves
     // it is reached BEFORE any write — there is no unconditional INSERT/UPDATE
     // in this function outside of what transition_order_status_v1 itself does.
     const body = syncFn();
     expect(body).not.toMatch(/INSERT INTO/);
     expect(body).not.toMatch(/UPDATE public\.(orders|payments)\b/);
+  });
+
+  it("the idempotency index is what makes a retry un-double-countable — not application logic", () => {
+    // The settled set can only contain one row per idempotency key because the
+    // uniqueness lives in the index (migration 034), so no amount of retrying
+    // can add the same money twice. Asserted here against 034's own text since
+    // this PR must not (and does not) modify that migration.
+    expect(paymentsDomainMigration()).toMatch(
+      /CREATE UNIQUE INDEX uniq_payments_idempotency\s+ON public\.payments\(organization_id, idempotency_key\)/,
+    );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TENANT ISOLATION OF THE SETTLEMENT FIGURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Test 19b: one tenant's payments can never reach another tenant's settlement", () => {
+  it("the pure rule only ever sees payments handed to it for one order", () => {
+    // Org B's payment is simply not in Org A's order's payment set — the
+    // repository query that builds it is organization_id-scoped (below), and
+    // the SQL aggregate is scoped identically (Test 12).
+    const orgAOnly = computeOrderSettlement([settled(1000)], USD, 10000);
+    expect(orgAOnly.netSettledMinor).toBe(1000);
+    expect(orgAOnly.orderPaymentStatus).toBe("pending");
+
+    // If a foreign payment COULD leak in, this is what would change — the
+    // assertion above is what proves it does not.
+    const ifItLeaked = computeOrderSettlement([settled(1000), settled(9000)], USD, 10000);
+    expect(ifItLeaked.orderPaymentStatus).toBe("paid");
+    expect(orgAOnly.orderPaymentStatus).not.toBe(ifItLeaked.orderPaymentStatus);
+  });
+
+  it("the settlement repository read is organization-scoped", () => {
+    const src = paymentsRepositorySource();
+    const fn = src.slice(src.indexOf("export async function listOrderSettlements"));
+    expect(fn).toMatch(/\.from\("order_payment_settlement"\)/);
+    expect(fn).toMatch(/\.eq\("organization_id", organizationId\)/);
+  });
+
+  it("the settlement service reads take organizationId from the auth context, never an argument", () => {
+    const src = readSource("src/server/payments/reconciliation.ts");
+    expect(src).toMatch(
+      /getOrderSettlement\(\s*ctx: AuthorizationContext,\s*orderId: string,?\s*\)/,
+    );
+    expect(src).toMatch(/ctx\.organizationId/);
+    // No handler anywhere takes a caller-supplied organization id.
+    expect(src).not.toMatch(/organizationId:\s*string\s*[,)]/);
+  });
+
+  it("the settlement server functions accept only an orderId/limit — never an organizationId", () => {
+    const src = readSource("src/api/payments.ts");
+    const block = src.slice(src.indexOf("export const getOrderSettlementFn"));
+    expect(block).toMatch(/orderId: z\.string\(\)\.uuid\(\)/);
+    expect(block).not.toMatch(/organizationId/);
+    expect(block).not.toMatch(/userId/);
+  });
+
+  it("settlement reads are permission-gated: payments.read for one order, payments.reconcile org-wide", () => {
+    const src = readSource("src/server/payments/reconciliation.ts");
+    const single = src.slice(src.indexOf("export async function getOrderSettlement"));
+    expect(single.slice(0, 400)).toMatch(/ctx\.require\("payments\.read"\)/);
+    const issues = src.slice(src.indexOf("export async function getOrderSettlementIssues"));
+    expect(issues.slice(0, 400)).toMatch(/ctx\.require\("payments\.reconcile"\)/);
   });
 });
 
