@@ -56,14 +56,13 @@ import type { Money, Currency } from "@/types";
 import * as repo from "./repository";
 import {
   isValidLifecycleTransition,
-  isValidPaymentTransition,
   isValidFulfillmentTransition,
   isTerminalLifecycle,
   LIFECYCLE_TRANSITION_PERMISSIONS,
-  PAYMENT_TRANSITION_PERMISSION,
   FULFILLMENT_TRANSITION_PERMISSIONS,
   type OrderLifecycleStatus,
   type OrderPaymentStatus,
+  type OrderRefundStatus,
   type OrderFulfillmentStatus,
   type OrderStatusAxis,
 } from "./state-machine";
@@ -106,6 +105,7 @@ export interface OrderSummary {
   total: Money;
   lifecycleStatus: OrderLifecycleStatus;
   paymentStatus: OrderPaymentStatus;
+  refundStatus: OrderRefundStatus;
   fulfillmentStatus: OrderFulfillmentStatus;
   createdBy: string | null;
   createdAt: string;
@@ -150,6 +150,7 @@ function mapOrder(row: OrderRow): OrderSummary {
     total: toMoney(row.total_minor, row.currency),
     lifecycleStatus: row.lifecycle_status,
     paymentStatus: row.payment_status,
+    refundStatus: row.refund_status ?? "none",
     fulfillmentStatus: row.fulfillment_status,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -520,48 +521,17 @@ export async function transitionLifecycleStatus(
 }
 
 /**
- * Move the order's payment status.
- *
- * Every target requires payments.confirm: whoever may declare that money
- * arrived is the same authority as whoever may declare that it did not.
+ * @deprecated Retained for caller compatibility. Payment records are the sole
+ * financial authority; use the Payment API to record and verify settlement.
  */
 export async function transitionPaymentStatus(
   ctx: AuthorizationContext,
-  orderId: string,
-  to: OrderPaymentStatus,
-  reason?: string | null,
+  _orderId: string,
+  _to: OrderPaymentStatus,
+  _reason?: string | null,
 ): Promise<OrderDetail> {
-  ctx.require(PAYMENT_TRANSITION_PERMISSION);
-
-  const order = await loadTransitionTarget(ctx, orderId);
-  const from = order.payment_status;
-
-  if (!isValidPaymentTransition(from, to)) {
-    throw conflict(`Cannot move payment status from '${from}' to '${to}'`);
-  }
-
-  const result = await repo.transitionStatus(
-    ctx.organizationId,
-    orderId,
-    "payment",
-    from,
-    to,
-    ctx.userId,
-    reason ?? null,
-  );
-
-  if (result.status !== "success") throw transitionFailureToError(result);
-
-  await bestEffortAudit(ctx, {
-    action: "payments.confirm",
-    resourceType: "orders",
-    resourceId: orderId,
-    beforeJson: { payment_status: from },
-    afterJson: { payment_status: to },
-    ...(reason ? { reason } : {}),
-  });
-
-  return requireDetail(ctx.organizationId, orderId);
+  ctx.require("payments.manual_confirm");
+  throw conflict("Order payment transitions are deprecated; use the Payment domain");
 }
 
 /** Move the order's fulfillment status. */

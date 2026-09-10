@@ -94,3 +94,12 @@ When documents conflict, apply this priority order (highest to lowest):
 ---
 
 *This file should remain under version control and be updated whenever a meaningful decision changes.*
+
+# Approved financial semantics — 2026-09-06
+
+Payment ↔ Order integration preserves `payment_status=paid` after partial
+and full refunds. Refund state belongs on an independent authoritative Order
+axis, `refund_status=none|partial|full`, derived from immutable Payment events.
+For a fully paid $100 Order, refunding $20 yields `paid/partial`; refunding
+$100 yields `paid/full`. Refunds must never be mapped to `failed` or
+`unpaid`, and original Payment amounts/history must never be rewritten.

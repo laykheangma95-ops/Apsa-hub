@@ -18,9 +18,8 @@
  *
  *   There is deliberately NO generic update function here, and NO function
  *   anywhere in this file that writes to the `orders` table. The Payment
- *   domain never mutates orders.payment_status in this phase — that
- *   integration is explicit, future work (see src/server/payments/service.ts
- *   header).
+ *   RPC transaction derives orders.payment_status and refund_status from the
+ *   aggregate Payment ledger. Never follow it with a second Order RPC.
  *
  * `supabaseAdmin as any` is used because payments / payment_events /
  * payment_evidence are not yet in the generated Supabase types (migrations
@@ -152,6 +151,7 @@ export async function refundPayment(
   actor: string | null,
   amountMinor: number,
   reason: string,
+  idempotencyKey?: string | null,
 ): Promise<RefundPaymentRpcResult> {
   const { data, error } = await db.rpc("refund_payment_v1", {
     p_organization_id: organizationId,
@@ -159,6 +159,7 @@ export async function refundPayment(
     p_actor: actor,
     p_amount_minor: amountMinor,
     p_reason: reason,
+    p_idempotency_key: idempotencyKey ?? null,
   });
 
   if (error) throw new Error(`refundPayment: ${errMessage(error)}`);

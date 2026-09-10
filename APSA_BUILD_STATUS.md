@@ -589,6 +589,54 @@ identically to path (1) for anyone who reaches it via a Smart Action.
 
 ### 18. Payments
 
+**Payment → Order integration (2026-09-06, pending independent review):**
+Additive migrations 039–040 introduce the independent Order refund axis and
+make Payment transactions the sole authority for Order financial state.
+Partial/full refunds preserve paid receipt status; immutable events derive
+refund and net totals across split Payments. Order-before-Payment locks serialize
+financial RPCs, and database guards reject unsupported Order status claims.
+The legacy Order payment API remains present but fails closed.
+Refund retry keys are optional for compatibility; clients must supply/reuse
+one for safe automatic retry. Historical Payment principal/events are preserved.
+Migration 040 audits and recomputes existing Order axes, including legacy paid
+claims without Payment records. No hosted migration has been applied.
+The foundation notes below describe the earlier phase.
+
+**Verification for this integration:** `bun test src/tests/` passed (1,064
+top-level tests, zero failures, including isolated Payment and PostgreSQL suites).
+The new PGlite suite executes the actual migrations and covers 21 cases, including
+both approved refund examples, split payments, reversals, evidence/COD isolation,
+idempotent recording/refunds, cross-tenant attacks, forced transaction rollback,
+legacy backfill audit, and Order stock consumption/restoration. Typecheck,
+changed-file ESLint, production build, and bundle-boundary checks passed.
+Live Supabase checks were skipped; no hosted migrations were applied.
+PGlite serializes one connection, so queued concurrent calls do not establish
+independent PostgreSQL session lock-contention coverage.
+
+**Rollout limits:** 039 must commit before 040 uses the new history enum value.
+040 intentionally reclassifies legacy paid Order claims unsupported by Payment
+records and appends migration history entries. Review that reconciliation before
+any separately authorized hosted rollout. The feature is ready for independent
+review; it has not been merged or applied to production.
+
+**Resume review and final verification (2026-09-06):** The original commit and
+pushed branch were intact. Review confirmed that the auth test changes only fix
+stale test imports/mocks, and that relocating the Payment suite preserved all
+existing assertions. Follow-up fixes revoke TRUNCATE and add statement guards,
+reject null amounts on refund-key replay, and retry mandatory audit persistence
+on refund replay. Focused Payment/PGlite verification passed 110 tests; the full
+suite again passed 1,064 top-level tests with zero failures. Typecheck, ESLint
+on every changed TypeScript file, production build, and diff checks passed.
+The separate audit write remains outside the financial transaction; keyed replay
+now repairs a failed audit attempt before returning success.
+
+**Overlap requiring coordination:** Open PR #34 also changes
+`src/tests/auth-hardening.runtime.ts` and
+`src/tests/delivery-ui-integration.test.ts`. Draft PR #31 also changes
+`src/types/index.ts`. The separate local `codex/payment-verification-domain`
+worktree shares the Payment domain; it was left unchanged. Newer main changes
+do not touch this branch's files, and its migrations still end at 038.
+
 **Status:** `PARTIAL` — Backend foundation BUILT; not applied to hosted Supabase; no UI
 
 **What exists today (backend foundation — 2026-09-05):**

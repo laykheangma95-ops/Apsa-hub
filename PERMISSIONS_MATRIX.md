@@ -407,6 +407,13 @@ reconciliation aggregate — the same Owner+Manager tier as `financials.revenue`
 
 Manual confirmation and override should always be audited.
 
+Payment → Order authority: `payments.confirm` is legacy vocabulary and grants
+no independent Order payment mutation. Recording uses `payments.record` (or
+`payments.mark_cod` for COD), staff confirmation uses `payments.manual_confirm`,
+and higher verification uses `payments.verify`. Reversal and refund retain
+`payments.reverse` and `payments.refund`. PostgreSQL derives the Order payment
+and refund axes in that Payment transaction; no extra Order permission is needed.
+
 ---
 
 # 18. FINANCIALS

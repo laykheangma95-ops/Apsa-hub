@@ -10,23 +10,12 @@
  *
  * ── ARCHITECTURE INVARIANTS ──────────────────────────────────────────────────
  *
- * PAYMENT ↔ ORDER SEPARATION (FOUNDATION PHASE — READ BEFORE CHANGING THIS FILE)
- *   This file NEVER imports @/server/orders and NEVER writes to the `orders`
- *   table, directly or through any RPC. orders.payment_status (migration 023)
- *   remains exactly as it is today: a manually-driven axis, moved only by
- *   src/server/orders/service.ts#transitionPaymentStatus behind
- *   `payments.confirm`, completely unmodified by this phase.
- *
- *   Making this Payment domain the authoritative driver of
- *   orders.payment_status is EXPLICITLY OUT OF SCOPE for this phase (see the
- *   task brief's "Payment / Order separation" section) — that transactional
- *   integration is the next phase's work, and it must be done the same way
- *   migration 026 wired Inventory into Order: as ONE atomic RPC-level change,
- *   never as two sequential service calls that could crash between them. Nothing
- *   here should be "helpfully" wired to call transitionPaymentStatus — doing so
- *   would let a screenshot-derived evidence attachment or a lone staff click
- *   silently become Order truth, which is the exact failure mode SECURITY.md
- *   §41 and this domain's evidence model exist to prevent.
+ * PAYMENT → ORDER AUTHORITY
+ *   Migration 040 derives the Order payment/refund axes inside each financial
+ *   RPC, holding the Order lock before the Payment lock. This file never calls
+ *   the Order service or makes a second Order RPC. Refunds preserve received
+ *   payment history; reversals invalidate settlement. Amounts come from the
+ *   immutable Payment event ledger (DATA_MODEL.md §53).
  *
  * EVIDENCE IS NEVER FINANCIAL AUTHORITY
  *   attachEvidence() cannot move `status` or `verification_state` — it calls
@@ -726,6 +715,7 @@ export async function refundPayment(
   paymentId: string,
   amountMinor: number,
   reason: string,
+  idempotencyKey?: string | null,
 ): Promise<PaymentDetail> {
   ctx.require("payments.refund");
 
@@ -743,9 +733,13 @@ export async function refundPayment(
     ctx.userId,
     amountMinor,
     reason.trim(),
+    idempotencyKey,
   );
   if (result.status !== "success") throw refundFailureToError(result);
 
+  // A previous attempt may have committed the refund but failed its separate
+  // required audit write. Replay must persist that audit before returning
+  // success too; its explicit flag distinguishes a retry from new money.
   await auditLogRequired(ctx, {
     action: "payments.refund",
     resourceType: "payments",
@@ -754,6 +748,7 @@ export async function refundPayment(
       refunded_amount_minor: amountMinor,
       refunded_total: result.refunded_total,
       fully_refunded: result.fully_refunded ?? false,
+      replayed: result.replayed ?? false,
     },
     reason,
   });

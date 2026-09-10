@@ -41,12 +41,9 @@ function mockServerModule(rpc?: (...args: unknown[]) => Promise<unknown>) {
         select: () => ({
           eq: () => ({
             in: () => ({
-              order: () => ({
-                limit: () => ({
-                  single: async () => ({
-                    data: { organization_id: "org-1", status: membershipStatus },
-                  }),
-                }),
+              order: async () => ({
+                data: [{ organization_id: "org-1", status: membershipStatus }],
+                error: null,
               }),
             }),
           }),
@@ -84,7 +81,7 @@ describe("auth hardening runtime", () => {
       rpcCalls.push(args);
       return { data: null, error: null };
     });
-    const { createOrganizationFn } = await import("@/server/org/create-organization");
+    const { createOrganizationFn } = await import("@/api/org");
     const result = await createOrganizationFn({
       data: { legalName: "APSA Co", displayName: "APSA", slug: "apsa-co", currency: "USD" },
     });

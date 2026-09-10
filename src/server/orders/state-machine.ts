@@ -37,9 +37,8 @@
  * The mock's payment value "pending_payment" becomes `unpaid` (no attempt yet)
  * versus `pending` (an attempt is in flight) — one word for two states was the
  * reason the mock could not tell "customer has not paid" from "the transfer is
- * clearing". `partially_paid`, `refunded` and `partially_refunded` are absent:
- * all three require the Payment Records domain (Phase 8) to mean anything, and
- * a status that no code can reach is a status that lies to whoever reads it.
+ * clearing". Payment authority now lives in migration 040. Refunds preserve
+ * receipt status and use the independent none/partial/full refund axis.
  *
  * ── INVENTORY INTEGRATION POINT (WIRED) ──────────────────────────────────────
  *
@@ -65,9 +64,11 @@ export const ORDER_FULFILLMENT_STATUSES = [
 
 export type OrderLifecycleStatus = (typeof ORDER_LIFECYCLE_STATUSES)[number];
 export type OrderPaymentStatus = (typeof ORDER_PAYMENT_STATUSES)[number];
+export const ORDER_REFUND_STATUSES = ["none", "partial", "full"] as const;
+export type OrderRefundStatus = (typeof ORDER_REFUND_STATUSES)[number];
 export type OrderFulfillmentStatus = (typeof ORDER_FULFILLMENT_STATUSES)[number];
 
-export type OrderStatusAxis = "lifecycle" | "payment" | "fulfillment";
+export type OrderStatusAxis = "lifecycle" | "payment" | "fulfillment" | "refund";
 
 // ── Transition tables ─────────────────────────────────────────────────────────
 //
@@ -115,10 +116,10 @@ export const LIFECYCLE_TRANSITIONS: Readonly<
  *   failed  -> unpaid    give up on the attempt without closing the order
  *   paid                 terminal IN THIS PHASE
  *
- * `paid` is terminal only because refunds do not exist yet. When the Payment
- * Records domain lands it gains exits to `refunded` / `partially_refunded`;
- * until then, leaving it open would mean an order could silently walk back out
- * of paid with no refund record to explain where the money went.
+ * This is the legacy transition vocabulary, retained for compatibility only.
+ * The public manual transition rejects all calls. Migration 040 derives status
+ * from Payment aggregates and can downgrade paid after a reversal. Refunds
+ * preserve paid and update the independent refund axis.
  */
 export const PAYMENT_TRANSITIONS: Readonly<
   Record<OrderPaymentStatus, readonly OrderPaymentStatus[]>
@@ -298,14 +299,8 @@ export const LIFECYCLE_TRANSITION_PERMISSIONS: Readonly<
 };
 
 /**
- * Every payment_status transition requires payments.confirm ("Manually confirm
- * payments", high risk — migration 003).
- *
- * Marking an order failed or pending is the same manual money-handling
- * authority as marking it paid: whoever can say "the transfer arrived" is
- * whoever can say "it did not". Finer keys (payments.record, payments.mark_cod,
- * payments.override_status from §17) arrive with the Payment Records domain,
- * which is what makes them distinguishable.
+ * @deprecated Historical vocabulary only. This permission no longer authorizes
+ * any Order financial write; Payment domain permissions are authoritative.
  */
 export const PAYMENT_TRANSITION_PERMISSION = "payments.confirm";
 

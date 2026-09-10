@@ -22,7 +22,7 @@ import * as path from "path";
 const ROOT = process.cwd();
 
 function readSource(relPath: string): string {
-  return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8");
+  return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8").replace(/\r\n/g, "\n");
 }
 
 const API_INDEX = "src/lib/api/index.ts";

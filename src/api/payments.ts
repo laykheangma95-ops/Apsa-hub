@@ -20,9 +20,8 @@
  * through verifyPaymentFn, which runs the authoritative state machine
  * server-side. Reversal, refund and correction are separate, narrow handlers.
  *
- * ORDER BOUNDARY: no handler here ever touches orders.payment_status — see
- * src/server/payments/service.ts's file header. This domain is foundation-
- * only in this phase.
+ * ORDER AUTHORITY: Payment RPCs atomically derive Order payment/refund state
+ * inside PostgreSQL. No second TypeScript Order mutation is involved.
  *
  * Usage from components: import these functions and call them directly —
  * TanStack Start routes them to the server automatically.
@@ -177,13 +176,20 @@ export const refundPaymentFn = createServerFn()
         paymentId: z.string().uuid("Invalid payment ID"),
         amountMinor: z.number().int().positive("amountMinor must be a positive integer"),
         reason: z.string().trim().min(1, "A refund reason is required").max(1000),
+        idempotencyKey: z.string().trim().min(1).max(200).nullish(),
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { refundPayment } = await import("@/server/payments/service");
-    return refundPayment(authCtx, data.paymentId, data.amountMinor, data.reason);
+    return refundPayment(
+      authCtx,
+      data.paymentId,
+      data.amountMinor,
+      data.reason,
+      data.idempotencyKey,
+    );
   });
 
 // ── correctPaymentFn ──────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 import type {
   OrderLifecycleStatus,
   OrderPaymentStatus,
+  OrderRefundStatus,
   OrderFulfillmentStatus,
   OrderStatusAxis,
 } from "./state-machine";
@@ -45,6 +46,7 @@ export interface OrderRow {
   total_minor: number;
   lifecycle_status: OrderLifecycleStatus;
   payment_status: OrderPaymentStatus;
+  refund_status: OrderRefundStatus;
   fulfillment_status: OrderFulfillmentStatus;
   created_by: string | null;
   created_at: string;

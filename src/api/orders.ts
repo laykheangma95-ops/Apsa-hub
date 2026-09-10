@@ -140,6 +140,7 @@ export const transitionOrderLifecycleFn = createServerFn()
     return transitionLifecycleStatus(authCtx, data.orderId, data.to, data.reason ?? null);
   });
 
+/** @deprecated Always rejects; callers must use Payment recording/verification. */
 export const transitionOrderPaymentFn = createServerFn()
   .validator((data: unknown) =>
     z
