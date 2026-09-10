@@ -19,6 +19,7 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
 import { Route as AppPosRouteImport } from './routes/app.pos'
@@ -79,6 +80,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppDeliveriesRoute = AppDeliveriesRouteImport.update({
+  id: '/deliveries',
+  path: '/deliveries',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppInboxRoute = AppInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
@@ -110,9 +116,9 @@ const AppCustomersIdRoute = AppCustomersIdRouteImport.update({
   getParentRoute: () => AppRoute,
 } as any)
 const AppDeliveriesIdRoute = AppDeliveriesIdRouteImport.update({
-  id: '/deliveries/$id',
-  path: '/deliveries/$id',
-  getParentRoute: () => AppRoute,
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppDeliveriesRoute,
 } as any)
 const AppInboxIdRoute = AppInboxIdRouteImport.update({
   id: '/$id',
@@ -135,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -155,6 +162,7 @@ export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -177,6 +185,7 @@ export interface FileRoutesById {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -200,6 +209,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
@@ -220,6 +230,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
@@ -241,6 +252,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
@@ -338,6 +350,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/deliveries': {
+      id: '/app/deliveries'
+      path: '/deliveries'
+      fullPath: '/app/deliveries'
+      preLoaderRoute: typeof AppDeliveriesRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/inbox': {
       id: '/app/inbox'
       path: '/inbox'
@@ -382,10 +401,10 @@ declare module '@tanstack/react-router' {
     }
     '/app/deliveries/$id': {
       id: '/app/deliveries/$id'
-      path: '/deliveries/$id'
+      path: '/$id'
       fullPath: '/app/deliveries/$id'
       preLoaderRoute: typeof AppDeliveriesIdRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppDeliveriesRoute
     }
     '/app/inbox/$id': {
       id: '/app/inbox/$id'
@@ -403,6 +422,18 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface AppDeliveriesRouteChildren {
+  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
+}
+
+const AppDeliveriesRouteChildren: AppDeliveriesRouteChildren = {
+  AppDeliveriesIdRoute: AppDeliveriesIdRoute,
+}
+
+const AppDeliveriesRouteWithChildren = AppDeliveriesRoute._addFileChildren(
+  AppDeliveriesRouteChildren,
+)
 
 interface AppInboxRouteChildren {
   AppInboxIdRoute: typeof AppInboxIdRoute
@@ -429,23 +460,23 @@ const AppOrdersRouteWithChildren = AppOrdersRoute._addFileChildren(
 )
 
 interface AppRouteChildren {
+  AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
   AppInboxRoute: typeof AppInboxRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCustomersIdRoute: typeof AppCustomersIdRoute
-  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppDeliveriesRoute: AppDeliveriesRouteWithChildren,
   AppInboxRoute: AppInboxRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,
   AppCustomersIdRoute: AppCustomersIdRoute,
-  AppDeliveriesIdRoute: AppDeliveriesIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

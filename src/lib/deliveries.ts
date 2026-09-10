@@ -13,6 +13,8 @@
 import type {
   DeliveryDetail as ServerDeliveryDetail,
   DeliveryHistoryEntry as ServerDeliveryHistoryEntry,
+  DeliveryListItem as ServerDeliveryListItem,
+  DeliveryListScope,
   DeliverySummary as ServerDeliverySummary,
 } from "@/server/deliveries/service";
 import type { DeliveryStatus as RealDeliveryStatus } from "@/server/deliveries/state-machine";
@@ -87,6 +89,49 @@ export function mapDeliveryDetailToUi(detail: ServerDeliveryDetail): RealDeliver
     ...mapDeliverySummaryToUi(detail),
     history: detail.history.map(mapHistoryEntry),
   };
+}
+
+// ── Deliveries list (src/routes/app.deliveries.tsx) ────────────────────────────
+
+export type { DeliveryListScope };
+
+export interface RealDeliveryListItem extends RealDelivery {
+  orderCode: string | null;
+  customerName: string | null;
+  hasCustomer: boolean;
+  actionNeeded: boolean;
+}
+
+export function mapDeliveryListItemToUi(row: ServerDeliveryListItem): RealDeliveryListItem {
+  return {
+    ...mapDeliverySummaryToUi(row),
+    orderCode: row.orderCode,
+    customerName: row.customerName,
+    hasCustomer: row.hasCustomer,
+    actionNeeded: row.actionNeeded,
+  };
+}
+
+/**
+ * Client-side narrowing over an already-fetched, already-authorized list —
+ * same pattern as CreateRealOrderSheet's customer search (filter in memory,
+ * no extra round-trip per keystroke). Matches order code, courier, tracking
+ * number, and customer name (only ever present when the server already
+ * decided this caller may see it).
+ */
+export function filterDeliveryListBySearch(
+  items: readonly RealDeliveryListItem[],
+  query: string,
+): RealDeliveryListItem[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...items];
+  return items.filter((item) =>
+    [item.orderCode, item.providerName, item.externalTrackingNumber, item.customerName]
+      .filter((v): v is string => Boolean(v))
+      .join(" ")
+      .toLowerCase()
+      .includes(needle),
+  );
 }
 
 // ── Transition-visibility rules (mirrors src/server/deliveries/state-machine.ts) ──

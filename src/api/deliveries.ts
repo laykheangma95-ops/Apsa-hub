@@ -161,3 +161,29 @@ export const listDeliveriesFn = createServerFn()
       offset: data?.offset,
     });
   });
+
+/** Backs the Deliveries list screen (src/routes/app.deliveries.tsx). See listDeliveriesForMerchant. */
+export const listDeliveriesForMerchantFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        status: deliveryStatusSchema.optional(),
+        scope: z.enum(["active", "completed"]).optional(),
+        search: z.string().trim().max(200).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
+      })
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listDeliveriesForMerchant } = await import("@/server/deliveries/service");
+    return listDeliveriesForMerchant(authCtx, {
+      status: data?.status,
+      scope: data?.scope,
+      search: data?.search,
+      limit: data?.limit,
+      offset: data?.offset,
+    });
+  });

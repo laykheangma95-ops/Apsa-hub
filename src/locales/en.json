@@ -124,7 +124,7 @@
       },
       "delivery": {
         "label": "Delivery",
-        "description": "A dedicated delivery hub is not in the app yet."
+        "description": "Every delivery, its status and what needs your attention."
       },
       "returnsRefunds": {
         "label": "Returns / Refunds",
@@ -1046,6 +1046,39 @@
     "nextStepHint": "Next: {{action}}",
     "detailsTitle": "Details",
     "codDue": "{{amount}} to collect on delivery."
+  },
+  "deliveryList": {
+    "title": "Deliveries",
+    "subtitle": "Every delivery, newest first",
+    "searchPlaceholder": "Search order, customer or courier",
+    "filtersLabel": "Filter deliveries",
+    "filters": {
+      "all": "All",
+      "active": "Active",
+      "completed": "Completed"
+    },
+    "unknownOrder": "Order unavailable",
+    "codBadge": "COD {{amount}}",
+    "actionNeeded": "Needs attention",
+    "denied": "You can't view deliveries",
+    "deniedBody": "Ask the shop owner for permission to view deliveries.",
+    "error": {
+      "title": "Deliveries didn't load",
+      "body": "Check your connection and try again."
+    },
+    "empty": {
+      "title": "No deliveries yet",
+      "body": "Deliveries you create from an order will show up here."
+    },
+    "emptyFilter": {
+      "title": "No deliveries in this state",
+      "body": "Try a different filter."
+    },
+    "noResults": {
+      "title": "No deliveries match that search",
+      "body": "Try a different order, customer or courier name.",
+      "clear": "Clear search"
+    }
   },
   "customer360": {
     "title": "Customer",

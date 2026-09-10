@@ -287,3 +287,135 @@ export async function listDeliveries(
   ctx.require("delivery.read");
   return (await repo.listDeliveries(ctx.organizationId, options)).map(mapDelivery);
 }
+
+// ── Merchant Deliveries list (src/routes/app.deliveries.tsx) ──────────────────
+//
+// A merchant-facing, one-row-per-order view — distinct from listDeliveries()
+// above (which returns every delivery row, e.g. all attempts for one order,
+// for the Order detail screen's own history read). Requirement: "Do not
+// mislead merchants with old resolved delivery failures. Where multiple
+// attempts exist, show current unresolved delivery state truthfully." A new
+// delivery can only be created once the previous one for that order is
+// terminal (see createDelivery's duplicate-active check and the DB's
+// uniq_deliveries_active_order constraint), so the most recent row per
+// order_id is always that order's true current delivery state — the same
+// `deliveries[0]` convention src/routes/app.orders.$id.tsx already uses for
+// its own "latest delivery" read.
+
+const ACTIVE_DELIVERY_STATUSES: readonly DeliveryStatus[] = [
+  "pending",
+  "preparing",
+  "ready",
+  "in_transit",
+];
+const COMPLETED_DELIVERY_STATUSES: readonly DeliveryStatus[] = ["delivered", "failed", "cancelled"];
+
+/** Bounded raw fetch used to compute the latest-per-order list below (server-enforced max, src/api/deliveries.ts). */
+const MERCHANT_LIST_RAW_FETCH_LIMIT = 200;
+const MERCHANT_LIST_DEFAULT_LIMIT = 50;
+
+export type DeliveryListScope = "active" | "completed";
+
+export interface ListDeliveriesForMerchantOptions {
+  status?: DeliveryStatus | undefined;
+  scope?: DeliveryListScope | undefined;
+  /** Case-insensitive match against order code, courier, tracking number, or (when visible) customer name. */
+  search?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+export interface DeliveryListItem extends DeliverySummary {
+  orderCode: string | null;
+  /** Null when the order has no customer, or the caller lacks customers.read — never guessed, never leaked. */
+  customerName: string | null;
+  /** Safe to show even when customerName is redacted — mirrors orderList.hasCustomer/noCustomer. */
+  hasCustomer: boolean;
+  /** True when the delivery needs the merchant's attention: failed, or stalled non-terminal. */
+  actionNeeded: boolean;
+}
+
+function matchesSearch(item: DeliveryListItem, needle: string): boolean {
+  const haystack = [
+    item.orderCode,
+    item.providerName,
+    item.externalTrackingNumber,
+    item.customerName,
+  ]
+    .filter((v): v is string => Boolean(v))
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
+}
+
+/**
+ * Deliveries newest-attempt-first, one row per order, enriched with the order
+ * code and (permission-gated) customer name for the Deliveries list screen.
+ *
+ * Tenant isolation: every read below is scoped to ctx.organizationId, so a
+ * delivery/order/customer belonging to another organization can never appear
+ * — it is filtered out at the query, not redacted after the fact.
+ */
+export async function listDeliveriesForMerchant(
+  ctx: AuthorizationContext,
+  options: ListDeliveriesForMerchantOptions = {},
+): Promise<DeliveryListItem[]> {
+  ctx.require("delivery.read");
+
+  const rawRows = await repo.listDeliveries(ctx.organizationId, {
+    limit: MERCHANT_LIST_RAW_FETCH_LIMIT,
+  });
+
+  // Dedup to the latest attempt per order — rows are already newest-first.
+  const latestByOrder = new Map<string, DeliveryRow>();
+  for (const row of rawRows) {
+    if (!latestByOrder.has(row.order_id)) latestByOrder.set(row.order_id, row);
+  }
+  let rows = [...latestByOrder.values()];
+
+  // Status/scope filter applies to each order's CURRENT delivery only — never
+  // resurfaces a superseded attempt just because an old row matched.
+  if (options.status) {
+    rows = rows.filter((row) => row.status === options.status);
+  } else if (options.scope === "active") {
+    rows = rows.filter((row) => ACTIVE_DELIVERY_STATUSES.includes(row.status));
+  } else if (options.scope === "completed") {
+    rows = rows.filter((row) => COMPLETED_DELIVERY_STATUSES.includes(row.status));
+  }
+
+  const orderIds = [...new Set(rows.map((row) => row.order_id))];
+  const orderRefs = await repo.listOrderRefsForOrg(ctx.organizationId, orderIds);
+  const orderById = new Map(orderRefs.map((o) => [o.id, o]));
+
+  const canViewCustomers = ctx.can("customers.read");
+  const customerNameById = new Map<string, string>();
+  if (canViewCustomers) {
+    const customerIds = [
+      ...new Set(orderRefs.map((o) => o.customer_id).filter((id): id is string => Boolean(id))),
+    ];
+    const customers = await repo.listCustomerRefsForOrg(ctx.organizationId, customerIds);
+    for (const c of customers) customerNameById.set(c.id, c.display_name);
+  }
+
+  let items: DeliveryListItem[] = rows.map((row) => {
+    const summary = mapDelivery(row);
+    const orderRef = orderById.get(row.order_id) ?? null;
+    const customerId = orderRef?.customer_id ?? null;
+    return {
+      ...summary,
+      orderCode: orderRef?.order_number ?? null,
+      customerName: customerId ? (customerNameById.get(customerId) ?? null) : null,
+      hasCustomer: Boolean(customerId),
+      // COD is never a payment signal (ARCHITECTURE.md) — "failed" is the only
+      // status that always needs merchant action; the rest are steady-state.
+      actionNeeded: row.status === "failed",
+    };
+  });
+
+  const needle = options.search?.trim().toLowerCase();
+  if (needle) items = items.filter((item) => matchesSearch(item, needle));
+
+  const offset = options.offset ?? 0;
+  const limit = options.limit ?? MERCHANT_LIST_DEFAULT_LIMIT;
+  return items.slice(offset, offset + limit);
+}

@@ -6,9 +6,12 @@ import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import {
   mapDeliveryDetailToUi,
+  mapDeliveryListItemToUi,
   mapDeliverySummaryToUi,
+  type DeliveryListScope,
   type RealDelivery,
   type RealDeliveryDetail,
+  type RealDeliveryListItem,
 } from "@/lib/deliveries";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
@@ -760,6 +763,33 @@ export async function listRealDeliveriesForOrder(orderId: string): Promise<RealD
   const { listDeliveriesFn } = await import("@/api/deliveries");
   const rows = await listDeliveriesFn({ data: { orderId } });
   return rows.map(mapDeliverySummaryToUi);
+}
+
+export interface ListRealDeliveriesOptions {
+  status?: RealDelivery["status"] | undefined;
+  scope?: DeliveryListScope | undefined;
+  search?: string | undefined;
+}
+
+/**
+ * Production Deliveries list — src/routes/app.deliveries.tsx. One row per
+ * order (latest attempt only), newest first, org-scoped and permission-gated
+ * server-side. No demo-mode fallback: unlike getProducts()/listRealOrders()'s
+ * sibling reads, a list failure here is always a real backend failure and is
+ * surfaced to the merchant as an error state, never masked with mock rows.
+ */
+export async function listRealDeliveries(
+  options: ListRealDeliveriesOptions = {},
+): Promise<RealDeliveryListItem[]> {
+  const { listDeliveriesForMerchantFn } = await import("@/api/deliveries");
+  const rows = await listDeliveriesForMerchantFn({
+    data: {
+      status: options.status,
+      scope: options.scope,
+      search: options.search,
+    },
+  });
+  return rows.map(mapDeliveryListItemToUi);
 }
 
 export interface CreateRealDeliveryInput {

@@ -3,11 +3,13 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import type {
   CreateDeliveryInput,
   CreateDeliveryRpcResult,
+  CustomerRefRow,
   DeliveryProviderRow,
   DeliveryRow,
   DeliveryStatus,
   DeliveryStatusHistoryRow,
   ListDeliveriesOptions,
+  OrderRefRow,
   TransitionDeliveryRpcResult,
 } from "./types";
 
@@ -111,6 +113,9 @@ export async function listDeliveries(
     .order("id", { ascending: false });
   if (options.order_id) query = query.eq("order_id", options.order_id);
   if (options.status) query = query.eq("status", options.status);
+  else if (options.statuses && options.statuses.length > 0) {
+    query = query.in("status", options.statuses);
+  }
   if (options.limit) query = query.limit(options.limit);
   if (options.offset && options.limit) {
     query = query.range(options.offset, options.offset + options.limit - 1);
@@ -118,6 +123,45 @@ export async function listDeliveries(
   const { data, error } = await query;
   if (error) throw new Error(`listDeliveries: ${message(error)}`);
   return (data ?? []) as DeliveryRow[];
+}
+
+/**
+ * Order references for a set of order ids, org-scoped. Read-only display join
+ * for the Deliveries list (order code + which customer, if any) — never a new
+ * domain, mirrors the existing findOrderForOrg above which already reads the
+ * orders table directly from this file.
+ */
+export async function listOrderRefsForOrg(
+  organizationId: string,
+  orderIds: string[],
+): Promise<OrderRefRow[]> {
+  if (orderIds.length === 0) return [];
+  const { data, error } = await db
+    .from("orders")
+    .select("id, order_number, customer_id")
+    .eq("organization_id", organizationId)
+    .in("id", orderIds);
+  if (error) throw new Error(`listOrderRefsForOrg: ${message(error)}`);
+  return (data ?? []) as OrderRefRow[];
+}
+
+/**
+ * Customer display names for a set of customer ids, org-scoped. The caller
+ * (service layer) must gate this behind `customers.read` — this function
+ * itself performs no authorization, matching every other repository function.
+ */
+export async function listCustomerRefsForOrg(
+  organizationId: string,
+  customerIds: string[],
+): Promise<CustomerRefRow[]> {
+  if (customerIds.length === 0) return [];
+  const { data, error } = await db
+    .from("customers")
+    .select("id, display_name")
+    .eq("organization_id", organizationId)
+    .in("id", customerIds);
+  if (error) throw new Error(`listCustomerRefsForOrg: ${message(error)}`);
+  return (data ?? []) as CustomerRefRow[];
 }
 
 export async function listDeliveryHistory(

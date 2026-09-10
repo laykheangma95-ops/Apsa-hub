@@ -67,6 +67,21 @@ export interface TransitionDeliveryRpcResult {
 export interface ListDeliveriesOptions {
   order_id?: string | undefined;
   status?: DeliveryStatus | undefined;
+  /** Alternative to `status`: matches any status in the list. Mutually exclusive with `status`. */
+  statuses?: DeliveryStatus[] | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
+}
+
+/** Minimal org-scoped order reference used to enrich a delivery list row. Never the full Order domain shape. */
+export interface OrderRefRow {
+  id: string;
+  order_number: string;
+  customer_id: string | null;
+}
+
+/** Minimal org-scoped customer reference — a display name only, never phone/address. */
+export interface CustomerRefRow {
+  id: string;
+  display_name: string;
 }
