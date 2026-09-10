@@ -86,6 +86,45 @@ export async function findMembershipById(
   return data ? toMembershipWithProfileAndRole(data as RawMembershipJoin) : null;
 }
 
+/**
+ * Resolves an email address to the most recent membership row for that
+ * person in this org, across EVERY status (active, suspended, removed,
+ * invited) — used by inviteStaff() (CORRECTION-001) to check the target's
+ * CURRENT role/authority before an invitation is even created, so a Manager
+ * cannot invite a suspended Owner/Manager's address at a lower role to
+ * reactivate them out from under that protection at accept time. Two
+ * queries (profile lookup, then membership lookup by user_id) rather than a
+ * single embedded-filter query — simpler and avoids relying on PostgREST's
+ * `.eq("profiles.email", …)` embedded-resource filter syntax.
+ */
+export async function findMembershipByEmail(
+  organizationId: string,
+  email: string,
+): Promise<MembershipWithProfileAndRole | null> {
+  const { data: profile, error: profileError } = await db
+    .from("profiles")
+    .select("id")
+    .eq("email", email.trim().toLowerCase())
+    .maybeSingle();
+
+  if (profileError) {
+    throw new Error(`findMembershipByEmail: ${(profileError as { message: string }).message}`);
+  }
+  if (!profile) return null;
+
+  const { data, error } = await db
+    .from("memberships")
+    .select(MEMBERSHIP_SELECT)
+    .eq("organization_id", organizationId)
+    .eq("user_id", (profile as { id: string }).id)
+    .order("joined_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(`findMembershipByEmail: ${(error as { message: string }).message}`);
+  return data ? toMembershipWithProfileAndRole(data as RawMembershipJoin) : null;
+}
+
 export async function countActiveMembers(organizationId: string): Promise<number> {
   const { count, error } = await db
     .from("memberships")
@@ -210,6 +249,7 @@ export async function createInvitation(
     invited_by: string;
     invited_display_name?: string | null;
     expires_at: string;
+    issued_by_role: "OWNER" | "MANAGER";
   },
 ): Promise<InvitationRow> {
   const { data, error } = await db
@@ -222,6 +262,7 @@ export async function createInvitation(
       invited_by: input.invited_by,
       invited_display_name: input.invited_display_name ?? null,
       expires_at: input.expires_at,
+      issued_by_role: input.issued_by_role,
     })
     .select("*")
     .single();

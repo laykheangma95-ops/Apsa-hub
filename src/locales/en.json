@@ -1205,6 +1205,7 @@
     "goToApp": "Go to APSA",
     "notFound": "This invite link is not valid.",
     "expired": "This invite has expired. Ask the owner to resend it.",
-    "alreadyUsed": "This invite has already been used or cancelled."
+    "alreadyUsed": "This invite has already been used or cancelled.",
+    "authorityDenied": "This invite can no longer be completed. Ask the business owner to resend it."
   }
 }

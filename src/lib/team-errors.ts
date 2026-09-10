@@ -52,10 +52,21 @@ export function classifyTeamActionError(err: unknown): TeamActionErrorKind {
 
 export type InviteFormErrorKind = "duplicate" | "insufficient_authority" | "generic";
 
-/** Classifies a thrown inviteStaff() server error into a UI copy kind. */
+/**
+ * Classifies a thrown inviteStaff() server error into a UI copy kind.
+ * CORRECTION-001 (round 2): inviteStaff() now also checks the invited
+ * email's EXISTING membership (if any) before creating the invitation, so
+ * it can throw either authority error changeRole/deactivateMember do —
+ * `insufficient_role_authority` (target is currently Manager) or
+ * `cannot_modify_owner` (target is currently Owner) — not just the
+ * "assigning a too-high role" check that predates it. Both read the same to
+ * an inviter: "you don't have authority over this person."
+ */
 export function classifyInviteError(err: unknown): InviteFormErrorKind {
   const message = err instanceof Error ? err.message : "";
   if (message.includes("duplicate_invitation")) return "duplicate";
-  if (message.includes("insufficient_role_authority")) return "insufficient_authority";
+  if (message.includes("insufficient_role_authority") || message.includes("cannot_modify_owner")) {
+    return "insufficient_authority";
+  }
   return "generic";
 }

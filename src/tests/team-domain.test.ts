@@ -94,6 +94,7 @@ function invitationRow(
     token_hash: "deadbeef",
     invited_by: "owner-user",
     invited_display_name: null,
+    issued_by_role: "OWNER",
     created_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2099-01-01T00:00:00.000Z",
     accepted_at: null,
@@ -112,6 +113,7 @@ function installRepoMock(overrides: Partial<Record<string, unknown>> = {}): Repo
     listMemberships: mock(async () => [] as MembershipWithProfileAndRole[]),
     listPendingInvitations: mock(async () => [] as InvitationRow[]),
     findMembershipById: mock(async () => null as MembershipWithProfileAndRole | null),
+    findMembershipByEmail: mock(async () => null as MembershipWithProfileAndRole | null),
     countActiveMembers: mock(async () => 1),
     updateMembershipRole: mock(async () => null as MembershipWithProfileAndRole | null),
     updateMembershipStatus: mock(async () => null as MembershipWithProfileAndRole | null),
@@ -478,12 +480,17 @@ describe("13. Manager role authority cap (CORRECTION-001)", () => {
 
     expect(result.invitation.id).toBe("inv-below");
     expect(repo["createInvitation"]).toHaveBeenCalledTimes(1);
+    const [, input] = repo["createInvitation"].mock.calls[0] as [
+      unknown,
+      { issued_by_role: string },
+    ];
+    expect(input.issued_by_role).toBe("MANAGER");
   });
 
   it("the Owner CAN invite someone as Manager", async () => {
     installPassthroughAuthMocks();
     const created = invitationRow({ id: "inv-mgr", organization_id: ORG_A });
-    installRepoMock({
+    const repo = installRepoMock({
       findPendingInvitationByEmail: mock(async () => null),
       createInvitation: mock(async () => created),
     });
@@ -500,6 +507,11 @@ describe("13. Manager role authority cap (CORRECTION-001)", () => {
       displayName: "New Manager",
       role: "manager",
     });
+    const [, input] = repo["createInvitation"].mock.calls[0] as [
+      unknown,
+      { issued_by_role: string },
+    ];
+    expect(input.issued_by_role).toBe("OWNER");
 
     expect(result.invitation.id).toBe("inv-mgr");
   });
@@ -754,6 +766,295 @@ describe("13. Manager role authority cap (CORRECTION-001)", () => {
   });
 });
 
+// ── 15. CORRECTION-001 round 2: invite/accept authority bypass closed ──────────
+// Independent review found a Manager could invite a suspended Owner's or
+// peer Manager's email at a lower role; accept_invitation() would then
+// reactivate that membership at the invited (lower) role with no authority
+// check at all. inviteStaff() now resolves the target email to any existing
+// membership in the org (any status) and applies the same authority rule
+// changeRole/deactivateMember/reactivateMember already enforce, BEFORE the
+// invitation is ever created. The DB-side re-check at accept time is
+// exercised structurally in "12. Migration safety — 041_team_invitations.sql"
+// above, since it runs inside a real Postgres transaction this suite cannot
+// invoke.
+
+describe("15a. Invite-time authority check against the target's CURRENT membership (CORRECTION-001)", () => {
+  it("a Manager CANNOT invite a suspended OWNER's email, even at a lower role", async () => {
+    installPassthroughAuthMocks();
+    const suspendedOwner = membershipRow({
+      id: "m-owner",
+      organization_id: ORG_A,
+      role_id: OWNER_ROLE_ID,
+      role: { name: "Owner", system_role: "OWNER" },
+      status: "suspended",
+    });
+    const repo = installRepoMock({
+      findMembershipByEmail: mock(async () => suspendedOwner),
+      findPendingInvitationByEmail: mock(async () => null),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(
+      inviteStaff(ctx, { email: "owner@example.com", displayName: "Owner", role: "cashier" }),
+    ).rejects.toThrow(/cannot_modify_owner/);
+    expect(repo["createInvitation"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CANNOT invite a suspended peer MANAGER's email, even at a lower role", async () => {
+    installPassthroughAuthMocks();
+    const suspendedManager = membershipRow({
+      id: "m-peer-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+      status: "suspended",
+    });
+    const repo = installRepoMock({
+      findMembershipByEmail: mock(async () => suspendedManager),
+      findPendingInvitationByEmail: mock(async () => null),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(
+      inviteStaff(ctx, { email: "peer@example.com", displayName: "Peer", role: "cashier" }),
+    ).rejects.toThrow(/insufficient_role_authority/);
+    expect(repo["createInvitation"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CAN invite a suspended Cashier/Sales/Customer Service email at a (different) lower role", async () => {
+    installPassthroughAuthMocks();
+    const suspendedCashier = membershipRow({
+      id: "m-cashier",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      role: { name: "Cashier", system_role: "CASHIER" },
+      status: "suspended",
+    });
+    const created = invitationRow({
+      id: "inv-re",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+      issued_by_role: "MANAGER",
+    });
+    const repo = installRepoMock({
+      findMembershipByEmail: mock(async () => suspendedCashier),
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => created),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "cashier@example.com",
+      displayName: "Cashier",
+      role: "sales",
+    });
+
+    expect(result.invitation.id).toBe("inv-re");
+    expect(repo["createInvitation"]).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Owner CAN invite a suspended MANAGER's email at a lower role", async () => {
+    installPassthroughAuthMocks();
+    const suspendedManager = membershipRow({
+      id: "m-manager",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      role: { name: "Manager", system_role: "MANAGER" },
+      status: "suspended",
+    });
+    const created = invitationRow({
+      id: "inv-demote",
+      organization_id: ORG_A,
+      role_id: CASHIER_ROLE_ID,
+      issued_by_role: "OWNER",
+    });
+    const repo = installRepoMock({
+      findMembershipByEmail: mock(async () => suspendedManager),
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => created),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "manager@example.com",
+      displayName: "Manager",
+      role: "cashier",
+    });
+
+    expect(result.invitation.id).toBe("inv-demote");
+    const [, input] = repo["createInvitation"].mock.calls[0] as [
+      unknown,
+      { issued_by_role: string },
+    ];
+    expect(input.issued_by_role).toBe("OWNER");
+  });
+
+  it("inviting an address with no existing membership skips the target-authority check entirely", async () => {
+    installPassthroughAuthMocks();
+    const created = invitationRow({
+      id: "inv-fresh",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+    });
+    const repo = installRepoMock({
+      findMembershipByEmail: mock(async () => null),
+      findPendingInvitationByEmail: mock(async () => null),
+      createInvitation: mock(async () => created),
+    });
+    const { inviteStaff } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    const result = await inviteStaff(ctx, {
+      email: "brandnew@example.com",
+      displayName: "Brand New",
+      role: "sales",
+    });
+
+    expect(result.invitation.id).toBe("inv-fresh");
+  });
+});
+
+describe("15b. Resend/cancel authority against the invitation's own role (CORRECTION-001)", () => {
+  it("a Manager CANNOT resend a Manager-grade invitation", async () => {
+    installPassthroughAuthMocks();
+    const managerInvite = invitationRow({
+      id: "inv-mgr",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+    });
+    const repo = installRepoMock({ findInvitationById: mock(async () => managerInvite) });
+    const { resendInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(resendInvite(ctx, "inv-mgr")).rejects.toThrow(/insufficient_role_authority/);
+    expect(repo["reissueInvitation"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CANNOT cancel a Manager-grade invitation", async () => {
+    installPassthroughAuthMocks();
+    const managerInvite = invitationRow({
+      id: "inv-mgr",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+    });
+    const repo = installRepoMock({ findInvitationById: mock(async () => managerInvite) });
+    const { cancelInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(cancelInvite(ctx, "inv-mgr")).rejects.toThrow(/insufficient_role_authority/);
+    expect(repo["cancelInvitation"]).not.toHaveBeenCalled();
+  });
+
+  it("a Manager CAN resend/cancel a below-Manager invitation", async () => {
+    installPassthroughAuthMocks();
+    const salesInvite = invitationRow({
+      id: "inv-sales",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+    });
+    const reissued = invitationRow({
+      id: "inv-sales",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+    });
+    const cancelled = invitationRow({
+      id: "inv-sales",
+      organization_id: ORG_A,
+      role_id: SALES_ROLE_ID,
+      status: "cancelled",
+    });
+    installRepoMock({
+      findInvitationById: mock(async () => salesInvite),
+      reissueInvitation: mock(async () => reissued),
+      cancelInvitation: mock(async () => cancelled),
+    });
+    const { resendInvite, cancelInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-manager",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: false,
+    });
+
+    await expect(resendInvite(ctx, "inv-sales")).resolves.toBeTruthy();
+    await expect(cancelInvite(ctx, "inv-sales")).resolves.toBe("inv-sales");
+  });
+
+  it("the Owner CAN resend/cancel a Manager-grade invitation", async () => {
+    installPassthroughAuthMocks();
+    const managerInvite = invitationRow({
+      id: "inv-mgr",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+    });
+    const reissued = invitationRow({
+      id: "inv-mgr",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+    });
+    const cancelled = invitationRow({
+      id: "inv-mgr",
+      organization_id: ORG_A,
+      role_id: MANAGER_ROLE_ID,
+      status: "cancelled",
+    });
+    installRepoMock({
+      findInvitationById: mock(async () => managerInvite),
+      reissueInvitation: mock(async () => reissued),
+      cancelInvitation: mock(async () => cancelled),
+    });
+    const { resendInvite, cancelInvite } = await import("../server/team/service");
+    const ctx = makeCtx({
+      userId: "u-owner",
+      organizationId: ORG_A,
+      permissions: ["team.invite"],
+      isOwner: true,
+    });
+
+    await expect(resendInvite(ctx, "inv-mgr")).resolves.toBeTruthy();
+    await expect(cancelInvite(ctx, "inv-mgr")).resolves.toBe("inv-mgr");
+  });
+});
+
 // ── 14. Resend/cancel invitation are audit logged ───────────────────────────────
 
 describe("14. Resend/cancel invitation are audit logged", () => {
@@ -791,13 +1092,22 @@ describe("14. Resend/cancel invitation are audit logged", () => {
 
   it("cancelInvite audit-logs team.invite_cancel", async () => {
     const { auditLog } = installPassthroughAuthMocks();
+    const pending = invitationRow({
+      id: "inv-2",
+      organization_id: ORG_A,
+      email: "gone@example.com",
+      role_id: SALES_ROLE_ID,
+    });
     const cancelled = invitationRow({
       id: "inv-2",
       organization_id: ORG_A,
       email: "gone@example.com",
       status: "cancelled",
     });
-    installRepoMock({ cancelInvitation: mock(async () => cancelled) });
+    installRepoMock({
+      findInvitationById: mock(async () => pending),
+      cancelInvitation: mock(async () => cancelled),
+    });
     const { cancelInvite } = await import("../server/team/service");
     const ctx = makeCtx({
       userId: "u-owner",
@@ -1129,7 +1439,7 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     // The existing-membership lookup is no longer restricted to active/invited
     // — it must see a suspended/removed row too, or reactivation can't happen.
     expect(sql).toMatch(
-      /SELECT \* INTO v_existing\s+FROM public\.memberships\s+WHERE user_id = v_user_id\s+AND organization_id = v_invitation\.organization_id\s+ORDER BY joined_at DESC/,
+      /SELECT \* INTO v_existing\s+FROM public\.memberships\s+WHERE user_id = v_user_id\s+AND organization_id = v_invitation\.organization_id\s+ORDER BY \(status IN \('active', 'invited'\)\) DESC, joined_at DESC/,
     );
     // A prior non-active/invited row is reactivated via UPDATE ... status = 'active' ...
     expect(sql).toMatch(/UPDATE public\.memberships\s+SET status = 'active'/);
@@ -1138,6 +1448,66 @@ describe("12. Migration safety — 041_team_invitations.sql", () => {
     const insertCount = (sql.match(/INSERT INTO public\.memberships/g) ?? []).length;
     expect(insertCount).toBe(1);
     expect(sql).toMatch(/ELSE\s+INSERT INTO public\.memberships/);
+  });
+
+  // CORRECTION-001 round 2: the accept-path authority re-check. Independent
+  // review found that a Manager could invite a suspended Owner/Manager's
+  // address at a lower role, and accept_invitation()'s reactivation branch
+  // would overwrite that membership's role_id with no authority check at
+  // all — bypassing the exact cap enforced on changeRole/deactivateMember/
+  // reactivateMember. These checks are structural (same limitation as the
+  // rest of this describe block) but pin down the specific mechanism.
+
+  it("invitations persist the issuer's authority (issued_by_role) at invite time", () => {
+    expect(sql).toMatch(
+      /issued_by_role\s+TEXT NOT NULL CHECK \(issued_by_role IN \('OWNER', 'MANAGER'\)\)/,
+    );
+  });
+
+  it("reactivation independently re-checks authority against the EXISTING row's current role before overwriting it", () => {
+    // The guard is computed from v_existing.role_id (the row's role as it
+    // stands NOW, re-read fresh under the advisory lock) — not from
+    // v_invitation.role_id (the role being offered).
+    expect(sql).toMatch(
+      /SELECT EXISTS \(\s*SELECT 1 FROM public\.roles r\s*WHERE r\.id = v_existing\.role_id AND r\.system_role IN \('OWNER', 'MANAGER'\)\s*\) INTO v_existing_is_guarded/,
+    );
+    // A Manager-issued invitation (issued_by_role != 'OWNER') is refused
+    // when the existing row is currently Owner/Manager-grade.
+    expect(sql).toMatch(
+      /IF v_existing_is_guarded AND v_invitation\.issued_by_role != 'OWNER' THEN\s*[\s\S]*?RETURN jsonb_build_object\('status', 'authority_denied'\)/,
+    );
+    // The guard runs BEFORE the UPDATE that would overwrite role_id — i.e.
+    // it can actually prevent the overwrite, not just log after the fact.
+    const guardIndex = sql.indexOf("v_existing_is_guarded AND v_invitation.issued_by_role");
+    const updateIndex = sql.indexOf("SET status = 'active', role_id = v_invitation.role_id");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(updateIndex).toBeGreaterThan(guardIndex);
+  });
+
+  it("reactivation does NOT overwrite the original invited_by (historical inviter is preserved)", () => {
+    const updateBlock = sql.slice(
+      sql.indexOf("SET status = 'active', role_id = v_invitation.role_id"),
+      sql.indexOf("WHERE id = v_existing.id;") + "WHERE id = v_existing.id;".length,
+    );
+    expect(updateBlock).not.toMatch(/invited_by/);
+  });
+
+  it("a successful acceptance writes a team.invite_accept row directly into audit_logs, atomically with the membership mutation", () => {
+    expect(sql).toMatch(/INSERT INTO public\.audit_logs/);
+    expect(sql).toMatch(/'team\.invite_accept'/);
+    // Records whether this accept created a new membership or reactivated
+    // an existing one, and which role it resulted in — the minimum the
+    // audit trail needs to answer "what changed and for whom".
+    expect(sql).toMatch(/'reactivated', v_reactivated/);
+    expect(sql).toMatch(/'role_id', v_invitation\.role_id/);
+    // The audit INSERT happens before the final RETURN, inside the same
+    // function invocation/transaction as the membership INSERT/UPDATE above
+    // — SECURITY DEFINER + no intermediate COMMIT means this is atomic with
+    // the mutation by construction.
+    const auditIndex = sql.indexOf("INSERT INTO public.audit_logs");
+    const returnSuccessIndex = sql.indexOf("'status', 'success'");
+    expect(auditIndex).toBeGreaterThan(-1);
+    expect(returnSuccessIndex).toBeGreaterThan(auditIndex);
   });
 });
 
@@ -1211,6 +1581,10 @@ describe("16. Client-side team error classification (src/lib/team-errors.ts)", (
     expect(classifyInviteError(new Error("insufficient_role_authority"))).toBe(
       "insufficient_authority",
     );
+    // cannot_modify_owner is now also reachable from inviteStaff() (CORRECTION-001
+    // round 2: inviting a suspended Owner's address at a lower role) and reads
+    // the same to the inviter as any other authority-cap denial.
+    expect(classifyInviteError(new Error("cannot_modify_owner"))).toBe("insufficient_authority");
     expect(classifyInviteError(new Error("invalid_input"))).toBe("generic");
   });
 });

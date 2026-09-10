@@ -15,20 +15,26 @@ import { hashInviteToken } from "./invite-token";
 interface RpcSuccess {
   status: "success";
   org_id: string;
+  membership_id: string;
+  role_id: string;
+  reactivated: boolean;
 }
 interface RpcAlreadyMember {
   status: "already_member";
   org_id: string;
 }
 interface RpcOtherStatus {
-  status: "not_found" | "already_used" | "expired" | "email_mismatch";
+  status: "not_found" | "already_used" | "expired" | "email_mismatch" | "authority_denied";
 }
 
 type RpcResult = RpcSuccess | RpcAlreadyMember | RpcOtherStatus;
 
 export type AcceptInvitationResult =
-  | { ok: true; orgId: string; alreadyMember: boolean }
-  | { ok: false; code: "not_found" | "already_used" | "expired" | "email_mismatch" }
+  | { ok: true; orgId: string; alreadyMember: boolean; reactivated: boolean }
+  | {
+      ok: false;
+      code: "not_found" | "already_used" | "expired" | "email_mismatch" | "authority_denied";
+    }
   | { ok: false; code: "unauthenticated" }
   | { ok: false; code: "internal_error"; message: string };
 
@@ -55,13 +61,19 @@ export async function acceptInvitationForCaller(
 
   switch (result.status) {
     case "success":
-      return { ok: true, orgId: result.org_id, alreadyMember: false };
+      return {
+        ok: true,
+        orgId: result.org_id,
+        alreadyMember: false,
+        reactivated: result.reactivated,
+      };
     case "already_member":
-      return { ok: true, orgId: result.org_id, alreadyMember: true };
+      return { ok: true, orgId: result.org_id, alreadyMember: true, reactivated: false };
     case "not_found":
     case "already_used":
     case "expired":
     case "email_mismatch":
+    case "authority_denied":
       return { ok: false, code: result.status };
     default:
       return { ok: false, code: "internal_error", message: "Unexpected RPC response" };

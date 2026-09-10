@@ -93,6 +93,29 @@ function assertRoleAuthority(ctx: AuthorizationContext, role: StaffRoleKey): voi
   }
 }
 
+/**
+ * CORRECTION-001: the authority check every action that touches an EXISTING
+ * membership/invitation must apply against that row's CURRENT (or, for an
+ * invitation, its offered) role — never only against the new role being
+ * requested. Owner rows get their own error code (cannot_modify_owner,
+ * since "insufficient authority" reads oddly for "you can never touch the
+ * owner"); Manager-and-below rows go through assertRoleAuthority(), which
+ * already treats "currently Manager" as off-limits to any non-owner.
+ *
+ * Shared by changeRole/deactivateMember/reactivateMember (against a target
+ * membership's current role) and inviteStaff/resendInvite/cancelInvite
+ * (against a target membership's current role or an invitation's offered
+ * role) so the same rule can't drift between the "existing person" paths
+ * and the "invite/resend/cancel" paths.
+ */
+function assertAuthorityOverRole(ctx: AuthorizationContext, role: StaffRoleKey): void {
+  if (role === "owner") {
+    if (!ctx.isOwner()) throw new TeamError("cannot_modify_owner");
+    return;
+  }
+  assertRoleAuthority(ctx, role);
+}
+
 // ── Roster ───────────────────────────────────────────────────────────────────
 
 export interface TeamRosterEntry {
@@ -168,6 +191,19 @@ export async function inviteStaff(
   const email = input.email.trim().toLowerCase();
   if (!email) throw new TeamError("invalid_input");
 
+  // CORRECTION-001: authority is checked against the TARGET PERSON's current
+  // role, not just the role being offered — a Manager must not be able to
+  // invite an address that already belongs to an Owner/Manager-grade
+  // membership (active, suspended, or removed) at a lower role, since that
+  // invitation could later be accepted and reactivate that membership. This
+  // is a defense-in-depth check at invite time; accept_invitation() (migration
+  // 041) re-checks independently at accept time against the row's role as it
+  // stands then, since it can change while the invitation is outstanding.
+  const existingTarget = await repo.findMembershipByEmail(ctx.organizationId, email);
+  if (existingTarget) {
+    assertAuthorityOverRole(ctx, roleKeyFromRoleId(existingTarget.role_id));
+  }
+
   const existingPending = await repo.findPendingInvitationByEmail(ctx.organizationId, email);
   if (existingPending) {
     // A pending invite whose TTL has already elapsed never got flipped to
@@ -193,6 +229,11 @@ export async function inviteStaff(
       invited_by: ctx.userId,
       invited_display_name: input.displayName.trim() || null,
       expires_at: inviteExpiryFromNow(),
+      // Snapshot the issuer's authority now — team.invite is only ever
+      // granted to OWNER or MANAGER (003_roles_permissions.sql), so this is
+      // exhaustive. accept_invitation() uses this, not the invited role, to
+      // gate reactivating an existing Owner/Manager-grade membership.
+      issued_by_role: ctx.isOwner() ? "OWNER" : "MANAGER",
     });
   } catch (err) {
     // Two concurrent invites for the same address can both pass the
@@ -232,6 +273,11 @@ export async function resendInvite(
 
   const existing = await repo.findInvitationById(ctx.organizationId, invitationId);
   if (!existing || existing.status !== "pending") throw new TeamError("invitation_not_found");
+  // CORRECTION-001: a Manager cannot resend a Manager-grade invitation
+  // (their own or one an Owner issued to someone else) — resending mints a
+  // fresh, longer-lived credential for that grant, which is itself an act
+  // of authority over it.
+  assertAuthorityOverRole(ctx, roleKeyFromRoleId(existing.role_id));
 
   const rawToken = generateInviteToken();
   const updated = await repo.reissueInvitation(ctx.organizationId, invitationId, {
@@ -269,6 +315,13 @@ export async function cancelInvite(
   invitationId: string,
 ): Promise<string> {
   ctx.require("team.invite");
+
+  const existing = await repo.findInvitationById(ctx.organizationId, invitationId);
+  if (!existing || existing.status !== "pending") throw new TeamError("invitation_not_found");
+  // CORRECTION-001: a Manager cannot cancel a Manager-grade invitation —
+  // same authority boundary as resend above.
+  assertAuthorityOverRole(ctx, roleKeyFromRoleId(existing.role_id));
+
   const cancelled = await repo.cancelInvitation(ctx.organizationId, invitationId);
   if (!cancelled) throw new TeamError("invitation_not_found");
 
@@ -296,18 +349,16 @@ export async function changeRole(
   if (!target) throw new TeamError("membership_not_found");
 
   const currentRole = roleKeyFromRoleId(target.role_id);
+  // CORRECTION-001: a non-owner can never touch a membership that is
+  // CURRENTLY Owner or Manager — this also covers a Manager targeting their
+  // own membership (currentRole === "manager"), closing self-promotion/
+  // self-protection through this path the same way as any other row.
+  assertAuthorityOverRole(ctx, currentRole);
   if (currentRole === "owner") {
-    if (!ctx.isOwner()) throw new TeamError("cannot_modify_owner");
     // Demoting an owner row (possibly the caller's own) — the DB trigger
     // (memberships_last_owner_protection) is the final authority, but this
     // gives a clean application-level error first.
     await assertOwnerWouldRemain(ctx.organizationId, target.user_id);
-  } else {
-    // CORRECTION-001: a non-owner can never touch a membership that is
-    // CURRENTLY Manager — this also covers a Manager targeting their own
-    // membership (currentRole === "manager"), closing self-promotion/
-    // self-protection through this path the same way as any other row.
-    assertRoleAuthority(ctx, currentRole);
   }
   // CORRECTION-001: a non-owner can never assign the Manager role, to
   // themselves or anyone else.
@@ -347,16 +398,12 @@ async function setMembershipStatus(
   if (!target) throw new TeamError("membership_not_found");
 
   const currentRole = roleKeyFromRoleId(target.role_id);
-  if (currentRole === "owner") {
-    if (!ctx.isOwner()) throw new TeamError("cannot_modify_owner");
-  } else {
-    // CORRECTION-001: a non-owner can never deactivate/reactivate a
-    // membership that is CURRENTLY Manager — including their own, the same
-    // as changeRole above. `team.remove` (granted to Manager since the
-    // original 003 seed) authorizes deactivating below-Manager staff, not
-    // peer Managers.
-    assertRoleAuthority(ctx, currentRole);
-  }
+  // CORRECTION-001: a non-owner can never deactivate/reactivate a
+  // membership that is CURRENTLY Owner or Manager — including their own
+  // Manager row, the same as changeRole above. `team.remove` (granted to
+  // Manager since the original 003 seed) authorizes deactivating
+  // below-Manager staff, not peer Managers or the Owner.
+  assertAuthorityOverRole(ctx, currentRole);
 
   if (status === "suspended" && currentRole === "owner") {
     await assertOwnerWouldRemain(ctx.organizationId, target.user_id);

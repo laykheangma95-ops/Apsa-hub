@@ -16,7 +16,9 @@
 -- Constraints: role_id cross-org integrity trigger (mirrors 006_memberships.sql);
 --              role_id may never be the system OWNER role — an invitation can
 --              never grant ownership (ownership transfer is a separate, not-yet-built,
---              secure workflow per SECURITY.md/PERMISSIONS_MATRIX.md §41)
+--              secure workflow per SECURITY.md/PERMISSIONS_MATRIX.md §41);
+--              issued_by_role snapshots the issuer's system role (OWNER/MANAGER) at
+--              invite time — see CORRECTION-001 below.
 -- Tenant ownership: organization_id
 -- RLS: no direct client SELECT/INSERT/UPDATE/DELETE. Token possession, not RLS,
 --      is what proves the right to inspect/accept one invitation — enforced in
@@ -38,6 +40,18 @@ CREATE TABLE public.invitations (
   token_hash            TEXT NOT NULL,
   invited_by            UUID NOT NULL REFERENCES public.profiles(id),
   invited_display_name  TEXT,
+  -- CORRECTION-001 (2026-09-10): a snapshot of the issuer's system role at the
+  -- moment the invitation was created — 'OWNER' or 'MANAGER' (the only two
+  -- roles 003_roles_permissions.sql grants `team.invite` to). This is
+  -- deliberately persisted on the invitation, not re-derived from the
+  -- issuer's CURRENT membership at accept time: the issuer's own role can
+  -- change or be revoked between invite and accept, and what matters for the
+  -- authority check below is what authority they had when they issued it.
+  -- accept_invitation() uses this to decide whether reactivating an existing
+  -- Owner/Manager-grade membership is allowed — a Manager-issued invitation
+  -- must never be able to overwrite an Owner's or another Manager's role,
+  -- even if that membership was suspended after the invite went out.
+  issued_by_role        TEXT NOT NULL CHECK (issued_by_role IN ('OWNER', 'MANAGER')),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at            TIMESTAMPTZ NOT NULL,
   accepted_at           TIMESTAMPTZ,
@@ -105,8 +119,8 @@ CREATE POLICY "invitations_delete_blocked" ON public.invitations FOR DELETE USIN
 
 -- ── accept_invitation RPC ────────────────────────────────────────────────────
 -- Atomic acceptance: verify token + expiry + invited-email match against the
--- AUTHENTICATED caller, then insert the real `memberships` row and mark the
--- invitation consumed, all in one transaction. Mirrors the
+-- AUTHENTICATED caller, then insert (or reactivate) the real `memberships` row
+-- and mark the invitation consumed, all in one transaction. Mirrors the
 -- create_organization_for_founder RPC pattern (009_create_organization_rpc.sql):
 -- identity comes from auth.uid() only (never a parameter), SECURITY DEFINER,
 -- advisory lock for concurrency safety, explicit REVOKE/GRANT.
@@ -114,18 +128,35 @@ CREATE POLICY "invitations_delete_blocked" ON public.invitations FOR DELETE USIN
 -- Must be called through a user-scoped client (the caller's own JWT) — never
 -- through the service-role client, which would make auth.uid() resolve to
 -- NULL and always fail the unauthenticated guard below.
+--
+-- CORRECTION-001 authority re-check (independent review round 2): the
+-- application layer (src/server/team/service.ts) already blocks a Manager
+-- from inviting an address that currently belongs to an Owner/Manager-grade
+-- membership. That check happens at INVITE time and cannot see what happens
+-- to the target membership between then and ACCEPT time — the target's row
+-- could be promoted, suspended, or otherwise changed while the invitation is
+-- outstanding. This RPC therefore re-checks authority independently, against
+-- the target membership's CURRENT role_id (re-read fresh inside this
+-- transaction, under the advisory lock), using the issuer's authority
+-- snapshotted on the invitation (issued_by_role) — not just the invited
+-- role. A Manager-issued invitation can never reactivate (or otherwise
+-- overwrite the role_id of) a membership that is currently Owner- or
+-- Manager-grade, regardless of what role the invitation itself offers.
 CREATE OR REPLACE FUNCTION public.accept_invitation(p_token_hash TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, auth
+SET search_path = public, auth, pg_temp
 AS $$
 DECLARE
-  v_user_id      UUID;
-  v_user_email   TEXT;
-  v_invitation   public.invitations%ROWTYPE;
-  v_lock_key     BIGINT;
-  v_existing     public.memberships%ROWTYPE;
+  v_user_id           UUID;
+  v_user_email        TEXT;
+  v_invitation        public.invitations%ROWTYPE;
+  v_lock_key          BIGINT;
+  v_existing          public.memberships%ROWTYPE;
+  v_existing_is_guarded BOOLEAN;
+  v_membership_id     UUID;
+  v_reactivated       BOOLEAN;
 BEGIN
   v_user_id := auth.uid();
   IF v_user_id IS NULL THEN
@@ -174,12 +205,15 @@ BEGIN
   -- inserted as a second row: memberships has no unique constraint across all
   -- statuses (only the partial index on active/invited), so without this
   -- check a suspend → re-invite → accept cycle would silently duplicate the
-  -- person in the roster.
+  -- person in the roster. Prefer a currently active/invited row over an
+  -- older terminal one, then fall back to the most recent row overall, so a
+  -- historical anomaly (multiple rows for the same user/org) can never pick
+  -- a stale suspended/removed row out from under a live membership.
   SELECT * INTO v_existing
   FROM public.memberships
   WHERE user_id = v_user_id
     AND organization_id = v_invitation.organization_id
-  ORDER BY joined_at DESC
+  ORDER BY (status IN ('active', 'invited')) DESC, joined_at DESC
   LIMIT 1;
 
   IF v_existing.id IS NOT NULL AND v_existing.status IN ('active', 'invited') THEN
@@ -190,21 +224,74 @@ BEGIN
   END IF;
 
   IF v_existing.id IS NOT NULL THEN
-    -- Prior row exists but is suspended/removed — reactivate it in place
-    -- (same membership id, same user_id) rather than inserting a duplicate.
+    -- Reactivation branch: the existing row is suspended/removed. Before
+    -- overwriting its role_id, independently verify the issuer had
+    -- authority over this membership's CURRENT role — never trust the
+    -- invite-time check alone (CORRECTION-001; see function comment above).
+    SELECT EXISTS (
+      SELECT 1 FROM public.roles r
+      WHERE r.id = v_existing.role_id AND r.system_role IN ('OWNER', 'MANAGER')
+    ) INTO v_existing_is_guarded;
+
+    IF v_existing_is_guarded AND v_invitation.issued_by_role != 'OWNER' THEN
+      -- A Manager-issued invitation can never reactivate (or role-overwrite)
+      -- a membership that is currently Owner- or Manager-grade — closes the
+      -- "suspend a peer, invite them at a lower role, they accept" bypass.
+      -- The invitation itself is left pending/untouched so the rightful
+      -- Owner can still resolve it (e.g. by cancelling and re-inviting).
+      RETURN jsonb_build_object('status', 'authority_denied');
+    END IF;
+
+    -- Same membership id, same user_id — history (orders, payments,
+    -- deliveries, conversations, audit log) keeps pointing at this row.
+    -- invited_by is deliberately NOT overwritten: the ORIGINAL inviter is
+    -- part of that same history and this is a role/status change, not a
+    -- fresh invitation of a brand-new person.
     UPDATE public.memberships
-      SET status = 'active', role_id = v_invitation.role_id, invited_by = v_invitation.invited_by
+      SET status = 'active', role_id = v_invitation.role_id
       WHERE id = v_existing.id;
+    v_membership_id := v_existing.id;
+    v_reactivated := true;
   ELSE
     INSERT INTO public.memberships (user_id, organization_id, role_id, status, invited_by)
-    VALUES (v_user_id, v_invitation.organization_id, v_invitation.role_id, 'active', v_invitation.invited_by);
+    VALUES (v_user_id, v_invitation.organization_id, v_invitation.role_id, 'active', v_invitation.invited_by)
+    RETURNING id INTO v_membership_id;
+    v_reactivated := false;
   END IF;
 
   UPDATE public.invitations
     SET status = 'accepted', accepted_at = NOW(), accepted_user_id = v_user_id
     WHERE id = v_invitation.id;
 
-  RETURN jsonb_build_object('status', 'success', 'org_id', v_invitation.organization_id);
+  -- Acceptance is a permission-granting event — it performs exactly the
+  -- effects of team.reactivate/team.role_change (both MANDATORY_AUDIT_ACTIONS
+  -- in src/server/auth/audit.ts) when it reactivates an existing row, and is
+  -- the moment access is actually created when it inserts a new one. This
+  -- write goes directly into audit_logs (same table/columns as
+  -- src/server/auth/audit.ts#auditLogRequired) rather than through the
+  -- TypeScript helper, because it must be atomic with the membership
+  -- mutation above and the invitee has no AuthorizationContext yet — there
+  -- is no separate audit system here, just the same table written from
+  -- inside this transaction instead of from the app layer.
+  INSERT INTO public.audit_logs (
+    organization_id, actor_user_id, action, resource_type, resource_id, before_json, after_json
+  ) VALUES (
+    v_invitation.organization_id,
+    v_user_id,
+    'team.invite_accept',
+    'memberships',
+    v_membership_id::TEXT,
+    jsonb_build_object('invitation_id', v_invitation.id, 'reactivated', v_reactivated),
+    jsonb_build_object('role_id', v_invitation.role_id, 'status', 'active')
+  );
+
+  RETURN jsonb_build_object(
+    'status', 'success',
+    'org_id', v_invitation.organization_id,
+    'membership_id', v_membership_id,
+    'role_id', v_invitation.role_id,
+    'reactivated', v_reactivated
+  );
 END;
 $$;
 

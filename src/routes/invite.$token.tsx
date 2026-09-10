@@ -56,7 +56,13 @@ type AcceptState =
   | { kind: "already_member" }
   | {
       kind: "error";
-      code: "not_found" | "expired" | "already_used" | "email_mismatch" | "generic";
+      code:
+        | "not_found"
+        | "expired"
+        | "already_used"
+        | "email_mismatch"
+        | "authority_denied"
+        | "generic";
     };
 
 function InviteAcceptPage() {
@@ -130,7 +136,8 @@ function InviteAcceptPage() {
           result.code === "not_found" ||
           result.code === "expired" ||
           result.code === "already_used" ||
-          result.code === "email_mismatch"
+          result.code === "email_mismatch" ||
+          result.code === "authority_denied"
             ? result.code
             : "generic",
       });
@@ -243,7 +250,9 @@ function InviteAcceptPage() {
                               invitedEmail: preview.invitedEmail,
                               yourEmail: preview.callerEmail,
                             })
-                          : t("inviteAccept.acceptError")
+                          : acceptState.code === "authority_denied"
+                            ? t("inviteAccept.authorityDenied")
+                            : t("inviteAccept.acceptError")
                 }
                 tone="danger"
                 onRetry={() => setAcceptState({ kind: "idle" })}

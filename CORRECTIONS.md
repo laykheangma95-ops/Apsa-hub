@@ -44,7 +44,7 @@ Corrections are listed newest first.
 ### CORRECTION-001
 
 **Date:** 2026-09-10
-**Affects:** PERMISSIONS_MATRIX.md, supabase/migrations/042_team_permissions.sql, src/server/team/service.ts
+**Affects:** PERMISSIONS_MATRIX.md, supabase/migrations/041_team_invitations.sql, supabase/migrations/042_team_permissions.sql, src/server/team/service.ts
 **Section:** §7 TEAM & MEMBERSHIP — `team.update_role` / `team.roles_assign`, ⚠️ (limited/conditional) for MANAGER
 **Original:** PERMISSIONS_MATRIX.md marks `team.update_role` as ⚠️ for MANAGER without defining what the limit is. Migration 042 (PR #39) granted MANAGER the `team.roles_assign` permission unconditionally — resolving the ⚠️ to unrestricted role-assignment authority, equal to OWNER's.
 **Correction:** MANAGER role authority is LIMITED as follows:
@@ -52,8 +52,9 @@ Corrections are listed newest first.
 - MANAGER may assign/change only roles strictly BELOW Manager: Cashier, Sales, Customer Service.
 - MANAGER may NOT: assign the Manager role to anyone; modify a membership whose current role is Manager (including their own); promote anyone to a role equal to or higher than their own; modify the Owner's membership.
 - No staff member (Owner included, by the pre-existing last-owner-protection rule; every other role, by permission) may promote themselves.
-This is enforced server-side in `src/server/team/service.ts` (`assertRoleAuthority()`), not by the `team.roles_assign` DB grant alone — the permission system is a coarse bit, not fine-grained by role hierarchy, so the DB grant to MANAGER stays as migration 042 wrote it and the cap lives in application code.
+This is enforced server-side in `src/server/team/service.ts` (`assertRoleAuthority()` / `assertAuthorityOverRole()`), not by the `team.roles_assign` DB grant alone — the permission system is a coarse bit, not fine-grained by role hierarchy, so the DB grant to MANAGER stays as migration 042 wrote it and the cap lives in application code. The cap applies to the full membership-authority surface, not only role changes: `inviteStaff` (against the invited email's existing membership, if any), `changeRole`, `deactivateMember`, `reactivateMember`, and `resendInvite`/`cancelInvite` (against the invitation's own offered role) all call one of these two functions before mutating anything.
 **Reason:** Independent review of PR #39 flagged the unconditional grant as an overstatement of the matrix's ⚠️ marker and a merge blocker. Project owner resolved the ambiguity directly.
+**Round 2 addendum (2026-09-10):** a second independent review found the cap did not survive the invite→accept path — a Manager could invite a suspended Owner's or peer Manager's email at a *lower* role, and `accept_invitation()` (migration 041) would reactivate that existing membership at the invited role with no authority check at all, since the RPC never consulted CORRECTION-001. Closed at both layers: `inviteStaff()` now resolves the invited email to any existing membership (any status) via `findMembershipByEmail()` and applies the same authority check before creating the invitation; and migration 041 now persists the issuer's authority (`invitations.issued_by_role`, snapshotted as `'OWNER'` or `'MANAGER'` at invite time) and independently re-checks it inside `accept_invitation()`, against the target membership's role as it stands at accept time (not invite time), before allowing a reactivation to overwrite it. A Manager-issued invitation can never reactivate an Owner- or Manager-grade membership, regardless of what role it offers. `resendInvite`/`cancelInvite` gained the same check against the invitation's own role, closing the adjacent gap where a Manager could resend or cancel a Manager-grade invitation they had no authority to touch.
 
 ---
 

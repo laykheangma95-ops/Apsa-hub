@@ -17,6 +17,15 @@ export type {
 
 export type InvitationStatus = "pending" | "accepted" | "cancelled" | "expired";
 
+/**
+ * Snapshot of the issuer's system role at the moment the invitation was
+ * created — 'OWNER' or 'MANAGER' (the only two roles 003_roles_permissions.sql
+ * grants `team.invite` to). accept_invitation() (migration 041) uses this,
+ * not the invitation's own role_id, to decide whether reactivating an
+ * existing Owner/Manager-grade membership is allowed (CORRECTION-001).
+ */
+export type InvitationIssuerRole = "OWNER" | "MANAGER";
+
 export interface InvitationRow {
   id: string;
   organization_id: string;
@@ -26,6 +35,7 @@ export interface InvitationRow {
   token_hash: string;
   invited_by: string;
   invited_display_name: string | null;
+  issued_by_role: InvitationIssuerRole;
   created_at: string;
   expires_at: string;
   accepted_at: string | null;
