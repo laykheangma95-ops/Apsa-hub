@@ -262,3 +262,20 @@ export const getPaymentReconciliationFn = createServerFn().handler(async () => {
   const { getReconciliationSummary } = await import("@/server/payments/reconciliation");
   return getReconciliationSummary(authCtx);
 });
+
+// ── getOrderSettlementFn ──────────────────────────────────────────────────────
+//
+// Per-order settlement read (received/refunded/net vs total), gated on
+// payments.reconcile like getPaymentReconciliationFn above. Surfaces
+// overpayment as a reviewable fact; never changes payment_status/refund_status
+// — see src/server/payments/reconciliation.ts#getOrderSettlement.
+
+export const getOrderSettlementFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getOrderSettlement } = await import("@/server/payments/reconciliation");
+    return getOrderSettlement(authCtx, data.orderId);
+  });

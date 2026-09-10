@@ -532,6 +532,29 @@ describe("Payment transaction authority and isolation", () => {
     ).rejects.toThrow("commit together");
     expect((await f.state(order)).payment_status).toBe("paid");
   });
+
+  it("split payments settling above the order total surface as a net_minor > total_minor drift, still coarsely 'paid'", async () => {
+    const order = await f.newOrder(f.org, 10000);
+    const a = await f.record(10000, "cash", null, order);
+    const b = await f.record(1000, "bank_transfer", null, order);
+    await f.verify(a);
+    await f.verify(b, "bank_verified");
+    const totalMinor = (
+      await f.db.query<{ total_minor: number }>("select total_minor from orders where id=$1", [
+        order,
+      ])
+    ).rows[0]!.total_minor;
+    expect(await f.state(order)).toMatchObject({
+      payment_status: "paid",
+      refund_status: "none",
+      received_minor: 11000,
+      net_minor: 11000,
+    });
+    // This is exactly the drift src/server/payments/reconciliation.ts#getOrderSettlement
+    // reads via order_payment_totals to flag `overpaid` — the view itself
+    // (migration 040, unchanged) already carries the raw numbers to detect it.
+    expect((await f.state(order)).net_minor).toBeGreaterThan(totalMinor);
+  });
 });
 
 it("migration audits legacy paid claims and derives existing partial refunds without changing Payment history", async () => {

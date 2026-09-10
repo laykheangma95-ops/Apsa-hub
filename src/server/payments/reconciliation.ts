@@ -207,3 +207,69 @@ export async function getReconciliationSummary(
 
   return Array.from(byCurrency.values());
 }
+
+function notFound(message: string): Error {
+  return Object.assign(new Error(message), { statusCode: 404 });
+}
+
+/**
+ * Per-order settlement snapshot — read-only.
+ *
+ * Migration 040's order_payment_totals view already derives ledger-accurate
+ * received/refunded/net totals per order (used internally to keep
+ * orders.payment_status/refund_status in sync), but nothing previously
+ * surfaced when net settlement exceeds what the order is owed. This adds
+ * exactly that: an amount-based `overpaid` fact for a human to review.
+ *
+ * It does NOT change payment_status or refund_status semantics — those stay
+ * governed by migration 040 alone (a fully paid order stays `paid`; refunds
+ * live on their own `refund_status` axis, per CORRECTIONS.md's approved
+ * semantics). This function only reads and reports.
+ */
+export interface OrderSettlement {
+  orderId: string;
+  currency: Currency;
+  totalMinor: Money;
+  receivedMinor: Money;
+  refundedMinor: Money;
+  netMinor: Money;
+  paymentStatus: string;
+  refundStatus: string;
+  /** net settlement exceeds the order total — money received beyond what was owed. */
+  overpaid: boolean;
+  /** netMinor - totalMinor when overpaid; null otherwise. */
+  overpaidAmount: Money | null;
+}
+
+/**
+ * Read one order's settlement snapshot.
+ *
+ * Org-scoped: an order belonging to another organization is reported
+ * not-found, indistinguishable from one that does not exist.
+ */
+export async function getOrderSettlement(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<OrderSettlement> {
+  ctx.require("payments.reconcile");
+
+  const row = await repo.getOrderPaymentTotals(ctx.organizationId, orderId);
+  if (!row) throw notFound("Order not found");
+
+  const currency = row.currency as Currency;
+  const overpaidAmountMinor = row.net_minor - row.total_minor;
+  const overpaid = overpaidAmountMinor > 0;
+
+  return {
+    orderId: row.order_id,
+    currency,
+    totalMinor: { amount: row.total_minor, currency },
+    receivedMinor: { amount: row.received_minor, currency },
+    refundedMinor: { amount: row.refunded_minor, currency },
+    netMinor: { amount: row.net_minor, currency },
+    paymentStatus: row.payment_status,
+    refundStatus: row.refund_status,
+    overpaid,
+    overpaidAmount: overpaid ? { amount: overpaidAmountMinor, currency } : null,
+  };
+}
