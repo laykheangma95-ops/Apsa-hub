@@ -56,7 +56,6 @@ import type { Money, Currency } from "@/types";
 import * as repo from "./repository";
 import {
   isValidLifecycleTransition,
-  isValidPaymentTransition,
   isValidFulfillmentTransition,
   isTerminalLifecycle,
   LIFECYCLE_TRANSITION_PERMISSIONS,
@@ -520,48 +519,44 @@ export async function transitionLifecycleStatus(
 }
 
 /**
- * Move the order's payment status.
+ * CLOSED. orders.payment_status can no longer be moved directly through the
+ * Order domain — see migration 039 (supabase/PAYMENTS.md §1) and the task
+ * brief's "PAYMENT ↔ ORDER AUTHORITY" invariant: "Order.paymentStatus must
+ * never be changed directly by UI / POS / Conversation / Delivery / generic
+ * Order update. Only Payment Domain may produce financial state changes."
  *
- * Every target requires payments.confirm: whoever may declare that money
- * arrived is the same authority as whoever may declare that it did not.
+ * Before this phase, this function was a second, independent way to write
+ * this same column — gated only by `payments.confirm`, with NO payment
+ * record required at all. That is exactly the failure mode the integration
+ * phase exists to close: "Order paid but no authoritative Payment exists"
+ * (task brief). The only remaining path is
+ * src/server/payments/service.ts#recordPayment/verifyPayment/
+ * reversePayment/refundPayment, which write orders.payment_status
+ * transactionally alongside the payment itself via
+ * sync_order_payment_status_v1 (migration 039) — never as a bare status
+ * write with no payment behind it.
+ *
+ * The permission check runs BEFORE the unconditional refusal so a caller
+ * without `payments.confirm` still sees the same 403 Forbidden as before —
+ * this function's behavior changes for an AUTHORIZED caller, not its
+ * authorization surface. `orderId`/`to`/`reason` are intentionally unused:
+ * every call is refused regardless of target, so validating them first
+ * would only leak which order ids exist to a caller who can never move
+ * anything anyway.
  */
 export async function transitionPaymentStatus(
   ctx: AuthorizationContext,
-  orderId: string,
-  to: OrderPaymentStatus,
-  reason?: string | null,
+  _orderId: string,
+  _to: OrderPaymentStatus,
+  _reason?: string | null,
 ): Promise<OrderDetail> {
   ctx.require(PAYMENT_TRANSITION_PERMISSION);
 
-  const order = await loadTransitionTarget(ctx, orderId);
-  const from = order.payment_status;
-
-  if (!isValidPaymentTransition(from, to)) {
-    throw conflict(`Cannot move payment status from '${from}' to '${to}'`);
-  }
-
-  const result = await repo.transitionStatus(
-    ctx.organizationId,
-    orderId,
-    "payment",
-    from,
-    to,
-    ctx.userId,
-    reason ?? null,
+  throw conflict(
+    "orders.payment_status can only be changed by the Payment Domain " +
+      "(record/verify/reverse/refund a payment — see supabase/PAYMENTS.md). " +
+      "Direct Order-side payment mutation is disabled.",
   );
-
-  if (result.status !== "success") throw transitionFailureToError(result);
-
-  await bestEffortAudit(ctx, {
-    action: "payments.confirm",
-    resourceType: "orders",
-    resourceId: orderId,
-    beforeJson: { payment_status: from },
-    afterJson: { payment_status: to },
-    ...(reason ? { reason } : {}),
-  });
-
-  return requireDetail(ctx.organizationId, orderId);
 }
 
 /** Move the order's fulfillment status. */

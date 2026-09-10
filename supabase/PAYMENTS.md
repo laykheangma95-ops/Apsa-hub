@@ -1,7 +1,8 @@
 # APSA — Payment Domain
 
-**Status:** Foundation built. Migrations written, NOT applied to the hosted Supabase
-project. No UI. No live bank/API integration.
+**Status:** Domain foundation AND transactional Order integration built.
+Migrations written, NOT applied to the hosted Supabase project. No UI. No live
+bank/API integration.
 
 **Source of truth:** `DATA_MODEL.md` §50–53 (Payment, PaymentAttempt, PaymentProviderEvent,
 Refund), `MVP_ROADMAP.md` §14 (Phase 8 — Payment Records), `PERMISSIONS_MATRIX.md` §17
@@ -10,22 +11,75 @@ Refund), `MVP_ROADMAP.md` §14 (Phase 8 — Payment Records), `PERMISSIONS_MATRI
 
 ---
 
-## 1. Why this domain is separate from `orders.payment_status`
+## 1. Relationship to `orders.payment_status`
 
-`orders.payment_status` (migration 023) is a coarse, manually-driven axis — "has the
-money arrived" — created for a phase that deliberately had no payments table at all.
-It is **untouched by this phase**. Nothing in `src/server/payments/*` or migrations
-034–036 writes to the `orders` table, imports `@/server/orders`, or calls
-`transitionPaymentStatus`/`transitionOrderPaymentFn`. That boundary is enforced by
-structural tests (see §9) as well as by the fact that the Payment repository's only
-touch on `orders` is a read-only existence/currency lookup.
+`orders.payment_status` (migration 023) is a coarse axis — `unpaid` / `pending` /
+`paid` / `failed`, nothing finer — created for a phase that deliberately had no
+payments table at all. The Payment Domain's foundation phase (migrations 034–036)
+kept it completely untouched on purpose, and documented the integration as
+explicitly deferred future work. **That phase is this document's history now, not
+its current state**: migration 039 wires this Payment domain in as the axis's SOLE
+authoritative driver, exactly the way the foundation phase said it would have to be
+— "wired the same way migration 026 wired Inventory into Order: as one atomic
+RPC-level change... never as two sequential service calls that could crash between
+them."
 
-Making this Payment domain the authoritative driver of `orders.payment_status` is
-**explicitly the next phase's work**, and it must be wired the same way migration 026
-wired Inventory into Order: as one atomic RPC-level change inside
-`transition_order_status_v1`, never as two sequential service calls that could crash
-between them. This foundation phase stops short of that integration on purpose — see
-the task brief's "Payment / Order separation" section.
+Concretely:
+
+- `src/server/payments/service.ts` and `repository.ts` are **still** completely
+  unmodified by the integration — no import of `@/server/orders`, no call to
+  `transitionPaymentStatus`/`transitionOrderPaymentFn`, enforced by the same
+  structural tests as before (§9) plus a duplicate assertion in
+  `src/tests/payment-order-integration.test.ts`. The bridge is **SQL calling SQL**:
+  `record_payment_v1` / `verify_payment_v1` / `reverse_payment_v1` /
+  `refund_payment_v1` each call a new function, `sync_order_payment_status_v1`
+  (migration 039), inside their own transaction — never a second, separate
+  TypeScript call that could crash between the two writes.
+- `sync_order_payment_status_v1` recomputes `orders.payment_status` from a
+  **deterministic aggregate** over that order's payments — `paid` beats `pending`
+  beats `failed` beats `unpaid` — and applies it via the existing
+  `transition_order_status_v1` (migration 026), never by writing the column
+  directly. See §1a below for the exact rule.
+- The Order domain's own generic mutator, `transitionPaymentStatus()`
+  (`src/server/orders/service.ts`), is **closed**: it now unconditionally refuses
+  every call (still 403 for a caller lacking `payments.confirm`, then 409 for one
+  who has it), pointing at this domain. Before migration 039 this function was a
+  second, independent way to write `orders.payment_status` with **no payment
+  record required at all** — exactly the failure mode ("Order paid but no
+  authoritative Payment exists") the integration exists to close. POS,
+  Conversation and Delivery never called it in the first place (their own
+  structural tests already proved that) and are unaffected.
+
+### 1a. The aggregate rule
+
+`orders.payment_status` has no `refunded`/`partially_paid` state of its own — it
+stays coarse by design (task brief: "Order payment axis: unpaid, pending, paid,
+failed"). An order may have more than one payment over its life (a failed attempt
+then a successful one; a payment later fully refunded and re-collected another
+way), so the coarse status is recomputed from ALL of that order's payments on every
+mutation, never copied from "the payment that just changed":
+
+```
+ANY payment.status = 'paid'                              -> order 'paid'
+else ANY payment.status = 'pending'                       -> order 'pending'
+else ANY payment.status = 'failed'                        -> order 'failed'
+else (no payments, or all reversed/refunded, nothing else active) -> order 'unpaid'
+```
+
+`paid` wins unconditionally. This is what makes the **PAID RULE** (task brief) hold
+even with multiple payment attempts: once ANY payment for an order has been
+staff/manager/bank-verified, an unrelated second attempt failing or being reversed
+can never silently downgrade the order. Only reversing/fully-refunding the PAID
+payment itself removes it from the aggregate — and even then the order only moves
+down to whatever the *remaining* payments still support, never straight to
+`unpaid` if another payment is still active. Refund/reversal history is never lost
+by this collapse: the detailed truth stays fully visible in
+`payments`/`payment_events` and the reconciliation view (§12); this function only
+ever writes the coarse summary the Order axis was designed to hold.
+
+`PAYMENT_TRANSITIONS.paid` (`src/server/orders/state-machine.ts`) gained exits to
+`pending`/`failed`/`unpaid` to describe this — reachable only through the aggregate
+recompute above, never through `transitionPaymentStatus()`.
 
 ---
 
@@ -48,6 +102,10 @@ service → repository (RPC-only writes) → PostgreSQL. No route or component i
 `src/server/payments/*` directly — every mutation and read goes through
 `src/api/payments.ts`, which dynamically imports server-only modules inside handler
 bodies (never a static top-level import), exactly like `src/api/orders.ts`.
+
+The Order integration (migration 039, §1/§1a) adds no new TypeScript module —
+`sync_order_payment_status_v1` lives entirely in Postgres and is called only from
+inside the four RPCs above, never from `src/server/payments/*`.
 
 ---
 
@@ -92,6 +150,12 @@ duplicate_suspected   → unverified | staff_confirmed | manager_verified | mism
 can arrive with no manual step at all — the core product principle: *"APSA must
 support payments with or without bank API."*
 
+Since migration 039, every one of these transitions also recomputes
+`orders.payment_status` in the same transaction (§1a) — `staff_confirmed` /
+`manager_verified` / `bank_verified` are the ONLY targets that can ever make an
+order `paid` anywhere in APSA; `mismatch` can move it down to `failed`, but only
+when no other payment for that order is still `paid`.
+
 ---
 
 ## 4. COD rules
@@ -100,9 +164,16 @@ Cash-on-delivery does **not** mean paid. `deliveries.cod_amount_minor` (migratio
 is an operational collection reference only — migration 027 makes no reference to the
 `payments` table at all (verified by a structural test), and no Delivery status
 transition (`pending/preparing/ready/in_transit/delivered/failed/cancelled`) ever calls
-into the Payment domain. COD settlement happens later, exclusively through
-`recordPayment({ method: "cod" })`, which requires its own permission
+into the Payment domain, and migration 039 adds nothing there either — Delivery only
+ever writes `orders.fulfillment_status`. COD settlement happens later, exclusively
+through `recordPayment({ method: "cod" })`, which requires its own permission
 (`payments.mark_cod`) distinct from counter payments (`payments.record`).
+
+Recording a COD payment is **not itself settlement**: `record_payment_v1` always
+inserts `status = 'pending'` regardless of method (§1a moves the order to `pending`,
+not `paid`, at this point). Only a subsequent `verifyPayment(..., 'staff_confirmed')`
+— someone actually confirming the cash was collected — moves the payment, and
+therefore the order, to `paid`.
 
 ---
 
@@ -178,20 +249,36 @@ Nothing is ever deleted or destructively rewritten:
 
 - **Reversal** (`reverse_payment_v1`): requires a reason; moves `status` to the
   terminal `reversed`; appends a `reversal` event. Allowed only from `pending`/`paid`.
+  Since migration 039, recomputes `orders.payment_status` (§1a) in the same
+  transaction — if another payment for the order is still `paid`, the order
+  correctly stays `paid`; a reversal never downgrades an order a DIFFERENT
+  payment already settled.
 - **Refund** (`refund_payment_v1`): refunded amount is **derived** by summing prior
   `refund` events for the payment — `payments.amount_minor` is never mutated
   (`DATA_MODEL.md` §53). Supports partial refunds; `status` moves to `refunded` only
-  once the cumulative refunded total equals the original amount.
+  once the cumulative refunded total equals the original amount. Since migration
+  039, recomputes `orders.payment_status` (§1a) ONLY on the transition to fully
+  `refunded` — a partial refund leaves the payment (and therefore the order) at
+  `paid`; refunded amounts are tracked in `payment_events`/reconciliation, never on
+  the order itself.
 - **Correction** (`correct_payment_v1`): narrow by design — may only update
   `reference`/`note` (never amount/method/currency, since a wrong amount is a
   reversal-and-re-record situation, not a paperwork fix). Requires
   `payments.override_status` (Owner only) and always appends a `correction` event
-  carrying the before/after values.
+  carrying the before/after values. Untouched by migration 039 — a correction never
+  moves `status`, so it has no Order consequence.
 
 `payment_events` is append-only **at the database level**: `BEFORE UPDATE` and
 `BEFORE DELETE` triggers (`block_payment_event_mutation`) raise unconditionally for
 every role, including `service_role` — this is not merely an RLS policy that a
 service-role bypass could defeat.
+
+The Order axis has no `refunded` state of its own (§1a) — after a full refund or a
+reversal, `sync_order_payment_status_v1` recomputes the order down to whatever the
+*remaining* payments still support (another `paid` payment keeps it `paid`; a
+remaining `pending` one moves it to `pending`; otherwise it returns to `unpaid`).
+"Recompute safely" means exactly this: never a blind downgrade, always a fresh
+aggregate over the order's current payments.
 
 ---
 
@@ -304,44 +391,66 @@ against labeling staff actions as theft/fraud.
 | 34 | `034_payments_domain.sql` | Enums, `payments`/`payment_events`/`payment_evidence` tables, cross-tenant triggers, append-only trigger on `payment_events`, RLS, `payment_reconciliation_summary` view |
 | 35 | `035_payment_rpc.sql` | `record_payment_v1`, `attach_payment_evidence_v1`, `verify_payment_v1`, `reverse_payment_v1`, `refund_payment_v1`, `correct_payment_v1`, privilege grants |
 | 36 | `036_payment_permissions.sql` | Seeds the finer-grained `payments.*` permission keys and role grants |
+| 39 | `039_payment_order_integration.sql` | Adds `sync_order_payment_status_v1`; `CREATE OR REPLACE`s `record_payment_v1`/`verify_payment_v1`/`reverse_payment_v1`/`refund_payment_v1` (same signatures) to call it. No table/column/enum change. |
 
-Numbered 034–036 because the repository's `main` branch had already advanced to
-migration 033 by the time this phase started (the task brief's original 028–029
-placeholder range no longer applied — see the task brief's own numbering note).
-Additive only; no existing migration file was modified.
+Numbered 034–036 (and, for the integration, 039) because the repository's `main`
+branch had already advanced past the task brief's original 028–029 placeholder
+range by the time each phase started (037–038 belong to Conversation ingestion
+work) — see each migration's own numbering note. Additive only; no existing
+migration file's contents were modified by any of these.
 
 ---
 
 ## 14. Hosted Supabase migration status
 
-**NOT APPLIED.** Migrations 034–036 exist only in this repository. Per this phase's
-constraints, no hosted Supabase migration was run. The project owner must apply
-034–036 (in order, after 001–033) to the live APSA Supabase project before any
-production traffic reaches this domain, then run
+**NOT APPLIED.** Migrations 034–036 and 039 exist only in this repository. Per this
+phase's constraints, no hosted Supabase migration was run. The project owner must
+apply 034–036 then 039 (in order, after 001–038) to the live APSA Supabase project
+before any production traffic reaches this domain, then run
 `supabase gen types typescript` to regenerate `src/lib/supabase/types.ts` and remove
 the `as any` casts in `src/server/payments/repository.ts` (same activation step every
 prior domain — Customer, Product, Order, Delivery — has documented in
-`APSA_BUILD_STATUS.md`).
+`APSA_BUILD_STATUS.md`). Migration 039 depends only on 023/026 (Order + its Inventory
+integration) and 034–036 already being applied; it adds no new dependency.
 
 ---
 
 ## 15. Smoke-test checklist (once migrations are applied to a live project)
 
-1. `record_payment_v1` — record a cash payment against a real order; confirm a
-   `payments` row appears with `status='pending'`, `verification_state='unverified'`,
-   and a `created` row in `payment_events`.
+1. `record_payment_v1` — record a cash payment against a real order (starting
+   `orders.payment_status = 'unpaid'`); confirm a `payments` row appears with
+   `status='pending'`, `verification_state='unverified'`, a `created` row in
+   `payment_events`, AND that the order's `payment_status` moved to `'pending'`
+   with a new `order_status_history` row (`axis='payment'`).
 2. Re-run the exact same `recordPayment` call with the same `idempotencyKey` — confirm
-   no second row is created and the same `payment_id` is returned.
-3. `attachEvidence` — attach a screenshot to the payment; confirm `payments.status`
-   and `verification_state` are unchanged.
-4. `verifyPayment(..., 'staff_confirmed')` — confirm `status` becomes `paid` and an
-   immutable `staff_confirmed` event is recorded with the acting user id.
+   no second `payments` row is created, the same `payment_id` is returned, and the
+   order's `payment_status` is unaffected (still `'pending'`, no duplicate history row).
+3. `attachEvidence` — attach a screenshot to the payment; confirm `payments.status`,
+   `verification_state`, AND `orders.payment_status` are all unchanged.
+4. `verifyPayment(..., 'staff_confirmed')` — confirm the payment's `status` becomes
+   `paid`, an immutable `staff_confirmed` event is recorded with the acting user id,
+   AND `orders.payment_status` becomes `'paid'` in the same transaction (a second
+   `order_status_history` row, `axis='payment'`, `from='pending'`, `to='paid'`).
 5. Attempt a direct `UPDATE`/`DELETE` on a `payment_events` row via the SQL editor as
    `service_role` — confirm it is rejected by `block_payment_event_mutation`.
-6. `refundPayment` for a partial amount, then again for the remainder — confirm
-   `status` stays `paid` after the first call and becomes `refunded` only after the
-   second, with two separate `refund` events.
-7. Attempt any of the six RPCs as the `anon` or `authenticated` role directly against
-   PostgREST — confirm `permission denied for function ...`.
-8. Confirm `orders.payment_status` on the same order is completely unaffected by every
-   step above.
+6. `refundPayment` for a partial amount, then again for the remainder — confirm the
+   payment's `status` stays `paid` after the first call (and `orders.payment_status`
+   stays `'paid'` too — no order consequence from a partial refund) and both become
+   `'refunded'`/`'unpaid'` respectively only after the second call, with two separate
+   `refund` events on the payment and one new `order_status_history` row.
+7. Attempt any of the six RPCs (or `sync_order_payment_status_v1` directly) as the
+   `anon` or `authenticated` role directly against PostgREST — confirm
+   `permission denied for function ...` for every one of them.
+8. Record a SECOND payment against a different, already-`'paid'` order, then let
+   that second payment's verification fail (`mismatch`) — confirm the order STAYS
+   `'paid'` (the aggregate rule, §1a: an unrelated failed attempt never downgrades
+   an order a different payment already settled).
+9. Reverse the payment that made an order `'paid'` (with no other active payment on
+   that order) — confirm `orders.payment_status` recomputes to `'unpaid'`, and that
+   the original `payments` row (now `status='reversed'`) and its full event history
+   remain visible and unmodified.
+10. Confirm a COD payment (`method: 'cod'`) leaves the order at `'pending'`, not
+    `'paid'`, until a subsequent `verifyPayment` call — Delivery's own status
+    transitions (`create_delivery_v1`/`transition_delivery_status_v1`, migration 027)
+    must never move `orders.payment_status` regardless of how far the delivery
+    progresses.

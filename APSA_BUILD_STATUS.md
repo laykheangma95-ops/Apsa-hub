@@ -2,8 +2,8 @@
 
 **File:** `APSA_BUILD_STATUS.md`
 **Project:** APSA — Cambodian Business Operating System / Social Commerce OS
-**Last updated:** 2026-09-05
-**Branch:** `claude/payment-domain-rebuild-xai15k` (Payment domain foundation rebuild)
+**Last updated:** 2026-09-10
+**Branch:** `claude/payment-domain-order-integration-izti1t` (Payment ↔ Order transactional integration)
 **Purpose:** Single source of truth for what is built, what is mock-only, what Lovable must still deliver, what Claude Code must productionize, and what is intentionally post-MVP.
 
 > **Rule:** Read CORRECTIONS.md before acting on any status here. CORRECTIONS.md overrides this file.
@@ -589,21 +589,25 @@ identically to path (1) for anyone who reaches it via a Smart Action.
 
 ### 18. Payments
 
-**Status:** `PARTIAL` — Backend foundation BUILT; not applied to hosted Supabase; no UI
+**Status:** `PARTIAL` — Backend foundation AND transactional Order integration BUILT;
+not applied to hosted Supabase; no UI
 
-**What exists today (backend foundation — 2026-09-05):**
+**What exists today (backend foundation — 2026-09-05; Order integration — 2026-09-10):**
 
 | Area | Status | Files |
 |---|---|---|
 | Migration 034: payments/payment_events/payment_evidence domain | WRITTEN | `supabase/migrations/034_payments_domain.sql` |
 | Migration 035: Payment RPCs (record/evidence/verify/reverse/refund/correct) | WRITTEN | `supabase/migrations/035_payment_rpc.sql` |
 | Migration 036: `payments.*` permission vocabulary (§17) | WRITTEN | `supabase/migrations/036_payment_permissions.sql` |
+| Migration 039: Payment ↔ Order transactional integration (`sync_order_payment_status_v1`) | WRITTEN | `supabase/migrations/039_payment_order_integration.sql` |
 | Payment domain (types/state-machine/repository/service/integrations/reconciliation) | BUILT | `src/server/payments/` |
 | Payment server functions | BUILT | `src/api/payments.ts` |
 | Payment domain tests (71 tests) | PASSING | `src/tests/payment-domain.test.ts` |
-| Rollout / architecture doc | WRITTEN | `supabase/PAYMENTS.md` |
+| Payment ↔ Order integration tests (49 tests) | PASSING | `src/tests/payment-order-integration.test.ts` |
+| Order domain's direct payment-axis mutator closed (`transitionPaymentStatus`) | UPDATED | `src/server/orders/service.ts`, `src/server/orders/state-machine.ts` |
+| Rollout / architecture doc | UPDATED | `supabase/PAYMENTS.md` |
 
-Two independent axes (`status`: pending/paid/failed/reversed/refunded;
+Two independent Payment axes (`status`: pending/paid/failed/reversed/refunded;
 `verification_state`: unverified/staff_confirmed/manager_verified/bank_verified/
 mismatch/duplicate_suspected). `status` is a derived consequence of a verification
 transition, never set independently. Evidence (screenshots/QR/receipts) can never by
@@ -615,35 +619,51 @@ anywhere — `src/server/payments/integrations.ts` defines a provider-agnostic
 verification adapter contract with a manual-only default; no live bank/KHQR
 integration is wired.
 
-**Deliberately NOT built in this phase:** any `orders.payment_status` integration
-(Payment Domain does not write to the `orders` table at all — see
-`supabase/PAYMENTS.md` §1), any UI (`/app/payments`, in-order payment recording
+**Payment ↔ Order transactional integration (migration 039, `supabase/PAYMENTS.md`
+§1/§1a):** this Payment domain is now the SOLE authoritative driver of
+`orders.payment_status` (unpaid/pending/paid/failed). `record_payment_v1` /
+`verify_payment_v1` / `reverse_payment_v1` / `refund_payment_v1` each call a new
+`sync_order_payment_status_v1` function — inside their own transaction, never a
+second TypeScript call — which recomputes the order's coarse payment status from a
+deterministic aggregate over ALL of its payments (`paid` beats `pending` beats
+`failed` beats `unpaid`) and applies it via the existing `transition_order_status_v1`
+(migration 026), the same pattern used for the Inventory integration. The Order
+domain's own generic mutator, `transitionPaymentStatus()`
+(`src/server/orders/service.ts`), now unconditionally refuses every call (403 for a
+caller lacking `payments.confirm`, else 409 pointing at the Payment Domain) — closing
+what was previously a second, independent way to write `orders.payment_status` with
+no payment record required at all. `src/server/payments/service.ts`/`repository.ts`
+remain completely unmodified — no import of `@/server/orders` — the bridge is SQL
+calling SQL, not TypeScript calling TypeScript.
+
+**Deliberately still NOT built:** any UI (`/app/payments`, in-order payment recording
 widgets), any live bank/API adapter.
 
-**Activation required:** Apply migrations 034–036 to the live Supabase project (in
-order, after 001–033), then run `supabase gen types typescript` and remove the
-`as any` casts in `src/server/payments/repository.ts`.
+**Activation required:** Apply migrations 034–036 then 039 to the live Supabase
+project (in order, after 001–038), then run `supabase gen types typescript` and
+remove the `as any` casts in `src/server/payments/repository.ts`.
 
 **Repository evidence:** `src/server/payments/`, `src/api/payments.ts`,
-`supabase/migrations/034_*.sql`–`036_*.sql`, `src/tests/payment-domain.test.ts`,
-`supabase/PAYMENTS.md`
+`supabase/migrations/034_*.sql`–`036_*.sql`, `supabase/migrations/039_*.sql`,
+`src/server/orders/service.ts`, `src/server/orders/state-machine.ts`,
+`src/tests/payment-domain.test.ts`, `src/tests/payment-order-integration.test.ts`,
+`src/tests/order-domain.test.ts`, `supabase/PAYMENTS.md`
 
 **Source-of-truth doc:** DATA_MODEL.md §50–53 (Payment, PaymentAttempt,
 PaymentProviderEvent, Refund), MVP_ROADMAP.md §14 (Phase 8), PERMISSIONS_MATRIX.md §17
 (Payments), SECURITY.md §§41–44
 
-**Owner:** Claude Code (backend foundation complete this phase); Claude Code, next
-phase (Payment ↔ Order transactional integration, live bank adapter); Lovable
-(payments list/reconciliation UI — not started)
+**Owner:** Claude Code (backend foundation and Payment ↔ Order transactional
+integration both complete); Claude Code, future work (live bank/KHQR adapter behind
+`PaymentVerificationAdapter`); Lovable (payments list/reconciliation UI — not started)
 
 **Dependencies:** Order domain (BUILT), Authentication, RBAC, Supabase project
-credentials for migration application (034–036)
+credentials for migration application (034–036, 039)
 
-**Next action:** Project owner — apply migrations 034–036. Claude Code, next phase —
-wire this domain as the sole authoritative driver of `orders.payment_status` (one
-atomic RPC-level change, the same pattern migration 026 used for Inventory), then
-integrate a real bank/KHQR adapter behind `PaymentVerificationAdapter`. Lovable — build
-`/app/payments` reconciliation list once the API is live.
+**Next action:** Project owner — apply migrations 034–036 then 039. Claude Code,
+future work — integrate a real bank/KHQR adapter behind `PaymentVerificationAdapter`
+(no schema or domain-layer change required — see `supabase/PAYMENTS.md` §11). Lovable
+— build `/app/payments` reconciliation list once the API is live.
 
 ---
 

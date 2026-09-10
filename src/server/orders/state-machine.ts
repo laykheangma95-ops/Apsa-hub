@@ -113,19 +113,35 @@ export const LIFECYCLE_TRANSITIONS: Readonly<
  *   failed  -> pending   retry
  *   failed  -> paid      retried and succeeded (or settled in cash instead)
  *   failed  -> unpaid    give up on the attempt without closing the order
- *   paid                 terminal IN THIS PHASE
+ *   paid    -> pending   a payment that made this order paid was reversed,
+ *                         but another payment is still active/unsettled
+ *   paid    -> failed    likewise, but the only remaining payment failed
+ *   paid    -> unpaid    every payment behind this order was reversed or
+ *                         fully refunded and nothing else is active
  *
- * `paid` is terminal only because refunds do not exist yet. When the Payment
- * Records domain lands it gains exits to `refunded` / `partially_refunded`;
- * until then, leaving it open would mean an order could silently walk back out
- * of paid with no refund record to explain where the money went.
+ * The Payment Records domain (migrations 034–036, wired in by migration 039)
+ * has landed, so `paid` is no longer terminal — but this axis still has no
+ * `refunded` / `partially_refunded` state of its own (deliberately: it stays
+ * COARSE, per the task brief). A reversal or full refund is recorded in full
+ * detail by the Payment domain (payments/payment_events); what reaches THIS
+ * axis is only the recomputed coarse aggregate — see
+ * sync_order_payment_status_v1 (migration 039) for the exact rule
+ * (paid > pending > failed > unpaid across all of the order's payments).
+ *
+ * These three new exits from `paid` are reachable ONLY through that
+ * aggregate recompute, called exclusively from inside
+ * record/verify/reverse/refund_payment_v1. transitionPaymentStatus() below
+ * — the Order domain's own generic payment-axis mutator — no longer performs
+ * ANY transition (see its own doc comment): "Order.paymentStatus must never
+ * be changed directly by... generic Order update. Only Payment Domain may
+ * produce financial state changes" (task brief).
  */
 export const PAYMENT_TRANSITIONS: Readonly<
   Record<OrderPaymentStatus, readonly OrderPaymentStatus[]>
 > = {
   unpaid: ["pending", "paid", "failed"],
   pending: ["paid", "failed", "unpaid"],
-  paid: [],
+  paid: ["pending", "failed", "unpaid"],
   failed: ["pending", "paid", "unpaid"],
 };
 
@@ -298,14 +314,15 @@ export const LIFECYCLE_TRANSITION_PERMISSIONS: Readonly<
 };
 
 /**
- * Every payment_status transition requires payments.confirm ("Manually confirm
- * payments", high risk — migration 003).
- *
- * Marking an order failed or pending is the same manual money-handling
- * authority as marking it paid: whoever can say "the transfer arrived" is
- * whoever can say "it did not". Finer keys (payments.record, payments.mark_cod,
- * payments.override_status from §17) arrive with the Payment Records domain,
- * which is what makes them distinguishable.
+ * Retained only so transitionPaymentStatus() in src/server/orders/service.ts
+ * keeps checking the SAME permission (payments.confirm, migration 003) it
+ * always required before refusing every call outright (migration 039 — see
+ * that function's own doc comment). An unauthorized caller still sees 403
+ * Forbidden exactly as before; only an authorized caller's outcome changed,
+ * from "performs the transition" to "refused — use the Payment Domain".
+ * Finer keys (payments.record, payments.mark_cod, payments.verify,
+ * payments.reverse, payments.refund, §17) are what actually govern
+ * orders.payment_status now, via migration 039's atomic integration.
  */
 export const PAYMENT_TRANSITION_PERMISSION = "payments.confirm";
 

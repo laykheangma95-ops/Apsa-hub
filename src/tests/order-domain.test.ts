@@ -870,12 +870,12 @@ describe("Test 11: Payment transitions", () => {
     }
   });
 
-  it("rejects transitions out of 'paid' — refunds do not exist in this phase", async () => {
+  it("'paid' has exits now that the Payment domain is wired in (migration 039) — reachable only via its aggregate recompute, never via transitionPaymentStatus", async () => {
     const { isValidPaymentTransition, PAYMENT_TRANSITIONS } =
       await import("../server/orders/state-machine");
-    expect(PAYMENT_TRANSITIONS.paid).toEqual([]);
+    expect(PAYMENT_TRANSITIONS.paid).toEqual(["pending", "failed", "unpaid"]);
     for (const to of ["unpaid", "pending", "failed"] as const) {
-      expect(isValidPaymentTransition("paid", to)).toBe(false);
+      expect(isValidPaymentTransition("paid", to)).toBe(true);
     }
   });
 
@@ -885,23 +885,25 @@ describe("Test 11: Payment transitions", () => {
     expect(ordersMigration()).not.toMatch(/'refunded'|'partially_refunded'|'partially_paid'/);
   });
 
-  it("the service refuses an invalid payment transition", async () => {
+  it("the service refuses EVERY payment transition, valid target or not — direct Order payment mutation is closed (migration 039)", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
     const calls = await withOrderDb(
-      { tables: { orders: orderRow({ payment_status: "paid" }) } },
+      { tables: { orders: orderRow({ payment_status: "unpaid" }) } },
       async (recorded) => {
-        const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "unpaid"));
-        expect(err.message).toContain("Cannot move payment status from 'paid' to 'unpaid'");
+        const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
+        expect(err.message).toContain("Payment Domain");
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
         return recorded;
       },
     );
+    // Never even reads the order — an authorized caller learns nothing about
+    // its current state, and certainly never reaches transition_order_status_v1.
     expect(calls).toHaveLength(0);
   });
 
-  it("the service performs a valid payment transition through the RPC", async () => {
+  it("no order/payment_status combination lets a direct call through the RPC", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
@@ -915,19 +917,17 @@ describe("Test 11: Payment transitions", () => {
         rpc: { transition_order_status_v1: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
-        await transitionPaymentStatus(ctx, ORDER_ID, "paid", "Cash at counter");
+        await expectRejects(() =>
+          transitionPaymentStatus(ctx, ORDER_ID, "paid", "Cash at counter"),
+        );
         return recorded;
       },
     );
 
-    expect(calls[0]!.fn).toBe("transition_order_status_v1");
-    expect(calls[0]!.args["p_axis"]).toBe("payment");
-    expect(calls[0]!.args["p_expected_from"]).toBe("unpaid");
-    expect(calls[0]!.args["p_to"]).toBe("paid");
-    expect(calls[0]!.args["p_changed_by"]).toBe(USER_ORG_A);
+    expect(calls).toHaveLength(0);
   });
 
-  it("payment transitions require payments.confirm", async () => {
+  it("payment transitions still require payments.confirm — an unauthorized caller is 403, not 409", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read", "orders.update"]);
     await expectForbidden(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
@@ -1002,8 +1002,8 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
     expect(isValidLifecycleTransition("confirmed", "draft")).toBe(false);
   });
 
-  it("a cancelled order accepts no further transition on any axis", async () => {
-    const { transitionPaymentStatus, transitionFulfillmentStatus, transitionLifecycleStatus } =
+  it("a cancelled order accepts no further transition on the two axes the Order domain still drives directly", async () => {
+    const { transitionFulfillmentStatus, transitionLifecycleStatus } =
       await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
@@ -1015,7 +1015,6 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       },
       async () => {
         for (const call of [
-          () => transitionPaymentStatus(ctx, ORDER_ID, "paid"),
           () => transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
           () => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
         ]) {
@@ -1027,14 +1026,37 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
     );
   });
 
-  it("a completed order is likewise frozen", async () => {
+  it("the payment axis refuses a direct call regardless of lifecycle state, cancelled included — it never even reads the order to check", async () => {
     const { transitionPaymentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
     await withOrderDb(
-      { tables: { orders: orderRow({ lifecycle_status: "completed" }) } },
+      {
+        tables: {
+          orders: orderRow({ lifecycle_status: "cancelled", fulfillment_status: "cancelled" }),
+        },
+      },
       async () => {
-        const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "failed"));
+        const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
+        expect(err.message).toContain("Payment Domain");
+      },
+    );
+  });
+
+  it("a completed order is likewise frozen on the lifecycle/fulfillment axes", async () => {
+    const { transitionFulfillmentStatus } = await import("../server/orders/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
+
+    await withOrderDb(
+      {
+        tables: {
+          orders: orderRow({ lifecycle_status: "completed", fulfillment_status: "fulfilled" }),
+        },
+      },
+      async () => {
+        const err = await expectRejects(() =>
+          transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
+        );
         expect(err.message).toContain("completed");
       },
     );
@@ -1089,21 +1111,28 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
   });
 
   it("a concurrent transition is surfaced as a conflict, not silently overwritten", async () => {
-    const { transitionPaymentStatus } = await import("../server/orders/service");
+    // Payment-axis coverage of this same RPC mapping now lives in
+    // src/tests/payment-order-integration.test.ts — transitionPaymentStatus
+    // no longer reaches transition_order_status_v1 at all (migration 039).
+    // Fulfillment is used here instead to keep this generic RPC-envelope
+    // behavior covered for an axis the Order domain still drives directly.
+    const { transitionFulfillmentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
 
     await withOrderDb(
       {
-        tables: { orders: orderRow({ payment_status: "unpaid" }) },
+        tables: { orders: orderRow({ fulfillment_status: "unfulfilled" }) },
         rpc: {
           transition_order_status_v1: {
-            data: { status: "stale", current: "paid" },
+            data: { status: "stale", current: "fulfilled" },
             error: null,
           },
         },
       },
       async () => {
-        const err = await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "pending"));
+        const err = await expectRejects(() =>
+          transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
+        );
         expect(err.message).toContain("changed concurrently");
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
       },
@@ -1363,7 +1392,7 @@ describe("Test 17: Browser direct writes are denied", () => {
 });
 
 describe("Test 18: Server-authorized write path", () => {
-  it("a fully permissioned caller completes the whole create → confirm → pay flow", async () => {
+  it("a fully permissioned caller completes create → confirm; 'pay' now belongs to the Payment Domain (migration 039), not this service", async () => {
     const { createOrder, transitionLifecycleStatus, transitionPaymentStatus } =
       await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_ORDER_PERMS);
@@ -1410,22 +1439,18 @@ describe("Test 18: Server-authorized write path", () => {
     expect(confirmCalls[0]!.args["p_axis"]).toBe("lifecycle");
     expect(confirmCalls[0]!.args["p_to"]).toBe("confirmed");
 
-    // Pay.
+    // "Pay" is no longer a step this service can perform at all — see
+    // src/tests/payment-order-integration.test.ts for the real flow
+    // (recordPayment -> verifyPayment, which drives orders.payment_status
+    // transactionally via migration 039's sync_order_payment_status_v1).
     const payCalls = await withOrderDb(
-      {
-        tables: {
-          orders: orderRow({ lifecycle_status: "confirmed", payment_status: "unpaid" }),
-          order_items: oneLine,
-          order_status_history: itemRows([]),
-        },
-        rpc: { transition_order_status_v1: { data: { status: "success" }, error: null } },
-      },
+      { tables: { orders: orderRow({ lifecycle_status: "confirmed", payment_status: "unpaid" }) } },
       async (recorded) => {
-        await transitionPaymentStatus(ctx, ORDER_ID, "paid");
+        await expectRejects(() => transitionPaymentStatus(ctx, ORDER_ID, "paid"));
         return recorded;
       },
     );
-    expect(payCalls[0]!.args["p_to"]).toBe("paid");
+    expect(payCalls).toHaveLength(0);
   });
 });
 
