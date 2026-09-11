@@ -15,6 +15,8 @@ import {
   StatusChip,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
+import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealDeliveries } from "@/lib/api";
 import {
   classifyDeliveryError,
@@ -124,8 +126,12 @@ const SEARCH_DEBOUNCE_MS = 300;
 function DeliveryListScreen() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const capabilities = useCapabilities();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const detailOpen = pathname !== "/app/deliveries" && pathname.startsWith("/app/deliveries/");
+
+  // listDeliveries requires delivery.read (src/server/deliveries/service.ts).
+  const canReadDeliveries = capabilities.can("delivery.read");
 
   const [filterId, setFilterId] = useState<FilterId>("all");
   const [search, setSearch] = useState("");
@@ -159,7 +165,7 @@ function DeliveryListScreen() {
     initialPageParam: 0,
     getNextPageParam: (lastPage, pages) =>
       lastPage.hasMore ? pages.reduce((total, page) => total + page.items.length, 0) : undefined,
-    enabled: !detailOpen,
+    enabled: !detailOpen && canReadDeliveries,
   });
 
   const items = useMemo(
@@ -180,6 +186,23 @@ function DeliveryListScreen() {
   }, [deliveriesQuery.isError, deliveriesQuery.error, navigate]);
 
   if (detailOpen) return <Outlet />;
+
+  /*
+   * No delivery.read: the screen shows only that the member does not have it.
+   * Not the search box, not the filter chips, not a count — a denial must not
+   * describe the data behind it.
+   */
+  if (!canReadDeliveries) {
+    return (
+      <ScreenBleed bottom="nav" surface="raised">
+        <AppHeader title={t("deliveryList.title")} subtitle={t("deliveryList.subtitle")} />
+        <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 lg:max-w-[var(--screen-max-wide)]">
+          <CapabilityDeniedState capabilities={capabilities} />
+        </main>
+        <BottomNav />
+      </ScreenBleed>
+    );
+  }
 
   const errorKind = deliveriesQuery.isError ? classifyDeliveryError(deliveriesQuery.error) : null;
   if (errorKind === "unauthorized") return null; // redirecting, see the effect above

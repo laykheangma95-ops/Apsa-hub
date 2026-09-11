@@ -12,7 +12,9 @@ import {
   StatusChip,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
+import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealOrders } from "@/lib/api";
 import { isChannelSource } from "@/lib/orders";
 import { shortTime } from "@/lib/format";
@@ -85,14 +87,21 @@ function OrderRow({ order }: { order: Order }) {
 function OrderListScreen() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const capabilities = useCapabilities();
   const [createOpen, setCreateOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const detailOpen = pathname !== "/app/orders" && pathname.startsWith("/app/orders/");
 
+  // listOrders requires orders.read and createOrder requires orders.create,
+  // both enforced in src/server/orders/service.ts. A member who reaches this
+  // URL without them gets the denied state here and a 403 from the server.
+  const canReadOrders = capabilities.can("orders.read");
+  const canCreateOrder = capabilities.can("orders.create");
+
   const ordersQuery = useQuery({
     queryKey: ["orders", "real"],
     queryFn: listRealOrders,
-    enabled: !detailOpen,
+    enabled: !detailOpen && canReadOrders,
   });
   const orders = ordersQuery.data ?? [];
 
@@ -114,44 +123,52 @@ function OrderListScreen() {
       <AppHeader
         title={t("orderList.title")}
         subtitle={t("orderList.subtitle")}
-        action={
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            aria-label={t("orderList.newOrder")}
-            className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary text-text-on-action"
-          >
-            <Plus className="size-5" aria-hidden />
-          </button>
-        }
+        {...(canCreateOrder
+          ? {
+              action: (
+                <button
+                  type="button"
+                  onClick={() => setCreateOpen(true)}
+                  aria-label={t("orderList.newOrder")}
+                  className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary text-text-on-action"
+                >
+                  <Plus className="size-5" aria-hidden />
+                </button>
+              ),
+            }
+          : {})}
       />
 
       <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 lg:max-w-[var(--screen-max-wide)]">
-        <div className="overflow-hidden rounded-2xl border border-border-default">
-          {ordersQuery.isLoading ? <ListSkeleton rows={6} /> : null}
+        {!canReadOrders ? <CapabilityDeniedState capabilities={capabilities} /> : null}
 
-          {ordersQuery.isError ? (
-            <OperationalState
-              tone="danger"
-              title={t("orderList.error.title")}
-              body={t("orderList.error.body")}
-              onRetry={() => void ordersQuery.refetch()}
-              className="rounded-none border-0"
-            />
-          ) : null}
+        {canReadOrders ? (
+          <div className="overflow-hidden rounded-2xl border border-border-default">
+            {ordersQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
-          {ordersQuery.isSuccess && orders.length === 0 ? (
-            <OperationalState
-              title={t("orderList.empty.title")}
-              body={t("orderList.empty.body")}
-              className="rounded-none border-0"
-            />
-          ) : null}
+            {ordersQuery.isError ? (
+              <OperationalState
+                tone="danger"
+                title={t("orderList.error.title")}
+                body={t("orderList.error.body")}
+                onRetry={() => void ordersQuery.refetch()}
+                className="rounded-none border-0"
+              />
+            ) : null}
 
-          {orders.map((order) => (
-            <OrderRow key={order.id} order={order} />
-          ))}
-        </div>
+            {ordersQuery.isSuccess && orders.length === 0 ? (
+              <OperationalState
+                title={t("orderList.empty.title")}
+                body={t("orderList.empty.body")}
+                className="rounded-none border-0"
+              />
+            ) : null}
+
+            {orders.map((order) => (
+              <OrderRow key={order.id} order={order} />
+            ))}
+          </div>
+        ) : null}
       </main>
 
       <CreateRealOrderSheet

@@ -19,10 +19,9 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
 import { getOrganizationProfileFn } from "@/api/org";
 import { getAccountProfileFn, signOutFn } from "@/api/auth";
-import { currentRole } from "@/lib/api";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { useLanguage } from "@/lib/i18n";
 import { notifyError } from "@/lib/feedback";
-import { permissionsFor } from "@/lib/permissions";
 import { resolveBusinessSectionView } from "@/lib/settings-view";
 
 export const Route = createFileRoute("/app/settings")({
@@ -47,11 +46,20 @@ export const Route = createFileRoute("/app/settings")({
 
 function BusinessSection() {
   const { t } = useTranslation();
+  const capabilities = useCapabilities();
+  // The profile read requires organization.read server-side. Without it the
+  // whole section is hidden rather than fetched-and-denied — a merchant should
+  // not watch a section load only to tell them it is not theirs.
+  const canRead = capabilities.can("organization.read");
+
   const query = useQuery({
     queryKey: ["settings", "organization-profile"],
     queryFn: () => getOrganizationProfileFn(),
     retry: false,
+    enabled: canRead,
   });
+
+  if (!canRead) return null;
 
   const view = resolveBusinessSectionView(query);
 
@@ -171,9 +179,10 @@ function AppSection() {
 function TeamSection() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const permissions = permissionsFor(currentRole);
+  const capabilities = useCapabilities();
 
-  if (!permissions.manageTeam) return null;
+  // team.read is what listTeamFn requires. No read, no entry point.
+  if (!capabilities.can("team.read")) return null;
 
   return (
     <Section title={t("settings.section.team")}>

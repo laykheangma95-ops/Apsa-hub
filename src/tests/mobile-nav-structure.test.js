@@ -18,9 +18,12 @@ test("/app stays protected with beforeLoad redirects", () => {
 });
 
 test("online-seller mobile tab order stays Home Inbox Resolve Sales More", () => {
+  // Entries that carry permission requirements are multi-line objects now, so
+  // the id may not sit on the same line as the opening brace. Order is what
+  // this test is about.
   assert.match(
     navConfig,
-    /tabs:\s*\[\s*\{ id: "home"[\s\S]*\{ id: "inbox"[\s\S]*\{ id: "resolve"[\s\S]*\{ id: "sales"[\s\S]*\{ id: "more"/,
+    /tabs:\s*\[[\s\S]*id: "home"[\s\S]*id: "inbox"[\s\S]*id: "resolve"[\s\S]*id: "sales"[\s\S]*id: "more"/,
   );
 });
 
@@ -46,8 +49,13 @@ test("resolve and sales sheets keep honest coming-soon states for missing hubs",
   assert.ok(navConfig.includes('availability: "coming-soon"'));
 });
 
-test("mobile shell renders a fixed five-tab navigation and bottom sheets", () => {
-  assert.ok(bottomNav.includes("grid-cols-5"));
+test("mobile shell sizes its tab row from the visible tabs and keeps its bottom sheets", () => {
+  // The tab row is no longer a fixed five: destinations the member has no
+  // server-supported access to are filtered out before it renders, so the
+  // grid is sized from whatever survived.
+  assert.ok(bottomNav.includes("filterBusinessNavConfig"));
+  assert.ok(bottomNav.includes("gridTemplateColumns"));
+  assert.ok(bottomNav.includes("config.tabs.length"));
   assert.ok(bottomNav.includes("fixed inset-x-0 bottom-0 z-50"));
   assert.ok(bottomNav.includes('title={t("nav.resolveSheetTitle")}'));
   assert.ok(bottomNav.includes('title={t("nav.salesSheetTitle")}'));

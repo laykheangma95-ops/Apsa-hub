@@ -11,10 +11,29 @@ const ICONS: Record<QuickActionId, LucideIcon> = {
   sendInvoice: FileText,
 };
 
-const ORDER: QuickActionId[] = ["receivePayment", "newOrder", "addProduct", "sendInvoice"];
+/** Fixed display order. Exported so callers can ask what the grid will render. */
+export const QUICK_ACTION_IDS: readonly QuickActionId[] = [
+  "receivePayment",
+  "newOrder",
+  "addProduct",
+  "sendInvoice",
+];
+
+/** The ids that survive an availability map — the grid renders exactly these. */
+export function visibleQuickActions(
+  available: Partial<Record<QuickActionId, boolean>> | undefined,
+): readonly QuickActionId[] {
+  return QUICK_ACTION_IDS.filter((id) => available?.[id] !== false);
+}
 
 interface QuickActionGridProps {
   onAction?: (id: QuickActionId) => void;
+  /**
+   * Which starting points this member can actually use. An id mapped to false
+   * is left out entirely — a command centre that offers work the server will
+   * refuse is worse than a shorter one. Omitted ids are shown.
+   */
+  available?: Partial<Record<QuickActionId, boolean>> | undefined;
   className?: string;
 }
 
@@ -25,12 +44,15 @@ interface QuickActionGridProps {
  * label — which cannot hyphenate or truncate cleanly — clipped. Two columns
  * with a leading icon give the label a real line to sit on in both languages.
  */
-export function QuickActionGrid({ onAction, className }: QuickActionGridProps) {
+export function QuickActionGrid({ onAction, available, className }: QuickActionGridProps) {
   const { t } = useTranslation();
+  const visible = visibleQuickActions(available);
+
+  if (visible.length === 0) return null;
 
   return (
     <div className={cn("grid grid-cols-2 gap-2", className)}>
-      {ORDER.map((id) => {
+      {visible.map((id) => {
         const Icon = ICONS[id];
         return (
           <button

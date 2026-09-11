@@ -604,9 +604,6 @@ export interface OrderDetail {
   staffName: string | null;
 }
 
-/** Current session role. Mocked; a real app resolves it from auth. */
-export const currentRole: StaffRole = "manager";
-
 export async function getOrderDetail(id: string): Promise<OrderDetail> {
   const order = orders.find((o) => o.id === id || o.code === id);
   if (!order) throw new Error(`Order ${id} not found`);

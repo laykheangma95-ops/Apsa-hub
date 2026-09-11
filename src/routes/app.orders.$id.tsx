@@ -36,7 +36,6 @@ import {
   confirmRealOrder,
   createRefund,
   createReturn,
-  currentRole,
   getCouriers,
   getOrderDetail,
   getRealOrderDetail,
@@ -57,7 +56,7 @@ import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliver
 import { fullTimestamp, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { addMoney, formatMoney, subtractMoney, usd } from "@/lib/money";
-import { permissionsFor } from "@/lib/permissions";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { cn } from "@/lib/utils";
 import type { OrderEvent, PaymentRecord } from "@/types";
 
@@ -121,6 +120,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const errorCopy = useOrderErrorCopy();
+  const capabilities = useCapabilities();
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
@@ -198,8 +198,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   const { order } = query.data!;
   const items = order.items;
-  const canConfirm = canConfirmOrder(order.lifecycleStatus);
-  const canCancel = canCancelOrder(order.lifecycleStatus);
+  // State says the transition is possible; the capability snapshot says this
+  // member may ask for it. Both must hold for the control to appear, and the
+  // server checks the permission again on the transition itself
+  // (src/server/orders/state-machine.ts).
+  const canConfirm = canConfirmOrder(order.lifecycleStatus) && capabilities.can("orders.confirm");
+  const canCancel = canCancelOrder(order.lifecycleStatus) && capabilities.can("orders.cancel");
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
 
@@ -443,7 +447,7 @@ function MockOrderDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { language } = useLanguage();
-  const permissions = permissionsFor(currentRole);
+  const capabilities = useCapabilities();
 
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [returnOpen, setReturnOpen] = useState(false);
@@ -572,7 +576,7 @@ function MockOrderDetailScreen({ id }: { id: string }) {
   const canDeliver =
     !delivery && order.fulfillmentStatus !== "cancelled" && order.deliveryFee.amount > 0;
   const canReturn = order.fulfillmentStatus === "delivered";
-  const canRefund = permissions.refund && paid.amount > 0;
+  const canRefund = capabilities.can("payments.refund") && paid.amount > 0;
 
   /** Exactly one dominant action: the next step the merchant actually owes. */
   const actions = [
@@ -644,7 +648,9 @@ function MockOrderDetailScreen({ id }: { id: string }) {
             <div className="min-w-0">
               <p className="text-body text-text-primary">{localName(customer, language)}</p>
               <p className="text-body-sm tnum text-text-secondary">
-                {permissions.viewCustomerPhone ? customer.phone : t("customer360.hidden")}
+                {capabilities.can("customers.view_sensitive")
+                  ? customer.phone
+                  : t("customer360.hidden")}
               </p>
             </div>
           ) : (

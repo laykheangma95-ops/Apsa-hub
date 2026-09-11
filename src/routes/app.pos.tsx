@@ -15,6 +15,8 @@ import {
   ErrorState,
   ListSkeleton,
 } from "@/design-system";
+import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { PosNotice } from "@/components/pos/PosNotice";
 import { PosCart } from "@/components/pos/PosCart";
 import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
@@ -70,6 +72,14 @@ function PosScreen() {
   const { t } = useTranslation();
   const { language } = useLanguage();
   const reduceMotion = useReducedMotion();
+  const capabilities = useCapabilities();
+  /*
+   * POS exists to take a sale, and taking a sale is createOrder — which
+   * requires orders.create server-side (src/server/orders/service.ts). Without
+   * it there is no honest version of this screen: a merchant would build a
+   * cart the server will refuse at checkout. So the whole entry point closes.
+   */
+  const canSell = capabilities.can("orders.create");
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<ProductCategory | "all">("all");
@@ -99,7 +109,11 @@ function PosScreen() {
   }, []);
 
   const shopQuery = useQuery({ queryKey: ["shop"], queryFn: getActiveShop });
-  const productsQuery = useQuery({ queryKey: ["pos-products"], queryFn: getPosProducts });
+  const productsQuery = useQuery({
+    queryKey: ["pos-products"],
+    queryFn: getPosProducts,
+    enabled: canSell,
+  });
 
   const catalog = productsQuery.data ?? [];
   const filtered = useMemo(() => {
@@ -186,6 +200,18 @@ function PosScreen() {
     },
     offline,
   };
+
+  if (!canSell) {
+    return (
+      <div className="min-h-dvh bg-surface-secondary pb-[var(--nav-clearance)]">
+        <AppHeader title={t("pos.title")} onBack={() => window.history.back()} />
+        <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3">
+          <CapabilityDeniedState capabilities={capabilities} />
+        </main>
+        <BottomNav workspace="business" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-dvh bg-surface-secondary pb-[calc(var(--nav-clearance)+var(--action-bar-height))] lg:pb-0">
