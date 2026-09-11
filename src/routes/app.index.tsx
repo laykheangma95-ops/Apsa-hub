@@ -171,7 +171,7 @@ function BusinessHome() {
         ) : null}
 
         {summary && !isEmpty ? (
-          <div className="stack-section screen-gutter pt-4">
+          <div className="content-in stack-section screen-gutter pt-4">
             {/*
              * What needs doing comes before what already happened. On a phone
              * the merchant sees roughly one screen before scrolling, and that
@@ -182,7 +182,7 @@ function BusinessHome() {
                 <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
                   {t("home.attention")}
                 </h2>
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
                   {summary.attention.map((item) => {
                     const route = ATTENTION_ROUTE[item.id];
                     const to =
@@ -224,7 +224,7 @@ function BusinessHome() {
                 <Sparkline series={summary.revenueSeries} tone="success" />
               </section>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="list-enter grid grid-cols-2 gap-2">
                 {summary.metrics.map((metric) => (
                   <MetricTile
                     key={metric.id}
