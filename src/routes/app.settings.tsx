@@ -23,7 +23,7 @@ import { currentRole } from "@/lib/api";
 import { useLanguage } from "@/lib/i18n";
 import { notifyError } from "@/lib/feedback";
 import { permissionsFor } from "@/lib/permissions";
-import { isPermissionDeniedError } from "@/lib/team-errors";
+import { resolveBusinessSectionView } from "@/lib/settings-view";
 
 export const Route = createFileRoute("/app/settings")({
   head: () => ({
@@ -53,7 +53,9 @@ function BusinessSection() {
     retry: false,
   });
 
-  if (query.isLoading) {
+  const view = resolveBusinessSectionView(query);
+
+  if (view.kind === "loading") {
     return (
       <Section title={t("settings.section.business")}>
         <div className="space-y-2 py-1">
@@ -65,11 +67,9 @@ function BusinessSection() {
     );
   }
 
-  if (query.isError) {
-    // Cashier / Sales / Customer Service never have organization.read — the
-    // Business section simply does not exist for them (not a misleading
-    // "restricted" row). A real infra failure still gets a retry affordance.
-    if (isPermissionDeniedError(query.error)) return null;
+  if (view.kind === "denied") return null;
+
+  if (view.kind === "error") {
     return (
       <Section title={t("settings.section.business")}>
         <OperationalState
@@ -82,7 +82,7 @@ function BusinessSection() {
     );
   }
 
-  const profile = query.data!;
+  const profile = view.profile;
 
   return (
     <Section title={t("settings.section.business")}>
@@ -218,14 +218,19 @@ function SettingsScreen() {
     setSigningOut(true);
     try {
       await signOutFn();
-      // Drop every cached query — protected data must not survive into the
-      // next session (another organization, another user) sharing this tab.
-      queryClient.clear();
       setSignOutOpen(false);
       await navigate({ to: "/sign-in" });
     } catch {
       notifyError(t("settings.security.signOutError"));
     } finally {
+      // Always drop every cached query — even if signOutFn() failed in
+      // transit, the server may have already revoked the session and
+      // cleared cookies, and protected data must not survive into the next
+      // session (another organization, another user) sharing this tab.
+      // Runs after navigate() above so Settings has already unmounted and
+      // this can't trigger a visible unauthenticated refetch/error flash
+      // on this screen first.
+      queryClient.clear();
       setSigningOut(false);
     }
   }

@@ -140,8 +140,9 @@ describe("settings account profile + sign-out audit runtime", () => {
     expect(await getAccountProfileFn()).toBeNull();
   });
 
-  it("signOutFn clears cookies even when the best-effort audit lookup throws", async () => {
+  it("signOutFn still calls client.auth.signOut() (session revocation) even when the best-effort audit lookup throws", async () => {
     deletedCookies.length = 0;
+    let signOutCalled = false;
     mock.module("@tanstack/react-start", () => ({ createServerFn: createServerFnMock() }));
     mockStartServerModule();
     mock.module("@/lib/supabase/server", () => ({
@@ -153,7 +154,10 @@ describe("settings account profile + sign-out audit runtime", () => {
             },
             error: null,
           }),
-          signOut: async () => ({ error: null }),
+          signOut: async () => {
+            signOutCalled = true;
+            return { error: null };
+          },
         },
       }),
       createRefreshClient: () => ({
@@ -170,11 +174,15 @@ describe("settings account profile + sign-out audit runtime", () => {
 
     const { signOutFn } = await import("@/api/auth");
     await expect(signOutFn()).resolves.toBeUndefined();
+    // Revocation and cookie-clearing must never be skipped because the
+    // (later, best-effort) audit step failed.
+    expect(signOutCalled).toBe(true);
     expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
   });
 
-  it("signOutFn clears cookies when the user has no active organization membership (onboarding-only account)", async () => {
+  it("signOutFn calls client.auth.signOut() and clears cookies when the user has no active organization membership (onboarding-only account)", async () => {
     deletedCookies.length = 0;
+    let signOutCalled = false;
     mock.module("@tanstack/react-start", () => ({ createServerFn: createServerFnMock() }));
     mockStartServerModule();
     mock.module("@/lib/supabase/server", () => ({
@@ -186,7 +194,10 @@ describe("settings account profile + sign-out audit runtime", () => {
             },
             error: null,
           }),
-          signOut: async () => ({ error: null }),
+          signOut: async () => {
+            signOutCalled = true;
+            return { error: null };
+          },
         },
       }),
       createRefreshClient: () => ({
@@ -216,6 +227,94 @@ describe("settings account profile + sign-out audit runtime", () => {
 
     const { signOutFn } = await import("@/api/auth");
     await expect(signOutFn()).resolves.toBeUndefined();
+    expect(signOutCalled).toBe(true);
     expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+  });
+
+  it("signOutFn still calls client.auth.signOut() even when getUser() itself throws (user identification failure never blocks revocation)", async () => {
+    deletedCookies.length = 0;
+    let signOutCalled = false;
+    mock.module("@tanstack/react-start", () => ({ createServerFn: createServerFnMock() }));
+    mockStartServerModule();
+    mock.module("@/lib/supabase/server", () => ({
+      createServerClient: () => ({
+        auth: {
+          getUser: async () => {
+            throw new Error("simulated network failure identifying the user");
+          },
+          signOut: async () => {
+            signOutCalled = true;
+            return { error: null };
+          },
+        },
+      }),
+      createRefreshClient: () => ({
+        auth: {
+          refreshSession: async () => ({ data: { session: null }, error: new Error("unused") }),
+        },
+      }),
+      supabaseAdmin: {
+        from: () => {
+          throw new Error("must not be reached — no userId was identified");
+        },
+      },
+    }));
+
+    const { signOutFn } = await import("@/api/auth");
+    await expect(signOutFn()).resolves.toBeUndefined();
+    expect(signOutCalled).toBe(true);
+    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+  });
+
+  it("signOutFn does not hang indefinitely when the audit write never resolves (bounded timeout)", async () => {
+    deletedCookies.length = 0;
+    mock.module("@tanstack/react-start", () => ({ createServerFn: createServerFnMock() }));
+    mockStartServerModule();
+    mock.module("@/lib/supabase/server", () => ({
+      createServerClient: () => ({
+        auth: {
+          getUser: async () => ({
+            data: {
+              user: { id: "user-1", email: "owner@example.com", email_confirmed_at: "2026-01-01" },
+            },
+            error: null,
+          }),
+          signOut: async () => ({ error: null }),
+        },
+      }),
+      createRefreshClient: () => ({
+        auth: {
+          refreshSession: async () => ({ data: { session: null }, error: new Error("unused") }),
+        },
+      }),
+      supabaseAdmin: {
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                order: () => ({
+                  limit: () => ({
+                    // Never resolves — simulates a hung DB call during the
+                    // membership lookup inside the best-effort audit step.
+                    single: () => new Promise(() => {}),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      },
+    }));
+
+    const { signOutFn } = await import("@/api/auth");
+    const start = Date.now();
+    await expect(signOutFn()).resolves.toBeUndefined();
+    const elapsedMs = Date.now() - start;
+    // Cookies must already be cleared (steps 1-3 complete) well before the
+    // bounded audit timeout elapses.
+    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+    // The audit step is capped — signOutFn must still resolve in a bounded
+    // time, not hang forever on the never-resolving membership lookup.
+    expect(elapsedMs).toBeLessThan(4000);
   });
 });

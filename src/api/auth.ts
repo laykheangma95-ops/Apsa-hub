@@ -335,11 +335,35 @@ export const signUpFn = createServerFn()
 
 // ── signOutFn ─────────────────────────────────────────────────────────────────
 //
-// Best-effort audit trail (auth.sign_out — see @/server/auth/audit): logged
-// before the session is revoked, and never allowed to block sign-out. A user
-// with no active organization membership yet (e.g. mid-onboarding) simply
-// gets no audit row — audit_logs.organization_id is NOT NULL, so there is
-// nothing tenant-scoped to attach it to, and sign-out must still succeed.
+// Order matters: (1) identify the user, (2) revoke the Supabase session,
+// (3) clear the hardened cookies, (4) write the best-effort audit row last,
+// bounded by a timeout. Revocation and cookie-clearing must never wait on —
+// or be skipped because of — the audit step. A user with no active
+// organization membership yet (e.g. mid-onboarding) simply gets no audit
+// row — audit_logs.organization_id is NOT NULL, so there is nothing
+// tenant-scoped to attach it to, and sign-out must still succeed.
+//
+// The bounded timeout matters because this runs in a Cloudflare Worker: a
+// truly detached ("fire and forget") promise can be killed once the
+// response is sent, silently dropping the audit write. Awaiting it here
+// (capped, so it can never hang the caller) keeps it inside the handler's
+// own lifetime instead.
+
+const AUDIT_TIMEOUT_MS = 2000;
+
+async function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 async function auditSignOutBestEffort(userId: string): Promise<void> {
   try {
@@ -372,25 +396,41 @@ export const signOutFn = createServerFn().handler(async (): Promise<void> => {
   const { getCookie } = await import("@tanstack/react-start/server");
   const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
 
-  // Revoke the server-side Supabase session (best effort — clears cookies regardless).
+  let userId: string | null = null;
+
   if (accessToken) {
     try {
       // Dynamic import — keeps @/lib/supabase/server out of the client bundle.
       const { createServerClient } = await import("@/lib/supabase/server");
       const client = createServerClient(accessToken);
-      const {
-        data: { user },
-      } = await client.auth.getUser();
-      if (user) {
-        await auditSignOutBestEffort(user.id);
+
+      // 1. Identify the user for the audit step below. Isolated in its own
+      //    try/catch so a getUser() failure can never skip step 2 (revocation).
+      try {
+        const {
+          data: { user },
+        } = await client.auth.getUser();
+        userId = user?.id ?? null;
+      } catch {
+        // Ignore — audit below is best-effort and simply skips without a userId.
       }
+
+      // 2. Revoke the server-side Supabase session promptly.
       await client.auth.signOut();
     } catch {
       // Ignore — cookies are cleared below regardless.
     }
   }
 
+  // 3. Clear the hardened session cookies. Always runs, regardless of the
+  //    outcome of steps above.
   await clearSessionCookies();
+
+  // 4. Best-effort sign-out audit, bounded so it can never delay the caller
+  //    past AUDIT_TIMEOUT_MS.
+  if (userId) {
+    await withTimeout(auditSignOutBestEffort(userId), AUDIT_TIMEOUT_MS);
+  }
 });
 
 // ── getAccountProfileFn ──────────────────────────────────────────────────────
