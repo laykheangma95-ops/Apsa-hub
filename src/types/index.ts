@@ -147,6 +147,7 @@ export type StatusKey =
   | "out_of_stock"
   | "active"
   | "invited"
+  | "suspended"
   // Production Order domain (src/server/orders/state-machine.ts). Distinct
   // vocabulary from the mock statuses above — see that file for why.
   | "draft"
@@ -494,7 +495,7 @@ export interface ConversationDetail extends Conversation {
 
 export type StaffRole = "owner" | "manager" | "cashier" | "sales" | "customer_service";
 
-export type StaffStatus = "active" | "invited";
+export type StaffStatus = "active" | "invited" | "suspended";
 
 export interface Staff {
   id: string;
@@ -552,6 +553,7 @@ export interface AttentionItem {
   id:
     | "unread_conversations"
     | "awaiting_payment"
+    | "payments_needing_review"
     | "awaiting_delivery"
     | "low_stock"
     | "orders_needing_action";
@@ -573,12 +575,24 @@ export interface Metric {
 
 export type MetricRange = "today" | "week" | "month";
 
+export type HomeSection<T> =
+  | { status: "available"; data: T }
+  | { status: "permission_denied" }
+  | { status: "error" }
+  | { status: "truncated" };
+
 export interface HomeSummary {
-  greetingName: string;
-  /** Per-currency net settlement from Payment's ledger-derived view. */
-  revenues: Money[];
-  financialsAvailable: boolean;
-  attention: AttentionItem[];
-  metrics: Metric[];
-  hasActivity: boolean;
+  range: MetricRange;
+  orders: HomeSection<{
+    periodCount: number;
+    awaitingPaymentCount: number;
+    actionNeededCount: number;
+  }>;
+  payments: HomeSection<{ needsReviewCount: number }>;
+  /** Lifetime net collection for the cohort of orders created in the selected period. */
+  finance: HomeSection<{ netCollectedForCreatedOrders: Money[] }>;
+  /** Active variants whose total stock across all modeled locations is <= 0. */
+  inventory: HomeSection<{ outOfStockVariantCount: number }>;
+  /** Latest-attempt delivery actions only; superseded attempts never contribute. */
+  delivery: HomeSection<{ actionCount: number }>;
 }

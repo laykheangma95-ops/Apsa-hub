@@ -14,14 +14,18 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   const { AuthorizationService, ForbiddenError } = await import("@/server/auth/authorization");
   // organization_id is derived from active membership, never client input.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data } = await (supabaseAdmin as any)
+  const { data, error } = await (supabaseAdmin as any)
     .from("memberships")
     .select("organization_id")
     .eq("user_id", session.userId)
     .eq("status", "active")
-    .order("joined_at", { ascending: false })
+    // Keep the same deterministic membership choice as the /app guard.
+    .order("joined_at", { ascending: true })
     .limit(1)
     .single();
+  if (error && (error as { code?: string }).code !== "PGRST116") {
+    throw new Error("Unable to resolve active organization membership");
+  }
   if (!data) throw new ForbiddenError("No active organization membership");
   return AuthorizationService.forRequest(
     session.userId,

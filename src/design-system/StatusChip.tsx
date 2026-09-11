@@ -58,6 +58,7 @@ const MAP: Record<StatusKey, { tone: Tone; icon: LucideIcon }> = {
   out_of_stock: { tone: "danger", icon: PackageX },
   active: { tone: "success", icon: Check },
   invited: { tone: "warning", icon: Clock },
+  suspended: { tone: "neutral", icon: Ban },
   // Production Order domain (src/server/orders/state-machine.ts).
   draft: { tone: "neutral", icon: Clock },
   completed: { tone: "success", icon: CheckCheck },

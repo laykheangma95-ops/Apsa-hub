@@ -96,6 +96,30 @@ function addToBucket(bucket: ReconciliationBucket, row: PaymentReconciliationRow
   bucket.amount.amount += row.amount_minor_total;
 }
 
+/** Existing Payment-domain definition of a currently unresolved review item. */
+export function paymentRowNeedsReview(row: PaymentReconciliationRow): boolean {
+  if (row.status === "reversed" || row.status === "refunded") return false;
+  return (
+    row.verification_state === "duplicate_suspected" ||
+    row.verification_state === "mismatch" ||
+    (row.status === "pending" && row.verification_state === "unverified")
+  );
+}
+
+/**
+ * Count unresolved Payment work without exposing reconciliation amounts.
+ * Evidence attachment never advances payment state, so evidence still awaiting
+ * review remains pending+unverified and is included by the same domain rule.
+ */
+export async function getPaymentAttentionCount(ctx: AuthorizationContext): Promise<number> {
+  ctx.require("payments.read");
+  const rows = await repo.getReconciliationSummary(ctx.organizationId);
+  return rows.reduce(
+    (count, row) => count + (paymentRowNeedsReview(row) ? row.payment_count : 0),
+    0,
+  );
+}
+
 /**
  * Build a per-currency reconciliation summary for the caller's organization.
  *
@@ -176,6 +200,7 @@ export async function getReconciliationSummary(
     const isLive = row.status !== "reversed" && row.status !== "refunded";
 
     if (isLive) {
+      if (paymentRowNeedsReview(row)) addToBucket(summary.needsReview, row);
       switch (row.verification_state) {
         case "bank_verified":
           addToBucket(summary.bankVerified, row);
@@ -188,14 +213,11 @@ export async function getReconciliationSummary(
           break;
         case "duplicate_suspected":
           addToBucket(summary.duplicateSuspected, row);
-          addToBucket(summary.needsReview, row);
           break;
         case "mismatch":
           addToBucket(summary.mismatch, row);
-          addToBucket(summary.needsReview, row);
           break;
         case "unverified":
-          if (row.status === "pending") addToBucket(summary.needsReview, row);
           break;
       }
     }

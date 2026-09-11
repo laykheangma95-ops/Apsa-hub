@@ -119,7 +119,9 @@ export function BottomNav({
     setMoreOpen(false);
   }
 
-  function goTo(to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") {
+  function goTo(
+    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+  ) {
     closeAllSheets();
     void navigate({ to });
   }
@@ -257,7 +259,9 @@ interface MobileTabProps {
   resolveOpen: boolean;
   salesOpen: boolean;
   moreOpen: boolean;
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
+  onRoute: (
+    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+  ) => void;
   onOpenResolve: () => void;
   onOpenSales: () => void;
   onOpenMore: () => void;
@@ -392,7 +396,9 @@ function SheetGroupList({
   onRoute,
 }: {
   groups: readonly MobileNavSheetGroup[];
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
+  onRoute: (
+    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+  ) => void;
 }) {
   const { t } = useTranslation();
 
@@ -417,7 +423,9 @@ function SheetAction({
   onRoute,
 }: {
   action: MobileNavActionConfig;
-  onRoute: (to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders") => void;
+  onRoute: (
+    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+  ) => void;
 }) {
   const { t } = useTranslation();
   const disabled = action.availability === "coming-soon";

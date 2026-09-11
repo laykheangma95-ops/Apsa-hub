@@ -160,6 +160,9 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     queryClient.setQueryData(queryKey, detail);
     setNotice(t("delivery.actionDone"));
     void queryClient.invalidateQueries({ queryKey: ["order", "real", detail?.orderId] });
+    // The Deliveries list shows this order's latest attempt — a transition
+    // changes it, so refresh rather than relying on the default staleTime.
+    void queryClient.invalidateQueries({ queryKey: ["deliveries", "real"] });
   }
 
   function onTransitionError(error: unknown) {

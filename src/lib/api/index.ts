@@ -6,9 +6,12 @@ import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import {
   mapDeliveryDetailToUi,
+  mapDeliveryListPageToUi,
   mapDeliverySummaryToUi,
+  type DeliveryListScope,
   type RealDelivery,
   type RealDeliveryDetail,
+  type RealDeliveryListPage,
 } from "@/lib/deliveries";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
@@ -23,6 +26,7 @@ import {
   orderPayments,
 } from "@/lib/mock/fulfillment";
 import type {
+  CompanionColor,
   Conversation,
   ConversationDetail,
   ConversationStatus,
@@ -73,18 +77,8 @@ export interface ConversationFilter {
 }
 
 export async function getHomeSummary(range: MetricRange = "today"): Promise<HomeSummary> {
-  try {
-    const { getHomeSummaryFn } = await import("@/api/home");
-    return await getHomeSummaryFn({ data: { range } });
-  } catch (err) {
-    // Auth, authorization and server failures must remain visible in production.
-    // Mock data is only valid outside TanStack Start's HTTP runtime.
-    if (isDemoModeError(err)) {
-      const { homeSummaries } = await import("@/lib/mock/home");
-      return resolve(homeSummaries[range]);
-    }
-    throw err;
-  }
+  const { getHomeSummaryFn } = await import("@/api/home");
+  return getHomeSummaryFn({ data: { range } });
 }
 
 function mockGetConversations(filter?: ConversationFilter): Conversation[] {
@@ -771,6 +765,42 @@ export async function listRealDeliveriesForOrder(orderId: string): Promise<RealD
   return rows.map(mapDeliverySummaryToUi);
 }
 
+export interface ListRealDeliveriesOptions {
+  status?: RealDelivery["status"] | undefined;
+  scope?: DeliveryListScope | undefined;
+  /** Matched server-side against the complete latest-per-order set, never against the visible page. */
+  search?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+/**
+ * Production Deliveries list — src/routes/app.deliveries.tsx. One row per
+ * order (latest attempt only), newest first, org-scoped and permission-gated
+ * server-side. No demo-mode fallback: unlike getProducts()/listRealOrders()'s
+ * sibling reads, a list failure here is always a real backend failure and is
+ * surfaced to the merchant as an error state, never masked with mock rows.
+ *
+ * Returns a page, not a bare array: `hasMore` drives "load more" and
+ * `truncated` lets the screen admit when the server could not reach the end of
+ * the history, rather than presenting a short list as the whole truth.
+ */
+export async function listRealDeliveries(
+  options: ListRealDeliveriesOptions = {},
+): Promise<RealDeliveryListPage> {
+  const { listDeliveriesForMerchantFn } = await import("@/api/deliveries");
+  const page = await listDeliveriesForMerchantFn({
+    data: {
+      status: options.status,
+      scope: options.scope,
+      search: options.search,
+      limit: options.limit,
+      offset: options.offset,
+    },
+  });
+  return mapDeliveryListPageToUi(page);
+}
+
 export interface CreateRealDeliveryInput {
   orderId: string;
   /** Manual-provider path (requirement 3: "support the existing backend provider/manual-provider options" — no list-providers endpoint exists yet to offer a providerId picker). */
@@ -1034,8 +1064,60 @@ export async function switchWorkspace(id: string): Promise<WorkspaceSummary> {
   return resolve({ ...next }, 220);
 }
 
+/* --------------- Real Team/Staff integration (production membership domain) --
+ *
+ * Team no longer has its own mock/real id split like Customer/Product — every
+ * call below tries the real server first and falls back to the in-memory mock
+ * roster only on isDemoModeError() (the harness-only "no Start context" case),
+ * exactly like getProducts() above. A real UnauthorizedError/ForbiddenError/DB
+ * failure always propagates so the Team screen's existing error/permission
+ * states are real, not hidden behind mock data.
+ */
+
+type TeamRoleKey = "owner" | "manager" | "cashier" | "sales" | "customer_service";
+
+interface TeamRosterEntry {
+  id: string;
+  name: string;
+  role: TeamRoleKey;
+  status: "active" | "suspended" | "invited";
+  email: string | null;
+  phone: string | null;
+  invitedAt: string | null;
+}
+
+const TEAM_COMPANIONS: Staff["companion"][] = ["nilo", "minto", "vela", "suri", "luma"];
+
+function deriveTeamCompanion(id: string): Staff["companion"] {
+  const sum = id
+    .slice(-12)
+    .split("")
+    .reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return TEAM_COMPANIONS[sum % TEAM_COMPANIONS.length]!;
+}
+
+function mapRosterEntryToStaff(entry: TeamRosterEntry): Staff {
+  return {
+    id: entry.id,
+    name: entry.name,
+    role: entry.role,
+    companion: deriveTeamCompanion(entry.id),
+    status: entry.status,
+    ...(entry.email ? { email: entry.email } : {}),
+    ...(entry.phone ? { phone: entry.phone } : {}),
+    ...(entry.invitedAt ? { invitedAt: entry.invitedAt } : {}),
+  };
+}
+
 export async function getTeam(): Promise<Staff[]> {
-  return resolve(teamMembers.map((m) => ({ ...m })));
+  try {
+    const { listTeamFn } = await import("@/api/team");
+    const rows = (await listTeamFn()) as unknown as TeamRosterEntry[];
+    return rows.map(mapRosterEntryToStaff);
+  } catch (err) {
+    if (isDemoModeError(err)) return resolve(teamMembers.map((m) => ({ ...m })));
+    throw err;
+  }
 }
 
 export interface InviteStaffInput {
@@ -1044,22 +1126,46 @@ export interface InviteStaffInput {
   role: StaffRole;
 }
 
-/** Mock invite. Owner can never be granted through this flow. */
-export async function inviteStaff(input: InviteStaffInput): Promise<Staff> {
+export interface InviteStaffResult extends Staff {
+  /** Present on the real backend — no email/SMS delivery exists yet, so the
+   *  owner copies and shares this link directly (UX_FLOWS.md §53). Absent in
+   *  mock/demo mode. */
+  inviteLink?: string;
+}
+
+function inviteLinkFromToken(token: string): string {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/invite/${token}`;
+}
+
+/** Owner can never be granted through this flow — enforced client-side (mock) and server-side (real). */
+export async function inviteStaff(input: InviteStaffInput): Promise<InviteStaffResult> {
   if (input.role === "owner") throw new Error(PERMISSION_DENIED);
-  const isEmail = input.contact.includes("@");
-  const member: Staff = {
-    id: `staff-${Date.now()}`,
-    name: input.name,
-    role: input.role,
-    companion: "minto",
-    status: "invited",
-    shopId: activeShopId,
-    invitedAt: new Date().toISOString(),
-    ...(isEmail ? { email: input.contact } : { phone: input.contact }),
-  };
-  teamMembers = [...teamMembers, member];
-  return resolve({ ...member }, 260);
+  try {
+    const { inviteStaffFn } = await import("@/api/team");
+    const result = (await inviteStaffFn({
+      data: { email: input.contact.trim(), displayName: input.name, role: input.role },
+    })) as unknown as { invitation: TeamRosterEntry; inviteToken: string };
+    return {
+      ...mapRosterEntryToStaff(result.invitation),
+      inviteLink: inviteLinkFromToken(result.inviteToken),
+    };
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+    const isEmail = input.contact.includes("@");
+    const member: Staff = {
+      id: `staff-${Date.now()}`,
+      name: input.name,
+      role: input.role,
+      companion: "minto",
+      status: "invited",
+      shopId: activeShopId,
+      invitedAt: new Date().toISOString(),
+      ...(isEmail ? { email: input.contact } : { phone: input.contact }),
+    };
+    teamMembers = [...teamMembers, member];
+    return resolve(member, 260);
+  }
 }
 
 function isFinalOwner(id: string): boolean {
@@ -1069,23 +1175,72 @@ function isFinalOwner(id: string): boolean {
 }
 
 export async function changeStaffRole(id: string, role: StaffRole): Promise<Staff> {
-  if (isFinalOwner(id) || role === "owner") throw new Error(PERMISSION_DENIED);
-  teamMembers = teamMembers.map((m) => (m.id === id ? { ...m, role } : m));
-  const member = teamMembers.find((m) => m.id === id)!;
-  return resolve({ ...member }, 220);
+  if (role === "owner") throw new Error(PERMISSION_DENIED);
+  try {
+    const { changeRoleFn } = await import("@/api/team");
+    const updated = (await changeRoleFn({
+      data: { membershipId: id, role },
+    })) as unknown as TeamRosterEntry;
+    return mapRosterEntryToStaff(updated);
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+    if (isFinalOwner(id)) throw new Error(PERMISSION_DENIED);
+    teamMembers = teamMembers.map((m) => (m.id === id ? { ...m, role } : m));
+    const member = teamMembers.find((m) => m.id === id)!;
+    return resolve({ ...member }, 220);
+  }
 }
 
+/** Deactivates (revokes access) without deleting the person or their historical attribution. */
 export async function removeStaff(id: string): Promise<string> {
-  if (isFinalOwner(id)) throw new Error(PERMISSION_DENIED);
-  teamMembers = teamMembers.filter((m) => m.id !== id);
-  return resolve(id, 220);
+  try {
+    const { deactivateMemberFn } = await import("@/api/team");
+    await deactivateMemberFn({ data: { membershipId: id } });
+    return id;
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+    if (isFinalOwner(id)) throw new Error(PERMISSION_DENIED);
+    teamMembers = teamMembers.filter((m) => m.id !== id);
+    return resolve(id, 220);
+  }
 }
 
-export async function resendInvite(id: string): Promise<string> {
-  return resolve(id, 200);
+/** Restores access for a previously deactivated staff member. */
+export async function reactivateStaff(id: string): Promise<Staff> {
+  const { reactivateMemberFn } = await import("@/api/team");
+  const updated = (await reactivateMemberFn({
+    data: { membershipId: id },
+  })) as unknown as TeamRosterEntry;
+  return mapRosterEntryToStaff(updated);
+}
+
+export interface ResendInviteResult {
+  id: string;
+  inviteLink?: string;
+}
+
+export async function resendInvite(id: string): Promise<ResendInviteResult> {
+  try {
+    const { resendInviteFn } = await import("@/api/team");
+    const result = (await resendInviteFn({ data: { invitationId: id } })) as unknown as {
+      invitation: TeamRosterEntry;
+      inviteToken: string;
+    };
+    return { id: result.invitation.id, inviteLink: inviteLinkFromToken(result.inviteToken) };
+  } catch (err) {
+    if (isDemoModeError(err)) return resolve({ id }, 200);
+    throw err;
+  }
 }
 
 export async function cancelInvite(id: string): Promise<string> {
-  teamMembers = teamMembers.filter((m) => m.id !== id);
-  return resolve(id, 200);
+  try {
+    const { cancelInviteFn } = await import("@/api/team");
+    await cancelInviteFn({ data: { invitationId: id } });
+    return id;
+  } catch (err) {
+    if (!isDemoModeError(err)) throw err;
+    teamMembers = teamMembers.filter((m) => m.id !== id);
+    return resolve(id, 200);
+  }
 }

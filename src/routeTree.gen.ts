@@ -19,10 +19,12 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
 import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppTeamRouteImport } from './routes/app.team'
+import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
@@ -78,6 +80,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppDeliveriesRoute = AppDeliveriesRouteImport.update({
+  id: '/deliveries',
+  path: '/deliveries',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppInboxRoute = AppInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
@@ -98,15 +105,20 @@ const AppTeamRoute = AppTeamRouteImport.update({
   path: '/team',
   getParentRoute: () => AppRoute,
 } as any)
+const InviteTokenRoute = InviteTokenRouteImport.update({
+  id: '/invite/$token',
+  path: '/invite/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppCustomersIdRoute = AppCustomersIdRouteImport.update({
   id: '/customers/$id',
   path: '/customers/$id',
   getParentRoute: () => AppRoute,
 } as any)
 const AppDeliveriesIdRoute = AppDeliveriesIdRouteImport.update({
-  id: '/deliveries/$id',
-  path: '/deliveries/$id',
-  getParentRoute: () => AppRoute,
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppDeliveriesRoute,
 } as any)
 const AppInboxIdRoute = AppInboxIdRouteImport.update({
   id: '/$id',
@@ -129,10 +141,12 @@ export interface FileRoutesByFullPath {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -148,10 +162,12 @@ export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -169,10 +185,12 @@ export interface FileRoutesById {
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/team': typeof AppTeamRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
@@ -191,10 +209,12 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -210,10 +230,12 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -230,10 +252,12 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/sign-up'
     | '/verify-email'
+    | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
     | '/app/pos'
     | '/app/team'
+    | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
@@ -251,6 +275,7 @@ export interface RootRouteChildren {
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
+  InviteTokenRoute: typeof InviteTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -325,6 +350,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/deliveries': {
+      id: '/app/deliveries'
+      path: '/deliveries'
+      fullPath: '/app/deliveries'
+      preLoaderRoute: typeof AppDeliveriesRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/inbox': {
       id: '/app/inbox'
       path: '/inbox'
@@ -353,6 +385,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamRouteImport
       parentRoute: typeof AppRoute
     }
+    '/invite/$token': {
+      id: '/invite/$token'
+      path: '/invite/$token'
+      fullPath: '/invite/$token'
+      preLoaderRoute: typeof InviteTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/app/customers/$id': {
       id: '/app/customers/$id'
       path: '/customers/$id'
@@ -362,10 +401,10 @@ declare module '@tanstack/react-router' {
     }
     '/app/deliveries/$id': {
       id: '/app/deliveries/$id'
-      path: '/deliveries/$id'
+      path: '/$id'
       fullPath: '/app/deliveries/$id'
       preLoaderRoute: typeof AppDeliveriesIdRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppDeliveriesRoute
     }
     '/app/inbox/$id': {
       id: '/app/inbox/$id'
@@ -383,6 +422,18 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface AppDeliveriesRouteChildren {
+  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
+}
+
+const AppDeliveriesRouteChildren: AppDeliveriesRouteChildren = {
+  AppDeliveriesIdRoute: AppDeliveriesIdRoute,
+}
+
+const AppDeliveriesRouteWithChildren = AppDeliveriesRoute._addFileChildren(
+  AppDeliveriesRouteChildren,
+)
 
 interface AppInboxRouteChildren {
   AppInboxIdRoute: typeof AppInboxIdRoute
@@ -409,23 +460,23 @@ const AppOrdersRouteWithChildren = AppOrdersRoute._addFileChildren(
 )
 
 interface AppRouteChildren {
+  AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
   AppInboxRoute: typeof AppInboxRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCustomersIdRoute: typeof AppCustomersIdRoute
-  AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppDeliveriesRoute: AppDeliveriesRouteWithChildren,
   AppInboxRoute: AppInboxRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,
   AppCustomersIdRoute: AppCustomersIdRoute,
-  AppDeliveriesIdRoute: AppDeliveriesIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
@@ -440,6 +491,7 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  InviteTokenRoute: InviteTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
