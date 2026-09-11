@@ -468,11 +468,11 @@ function SheetGroupList({
   const { t } = useTranslation();
 
   return (
-    <div className="space-y-5">
+    <div className="list-enter space-y-5">
       {groups.map((group) => (
         <section key={group.id}>
           <h3 className={sheetSectionTitleClass}>{t(group.titleKey)}</h3>
-          <div className="space-y-2">
+          <div className="list-enter space-y-2">
             {group.actions.map((action) => (
               <SheetAction key={action.id} action={action} onRoute={onRoute} />
             ))}
@@ -619,7 +619,7 @@ function RecentOrders({
       ) : null}
 
       {!loading && !error && recentOrders.length > 0 ? (
-        <ul className="mt-3 space-y-2">
+        <ul className="list-enter mt-3 space-y-2">
           {recentOrders.map((order) => (
             <li key={order.id}>
               <button

@@ -12,6 +12,7 @@ import {
   Section,
   SectionRow,
   SectionRows,
+  Spinner,
   StatusChip,
   StatusHero,
   StickyActionBar,
@@ -307,7 +308,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
 
       <div
         className={cn(
-          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "content-in stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
           "pb-[var(--space-screen-bottom)]",
         )}
       >
@@ -509,7 +510,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
 
       <div
         className={cn(
-          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "content-in stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
           "pb-[var(--space-screen-bottom)]",
         )}
       >
@@ -637,8 +638,10 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
           <Button
             className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
             disabled={actionMutation.isPending}
+            aria-busy={actionMutation.isPending}
             onClick={() => actionMutation.mutate(failed ? "retry" : "mark_delivered")}
           >
+            {actionMutation.isPending ? <Spinner /> : null}
             {actionMutation.isPending
               ? t("common.loading")
               : failed

@@ -143,7 +143,7 @@ function OrderListScreen() {
         {!canReadOrders ? <CapabilityDeniedState capabilities={capabilities} /> : null}
 
         {canReadOrders ? (
-          <div className="overflow-hidden rounded-2xl border border-border-default">
+          <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
             {ordersQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
             {ordersQuery.isError ? (

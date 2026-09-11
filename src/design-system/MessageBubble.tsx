@@ -15,7 +15,7 @@ export function MessageBubble({ message, attachment, className }: MessageBubbleP
 
   if (direction === "system") {
     return (
-      <div className={cn("flex justify-center py-2", className)}>
+      <div className={cn("animate-rise flex justify-center py-2", className)}>
         <span className="text-caption rounded-full bg-surface-secondary px-3 py-1 text-text-secondary">
           {body}
         </span>
@@ -28,7 +28,13 @@ export function MessageBubble({ message, attachment, className }: MessageBubbleP
     state === "failed" ? X : state === "sending" ? Clock : state === "read" ? CheckCheck : Check;
 
   return (
-    <div className={cn("flex w-full", outbound ? "justify-end" : "justify-start", className)}>
+    <div
+      className={cn(
+        "animate-rise flex w-full",
+        outbound ? "justify-end" : "justify-start",
+        className,
+      )}
+    >
       <div
         className={cn(
           "max-w-[78%] rounded-2xl px-3.5 py-2.5",

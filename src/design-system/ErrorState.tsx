@@ -16,7 +16,7 @@ export function ErrorState({ title, body, onRetry, showApsi = false, className }
 
   return (
     <div
-      className={cn("flex flex-col items-center px-6 py-10 text-center", className)}
+      className={cn("content-in flex flex-col items-center px-6 py-10 text-center", className)}
       role="alert"
     >
       {showApsi ? <Apsi emotion="supportive" size="md" withCompanion /> : null}

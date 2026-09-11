@@ -14,6 +14,7 @@ import {
   Section,
   SectionRow,
   SectionRows,
+  Spinner,
   StatusChip,
   StatusHero,
   StickyActionBar,
@@ -252,7 +253,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
       <div
         className={cn(
-          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "content-in stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
           "pb-[var(--space-screen-bottom)]",
         )}
       >
@@ -407,8 +408,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
             <Button
               className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={confirmMutation.isPending}
+              aria-busy={confirmMutation.isPending}
               onClick={() => confirmMutation.mutate()}
             >
+              {confirmMutation.isPending ? <Spinner /> : null}
               {confirmMutation.isPending ? t("order.confirming") : t("order.confirmOrder")}
             </Button>
           ) : null}
@@ -599,7 +602,7 @@ function MockOrderDetailScreen({ id }: { id: string }) {
 
       <div
         className={cn(
-          "stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
+          "content-in stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 lg:max-w-[var(--screen-max-wide)]",
           "pb-[var(--space-screen-bottom)]",
         )}
       >

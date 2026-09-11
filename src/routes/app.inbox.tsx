@@ -260,7 +260,7 @@ function InboxLayout() {
               />
             ) : null}
 
-            <ul>
+            <ul className="list-enter">
               {conversations.map((conversation) => {
                 const customer = customersQuery.data?.find((c) => c.id === conversation.customerId);
                 // Production conversations resolve their customer via the real

@@ -46,6 +46,7 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
   return (
     <ul
       className={cn(
+        "list-enter",
         view === "grid"
           ? "grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-3"
           : "divide-y divide-border-default",
