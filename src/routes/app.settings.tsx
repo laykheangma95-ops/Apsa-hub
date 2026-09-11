@@ -14,6 +14,7 @@ import {
   SectionRows,
   SegmentedControl,
   SkeletonBlock,
+  Spinner,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
@@ -143,7 +144,7 @@ function AccountSection() {
 
   return (
     <Section title={t("settings.section.account")}>
-      <SectionRows>
+      <SectionRows className="content-in">
         <SectionRow label={t("settings.account.email")} value={account.email} />
         {account.displayName ? (
           <SectionRow label={t("settings.account.name")} value={account.displayName} />
@@ -284,6 +285,7 @@ function SettingsScreen() {
               aria-busy={signingOut}
               onClick={() => void handleSignOut()}
             >
+              {signingOut ? <Spinner /> : null}
               {signingOut
                 ? t("settings.security.signingOut")
                 : t("settings.security.signOutConfirmAction")}
