@@ -162,7 +162,7 @@
       },
       "settings": {
         "label": "Settings",
-        "description": "Business settings are not in the app yet."
+        "description": "Open your business, account and language settings."
       },
       "profileAccount": {
         "label": "Profile / account",
@@ -1243,5 +1243,47 @@
     "expired": "This invite has expired. Ask the owner to resend it.",
     "alreadyUsed": "This invite has already been used or cancelled.",
     "authorityDenied": "This invite can no longer be completed. Ask the business owner to resend it."
+  },
+  "settings": {
+    "title": "Settings",
+    "subtitle": "Your business, account and language.",
+    "section": {
+      "business": "Business",
+      "account": "Account",
+      "app": "App",
+      "team": "Team",
+      "security": "Security"
+    },
+    "business": {
+      "name": "Business name",
+      "slug": "Shop link",
+      "type": "Business type",
+      "currency": "Currency",
+      "country": "Country",
+      "errorTitle": "Could not load business details",
+      "errorBody": "Check your connection and try again."
+    },
+    "account": {
+      "email": "Email",
+      "name": "Name",
+      "errorTitle": "Could not load your account",
+      "errorBody": "Check your connection and try again."
+    },
+    "app": {
+      "language": "Language",
+      "languageHint": "Changes the app for you only."
+    },
+    "team": {
+      "label": "Team",
+      "description": "See who works here and what they can do."
+    },
+    "security": {
+      "signOut": "Sign out",
+      "signOutConfirmTitle": "Sign out of APSA?",
+      "signOutConfirmBody": "You will need to sign in again to access this business.",
+      "signOutConfirmAction": "Sign out",
+      "signingOut": "Signing out…",
+      "signOutError": "Could not sign you out. Check your connection and try again."
+    }
   }
 }

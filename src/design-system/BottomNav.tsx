@@ -120,7 +120,14 @@ export function BottomNav({
   }
 
   function goTo(
-    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+    to:
+      | "/app"
+      | "/app/inbox"
+      | "/app/pos"
+      | "/app/team"
+      | "/app/orders"
+      | "/app/deliveries"
+      | "/app/settings",
   ) {
     closeAllSheets();
     void navigate({ to });
@@ -260,7 +267,14 @@ interface MobileTabProps {
   salesOpen: boolean;
   moreOpen: boolean;
   onRoute: (
-    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+    to:
+      | "/app"
+      | "/app/inbox"
+      | "/app/pos"
+      | "/app/team"
+      | "/app/orders"
+      | "/app/deliveries"
+      | "/app/settings",
   ) => void;
   onOpenResolve: () => void;
   onOpenSales: () => void;
@@ -397,7 +411,14 @@ function SheetGroupList({
 }: {
   groups: readonly MobileNavSheetGroup[];
   onRoute: (
-    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+    to:
+      | "/app"
+      | "/app/inbox"
+      | "/app/pos"
+      | "/app/team"
+      | "/app/orders"
+      | "/app/deliveries"
+      | "/app/settings",
   ) => void;
 }) {
   const { t } = useTranslation();
@@ -424,7 +445,14 @@ function SheetAction({
 }: {
   action: MobileNavActionConfig;
   onRoute: (
-    to: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries",
+    to:
+      | "/app"
+      | "/app/inbox"
+      | "/app/pos"
+      | "/app/team"
+      | "/app/orders"
+      | "/app/deliveries"
+      | "/app/settings",
   ) => void;
 }) {
   const { t } = useTranslation();
