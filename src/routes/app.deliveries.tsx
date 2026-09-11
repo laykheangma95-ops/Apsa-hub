@@ -257,7 +257,7 @@ function DeliveryListScreen() {
         ) : null}
 
         {showListPanel ? (
-          <div className="overflow-hidden rounded-2xl border border-border-default">
+          <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
             {deliveriesQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
             {errorKind ? (
