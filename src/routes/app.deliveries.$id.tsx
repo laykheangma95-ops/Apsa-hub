@@ -50,8 +50,7 @@ import {
 import { fullTimestamp, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
-import { currentRole } from "@/lib/api";
-import { permissionsFor } from "@/lib/permissions";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { cn } from "@/lib/utils";
 import type { DeliveryAction } from "@/lib/api";
 import type { DeliveryStatus } from "@/types";
@@ -443,7 +442,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { language } = useLanguage();
-  const permissions = permissionsFor(currentRole);
+  const capabilities = useCapabilities();
 
   const [statusOverride, setStatusOverride] = useState<DeliveryStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -593,7 +592,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
             <p className="text-body text-text-primary">{localName(customer, language)}</p>
           ) : null}
           <p className="text-body-sm mt-1 text-text-secondary">
-            {!permissions.viewCustomerAddress
+            {!capabilities.can("customers.view_sensitive")
               ? t("customer360.hidden")
               : customer?.address
                 ? [

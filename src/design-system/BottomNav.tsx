@@ -2,9 +2,10 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Home, Inbox, MoreHorizontal, ShoppingBag, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { LucideIcon } from "lucide-react";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { getOrders } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -12,9 +13,12 @@ import type { Order, Workspace } from "@/types";
 import { BottomSheet } from "./BottomSheet";
 import { ResolveSheet } from "./ResolveSheet";
 import {
+  filterBusinessNavConfig,
   getBusinessNavConfig,
+  isNavEntryAvailable,
   resolveMobileNavActiveTab,
   type BusinessNavVariant,
+  type MobileNavRequirement,
   type MobileNavActionAvailability,
   type MobileNavActionConfig,
   type MobileNavSheetGroup,
@@ -22,7 +26,7 @@ import {
   type MobileNavTabId,
 } from "./mobile-nav-config";
 
-export type NavTab = {
+export type NavTab = MobileNavRequirement & {
   id: string;
   labelKey: string;
   icon: LucideIcon;
@@ -33,11 +37,29 @@ export type NavTab = {
 export const SELLER_TABS: { left: NavTab[]; right: NavTab[] } = {
   left: [
     { id: "home", labelKey: "nav.home", icon: Home, to: "/app", exact: true },
-    { id: "inbox", labelKey: "nav.inbox", icon: Inbox, to: "/app/inbox" },
+    {
+      id: "inbox",
+      labelKey: "nav.inbox",
+      icon: Inbox,
+      to: "/app/inbox",
+      requiresAll: ["messages.read"],
+    },
   ],
   right: [
-    { id: "sales", labelKey: "nav.sales", icon: ShoppingBag, to: "/app/pos" },
-    { id: "more", labelKey: "nav.more", icon: MoreHorizontal, to: "/app/team" },
+    {
+      id: "sales",
+      labelKey: "nav.sales",
+      icon: ShoppingBag,
+      to: "/app/pos",
+      requiresAll: ["orders.create"],
+    },
+    {
+      id: "more",
+      labelKey: "nav.more",
+      icon: MoreHorizontal,
+      to: "/app/team",
+      requiresAll: ["team.read"],
+    },
   ],
 };
 
@@ -98,7 +120,24 @@ export function BottomNav({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const config = getBusinessNavConfig(businessType);
+  const capabilities = useCapabilities();
+  /*
+   * The nav shows destinations, so it shows only the destinations this member
+   * actually has server-supported access to. An unresolved snapshot hides the
+   * gated entries rather than guessing — the routes behind them stay guarded
+   * on the server either way.
+   */
+  const config = useMemo(
+    () => filterBusinessNavConfig(getBusinessNavConfig(businessType), capabilities),
+    [businessType, capabilities],
+  );
+  const visibleTabs = useMemo(
+    () => ({
+      left: tabs.left.filter((tab) => isNavEntryAvailable(tab, capabilities)),
+      right: tabs.right.filter((tab) => isNavEntryAvailable(tab, capabilities)),
+    }),
+    [tabs, capabilities],
+  );
   const activeTab = resolveMobileNavActiveTab(pathname, businessType);
   const isBusiness = workspace === "business";
 
@@ -150,7 +189,7 @@ export function BottomNav({
         )}
       >
         <div className="relative mx-auto flex h-[var(--nav-height)] max-w-[560px] items-stretch px-1">
-          {tabs.left.map((tab) => (
+          {visibleTabs.left.map((tab) => (
             <TabItem key={tab.id} tab={tab} />
           ))}
           <div className="flex flex-1 items-center justify-center">
@@ -166,7 +205,7 @@ export function BottomNav({
               <Sparkles className="size-6" aria-hidden />
             </button>
           </div>
-          {tabs.right.map((tab) => (
+          {visibleTabs.right.map((tab) => (
             <TabItem key={tab.id} tab={tab} />
           ))}
         </div>
@@ -182,7 +221,12 @@ export function BottomNav({
               aria-hidden
               className="pointer-events-none absolute inset-x-10 top-0 h-px bg-[linear-gradient(90deg,rgba(115,183,255,0),rgba(52,120,246,0.45),rgba(115,183,255,0))]"
             />
-            <div className="grid grid-cols-5 items-stretch gap-0.5">
+            <div
+              className="grid items-stretch gap-0.5"
+              style={{
+                gridTemplateColumns: `repeat(${Math.max(config.tabs.length, 1)}, minmax(0, 1fr))`,
+              }}
+            >
               {config.tabs.map((tab) => (
                 <MobileTab
                   key={tab.id}

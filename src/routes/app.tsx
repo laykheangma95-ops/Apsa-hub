@@ -18,7 +18,10 @@
  */
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { checkAppGuardFn } from "@/api/app-guard";
+import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import { AppShell } from "@/design-system";
+import { CapabilityProvider } from "@/hooks/use-capabilities";
+import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
   beforeLoad: async () => {
@@ -34,13 +37,43 @@ export const Route = createFileRoute("/app")({
     };
   },
 
+  /*
+   * Capability snapshot for the signed-in member, fetched after — never
+   * instead of — the guard above. Loading it here rather than from a client
+   * effect means the very first paint is already role-correct: no flash of
+   * actions the member cannot use, and no flash of an empty shell either.
+   *
+   * This is presentation data only. It grants nothing; every action behind it
+   * is authorized independently on the server.
+   */
+  loader: async (): Promise<CapabilityResult | null> => {
+    try {
+      return await getActiveMemberCapabilitiesFn();
+    } catch {
+      // A capability fetch that fails must never take the whole signed-in
+      // shell down with it — the guard above already said this member belongs
+      // here. Returning no seed leaves the provider to fetch and report the
+      // honest "could not check" state, and the UI fails closed meanwhile.
+      return null;
+    }
+  },
+
   component: AppLayout,
 });
 
 function AppLayout() {
+  const { session, organizationId } = Route.useRouteContext();
+  const capabilities = Route.useLoaderData();
+
   return (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <CapabilityProvider
+      userId={session.userId}
+      organizationId={organizationId}
+      initialResult={capabilities ?? undefined}
+    >
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </CapabilityProvider>
   );
 }

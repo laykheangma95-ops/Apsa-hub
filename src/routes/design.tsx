@@ -6,6 +6,8 @@ import { customers } from "@/lib/mock/customers";
 import { conversations } from "@/lib/mock/conversations";
 import { homeSummaries } from "@/lib/mock/home";
 import { staff } from "@/lib/mock/shop";
+import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
+import { UI_PERMISSION_KEYS } from "@/lib/capabilities";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { khr, usd } from "@/lib/money";
@@ -326,7 +328,15 @@ function DesignReference() {
         <p className="text-body text-text-secondary">{t("design.sheetBody")}</p>
       </BottomSheet>
 
-      <BottomNav workspace="business" />
+      {/*
+       * The gallery is not a signed-in surface, so there is no capability
+       * snapshot here. A fixture keeps every nav destination visible for
+       * review; it grants nothing and never runs on an /app route
+       * (src/tests/capability-boundary.test.ts).
+       */}
+      <CapabilityFixtureProvider permissions={UI_PERMISSION_KEYS}>
+        <BottomNav workspace="business" />
+      </CapabilityFixtureProvider>
     </div>
   );
 }

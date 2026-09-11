@@ -1285,5 +1285,16 @@
       "signingOut": "Signing out…",
       "signOutError": "Could not sign you out. Check your connection and try again."
     }
+  },
+  "capability": {
+    "denied": {
+      "title": "You do not have access to this",
+      "body": "Your account does not have permission for this area. Ask an owner or manager of this business if you need it."
+    },
+    "actionDenied": "You do not have permission for this action.",
+    "unavailable": {
+      "title": "Access could not be checked",
+      "body": "APSA could not confirm what you are allowed to do right now. Try again in a moment."
+    }
   }
 }
