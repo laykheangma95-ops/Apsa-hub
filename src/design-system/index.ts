@@ -50,6 +50,7 @@ export { EmptyState } from "./EmptyState";
 export { InlineAction } from "./InlineAction";
 export { ErrorState } from "./ErrorState";
 export { DetailSkeleton, HomeSkeleton, ListSkeleton, SkeletonBlock } from "./LoadingState";
+export { Spinner } from "./Spinner";
 export { MessageBubble } from "./MessageBubble";
 export { MetricTile, Sparkline } from "./MetricTile";
 export { Money } from "./Money";

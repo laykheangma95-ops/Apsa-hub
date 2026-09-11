@@ -46,7 +46,7 @@ export function QuantityStepper({
   };
 
   const buttonClass =
-    "tap-target flex items-center justify-center rounded-lg border border-border-strong bg-surface-primary text-text-primary transition-colors hover:bg-surface-secondary disabled:opacity-40";
+    "press tap-target flex items-center justify-center rounded-lg border border-border-strong bg-surface-primary text-text-primary transition-colors hover:bg-surface-secondary disabled:opacity-40";
 
   return (
     <div className={cn("inline-flex items-center gap-2", className)} role="group">

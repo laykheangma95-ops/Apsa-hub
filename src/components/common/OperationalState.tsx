@@ -30,7 +30,7 @@ export function OperationalState({
     <div
       role={tone === "danger" ? "alert" : "status"}
       className={cn(
-        "rounded-2xl border border-border-default bg-surface-primary px-5 py-6 text-center",
+        "content-in rounded-2xl border border-border-default bg-surface-primary px-5 py-6 text-center",
         className,
       )}
     >
