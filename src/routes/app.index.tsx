@@ -233,13 +233,13 @@ function BusinessHome() {
         ) : null}
 
         {summary ? (
-          <div className="stack-section screen-gutter pt-4">
+          <div className="content-in stack-section screen-gutter pt-4">
             <section aria-labelledby="attention-heading">
               <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
                 {t("home.attention")}
               </h2>
               {attention.length > 0 ? (
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
                   {attention.map((item) => {
                     const route = ATTENTION_ROUTE[item.id];
                     const to =
@@ -300,7 +300,7 @@ function BusinessHome() {
               )}
 
               {metrics.length > 0 ? (
-                <div className="grid grid-cols-2 gap-2">
+                <div className="list-enter grid grid-cols-2 gap-2">
                   {metrics.map((metric) => (
                     <MetricTile
                       key={metric.id}
