@@ -1,10 +1,10 @@
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Check } from "lucide-react";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
-import { BottomSheet, CurrencyInput, ErrorState, StatusChip } from "@/design-system";
+import { BottomSheet, CurrencyInput, ErrorState, Spinner, StatusChip } from "@/design-system";
 import { confirmRealOrder, createRealOrder, createSale, isProductionId } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
@@ -37,6 +37,18 @@ export function PosCheckoutSheet({
 }: PosCheckoutSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const reduceMotion = useReducedMotion();
+
+  /*
+   * The sale is done — one settled confirmation, not a celebration. Inside
+   * the 160–260ms budget like every other transition, and an instant state
+   * change when the merchant asked for reduced motion.
+   */
+  const successMotion = {
+    initial: reduceMotion ? (false as const) : { scale: 0.96, opacity: 0 },
+    animate: { scale: 1, opacity: 1 },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0, 0, 1] as const },
+  };
 
   // A cart reaches the authoritative Order Domain only when EVERY line
   // references a real, DB-backed product and variant. Any mock line (a
@@ -197,9 +209,7 @@ export function PosCheckoutSheet({
         <motion.div
           role="status"
           className="flex flex-col items-center py-6 text-center"
-          initial={{ scale: 0.94, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ duration: 0.42, ease: [0.34, 1.3, 0.64, 1] }}
+          {...successMotion}
         >
           <span
             className="flex size-14 items-center justify-center rounded-full text-text-inverse"
@@ -275,9 +285,7 @@ export function PosCheckoutSheet({
         <motion.div
           role="status"
           className="flex flex-col items-center py-6 text-center"
-          initial={{ scale: 0.94, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ duration: 0.42, ease: [0.34, 1.3, 0.64, 1] }}
+          {...successMotion}
         >
           <span
             className="flex size-14 items-center justify-center rounded-full text-text-inverse"
@@ -326,8 +334,10 @@ export function PosCheckoutSheet({
                 <Button
                   className="tap-target w-full"
                   disabled={submitting}
+                  aria-busy={submitting}
                   onClick={() => void completeReal()}
                 >
+                  {submitting ? <Spinner /> : null}
                   {submitting ? t("pos.confirming") : t("pos.confirmSale")}
                 </Button>
               )}
@@ -417,8 +427,10 @@ export function PosCheckoutSheet({
           <Button
             className="tap-target w-full"
             disabled={submitting || offline || lines.length === 0}
+            aria-busy={submitting}
             onClick={() => void completeReal()}
           >
+            {submitting ? <Spinner /> : null}
             {submitting ? t("pos.confirming") : t("pos.confirmSale")}
           </Button>
         </div>
@@ -477,7 +489,7 @@ export function PosCheckoutSheet({
                   aria-pressed={method === value}
                   onClick={() => setMethod(value)}
                   className={cn(
-                    "tap-target rounded-xl border px-3 text-label transition-colors",
+                    "press tap-target rounded-xl border px-3 text-label transition-colors",
                     method === value
                       ? "border-action-primary bg-action-primary-soft text-action-primary"
                       : "border-border-strong bg-surface-primary text-text-primary",
@@ -544,11 +556,15 @@ export function PosCheckoutSheet({
           <Button
             className="tap-target w-full"
             disabled={submitting || offline || shortfall || lines.length === 0}
+            aria-busy={submitting}
             onClick={() => void complete()}
           >
-            {method === "khqr" || method === "bank_transfer"
-              ? t("pos.markPaid")
-              : t("pos.completeSale")}
+            {submitting ? <Spinner /> : null}
+            {submitting
+              ? t("pos.confirming")
+              : method === "khqr" || method === "bank_transfer"
+                ? t("pos.markPaid")
+                : t("pos.completeSale")}
           </Button>
         </div>
       )}
