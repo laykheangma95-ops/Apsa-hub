@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { AlertTriangle, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,7 +18,6 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { listRealDeliveries } from "@/lib/api";
 import {
   classifyDeliveryError,
-  filterDeliveryListBySearch,
   type RealDeliveryListItem,
   type RealDeliveryStatus,
 } from "@/lib/deliveries";
@@ -117,6 +116,11 @@ function DeliveryRow({ item }: { item: RealDeliveryListItem }) {
   );
 }
 
+/** One page of derived (latest-per-order) results per request. */
+const PAGE_SIZE = 50;
+/** Long enough that a fast typist issues one request, short enough to feel live. */
+const SEARCH_DEBOUNCE_MS = 300;
+
 function DeliveryListScreen() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -125,18 +129,46 @@ function DeliveryListScreen() {
 
   const [filterId, setFilterId] = useState<FilterId>("all");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const activeFilter = FILTER_CHIPS.find((c) => c.id === filterId) ?? FILTER_CHIPS[0]!;
 
-  const deliveriesQuery = useQuery({
-    queryKey: ["deliveries", "real", activeFilter.scope ?? null, activeFilter.status ?? null],
-    queryFn: () => listRealDeliveries({ scope: activeFilter.scope, status: activeFilter.status }),
+  // The search term goes to the server rather than narrowing the rows already
+  // on screen: a delivery two pages down still has to be findable, and only
+  // the server can see the complete authorized set.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [search]);
+
+  const deliveriesQuery = useInfiniteQuery({
+    queryKey: [
+      "deliveries",
+      "real",
+      activeFilter.scope ?? null,
+      activeFilter.status ?? null,
+      debouncedSearch || null,
+    ],
+    queryFn: ({ pageParam }) =>
+      listRealDeliveries({
+        scope: activeFilter.scope,
+        status: activeFilter.status,
+        search: debouncedSearch || undefined,
+        limit: PAGE_SIZE,
+        offset: pageParam,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, pages) =>
+      lastPage.hasMore ? pages.reduce((total, page) => total + page.items.length, 0) : undefined,
     enabled: !detailOpen,
   });
-  const deliveries = useMemo(() => deliveriesQuery.data ?? [], [deliveriesQuery.data]);
-  const filtered = useMemo(
-    () => filterDeliveryListBySearch(deliveries, search),
-    [deliveries, search],
+
+  const items = useMemo(
+    () => deliveriesQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [deliveriesQuery.data],
   );
+  // Any page that hit the server's scan ceiling makes the whole list partial.
+  const truncated = deliveriesQuery.data?.pages.some((page) => page.truncated) ?? false;
+  const searching = debouncedSearch.length > 0;
 
   useEffect(() => {
     if (
@@ -151,6 +183,14 @@ function DeliveryListScreen() {
 
   const errorKind = deliveriesQuery.isError ? classifyDeliveryError(deliveriesQuery.error) : null;
   if (errorKind === "unauthorized") return null; // redirecting, see the effect above
+
+  // An empty result is now a statement of fact, not an artefact of a capped
+  // read — unless the scan was truncated, which gets its own honest copy.
+  const showEmpty = deliveriesQuery.isSuccess && items.length === 0 && !truncated;
+  // A truncated scan with nothing to show is explained by the notice above, so
+  // the list panel would otherwise render as a bare 1px border.
+  const showListPanel =
+    deliveriesQuery.isLoading || Boolean(errorKind) || showEmpty || items.length > 0;
 
   return (
     <ScreenBleed bottom="nav" surface="raised">
@@ -171,11 +211,10 @@ function DeliveryListScreen() {
           />
         </div>
 
-        <ChipRow label={t("deliveryList.filtersLabel")} role="tablist" className="mb-3">
+        <ChipRow label={t("deliveryList.filtersLabel")} className="mb-3">
           {FILTER_CHIPS.map((chip) => (
             <Chip
               key={chip.id}
-              role="tab"
               selected={chip.id === filterId}
               onClick={() => setFilterId(chip.id)}
             >
@@ -184,60 +223,87 @@ function DeliveryListScreen() {
           ))}
         </ChipRow>
 
-        <div className="overflow-hidden rounded-2xl border border-border-default">
-          {deliveriesQuery.isLoading ? <ListSkeleton rows={6} /> : null}
+        {truncated ? (
+          <div
+            role="status"
+            className="text-caption mb-3 flex items-start gap-2 rounded-xl bg-status-warning-soft px-3 py-2 text-status-warning-text"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <span>{t("deliveryList.partial")}</span>
+          </div>
+        ) : null}
 
-          {errorKind ? (
-            <OperationalState
-              tone="danger"
-              title={
-                errorKind === "forbidden" ? t("deliveryList.denied") : t("deliveryList.error.title")
-              }
-              body={
-                errorKind === "forbidden"
-                  ? t("deliveryList.deniedBody")
-                  : t("deliveryList.error.body")
-              }
-              {...(errorKind === "forbidden"
-                ? {}
-                : { onRetry: () => void deliveriesQuery.refetch() })}
-              className="rounded-none border-0"
-            />
-          ) : null}
+        {showListPanel ? (
+          <div className="overflow-hidden rounded-2xl border border-border-default">
+            {deliveriesQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
-          {deliveriesQuery.isSuccess && deliveries.length === 0 ? (
-            <OperationalState
-              title={
-                filterId === "all"
-                  ? t("deliveryList.empty.title")
-                  : t("deliveryList.emptyFilter.title")
-              }
-              body={
-                filterId === "all"
-                  ? t("deliveryList.empty.body")
-                  : t("deliveryList.emptyFilter.body")
-              }
-              className="rounded-none border-0"
-            />
-          ) : null}
+            {errorKind ? (
+              <OperationalState
+                tone="danger"
+                title={
+                  errorKind === "forbidden"
+                    ? t("deliveryList.denied")
+                    : t("deliveryList.error.title")
+                }
+                body={
+                  errorKind === "forbidden"
+                    ? t("deliveryList.deniedBody")
+                    : t("deliveryList.error.body")
+                }
+                {...(errorKind === "forbidden"
+                  ? {}
+                  : { onRetry: () => void deliveriesQuery.refetch() })}
+                className="rounded-none border-0"
+              />
+            ) : null}
 
-          {deliveriesQuery.isSuccess && deliveries.length > 0 && filtered.length === 0 ? (
-            <OperationalState
-              title={t("deliveryList.noResults.title")}
-              body={t("deliveryList.noResults.body")}
-              action={
-                <Button variant="ghost" className="tap-target h-11" onClick={() => setSearch("")}>
-                  {t("deliveryList.noResults.clear")}
-                </Button>
-              }
-              className="rounded-none border-0"
-            />
-          ) : null}
+            {showEmpty && searching ? (
+              <OperationalState
+                title={t("deliveryList.noResults.title")}
+                body={t("deliveryList.noResults.body")}
+                action={
+                  <Button variant="ghost" className="tap-target h-11" onClick={() => setSearch("")}>
+                    {t("deliveryList.noResults.clear")}
+                  </Button>
+                }
+                className="rounded-none border-0"
+              />
+            ) : null}
 
-          {filtered.map((item) => (
-            <DeliveryRow key={item.id} item={item} />
-          ))}
-        </div>
+            {showEmpty && !searching ? (
+              <OperationalState
+                title={
+                  filterId === "all"
+                    ? t("deliveryList.empty.title")
+                    : t("deliveryList.emptyFilter.title")
+                }
+                body={
+                  filterId === "all"
+                    ? t("deliveryList.empty.body")
+                    : t("deliveryList.emptyFilter.body")
+                }
+                className="rounded-none border-0"
+              />
+            ) : null}
+
+            {items.map((item) => (
+              <DeliveryRow key={item.id} item={item} />
+            ))}
+          </div>
+        ) : null}
+
+        {deliveriesQuery.hasNextPage ? (
+          <Button
+            variant="ghost"
+            className="tap-target mt-3 h-11 w-full"
+            disabled={deliveriesQuery.isFetchingNextPage}
+            onClick={() => void deliveriesQuery.fetchNextPage()}
+          >
+            {deliveriesQuery.isFetchingNextPage
+              ? t("deliveryList.loadingMore")
+              : t("deliveryList.loadMore")}
+          </Button>
+        ) : null}
       </main>
 
       <BottomNav />

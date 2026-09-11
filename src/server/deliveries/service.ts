@@ -6,7 +6,12 @@ import {
   isValidDeliveryTransition,
   type DeliveryStatus,
 } from "./state-machine";
-import type { DeliveryRow, DeliveryStatusHistoryRow, ListDeliveriesOptions } from "./types";
+import type {
+  DeliveryRow,
+  DeliveryStatusHistoryRow,
+  ListDeliveriesOptions,
+  OrderRefRow,
+} from "./types";
 
 export interface DeliverySummary {
   id: string;
@@ -294,13 +299,23 @@ export async function listDeliveries(
 // above (which returns every delivery row, e.g. all attempts for one order,
 // for the Order detail screen's own history read). Requirement: "Do not
 // mislead merchants with old resolved delivery failures. Where multiple
-// attempts exist, show current unresolved delivery state truthfully." A new
-// delivery can only be created once the previous one for that order is
-// terminal (see createDelivery's duplicate-active check and the DB's
-// uniq_deliveries_active_order constraint), so the most recent row per
-// order_id is always that order's true current delivery state — the same
-// `deliveries[0]` convention src/routes/app.orders.$id.tsx already uses for
-// its own "latest delivery" read.
+// attempts exist, show current unresolved delivery state truthfully."
+//
+// Correctness rests on one DB invariant: uniq_deliveries_active_order
+// (supabase/migrations/027_delivery_fulfillment_domain.sql) is UNIQUE
+// (organization_id, order_id) WHERE status IN ('pending','preparing','ready',
+// 'in_transit'), and create_delivery_v1 takes a FOR UPDATE lock on the parent
+// order. So attempts for one order are strictly serialised: a new attempt can
+// only exist once the previous one is terminal. The newest row per order_id is
+// therefore always that order's true current delivery state.
+//
+// COMPLETENESS. An earlier revision of this list read a single capped window
+// of raw rows and *then* deduped and filtered. That lost completeness before
+// truth was derived: any order whose latest attempt fell outside that window
+// vanished, and a status filter could report zero while hundreds of matching
+// orders existed. The scan below inverts the order — it resolves
+// latest-per-order over the whole stream and only then filters and paginates,
+// so a result of zero means zero.
 
 const ACTIVE_DELIVERY_STATUSES: readonly DeliveryStatus[] = [
   "pending",
@@ -310,9 +325,20 @@ const ACTIVE_DELIVERY_STATUSES: readonly DeliveryStatus[] = [
 ];
 const COMPLETED_DELIVERY_STATUSES: readonly DeliveryStatus[] = ["delivered", "failed", "cancelled"];
 
-/** Bounded raw fetch used to compute the latest-per-order list below (server-enforced max, src/api/deliveries.ts). */
-const MERCHANT_LIST_RAW_FETCH_LIMIT = 200;
+/** Rows pulled per scan round trip. Sized so the overwhelming majority of pages resolve in one. */
+const SCAN_WINDOW = 500;
+/**
+ * Upper bound on rows examined for a single request. This is a safety valve,
+ * not a correctness boundary: the scan is complete below it, and when it does
+ * stop a scan early the result says so (`truncated`) instead of silently
+ * presenting a short list as the whole truth.
+ */
+const SCAN_SAFETY_LIMIT = 10_000;
+/** Orders per latest-attempt resolution round trip (see repo.listDeliveryAttemptRefsForOrders). */
+const LATEST_ATTEMPT_CHUNK = 50;
+
 const MERCHANT_LIST_DEFAULT_LIMIT = 50;
+const MERCHANT_LIST_MAX_LIMIT = 200;
 
 export type DeliveryListScope = "active" | "completed";
 
@@ -335,6 +361,20 @@ export interface DeliveryListItem extends DeliverySummary {
   actionNeeded: boolean;
 }
 
+/**
+ * One truthful page of the Deliveries list.
+ *
+ * `hasMore` is probe-derived (the scan resolves one item past the page before
+ * answering), so it is never a guess. `truncated` is the honest signal that
+ * SCAN_SAFETY_LIMIT stopped the scan before the source was exhausted — the
+ * only circumstance in which this list is knowingly incomplete.
+ */
+export interface DeliveryListPage {
+  items: DeliveryListItem[];
+  hasMore: boolean;
+  truncated: boolean;
+}
+
 function matchesSearch(item: DeliveryListItem, needle: string): boolean {
   const haystack = [
     item.orderCode,
@@ -349,73 +389,201 @@ function matchesSearch(item: DeliveryListItem, needle: string): boolean {
 }
 
 /**
+ * The statuses a row must carry to be a candidate for this request, or null to
+ * scan every status. Pushing this into the query is what keeps a rare-status
+ * filter (say "failed" across a year of history) to a small, selective read
+ * instead of a full-table walk — the filter still applies to each order's
+ * *latest* attempt, because every candidate is verified below.
+ */
+function candidateStatuses(
+  options: ListDeliveriesForMerchantOptions,
+): readonly DeliveryStatus[] | null {
+  if (options.status) return [options.status];
+  if (options.scope === "active") return ACTIVE_DELIVERY_STATUSES;
+  if (options.scope === "completed") return COMPLETED_DELIVERY_STATUSES;
+  return null;
+}
+
+/**
+ * Whether a candidate row could be superseded by a newer attempt.
+ *
+ * No, in two cases:
+ *  - An unfiltered scan walks every row newest-first, so the first row seen for
+ *    an order is by construction its latest.
+ *  - A row in an *active* status is always its order's latest: while it is
+ *    active, uniq_deliveries_active_order forbids a second active row and
+ *    create_delivery_v1 refuses to open a new attempt, so nothing newer can
+ *    exist. It stops being active only by transitioning in place.
+ *
+ * Terminal candidates are the real case: an old `failed` row is only this
+ * order's current state if no retry has superseded it.
+ */
+function needsLatestAttemptCheck(statuses: readonly DeliveryStatus[] | null): boolean {
+  if (statuses === null) return false;
+  return statuses.some((status) => !ACTIVE_DELIVERY_STATUSES.includes(status));
+}
+
+/**
+ * Keeps only those candidates that really are their order's latest attempt,
+ * preserving the caller's newest-first ordering. Exact, not heuristic: it reads
+ * every attempt for the orders in question and compares row ids.
+ */
+async function keepOnlyLatestAttempts(
+  organizationId: string,
+  candidates: DeliveryRow[],
+): Promise<DeliveryRow[]> {
+  if (candidates.length === 0) return [];
+  const kept: DeliveryRow[] = [];
+  for (let i = 0; i < candidates.length; i += LATEST_ATTEMPT_CHUNK) {
+    const chunk = candidates.slice(i, i + LATEST_ATTEMPT_CHUNK);
+    const refs = await repo.listDeliveryAttemptRefsForOrders(
+      organizationId,
+      chunk.map((row) => row.order_id),
+    );
+    // refs arrive newest-first, so the first ref per order is that order's latest.
+    const latestIdByOrder = new Map<string, string>();
+    for (const ref of refs) {
+      if (!latestIdByOrder.has(ref.order_id)) latestIdByOrder.set(ref.order_id, ref.id);
+    }
+    for (const row of chunk) {
+      if (latestIdByOrder.get(row.order_id) === row.id) kept.push(row);
+    }
+  }
+  return kept;
+}
+
+/**
  * Deliveries newest-attempt-first, one row per order, enriched with the order
  * code and (permission-gated) customer name for the Deliveries list screen.
  *
  * Tenant isolation: every read below is scoped to ctx.organizationId, so a
  * delivery/order/customer belonging to another organization can never appear
  * — it is filtered out at the query, not redacted after the fact.
+ *
+ * Shape of the scan, in the order the requirement demands:
+ *   A. resolve each order's latest attempt authoritatively (candidate window →
+ *      first-per-order → latest-attempt check where it can matter),
+ *   B. apply the requested status/scope (and search) to that derived set,
+ *   C. paginate the derived results,
+ *   D. enrich only what the answer needs.
  */
 export async function listDeliveriesForMerchant(
   ctx: AuthorizationContext,
   options: ListDeliveriesForMerchantOptions = {},
-): Promise<DeliveryListItem[]> {
+): Promise<DeliveryListPage> {
   ctx.require("delivery.read");
 
-  const rawRows = await repo.listDeliveries(ctx.organizationId, {
-    limit: MERCHANT_LIST_RAW_FETCH_LIMIT,
-  });
+  const limit = Math.min(
+    Math.max(options.limit ?? MERCHANT_LIST_DEFAULT_LIMIT, 1),
+    MERCHANT_LIST_MAX_LIMIT,
+  );
+  const offset = Math.max(options.offset ?? 0, 0);
+  const needle = options.search?.trim().toLowerCase() || null;
+  const statuses = candidateStatuses(options);
+  const verifyLatest = needsLatestAttemptCheck(statuses);
 
-  // Dedup to the latest attempt per order — rows are already newest-first.
-  const latestByOrder = new Map<string, DeliveryRow>();
-  for (const row of rawRows) {
-    if (!latestByOrder.has(row.order_id)) latestByOrder.set(row.order_id, row);
-  }
-  let rows = [...latestByOrder.values()];
-
-  // Status/scope filter applies to each order's CURRENT delivery only — never
-  // resurfaces a superseded attempt just because an old row matched.
-  if (options.status) {
-    rows = rows.filter((row) => row.status === options.status);
-  } else if (options.scope === "active") {
-    rows = rows.filter((row) => ACTIVE_DELIVERY_STATUSES.includes(row.status));
-  } else if (options.scope === "completed") {
-    rows = rows.filter((row) => COMPLETED_DELIVERY_STATUSES.includes(row.status));
-  }
-
-  const orderIds = [...new Set(rows.map((row) => row.order_id))];
-  const orderRefs = await repo.listOrderRefsForOrg(ctx.organizationId, orderIds);
-  const orderById = new Map(orderRefs.map((o) => [o.id, o]));
+  // Resolve one item past the page so hasMore is observed, never estimated.
+  const wanted = offset + limit + 1;
 
   const canViewCustomers = ctx.can("customers.read");
-  const customerNameById = new Map<string, string>();
-  if (canViewCustomers) {
-    const customerIds = [
-      ...new Set(orderRefs.map((o) => o.customer_id).filter((id): id is string => Boolean(id))),
+  const orderRefCache = new Map<string, OrderRefRow | null>();
+  const customerNameCache = new Map<string, string | null>();
+
+  /**
+   * Enrichment for a batch of rows, memoised across the scan. When a search is
+   * running this necessarily touches every scanned batch (a customer name is
+   * searchable), so the page slice at the end costs no further round trip.
+   */
+  async function enrich(rows: DeliveryRow[]): Promise<DeliveryListItem[]> {
+    const missingOrderIds = [
+      ...new Set(rows.map((row) => row.order_id).filter((id) => !orderRefCache.has(id))),
     ];
-    const customers = await repo.listCustomerRefsForOrg(ctx.organizationId, customerIds);
-    for (const c of customers) customerNameById.set(c.id, c.display_name);
+    if (missingOrderIds.length > 0) {
+      const refs = await repo.listOrderRefsForOrg(ctx.organizationId, missingOrderIds);
+      const byId = new Map(refs.map((ref) => [ref.id, ref]));
+      // A miss is cached as null: a cross-org or deleted order resolves to
+      // nothing exactly once, and never re-queries.
+      for (const id of missingOrderIds) orderRefCache.set(id, byId.get(id) ?? null);
+    }
+
+    if (canViewCustomers) {
+      const missingCustomerIds = [
+        ...new Set(
+          rows
+            .map((row) => orderRefCache.get(row.order_id)?.customer_id ?? null)
+            .filter((id): id is string => Boolean(id) && !customerNameCache.has(id as string)),
+        ),
+      ];
+      if (missingCustomerIds.length > 0) {
+        const customers = await repo.listCustomerRefsForOrg(ctx.organizationId, missingCustomerIds);
+        const byId = new Map(customers.map((c) => [c.id, c.display_name]));
+        for (const id of missingCustomerIds) customerNameCache.set(id, byId.get(id) ?? null);
+      }
+    }
+
+    return rows.map((row) => {
+      const orderRef = orderRefCache.get(row.order_id) ?? null;
+      const customerId = orderRef?.customer_id ?? null;
+      return {
+        ...mapDelivery(row),
+        orderCode: orderRef?.order_number ?? null,
+        customerName:
+          canViewCustomers && customerId ? (customerNameCache.get(customerId) ?? null) : null,
+        hasCustomer: Boolean(customerId),
+        // COD is never a payment signal (ARCHITECTURE.md) — "failed" is the only
+        // status that always needs merchant action; the rest are steady-state.
+        actionNeeded: row.status === "failed",
+      };
+    });
   }
 
-  let items: DeliveryListItem[] = rows.map((row) => {
-    const summary = mapDelivery(row);
-    const orderRef = orderById.get(row.order_id) ?? null;
-    const customerId = orderRef?.customer_id ?? null;
-    return {
-      ...summary,
-      orderCode: orderRef?.order_number ?? null,
-      customerName: customerId ? (customerNameById.get(customerId) ?? null) : null,
-      hasCustomer: Boolean(customerId),
-      // COD is never a payment signal (ARCHITECTURE.md) — "failed" is the only
-      // status that always needs merchant action; the rest are steady-state.
-      actionNeeded: row.status === "failed",
-    };
-  });
+  const resolved: DeliveryRow[] = [];
+  const seenOrderIds = new Set<string>();
+  let scanned = 0;
+  let exhausted = false;
+  let truncated = false;
 
-  const needle = options.search?.trim().toLowerCase();
-  if (needle) items = items.filter((item) => matchesSearch(item, needle));
+  while (resolved.length < wanted && !exhausted) {
+    if (scanned >= SCAN_SAFETY_LIMIT) {
+      truncated = true;
+      break;
+    }
+    const window = Math.min(SCAN_WINDOW, SCAN_SAFETY_LIMIT - scanned);
+    const rows = await repo.scanDeliveries(ctx.organizationId, {
+      statuses: statuses ? [...statuses] : undefined,
+      offset: scanned,
+      limit: window,
+    });
+    scanned += rows.length;
+    if (rows.length < window) exhausted = true;
 
-  const offset = options.offset ?? 0;
-  const limit = options.limit ?? MERCHANT_LIST_DEFAULT_LIMIT;
-  return items.slice(offset, offset + limit);
+    // Rows arrive newest-first, so the first row seen for an order is that
+    // order's newest *candidate* attempt. Later rows for the same order are
+    // superseded history and are dropped here, before any filtering — a
+    // resolved failure can therefore never resurface under a status filter.
+    const firstPerOrder: DeliveryRow[] = [];
+    for (const row of rows) {
+      if (seenOrderIds.has(row.order_id)) continue;
+      seenOrderIds.add(row.order_id);
+      firstPerOrder.push(row);
+    }
+
+    let batch = verifyLatest
+      ? await keepOnlyLatestAttempts(ctx.organizationId, firstPerOrder)
+      : firstPerOrder;
+
+    if (needle && batch.length > 0) {
+      const enriched = await enrich(batch);
+      const matchedIds = new Set(
+        enriched.filter((item) => matchesSearch(item, needle)).map((item) => item.id),
+      );
+      batch = batch.filter((row) => matchedIds.has(row.id));
+    }
+
+    resolved.push(...batch);
+  }
+
+  const hasMore = resolved.length > offset + limit;
+  const pageRows = resolved.slice(offset, offset + limit);
+  return { items: await enrich(pageRows), hasMore, truncated };
 }

@@ -4,12 +4,14 @@ import type {
   CreateDeliveryInput,
   CreateDeliveryRpcResult,
   CustomerRefRow,
+  DeliveryAttemptRef,
   DeliveryProviderRow,
   DeliveryRow,
   DeliveryStatus,
   DeliveryStatusHistoryRow,
   ListDeliveriesOptions,
   OrderRefRow,
+  ScanDeliveriesOptions,
   TransitionDeliveryRpcResult,
 } from "./types";
 
@@ -123,6 +125,60 @@ export async function listDeliveries(
   const { data, error } = await query;
   if (error) throw new Error(`listDeliveries: ${message(error)}`);
   return (data ?? []) as DeliveryRow[];
+}
+
+/**
+ * One deterministic window of the org's raw delivery stream, newest attempt
+ * first. This is the scan primitive behind listDeliveriesForMerchant: the
+ * service walks these windows until it has resolved enough latest-per-order
+ * rows to answer the requested page, so completeness is never traded away up
+ * front by a single capped read.
+ *
+ * `created_at DESC, id DESC` is a total order even when two attempts share a
+ * timestamp, so consecutive windows can neither repeat nor skip a row.
+ */
+export async function scanDeliveries(
+  organizationId: string,
+  options: ScanDeliveriesOptions,
+): Promise<DeliveryRow[]> {
+  let query = db
+    .from("deliveries")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
+  if (options.statuses && options.statuses.length > 0) {
+    query = query.in("status", options.statuses);
+  }
+  query = query.range(options.offset, options.offset + options.limit - 1);
+  const { data, error } = await query;
+  if (error) throw new Error(`scanDeliveries: ${message(error)}`);
+  return (data ?? []) as DeliveryRow[];
+}
+
+/**
+ * Every attempt belonging to a bounded set of orders, newest first, org-scoped
+ * and projected down to the three columns needed to pick each order's latest.
+ *
+ * Intentionally unlimited: the caller chunks `orderIds` (see
+ * LATEST_ATTEMPT_CHUNK in service.ts) precisely so this stays a small read. A
+ * row cap here would be the same class of defect it exists to fix — a cut-off
+ * would hide an order's newest attempt and wrongly promote a superseded one.
+ */
+export async function listDeliveryAttemptRefsForOrders(
+  organizationId: string,
+  orderIds: string[],
+): Promise<DeliveryAttemptRef[]> {
+  if (orderIds.length === 0) return [];
+  const { data, error } = await db
+    .from("deliveries")
+    .select("id, order_id, created_at")
+    .eq("organization_id", organizationId)
+    .in("order_id", orderIds)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
+  if (error) throw new Error(`listDeliveryAttemptRefsForOrders: ${message(error)}`);
+  return (data ?? []) as DeliveryAttemptRef[];
 }
 
 /**

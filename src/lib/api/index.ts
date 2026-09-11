@@ -6,12 +6,12 @@ import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import {
   mapDeliveryDetailToUi,
-  mapDeliveryListItemToUi,
+  mapDeliveryListPageToUi,
   mapDeliverySummaryToUi,
   type DeliveryListScope,
   type RealDelivery,
   type RealDeliveryDetail,
-  type RealDeliveryListItem,
+  type RealDeliveryListPage,
 } from "@/lib/deliveries";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
@@ -768,7 +768,10 @@ export async function listRealDeliveriesForOrder(orderId: string): Promise<RealD
 export interface ListRealDeliveriesOptions {
   status?: RealDelivery["status"] | undefined;
   scope?: DeliveryListScope | undefined;
+  /** Matched server-side against the complete latest-per-order set, never against the visible page. */
   search?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
 }
 
 /**
@@ -777,19 +780,25 @@ export interface ListRealDeliveriesOptions {
  * server-side. No demo-mode fallback: unlike getProducts()/listRealOrders()'s
  * sibling reads, a list failure here is always a real backend failure and is
  * surfaced to the merchant as an error state, never masked with mock rows.
+ *
+ * Returns a page, not a bare array: `hasMore` drives "load more" and
+ * `truncated` lets the screen admit when the server could not reach the end of
+ * the history, rather than presenting a short list as the whole truth.
  */
 export async function listRealDeliveries(
   options: ListRealDeliveriesOptions = {},
-): Promise<RealDeliveryListItem[]> {
+): Promise<RealDeliveryListPage> {
   const { listDeliveriesForMerchantFn } = await import("@/api/deliveries");
-  const rows = await listDeliveriesForMerchantFn({
+  const page = await listDeliveriesForMerchantFn({
     data: {
       status: options.status,
       scope: options.scope,
       search: options.search,
+      limit: options.limit,
+      offset: options.offset,
     },
   });
-  return rows.map(mapDeliveryListItemToUi);
+  return mapDeliveryListPageToUi(page);
 }
 
 export interface CreateRealDeliveryInput {

@@ -14,6 +14,7 @@ import type {
   DeliveryDetail as ServerDeliveryDetail,
   DeliveryHistoryEntry as ServerDeliveryHistoryEntry,
   DeliveryListItem as ServerDeliveryListItem,
+  DeliveryListPage as ServerDeliveryListPage,
   DeliveryListScope,
   DeliverySummary as ServerDeliverySummary,
 } from "@/server/deliveries/service";
@@ -113,25 +114,26 @@ export function mapDeliveryListItemToUi(row: ServerDeliveryListItem): RealDelive
 }
 
 /**
- * Client-side narrowing over an already-fetched, already-authorized list —
- * same pattern as CreateRealOrderSheet's customer search (filter in memory,
- * no extra round-trip per keystroke). Matches order code, courier, tracking
- * number, and customer name (only ever present when the server already
- * decided this caller may see it).
+ * One page of the Deliveries list as the screen consumes it.
+ *
+ * Search is deliberately NOT a client-side narrowing here. Filtering the rows
+ * that happen to be on screen would report "no matches" for a delivery that
+ * exists two pages down, so the search term goes to the server, which runs it
+ * against the complete latest-per-order set it alone can see.
  */
-export function filterDeliveryListBySearch(
-  items: readonly RealDeliveryListItem[],
-  query: string,
-): RealDeliveryListItem[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [...items];
-  return items.filter((item) =>
-    [item.orderCode, item.providerName, item.externalTrackingNumber, item.customerName]
-      .filter((v): v is string => Boolean(v))
-      .join(" ")
-      .toLowerCase()
-      .includes(needle),
-  );
+export interface RealDeliveryListPage {
+  items: RealDeliveryListItem[];
+  hasMore: boolean;
+  /** The server could not scan the whole history for this request; the list is knowingly partial. */
+  truncated: boolean;
+}
+
+export function mapDeliveryListPageToUi(page: ServerDeliveryListPage): RealDeliveryListPage {
+  return {
+    items: page.items.map(mapDeliveryListItemToUi),
+    hasMore: page.hasMore,
+    truncated: page.truncated,
+  };
 }
 
 // ── Transition-visibility rules (mirrors src/server/deliveries/state-machine.ts) ──

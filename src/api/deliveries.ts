@@ -171,6 +171,8 @@ export const listDeliveriesForMerchantFn = createServerFn()
         scope: z.enum(["active", "completed"]).optional(),
         search: z.string().trim().max(200).optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        // Offset into the derived latest-per-order results, not into the raw
+        // delivery stream — the service scans as deep as this page requires.
         offset: z.number().int().min(0).optional(),
       })
       .optional()

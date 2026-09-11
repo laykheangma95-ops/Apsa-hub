@@ -24,7 +24,7 @@ const CUSTOMER_1 = "aaaaaaaa-6666-0000-0000-000000000001";
 const CUSTOMER_2 = "aaaaaaaa-6666-0000-0000-000000000002";
 
 type QueryResult = { data: unknown; error: { code?: string; message: string } | null };
-type Call = { table: string; args: unknown[] };
+type Call = { table: string; select: string; args: unknown[] };
 
 function source(relative: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relative), "utf8");
@@ -49,33 +49,97 @@ function makeCtx(permissions: string[]): AuthorizationContext {
   } as unknown as AuthorizationContext;
 }
 
-/** Table-scoped fake: each `.from(table)` call returns the whole matching row set for that table (filtered by the test's own `.eq`/`.in` no-ops — filtering happens in the fixture data itself, matching this repo's existing withDb convention of pre-scoped fixtures). */
-function fakeQuery(result: QueryResult) {
+/**
+ * A small, faithful stand-in for PostgREST.
+ *
+ * The previous revision of this harness stubbed `.limit()`/`.range()` as
+ * no-ops, which is exactly why the 200-row truncation defect this suite now
+ * covers could not be caught: every fixture fit in one window no matter what
+ * the caller asked for. This one really applies `.eq`, `.in`, multi-key
+ * `.order`, `.limit` and `.range`, so a row cap in the implementation shows up
+ * as missing rows in a test — the way it would in production.
+ */
+function fakeQuery(rows: Record<string, unknown>[], record: (select: string) => void) {
+  let out = [...rows];
+  let selected = "*";
+  const orderKeys: { column: string; ascending: boolean }[] = [];
+
+  function applyOrder() {
+    if (orderKeys.length === 0) return;
+    out.sort((a, b) => {
+      for (const { column, ascending } of orderKeys) {
+        const av = a[column] as string | number;
+        const bv = b[column] as string | number;
+        if (av === bv) continue;
+        const cmp = av < bv ? -1 : 1;
+        return ascending ? cmp : -cmp;
+      }
+      return 0;
+    });
+  }
+
   const query = {
-    select: () => query,
-    eq: () => query,
-    in: () => query,
-    order: () => query,
-    limit: () => query,
-    range: () => query,
-    single: async () => result,
-    maybeSingle: async () => result,
-    then: (resolve: (v: QueryResult) => void, reject?: (e: unknown) => void) =>
-      Promise.resolve(result).then(resolve, reject),
+    select: (columns?: string) => {
+      selected = columns ?? "*";
+      record(selected);
+      return query;
+    },
+    eq: (column: string, value: unknown) => {
+      out = out.filter((r) => r[column] === value);
+      return query;
+    },
+    in: (column: string, values: unknown[]) => {
+      out = out.filter((r) => values.includes(r[column]));
+      return query;
+    },
+    order: (column: string, opts?: { ascending?: boolean }) => {
+      orderKeys.push({ column, ascending: opts?.ascending !== false });
+      return query;
+    },
+    limit: (n: number) => {
+      applyOrder();
+      orderKeys.length = 0;
+      out = out.slice(0, n);
+      return query;
+    },
+    range: (from: number, to: number) => {
+      applyOrder();
+      orderKeys.length = 0;
+      out = out.slice(from, to + 1);
+      return query;
+    },
+    single: async () => {
+      applyOrder();
+      return { data: out[0] ?? null, error: null } as QueryResult;
+    },
+    maybeSingle: async () => {
+      applyOrder();
+      return { data: out[0] ?? null, error: null } as QueryResult;
+    },
+    then: (resolve: (v: QueryResult) => void, reject?: (e: unknown) => void) => {
+      applyOrder();
+      return Promise.resolve({ data: out, error: null } as QueryResult).then(resolve, reject);
+    },
   };
   return query;
 }
 
+/** Tables as plain row arrays — the fake applies the real filters over them. */
+type Tables = Record<string, Record<string, unknown>[]>;
+
 async function withDb<T>(
-  tables: Record<string, QueryResult>,
+  tables: Tables,
   run: () => Promise<T>,
 ): Promise<{ result: T; calls: Call[] }> {
   const { setDeliveryRepositoryDbForTests } = await import("../server/deliveries/repository");
   const calls: Call[] = [];
   const testDb = {
     from: (table: string) => {
-      calls.push({ table, args: [] });
-      return fakeQuery(tables[table] ?? { data: [], error: null });
+      const call: Call = { table, select: "*", args: [] };
+      calls.push(call);
+      return fakeQuery(tables[table] ?? [], (select) => {
+        call.select = select;
+      });
     },
   };
   const restore = setDeliveryRepositoryDbForTests(testDb);
@@ -137,17 +201,16 @@ describe("listDeliveriesForMerchant — latest attempt per order (requirement 5)
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: null }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), {}),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.id).toBe("delivery-retry");
-    expect(result[0]?.status).toBe("pending");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe("delivery-retry");
+    expect(result.items[0]?.status).toBe("pending");
   });
 
   it("excludes an order from the completed scope once a newer active delivery supersedes its old failure", async () => {
@@ -168,15 +231,14 @@ describe("listDeliveriesForMerchant — latest attempt per order (requirement 5)
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: null }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), { scope: "completed" }),
     );
-    expect(result).toHaveLength(0);
+    expect(result.items).toHaveLength(0);
   });
 
   it("includes an order in the active scope once its current delivery is the newer, non-terminal one", async () => {
@@ -197,16 +259,15 @@ describe("listDeliveriesForMerchant — latest attempt per order (requirement 5)
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: null }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), { scope: "active" }),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.id).toBe("delivery-retry");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe("delivery-retry");
   });
 });
 
@@ -219,14 +280,11 @@ describe("listDeliveriesForMerchant — filters", () => {
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [
-            { id: ORDER_1, order_number: "ORD-0001", customer_id: null },
-            { id: ORDER_2, order_number: "ORD-0002", customer_id: null },
-          ],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+          { organization_id: ORG_A, id: ORDER_2, order_number: "ORD-0002", customer_id: null },
+        ],
       },
       () =>
         listDeliveriesForMerchant(makeCtx(allPermissions), {
@@ -234,8 +292,8 @@ describe("listDeliveriesForMerchant — filters", () => {
           scope: "completed",
         }),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.status).toBe("failed");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.status).toBe("failed");
   });
 
   it("search matches order code, courier and customer name case-insensitively", async () => {
@@ -256,26 +314,30 @@ describe("listDeliveriesForMerchant — filters", () => {
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [
-            { id: ORDER_1, order_number: "ORD-0001", customer_id: CUSTOMER_1 },
-            { id: ORDER_2, order_number: "ORD-0002", customer_id: CUSTOMER_2 },
-          ],
-          error: null,
-        },
-        customers: {
-          data: [
-            { id: CUSTOMER_1, display_name: "Sok Dara" },
-            { id: CUSTOMER_2, display_name: "Chan Vibol" },
-          ],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          {
+            organization_id: ORG_A,
+            id: ORDER_1,
+            order_number: "ORD-0001",
+            customer_id: CUSTOMER_1,
+          },
+          {
+            organization_id: ORG_A,
+            id: ORDER_2,
+            order_number: "ORD-0002",
+            customer_id: CUSTOMER_2,
+          },
+        ],
+        customers: [
+          { organization_id: ORG_A, id: CUSTOMER_1, display_name: "Sok Dara" },
+          { organization_id: ORG_A, id: CUSTOMER_2, display_name: "Chan Vibol" },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), { search: "sok" }),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.orderCode).toBe("ORD-0001");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.orderCode).toBe("ORD-0001");
   });
 
   it("applies limit/offset after filtering and dedup", async () => {
@@ -287,20 +349,17 @@ describe("listDeliveriesForMerchant — filters", () => {
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [
-            { id: ORDER_1, order_number: "ORD-0001", customer_id: null },
-            { id: ORDER_2, order_number: "ORD-0002", customer_id: null },
-            { id: ORDER_3, order_number: "ORD-0003", customer_id: null },
-          ],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+          { organization_id: ORG_A, id: ORDER_2, order_number: "ORD-0002", customer_id: null },
+          { organization_id: ORG_A, id: ORDER_3, order_number: "ORD-0003", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), { limit: 1, offset: 1 }),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.orderCode).toBe("ORD-0002");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.orderCode).toBe("ORD-0002");
   });
 });
 
@@ -310,20 +369,23 @@ describe("listDeliveriesForMerchant — customer visibility is server-gated", ()
     const rows = [deliveryRow({ id: "d1", order_id: ORDER_1, status: "pending" })];
     const { result, calls } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: CUSTOMER_1 }],
-          error: null,
-        },
-        customers: {
-          data: [{ id: CUSTOMER_1, display_name: "Should Never Appear" }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          {
+            organization_id: ORG_A,
+            id: ORDER_1,
+            order_number: "ORD-0001",
+            customer_id: CUSTOMER_1,
+          },
+        ],
+        customers: [
+          { organization_id: ORG_A, id: CUSTOMER_1, display_name: "Should Never Appear" },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(["delivery.read"]), {}),
     );
-    expect(result[0]?.hasCustomer).toBe(true);
-    expect(result[0]?.customerName).toBeNull();
+    expect(result.items[0]?.hasCustomer).toBe(true);
+    expect(result.items[0]?.customerName).toBeNull();
     // The gate is enforced before the query even runs — customers is never read.
     expect(calls.some((c) => c.table === "customers")).toBe(false);
   });
@@ -333,20 +395,21 @@ describe("listDeliveriesForMerchant — customer visibility is server-gated", ()
     const rows = [deliveryRow({ id: "d1", order_id: ORDER_1, status: "pending" })];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: CUSTOMER_1 }],
-          error: null,
-        },
-        customers: {
-          data: [{ id: CUSTOMER_1, display_name: "Sok Dara" }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          {
+            organization_id: ORG_A,
+            id: ORDER_1,
+            order_number: "ORD-0001",
+            customer_id: CUSTOMER_1,
+          },
+        ],
+        customers: [{ organization_id: ORG_A, id: CUSTOMER_1, display_name: "Sok Dara" }],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), {}),
     );
-    expect(result[0]?.hasCustomer).toBe(true);
-    expect(result[0]?.customerName).toBe("Sok Dara");
+    expect(result.items[0]?.hasCustomer).toBe(true);
+    expect(result.items[0]?.customerName).toBe("Sok Dara");
   });
 
   it("never throws and degrades to null/false when an order or customer reference can't be resolved (e.g. filtered out by org scope)", async () => {
@@ -354,15 +417,15 @@ describe("listDeliveriesForMerchant — customer visibility is server-gated", ()
     const rows = [deliveryRow({ id: "d1", order_id: ORDER_1, status: "pending" })];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: { data: [], error: null }, // simulates a cross-org order id resolving to nothing
+        deliveries: rows,
+        orders: [], // simulates a cross-org order id resolving to nothing
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), {}),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0]?.orderCode).toBeNull();
-    expect(result[0]?.hasCustomer).toBe(false);
-    expect(result[0]?.customerName).toBeNull();
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.orderCode).toBeNull();
+    expect(result.items[0]?.hasCustomer).toBe(false);
+    expect(result.items[0]?.customerName).toBeNull();
   });
 });
 
@@ -376,19 +439,16 @@ describe("listDeliveriesForMerchant — action-needed and COD are never payment 
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [
-            { id: ORDER_1, order_number: "ORD-0001", customer_id: null },
-            { id: ORDER_2, order_number: "ORD-0002", customer_id: null },
-            { id: ORDER_3, order_number: "ORD-0003", customer_id: null },
-          ],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+          { organization_id: ORG_A, id: ORDER_2, order_number: "ORD-0002", customer_id: null },
+          { organization_id: ORG_A, id: ORDER_3, order_number: "ORD-0003", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), {}),
     );
-    const byId = Object.fromEntries(result.map((r) => [r.orderCode, r.actionNeeded]));
+    const byId = Object.fromEntries(result.items.map((r) => [r.orderCode, r.actionNeeded]));
     expect(byId["ORD-0001"]).toBe(true);
     expect(byId["ORD-0002"]).toBe(false);
     expect(byId["ORD-0003"]).toBe(false);
@@ -407,17 +467,16 @@ describe("listDeliveriesForMerchant — action-needed and COD are never payment 
     ];
     const { result } = await withDb(
       {
-        deliveries: { data: rows, error: null },
-        orders: {
-          data: [{ id: ORDER_1, order_number: "ORD-0001", customer_id: null }],
-          error: null,
-        },
+        deliveries: rows,
+        orders: [
+          { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+        ],
       },
       () => listDeliveriesForMerchant(makeCtx(allPermissions), {}),
     );
-    expect(result[0]?.codAmount).toEqual({ amount: 2500, currency: "USD" });
-    expect(Object.keys(result[0] ?? {})).not.toContain("paymentStatus");
-    expect(Object.keys(result[0] ?? {})).not.toContain("paid");
+    expect(result.items[0]?.codAmount).toEqual({ amount: 2500, currency: "USD" });
+    expect(Object.keys(result.items[0] ?? {})).not.toContain("paymentStatus");
+    expect(Object.keys(result.items[0] ?? {})).not.toContain("paid");
   });
 });
 
@@ -442,5 +501,415 @@ describe("Tenant isolation — structural (mirrors delivery-domain.test.ts's own
     );
     expect(fnSource).toContain("ctx.organizationId");
     expect(fnSource).not.toMatch(/options\.organizationId|data\.organizationId/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Large lists — the defect class the old implementation could not even express.
+//
+// The previous revision read one capped window of raw rows and *then* deduped
+// and filtered, so any order whose latest attempt fell outside that window
+// disappeared and a filter could report zero while hundreds of matching orders
+// existed. Every test below puts more raw rows in the fixture than that old cap
+// and asserts the complete answer; the harness above really applies `.limit()`
+// and `.range()`, so a re-introduced cap fails these instead of passing them.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const OLD_RAW_CAP = 200;
+
+/** Deliveries are laid out newest-first: index 0 is the most recent attempt in the org. */
+function buildStream(
+  specs: { orderId: string; status: string; id?: string; tracking?: string | null }[],
+): { deliveries: Record<string, unknown>[]; orders: Record<string, unknown>[] } {
+  const base = Date.UTC(2026, 8, 10, 0, 0, 0);
+  const deliveries = specs.map((spec, index) =>
+    deliveryRow({
+      id: spec.id ?? `del-${index}`,
+      order_id: spec.orderId,
+      status: spec.status,
+      external_tracking_number: spec.tracking ?? null,
+      // Strictly decreasing, so index order *is* newest-first order.
+      created_at: new Date(base - index * 60_000).toISOString(),
+      updated_at: new Date(base - index * 60_000).toISOString(),
+    }),
+  );
+  const orders = [...new Set(specs.map((s) => s.orderId))].map((orderId) => ({
+    organization_id: ORG_A,
+    id: orderId,
+    order_number: `ORD-${orderId}`,
+    customer_id: null,
+  }));
+  return { deliveries, orders };
+}
+
+/** Walks every page the way the screen's "load more" does, and reports what it saw. */
+async function readAllPages(
+  tables: Tables,
+  options: Record<string, unknown>,
+  pageSize = 50,
+): Promise<{ orderCodes: string[]; pages: string[][]; truncated: boolean }> {
+  const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+  const pages: string[][] = [];
+  let truncated = false;
+  let offset = 0;
+  for (let guard = 0; guard < 100; guard += 1) {
+    const { result } = await withDb(tables, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { ...options, limit: pageSize, offset }),
+    );
+    pages.push(result.items.map((i) => i.orderCode ?? "?"));
+    truncated ||= result.truncated;
+    if (!result.hasMore) break;
+    offset += result.items.length;
+  }
+  return { orderCodes: pages.flat(), pages, truncated };
+}
+
+describe("listDeliveriesForMerchant — completeness beyond the old 200-row cap", () => {
+  it("returns every order when the org has far more deliveries than the old raw cap", async () => {
+    const specs = Array.from({ length: 600 }, (_, i) => ({
+      orderId: `o${String(i).padStart(4, "0")}`,
+      status: "in_transit",
+    }));
+    const { deliveries, orders } = buildStream(specs);
+    expect(deliveries.length).toBeGreaterThan(OLD_RAW_CAP);
+
+    const { orderCodes } = await readAllPages({ deliveries, orders }, {});
+    expect(orderCodes).toHaveLength(600);
+    // The order sitting at raw index 500 — far past the old cap — is present.
+    expect(orderCodes).toContain("ORD-o0500");
+    expect(new Set(orderCodes).size).toBe(600);
+  });
+
+  it("150 unresolved failed deliveries sitting past the old cap are not collapsed to zero", async () => {
+    // 300 newer delivered rows would have entirely filled the old 200-row
+    // window, leaving the failures invisible — the reviewer's reproduction.
+    const specs = [
+      ...Array.from({ length: 300 }, (_, i) => ({ orderId: `ok${i}`, status: "delivered" })),
+      ...Array.from({ length: 150 }, (_, i) => ({ orderId: `bad${i}`, status: "failed" })),
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const { result } = await withDb({ deliveries, orders }, () =>
+      import("../server/deliveries/service").then((m) =>
+        m.listDeliveriesForMerchant(makeCtx(allPermissions), { status: "failed" }),
+      ),
+    );
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.hasMore).toBe(true);
+    expect(result.truncated).toBe(false);
+
+    const { orderCodes } = await readAllPages({ deliveries, orders }, { status: "failed" });
+    expect(orderCodes).toHaveLength(150);
+    expect(orderCodes.every((code) => code.startsWith("ORD-bad"))).toBe(true);
+  });
+
+  it("the active filter reaches active deliveries buried under newer completed ones", async () => {
+    const specs = [
+      ...Array.from({ length: 400 }, (_, i) => ({ orderId: `done${i}`, status: "delivered" })),
+      ...Array.from({ length: 30 }, (_, i) => ({ orderId: `live${i}`, status: "in_transit" })),
+    ];
+    const { deliveries, orders } = buildStream(specs);
+    const { orderCodes } = await readAllPages({ deliveries, orders }, { scope: "active" });
+    expect(orderCodes).toHaveLength(30);
+    expect(orderCodes).toContain("ORD-live29");
+  });
+
+  it("the completed filter reaches completed deliveries buried under newer active ones", async () => {
+    const specs = [
+      ...Array.from({ length: 400 }, (_, i) => ({ orderId: `live${i}`, status: "in_transit" })),
+      ...Array.from({ length: 25 }, (_, i) => ({ orderId: `done${i}`, status: "delivered" })),
+    ];
+    const { deliveries, orders } = buildStream(specs);
+    const { orderCodes } = await readAllPages({ deliveries, orders }, { scope: "completed" });
+    expect(orderCodes).toHaveLength(25);
+    expect(orderCodes).toContain("ORD-done24");
+  });
+
+  it("heavy retry volume on a few orders no longer starves every other order off the list", async () => {
+    // 5 orders with 60 attempts each = 300 raw rows that collapse to 5 list
+    // rows; under the old cap they consumed the entire window.
+    const specs: { orderId: string; status: string }[] = [];
+    for (let o = 0; o < 5; o += 1) {
+      specs.push({ orderId: `retry${o}`, status: "pending" });
+      for (let a = 0; a < 59; a += 1) specs.push({ orderId: `retry${o}`, status: "failed" });
+    }
+    for (let i = 0; i < 50; i += 1) specs.push({ orderId: `plain${i}`, status: "in_transit" });
+    const { deliveries, orders } = buildStream(specs);
+    expect(deliveries.length).toBe(350);
+
+    const { orderCodes } = await readAllPages({ deliveries, orders }, {});
+    expect(orderCodes).toHaveLength(55);
+    expect(orderCodes).toContain("ORD-plain49");
+    expect(new Set(orderCodes).size).toBe(55);
+  });
+
+  it("search finds a delivery far past the old cap instead of reporting no matches", async () => {
+    const specs = Array.from({ length: 500 }, (_, i) => ({
+      orderId: `o${i}`,
+      status: "in_transit",
+      tracking: i === 420 ? "NEEDLE-IN-THE-TAIL" : `TRK-${i}`,
+    }));
+    const { deliveries, orders } = buildStream(specs);
+
+    const { result } = await withDb({ deliveries, orders }, () =>
+      import("../server/deliveries/service").then((m) =>
+        m.listDeliveriesForMerchant(makeCtx(allPermissions), { search: "needle-in-the-tail" }),
+      ),
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.orderCode).toBe("ORD-o420");
+    expect(result.hasMore).toBe(false);
+  });
+
+  it("a retried order is still excluded from the failed filter even when its failure is buried deep", async () => {
+    // The retry is newest; its old failure sits past the old cap. The failed
+    // filter must not resurrect the superseded attempt.
+    const specs = [
+      { orderId: "retried", status: "in_transit", id: "retry-current" },
+      ...Array.from({ length: 400 }, (_, i) => ({ orderId: `other${i}`, status: "delivered" })),
+      { orderId: "retried", status: "failed", id: "retry-old-failure" },
+      { orderId: "genuine", status: "failed", id: "genuine-failure" },
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const { orderCodes } = await readAllPages({ deliveries, orders }, { status: "failed" });
+    expect(orderCodes).toEqual(["ORD-genuine"]);
+
+    const active = await readAllPages({ deliveries, orders }, { scope: "active" });
+    expect(active.orderCodes).toEqual(["ORD-retried"]);
+  });
+});
+
+describe("listDeliveriesForMerchant — pagination contract", () => {
+  const specs = Array.from({ length: 320 }, (_, i) => ({
+    orderId: `o${String(i).padStart(4, "0")}`,
+    status: "in_transit",
+  }));
+  const { deliveries, orders } = buildStream(specs);
+  const tables: Tables = { deliveries, orders };
+
+  it("pages cover the whole set with no duplicate and no missing order", async () => {
+    const { pages, orderCodes } = await readAllPages(tables, {}, 50);
+    expect(pages.length).toBe(7); // 6 full pages + a 20-row tail
+    expect(orderCodes).toHaveLength(320);
+    expect(new Set(orderCodes).size).toBe(320);
+
+    const seen = new Set<string>();
+    for (const page of pages) {
+      for (const code of page) {
+        expect(seen.has(code)).toBe(false);
+        seen.add(code);
+      }
+    }
+  });
+
+  it("hasMore is observed, not guessed — false exactly on the final page", async () => {
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const lastFull = await withDb(tables, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { limit: 50, offset: 250 }),
+    );
+    expect(lastFull.result.items).toHaveLength(50);
+    expect(lastFull.result.hasMore).toBe(true);
+
+    const tail = await withDb(tables, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { limit: 50, offset: 300 }),
+    );
+    expect(tail.result.items).toHaveLength(20);
+    expect(tail.result.hasMore).toBe(false);
+  });
+
+  it("an offset past the end returns empty and says so, rather than hiding a reachable page", async () => {
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result } = await withDb(tables, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { limit: 50, offset: 320 }),
+    );
+    expect(result.items).toHaveLength(0);
+    expect(result.hasMore).toBe(false);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("ordering is stable across repeated reads and tie-safe when timestamps collide", async () => {
+    const collide = "2026-09-10T00:00:00.000Z";
+    const tied = {
+      deliveries: [
+        deliveryRow({ id: "attempt-a", order_id: ORDER_1, status: "failed", created_at: collide }),
+        deliveryRow({
+          id: "attempt-b",
+          order_id: ORDER_1,
+          status: "delivered",
+          created_at: collide,
+        }),
+      ],
+      orders: [
+        { organization_id: ORG_A, id: ORDER_1, order_number: "ORD-0001", customer_id: null },
+      ],
+    };
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+
+    // id DESC breaks the tie, so "attempt-b" wins — deterministically, every time.
+    for (let i = 0; i < 3; i += 1) {
+      const { result } = await withDb(tied, () =>
+        listDeliveriesForMerchant(makeCtx(allPermissions), {}),
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]?.id).toBe("attempt-b");
+      expect(result.items[0]?.status).toBe("delivered");
+    }
+  });
+});
+
+describe("listDeliveriesForMerchant — the scan is bounded, and says so when it stops early", () => {
+  it("reports truncated instead of silently presenting a partial list", async () => {
+    // One pathological order with more attempts than the scan ceiling: the
+    // scan cannot reach the end of the stream, and the result admits it.
+    const specs = Array.from({ length: 10_400 }, () => ({
+      orderId: "pathological",
+      status: "failed",
+    }));
+    specs[0] = { orderId: "pathological", status: "pending" };
+    const { deliveries, orders } = buildStream(specs);
+
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result } = await withDb({ deliveries, orders }, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), {}),
+    );
+    expect(result.truncated).toBe(true);
+    expect(result.items).toHaveLength(1);
+  });
+
+  it("a normal large list is never marked truncated", async () => {
+    const specs = Array.from({ length: 900 }, (_, i) => ({
+      orderId: `o${i}`,
+      status: "delivered",
+    }));
+    const { deliveries, orders } = buildStream(specs);
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result } = await withDb({ deliveries, orders }, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), {}),
+    );
+    expect(result.truncated).toBe(false);
+    expect(result.hasMore).toBe(true);
+  });
+});
+
+describe("Large-list scan stays tenant-scoped and permission-safe", () => {
+  it("another org's deliveries are never scanned into the result, however deep the stream", async () => {
+    const mine = Array.from({ length: 250 }, (_, i) => ({
+      orderId: `mine${i}`,
+      status: "delivered",
+    }));
+    const { deliveries, orders } = buildStream(mine);
+    // Interleave a foreign org's rows — the fake applies .eq("organization_id") for real.
+    const foreign = Array.from({ length: 250 }, (_, i) =>
+      deliveryRow({
+        id: `foreign-${i}`,
+        organization_id: ORG_B,
+        order_id: `theirs${i}`,
+        status: "failed",
+        created_at: new Date(Date.UTC(2026, 8, 11) - i * 60_000).toISOString(),
+      }),
+    );
+    const foreignOrders = Array.from({ length: 250 }, (_, i) => ({
+      organization_id: ORG_B,
+      id: `theirs${i}`,
+      order_number: `ORD-theirs${i}`,
+      customer_id: null,
+    }));
+
+    const tables: Tables = {
+      deliveries: [...foreign, ...deliveries],
+      orders: [...foreignOrders, ...orders],
+    };
+    const { orderCodes } = await readAllPages(tables, {});
+    expect(orderCodes).toHaveLength(250);
+    expect(orderCodes.some((code) => code.includes("theirs"))).toBe(false);
+
+    const failed = await readAllPages(tables, { status: "failed" });
+    expect(failed.orderCodes).toHaveLength(0);
+  });
+
+  it("a deep scan still never reads customers when the caller lacks customers.read", async () => {
+    const specs = Array.from({ length: 400 }, (_, i) => ({
+      orderId: `o${i}`,
+      status: "in_transit",
+    }));
+    const { deliveries } = buildStream(specs);
+    const orders = Array.from({ length: 400 }, (_, i) => ({
+      organization_id: ORG_A,
+      id: `o${i}`,
+      order_number: `ORD-o${i}`,
+      customer_id: CUSTOMER_1,
+    }));
+    const customers = [
+      { organization_id: ORG_A, id: CUSTOMER_1, display_name: "Should Never Appear" },
+    ];
+
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result, calls } = await withDb({ deliveries, orders, customers }, () =>
+      listDeliveriesForMerchant(makeCtx(["delivery.read"]), { search: "should never appear" }),
+    );
+    // Searching cannot become a side channel onto names the caller may not see.
+    expect(result.items).toHaveLength(0);
+    expect(calls.some((c) => c.table === "customers")).toBe(false);
+  });
+
+  it("customer-name search works across the whole stream when customers.read is held", async () => {
+    const specs = Array.from({ length: 400 }, (_, i) => ({
+      orderId: `o${i}`,
+      status: "in_transit",
+    }));
+    const { deliveries } = buildStream(specs);
+    const orders = Array.from({ length: 400 }, (_, i) => ({
+      organization_id: ORG_A,
+      id: `o${i}`,
+      order_number: `ORD-o${i}`,
+      customer_id: i === 390 ? CUSTOMER_2 : CUSTOMER_1,
+    }));
+    const customers = [
+      { organization_id: ORG_A, id: CUSTOMER_1, display_name: "Sok Dara" },
+      { organization_id: ORG_A, id: CUSTOMER_2, display_name: "Chan Vibol" },
+    ];
+
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result } = await withDb({ deliveries, orders, customers }, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { search: "vibol" }),
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.orderCode).toBe("ORD-o390");
+    expect(result.items[0]?.customerName).toBe("Chan Vibol");
+  });
+});
+
+describe("The scan really is windowed — the harness would catch a re-introduced cap", () => {
+  it("walks the stream in multiple bounded reads rather than one unbounded fetch", async () => {
+    const specs = Array.from({ length: 1200 }, (_, i) => ({
+      orderId: `o${i}`,
+      status: "delivered",
+    }));
+    const { deliveries, orders } = buildStream(specs);
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result, calls } = await withDb({ deliveries, orders }, () =>
+      // Ask for a page deep enough that one 500-row window cannot answer it.
+      listDeliveriesForMerchant(makeCtx(allPermissions), { limit: 50, offset: 1000 }),
+    );
+    expect(result.items).toHaveLength(50);
+    expect(result.items[0]?.orderCode).toBe("ORD-o1000");
+    const deliveryReads = calls.filter((c) => c.table === "deliveries").length;
+    expect(deliveryReads).toBeGreaterThan(1);
+  });
+
+  it("resolves each order's latest attempt with a three-column projection, not a full-row fan-out", async () => {
+    const specs = [
+      { orderId: "a", status: "delivered" },
+      { orderId: "a", status: "failed" },
+    ];
+    const { deliveries, orders } = buildStream(specs);
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { calls } = await withDb({ deliveries, orders }, () =>
+      listDeliveriesForMerchant(makeCtx(allPermissions), { status: "delivered" }),
+    );
+    expect(
+      calls.some((c) => c.table === "deliveries" && c.select === "id, order_id, created_at"),
+    ).toBe(true);
   });
 });

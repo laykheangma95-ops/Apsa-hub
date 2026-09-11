@@ -17,7 +17,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
-import { filterDeliveryListBySearch, mapDeliveryListItemToUi } from "@/lib/deliveries";
+import { mapDeliveryListItemToUi, mapDeliveryListPageToUi } from "@/lib/deliveries";
 import type { DeliveryListItem } from "@/server/deliveries/service";
 
 const ROOT = process.cwd();
@@ -76,60 +76,96 @@ describe("mapDeliveryListItemToUi", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// filterDeliveryListBySearch — pure client-side narrowing
+// mapDeliveryListPageToUi — the page contract the screen paginates over
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function item(overrides: Partial<ReturnType<typeof mapDeliveryListItemToUi>>) {
-  return {
-    ...mapDeliveryListItemToUi(SERVER_ITEM),
-    id: overrides.id ?? SERVER_ITEM.id,
-    ...overrides,
-  };
-}
-
-describe("filterDeliveryListBySearch", () => {
-  const rows = [
-    item({ id: "1", orderCode: "ORD-0001", providerName: "J&T Express", customerName: "Sok Dara" }),
-    item({
-      id: "2",
-      orderCode: "ORD-0002",
-      providerName: "Capital Delivery",
-      customerName: "Chan Vibol",
-    }),
-    item({
-      id: "3",
-      orderCode: "ORD-0003",
-      providerName: "VET Express",
-      customerName: null,
-      hasCustomer: false,
-      externalTrackingNumber: "SPECIAL-TRACK-9",
-    }),
-  ];
-
-  it("returns everything unchanged for an empty/whitespace query", () => {
-    expect(filterDeliveryListBySearch(rows, "")).toHaveLength(3);
-    expect(filterDeliveryListBySearch(rows, "   ")).toHaveLength(3);
+describe("mapDeliveryListPageToUi", () => {
+  it("carries items, hasMore and truncated through — the server owns all three", () => {
+    const page = mapDeliveryListPageToUi({
+      items: [SERVER_ITEM],
+      hasMore: true,
+      truncated: false,
+    });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.orderCode).toBe("ORD-0042");
+    expect(page.hasMore).toBe(true);
+    expect(page.truncated).toBe(false);
   });
 
-  it("matches order code case-insensitively", () => {
-    expect(filterDeliveryListBySearch(rows, "ord-0002").map((r) => r.id)).toEqual(["2"]);
+  it("preserves a truncated page rather than presenting it as complete", () => {
+    const page = mapDeliveryListPageToUi({ items: [], hasMore: false, truncated: true });
+    expect(page.truncated).toBe(true);
+    expect(page.items).toHaveLength(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Search is server-side — the screen must not narrow the rows it happens to hold
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Deliveries list search runs against complete server-side truth", () => {
+  it("no client-side search filter survives in the list route or the client lib", () => {
+    const route = readSource(LIST_ROUTE);
+    const lib = readSource("src/lib/deliveries.ts");
+    // Narrowing in memory would report "no matches" for a delivery one page
+    // down; the term must reach the server instead.
+    expect(route).not.toContain("filterDeliveryListBySearch");
+    expect(lib).not.toContain("filterDeliveryListBySearch");
   });
 
-  it("matches courier/provider name", () => {
-    expect(filterDeliveryListBySearch(rows, "capital").map((r) => r.id)).toEqual(["2"]);
+  it("the route debounces the search term and sends it to listRealDeliveries", () => {
+    const route = readSource(LIST_ROUTE);
+    expect(route).toContain("debouncedSearch");
+    expect(route).toMatch(/search:\s*debouncedSearch/);
+    expect(route).toContain("SEARCH_DEBOUNCE_MS");
   });
 
-  it("matches customer name only when present, never guesses for a redacted/absent one", () => {
-    expect(filterDeliveryListBySearch(rows, "vibol").map((r) => r.id)).toEqual(["2"]);
-    expect(filterDeliveryListBySearch(rows, "dara").map((r) => r.id)).toEqual(["1"]);
+  it("the search term is part of the query key, so a new term refetches rather than reusing a page", () => {
+    const route = readSource(LIST_ROUTE);
+    const key = route.slice(route.indexOf("queryKey: ["), route.indexOf("queryKey: [") + 220);
+    expect(key).toContain("debouncedSearch");
   });
 
-  it("matches the tracking number", () => {
-    expect(filterDeliveryListBySearch(rows, "special-track").map((r) => r.id)).toEqual(["3"]);
+  it("listRealDeliveries forwards search, limit and offset to the server function", () => {
+    const apiIndex = readSource(API_INDEX);
+    const fn = apiIndex.slice(
+      apiIndex.indexOf("export async function listRealDeliveries("),
+      apiIndex.indexOf("export async function listRealDeliveries(") + 1200,
+    );
+    expect(fn).toMatch(/search:\s*options\.search/);
+    expect(fn).toMatch(/limit:\s*options\.limit/);
+    expect(fn).toMatch(/offset:\s*options\.offset/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pagination and truncation are surfaced, not swallowed
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("Deliveries list paginates and admits partial results", () => {
+  it("uses an infinite query driven by the server's hasMore, not a single capped read", () => {
+    const route = readSource(LIST_ROUTE);
+    expect(route).toContain("useInfiniteQuery");
+    expect(route).toMatch(/getNextPageParam/);
+    expect(route).toContain("lastPage.hasMore");
   });
 
-  it("returns nothing for a query matching no field", () => {
-    expect(filterDeliveryListBySearch(rows, "no such thing")).toHaveLength(0);
+  it("renders a load-more control so additional current deliveries are reachable", () => {
+    const route = readSource(LIST_ROUTE);
+    expect(route).toContain("hasNextPage");
+    expect(route).toContain("fetchNextPage");
+    expect(route).toContain("deliveryList.loadMore");
+  });
+
+  it("shows an explicit partial-history notice when the server reports truncation", () => {
+    const route = readSource(LIST_ROUTE);
+    expect(route).toContain("truncated");
+    expect(route).toContain("deliveryList.partial");
+  });
+
+  it("only claims emptiness when the result is complete — a truncated scan never renders the empty state", () => {
+    const route = readSource(LIST_ROUTE);
+    expect(route).toMatch(/const showEmpty =[\s\S]{0,160}!truncated/);
   });
 });
 
@@ -141,8 +177,8 @@ describe("Deliveries list uses the production Delivery API, never mock data", ()
   it("listRealDeliveries calls listDeliveriesForMerchantFn with no demo-mode/mock fallback", () => {
     const apiIndex = readSource(API_INDEX);
     const fn = apiIndex.slice(
-      apiIndex.indexOf("export async function listRealDeliveries"),
-      apiIndex.indexOf("export async function listRealDeliveries") + 1200,
+      apiIndex.indexOf("export async function listRealDeliveries("),
+      apiIndex.indexOf("export async function listRealDeliveries(") + 1200,
     );
     expect(fn).toMatch(/listDeliveriesForMerchantFn/);
     expect(fn).not.toMatch(/try\s*{/);
@@ -205,20 +241,24 @@ describe("Deliveries list is reachable from the app shell", () => {
 });
 
 describe("No new Delivery domain, no new migration", () => {
-  it("listDeliveriesForMerchant is implemented in the existing service.ts, reusing repo.listDeliveries as its base read", () => {
+  it("listDeliveriesForMerchant is implemented in the existing service.ts, scanning via the repository rather than a new domain", () => {
     const service = readSource(SERVICE);
     const fn = service.slice(service.indexOf("export async function listDeliveriesForMerchant"));
-    expect(fn).toContain("repo.listDeliveries(ctx.organizationId");
+    expect(fn).toContain("repo.scanDeliveries(ctx.organizationId");
     expect(fn).toContain('ctx.require("delivery.read")');
   });
 
-  it("no new supabase migration file was added for this feature", () => {
-    const files = fs.readdirSync(path.resolve(ROOT, "supabase/migrations"));
-    const newest = files.filter((f) => /^0[3-9][0-9]_/.test(f) || /^0[4-9][0-9]_/.test(f)).sort();
-    // The Deliveries list ships with no schema change; the highest existing
-    // migration at the time this phase was built is 042 (Team/Staff, PR #39).
-    for (const f of newest) {
-      expect(Number(f.slice(0, 3))).toBeLessThanOrEqual(42);
-    }
+  it("the Deliveries list is implemented without touching the schema", () => {
+    // Deliberately not asserted by comparing migration numbers: a repo-wide
+    // "nothing newer than 042" check fails on the next unrelated migration and
+    // sends whoever triages it into this file for no reason. Whether *this*
+    // branch changed a migration is a diff question, and
+    // scripts/check-migration-safety.ts --base=origin/main already answers it.
+    const service = readSource(SERVICE);
+    const fn = service.slice(service.indexOf("export async function listDeliveriesForMerchant"));
+    expect(fn).not.toMatch(/\.rpc\(/);
+    expect(readSource("src/server/deliveries/repository.ts")).not.toMatch(
+      /rpc\("list_latest_deliveries/,
+    );
   });
 });
