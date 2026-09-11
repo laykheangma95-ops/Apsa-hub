@@ -58,8 +58,19 @@ function makeCtx(permissions: string[]): AuthorizationContext {
  * the caller asked for. This one really applies `.eq`, `.in`, multi-key
  * `.order`, `.limit` and `.range`, so a row cap in the implementation shows up
  * as missing rows in a test — the way it would in production.
+ *
+ * `dbMaxRows` additionally models PostgREST's own response ceiling
+ * (`db-max-rows`, commonly 1000 on a hosted Supabase project) — a cap the
+ * CALLER does not request and cannot see, applied to every response
+ * regardless of what `.limit()`/`.range()` asked for, silently, with
+ * `error: null`. Defaults to unbounded so every pre-existing test is
+ * unaffected; only the tests that reproduce the P1 cap defect configure it.
  */
-function fakeQuery(rows: Record<string, unknown>[], record: (select: string) => void) {
+function fakeQuery(
+  rows: Record<string, unknown>[],
+  record: (select: string) => void,
+  dbMaxRows: number = Number.POSITIVE_INFINITY,
+) {
   let out = [...rows];
   let selected = "*";
   const orderKeys: { column: string; ascending: boolean }[] = [];
@@ -99,13 +110,13 @@ function fakeQuery(rows: Record<string, unknown>[], record: (select: string) => 
     limit: (n: number) => {
       applyOrder();
       orderKeys.length = 0;
-      out = out.slice(0, n);
+      out = out.slice(0, Math.min(n, dbMaxRows));
       return query;
     },
     range: (from: number, to: number) => {
       applyOrder();
       orderKeys.length = 0;
-      out = out.slice(from, to + 1);
+      out = out.slice(from, from + Math.min(to - from + 1, dbMaxRows));
       return query;
     },
     single: async () => {
@@ -118,7 +129,8 @@ function fakeQuery(rows: Record<string, unknown>[], record: (select: string) => 
     },
     then: (resolve: (v: QueryResult) => void, reject?: (e: unknown) => void) => {
       applyOrder();
-      return Promise.resolve({ data: out, error: null } as QueryResult).then(resolve, reject);
+      const capped = Number.isFinite(dbMaxRows) ? out.slice(0, dbMaxRows) : out;
+      return Promise.resolve({ data: capped, error: null } as QueryResult).then(resolve, reject);
     },
   };
   return query;
@@ -130,6 +142,7 @@ type Tables = Record<string, Record<string, unknown>[]>;
 async function withDb<T>(
   tables: Tables,
   run: () => Promise<T>,
+  dbMaxRows: number = Number.POSITIVE_INFINITY,
 ): Promise<{ result: T; calls: Call[] }> {
   const { setDeliveryRepositoryDbForTests } = await import("../server/deliveries/repository");
   const calls: Call[] = [];
@@ -137,9 +150,13 @@ async function withDb<T>(
     from: (table: string) => {
       const call: Call = { table, select: "*", args: [] };
       calls.push(call);
-      return fakeQuery(tables[table] ?? [], (select) => {
-        call.select = select;
-      });
+      return fakeQuery(
+        tables[table] ?? [],
+        (select) => {
+          call.select = select;
+        },
+        dbMaxRows,
+      );
     },
   };
   const restore = setDeliveryRepositoryDbForTests(testDb);
@@ -547,14 +564,22 @@ async function readAllPages(
   tables: Tables,
   options: Record<string, unknown>,
   pageSize = 50,
+  dbMaxRows: number = Number.POSITIVE_INFINITY,
 ): Promise<{ orderCodes: string[]; pages: string[][]; truncated: boolean }> {
   const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
   const pages: string[][] = [];
   let truncated = false;
   let offset = 0;
   for (let guard = 0; guard < 100; guard += 1) {
-    const { result } = await withDb(tables, () =>
-      listDeliveriesForMerchant(makeCtx(allPermissions), { ...options, limit: pageSize, offset }),
+    const { result } = await withDb(
+      tables,
+      () =>
+        listDeliveriesForMerchant(makeCtx(allPermissions), {
+          ...options,
+          limit: pageSize,
+          offset,
+        }),
+      dbMaxRows,
     );
     pages.push(result.items.map((i) => i.orderCode ?? "?"));
     truncated ||= result.truncated;
@@ -911,5 +936,206 @@ describe("The scan really is windowed — the harness would catch a re-introduce
     expect(
       calls.some((c) => c.table === "deliveries" && c.select === "id, order_id, created_at"),
     ).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P1 fix (Round 3) — listDeliveryAttemptRefsForOrders must be complete
+// regardless of any PostgREST/Supabase `db-max-rows` response ceiling, and
+// verification must never read "no ref for this order" as "superseded".
+//
+// The independent reviewer reproduced: a single order with a long
+// non-candidate history sitting newest-in-the-org, verified alongside 49
+// orders whose current delivery genuinely was failed. Under the OLD query
+// shape (one `.in("order_id", chunk)` read spanning every attempt of every
+// order in the chunk), a capped response (db-max-rows, commonly 1000 on a
+// hosted Supabase project) let the heavy order's own history consume the
+// entire cap, so the 49 real orders' single ref each never appeared in the
+// capped response. The old code read that absence as "superseded" and
+// dropped all 49 — presented as `truncated: false`, a certain zero that was
+// actually unknown.
+//
+// The fix (repo.listDeliveryAttemptRefsForOrders) reads each order's latest
+// attempt as its own `.limit(1)` query. `dbMaxRows` below models the
+// PostgREST ceiling directly on the fake — every read, capped or not,
+// returns at most `dbMaxRows` rows regardless of what the caller asked for —
+// so these tests fail against the pre-fix `.in()` shape and pass against the
+// per-order shape.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("listDeliveriesForMerchant — verification is complete under a PostgREST row cap (P1 fix)", () => {
+  it("A. one order's massive attempt history cannot push a different order's ref out of a capped read", async () => {
+    // "loud" carries far more history than any db-max-rows a real project
+    // would configure; its true latest is non-failed, so it must be excluded.
+    // "quiet" has exactly one attempt, genuinely failed, and must survive.
+    const specs = [
+      ...Array.from({ length: 1500 }, () => ({ orderId: "loud", status: "cancelled" })),
+      { orderId: "quiet", status: "failed" },
+      { orderId: "loud", status: "failed" }, // loud's own oldest attempt — still superseded
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const capped = await readAllPages({ deliveries, orders }, { status: "failed" }, 50, 1000);
+    const uncapped = await readAllPages(
+      { deliveries, orders },
+      { status: "failed" },
+      50,
+      Number.MAX_SAFE_INTEGER,
+    );
+
+    // The answer must not depend on the configured db-max-rows value.
+    expect(capped.orderCodes).toEqual(["ORD-quiet"]);
+    expect(uncapped.orderCodes).toEqual(["ORD-quiet"]);
+    expect(capped.truncated).toBe(false);
+  });
+
+  it("B. reproduces the reviewer's exact finding: 49 legitimate failed deliveries no longer collapse to zero", async () => {
+    const specs = [
+      // Newest-in-the-org, non-candidate history — the exact shape that
+      // consumed the old capped read.
+      ...Array.from({ length: 1500 }, () => ({ orderId: "heavy", status: "cancelled" })),
+      ...Array.from({ length: 49 }, (_, i) => ({ orderId: `real${i}`, status: "failed" })),
+      { orderId: "heavy", status: "failed" }, // heavy's own old, superseded failure
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const { orderCodes, truncated } = await readAllPages(
+      { deliveries, orders },
+      { status: "failed" },
+      50,
+      1000, // the common hosted-Supabase db-max-rows default
+    );
+
+    expect(orderCodes).toHaveLength(49);
+    expect(orderCodes.every((code) => code.startsWith("ORD-real"))).toBe(true);
+    expect(orderCodes).not.toContain("ORD-heavy");
+    expect(truncated).toBe(false);
+  });
+
+  it("C/E. an unresolved verification (ref missing for a reason that is not supersession) is kept, never silently dropped, and marks the page truncated", async () => {
+    const specs = [
+      { orderId: "cannot-verify", status: "failed" },
+      { orderId: "genuine", status: "failed" },
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { setDeliveryRepositoryDbForTests } = await import("../server/deliveries/repository");
+    const restore = setDeliveryRepositoryDbForTests({
+      from: (table: string) => {
+        if (table !== "deliveries") return fakeQuery(orders, () => {});
+        // Wrap the real fake so every chain (scanDeliveries's status/range
+        // scan included) behaves exactly as in every other test, except the
+        // one per-order verification read targeting "cannot-verify": that
+        // one resolves empty — not a cap (the bounded per-order shape can't
+        // hit one), but the same observable shape as any other transport
+        // hiccup that returns no rows and no error.
+        const real = fakeQuery(deliveries, () => {});
+        let blocked = false;
+        const wrapper = {
+          select: (...args: [string?]) => {
+            real.select(...args);
+            return wrapper;
+          },
+          eq: (column: string, value: unknown) => {
+            if (column === "order_id" && value === "cannot-verify") blocked = true;
+            real.eq(column, value);
+            return wrapper;
+          },
+          in: (...args: [string, unknown[]]) => {
+            real.in(...args);
+            return wrapper;
+          },
+          order: (...args: [string, { ascending?: boolean }?]) => {
+            real.order(...args);
+            return wrapper;
+          },
+          range: (...args: [number, number]) => {
+            real.range(...args);
+            return wrapper;
+          },
+          limit: (n: number) =>
+            blocked ? Promise.resolve({ data: [], error: null }) : real.limit(n),
+          single: () => real.single(),
+          maybeSingle: () => real.maybeSingle(),
+          then: (resolve: (v: QueryResult) => void, reject?: (e: unknown) => void) =>
+            real.then(resolve, reject),
+        };
+        return wrapper;
+      },
+    });
+
+    let result: Awaited<ReturnType<typeof listDeliveriesForMerchant>>;
+    try {
+      result = await listDeliveriesForMerchant(makeCtx(allPermissions), { status: "failed" });
+    } finally {
+      restore();
+    }
+
+    // The unresolved candidate is admitted, not guessed away as superseded —
+    // and the page honestly reports it cannot be certain.
+    expect(result.items.some((i) => i.orderCode === "ORD-cannot-verify")).toBe(true);
+    expect(result.items.some((i) => i.orderCode === "ORD-genuine")).toBe(true);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("D. a candidate that really is superseded is still excluded — the fix does not weaken this", async () => {
+    const specs = [
+      { orderId: "retried", status: "in_transit", id: "retry-current" },
+      { orderId: "retried", status: "failed", id: "retry-old-failure" },
+      { orderId: "genuine", status: "failed", id: "genuine-failure" },
+    ];
+    const { deliveries, orders } = buildStream(specs);
+
+    const { orderCodes } = await readAllPages(
+      { deliveries, orders },
+      { status: "failed" },
+      50,
+      1000,
+    );
+    expect(orderCodes).toEqual(["ORD-genuine"]);
+  });
+
+  it("F. tenant isolation and customers.read gating hold under the new per-order verification reads", async () => {
+    // An adversarial id collision across orgs: verification must still scope
+    // by organization_id before order_id, exactly as the raw scan does.
+    const mineRow = deliveryRow({
+      id: "mine-failed",
+      organization_id: ORG_A,
+      order_id: "shared-id",
+      status: "failed",
+      created_at: "2026-09-05T00:00:00.000Z",
+    });
+    const theirsRow = deliveryRow({
+      id: "theirs-failed",
+      organization_id: ORG_B,
+      order_id: "shared-id",
+      status: "failed",
+      created_at: "2026-09-06T00:00:00.000Z", // newer, so it would win if org-scoping were dropped
+    });
+    const orders = [
+      {
+        organization_id: ORG_A,
+        id: "shared-id",
+        order_number: "ORD-mine",
+        customer_id: CUSTOMER_1,
+      },
+      { organization_id: ORG_B, id: "shared-id", order_number: "ORD-theirs", customer_id: null },
+    ];
+    const customers = [{ organization_id: ORG_A, id: CUSTOMER_1, display_name: "Should Not Leak" }];
+
+    const { listDeliveriesForMerchant } = await import("../server/deliveries/service");
+    const { result: withNames, calls } = await withDb(
+      { deliveries: [mineRow, theirsRow], orders, customers },
+      () => listDeliveriesForMerchant(makeCtx(["delivery.read"]), { status: "failed" }),
+      1000,
+    );
+
+    expect(withNames.items).toHaveLength(1);
+    expect(withNames.items[0]?.id).toBe("mine-failed");
+    expect(withNames.items[0]?.orderCode).toBe("ORD-mine");
+    // No customers.read held — the name must stay redacted, not silently resolved.
+    expect(withNames.items[0]?.customerName).toBeNull();
+    expect(calls.some((c) => c.table === "customers")).toBe(false);
   });
 });

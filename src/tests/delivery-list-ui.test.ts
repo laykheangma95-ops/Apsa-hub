@@ -1,8 +1,9 @@
 /**
  * Deliveries List UI — pure-function and structural tests.
  *
- * Pure logic (client-side search matching, server->UI mapping) is unit-tested
- * directly. What remains — which server function the list route calls,
+ * Pure logic (server->UI page/item mapping) is unit-tested directly. Search
+ * is server-side only as of Round 2 — there is no client-side matching helper
+ * left to unit-test. What remains — which server function the list route calls,
  * whether it ever falls back to mock data, tap-through wiring to the existing
  * (unmodified) Delivery Detail screen — is proven by reading the actual
  * source text, the same approach as delivery-ui-integration.test.ts.

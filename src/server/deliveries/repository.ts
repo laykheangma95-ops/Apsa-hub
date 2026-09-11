@@ -157,28 +157,51 @@ export async function scanDeliveries(
 }
 
 /**
- * Every attempt belonging to a bounded set of orders, newest first, org-scoped
- * and projected down to the three columns needed to pick each order's latest.
+ * The authoritative latest attempt for a bounded set of orders — at most one
+ * row per order, each fetched as its own `.limit(1)` read, org-scoped and
+ * projected down to the three columns needed to pick that order's latest.
  *
- * Intentionally unlimited: the caller chunks `orderIds` (see
- * LATEST_ATTEMPT_CHUNK in service.ts) precisely so this stays a small read. A
- * row cap here would be the same class of defect it exists to fix — a cut-off
- * would hide an order's newest attempt and wrongly promote a superseded one.
+ * WHY PER-ORDER, NOT A SINGLE `.in("order_id", orderIds)` READ: an order's
+ * attempt history has no bound the caller controls (a retried order can carry
+ * hundreds of superseded rows), so a single fan-out read has no bound either.
+ * PostgREST enforces its own response ceiling (`db-max-rows`, commonly 1000
+ * on a hosted Supabase project) independently of anything this code requests,
+ * and a capped response comes back as `error: null` — indistinguishable from
+ * a complete one. One retried order's history alone can consume that ceiling,
+ * silently returning zero rows for every *other* order in the same chunk.
+ * The caller previously read "no ref for this order" as "superseded"; under a
+ * capped read that is UNKNOWN, not FALSE — this was the P1 defect that let 49
+ * genuinely current failed deliveries collapse to zero while `truncated`
+ * stayed false.
+ *
+ * A `.limit(1)` read cannot be capped by any `db-max-rows` >= 1 — the only
+ * value under which the API is functional at all — so this shape is complete
+ * by construction, not by an assumption about a dashboard setting that could
+ * change under this code without warning. The cost is one round trip per
+ * distinct order rather than one per chunk; LATEST_ATTEMPT_CHUNK (see
+ * service.ts) bounds how many run in parallel per verification pass.
  */
 export async function listDeliveryAttemptRefsForOrders(
   organizationId: string,
   orderIds: string[],
 ): Promise<DeliveryAttemptRef[]> {
-  if (orderIds.length === 0) return [];
-  const { data, error } = await db
-    .from("deliveries")
-    .select("id, order_id, created_at")
-    .eq("organization_id", organizationId)
-    .in("order_id", orderIds)
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false });
-  if (error) throw new Error(`listDeliveryAttemptRefsForOrders: ${message(error)}`);
-  return (data ?? []) as DeliveryAttemptRef[];
+  const uniqueOrderIds = [...new Set(orderIds)];
+  if (uniqueOrderIds.length === 0) return [];
+  const perOrder = await Promise.all(
+    uniqueOrderIds.map(async (orderId) => {
+      const { data, error } = await db
+        .from("deliveries")
+        .select("id, order_id, created_at")
+        .eq("organization_id", organizationId)
+        .eq("order_id", orderId)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(1);
+      if (error) throw new Error(`listDeliveryAttemptRefsForOrders: ${message(error)}`);
+      return (data ?? []) as DeliveryAttemptRef[];
+    }),
+  );
+  return perOrder.flat();
 }
 
 /**

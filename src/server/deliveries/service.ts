@@ -357,7 +357,7 @@ export interface DeliveryListItem extends DeliverySummary {
   customerName: string | null;
   /** Safe to show even when customerName is redacted — mirrors orderList.hasCustomer/noCustomer. */
   hasCustomer: boolean;
-  /** True when the delivery needs the merchant's attention: failed, or stalled non-terminal. */
+  /** True when the delivery's current status is 'failed' — the one status that always needs merchant action. */
   actionNeeded: boolean;
 }
 
@@ -423,33 +423,59 @@ function needsLatestAttemptCheck(statuses: readonly DeliveryStatus[] | null): bo
   return statuses.some((status) => !ACTIVE_DELIVERY_STATUSES.includes(status));
 }
 
+interface LatestAttemptVerification {
+  /** Candidates verified either latest (kept) or genuinely superseded (dropped). */
+  kept: DeliveryRow[];
+  /**
+   * True when at least one candidate's order returned no ref from
+   * repo.listDeliveryAttemptRefsForOrders — an absence that cannot happen
+   * from a PostgREST row cap (that read is bounded to one row per order) but
+   * could still reflect a race outside this domain's control. An absent ref
+   * is UNKNOWN, never treated as FALSE (superseded): the candidate is kept
+   * rather than silently dropped, and the caller must surface this as
+   * incompleteness rather than presenting the page as certain.
+   */
+  unresolved: boolean;
+}
+
 /**
  * Keeps only those candidates that really are their order's latest attempt,
- * preserving the caller's newest-first ordering. Exact, not heuristic: it reads
- * every attempt for the orders in question and compares row ids.
+ * preserving the caller's newest-first ordering. Exact, not heuristic: for
+ * each order it reads the one row repo.listDeliveryAttemptRefsForOrders
+ * proves is that order's latest (see that function for why the read is
+ * bounded and therefore complete) and compares ids.
  */
 async function keepOnlyLatestAttempts(
   organizationId: string,
   candidates: DeliveryRow[],
-): Promise<DeliveryRow[]> {
-  if (candidates.length === 0) return [];
+): Promise<LatestAttemptVerification> {
+  if (candidates.length === 0) return { kept: [], unresolved: false };
   const kept: DeliveryRow[] = [];
+  let unresolved = false;
   for (let i = 0; i < candidates.length; i += LATEST_ATTEMPT_CHUNK) {
     const chunk = candidates.slice(i, i + LATEST_ATTEMPT_CHUNK);
     const refs = await repo.listDeliveryAttemptRefsForOrders(
       organizationId,
       chunk.map((row) => row.order_id),
     );
-    // refs arrive newest-first, so the first ref per order is that order's latest.
+    // Each order contributes at most one ref (see repo.listDeliveryAttemptRefsForOrders) —
+    // it is that order's sole, provably-authoritative latest row.
     const latestIdByOrder = new Map<string, string>();
-    for (const ref of refs) {
-      if (!latestIdByOrder.has(ref.order_id)) latestIdByOrder.set(ref.order_id, ref.id);
-    }
+    for (const ref of refs) latestIdByOrder.set(ref.order_id, ref.id);
     for (const row of chunk) {
-      if (latestIdByOrder.get(row.order_id) === row.id) kept.push(row);
+      const latestId = latestIdByOrder.get(row.order_id);
+      if (latestId === undefined) {
+        // VERIFIED-SUPERSEDED is not provable here — admit UNRESOLVED rather
+        // than guess, and never drop the candidate on the strength of a guess.
+        unresolved = true;
+        kept.push(row);
+        continue;
+      }
+      if (latestId === row.id) kept.push(row); // VERIFIED-LATEST
+      // else: VERIFIED-SUPERSEDED — correctly excluded.
     }
   }
-  return kept;
+  return { kept, unresolved };
 }
 
 /**
@@ -537,6 +563,21 @@ export async function listDeliveriesForMerchant(
     });
   }
 
+  // Residual concurrency risk, documented precisely: the scan below pages the
+  // raw stream by offset. A concurrent INSERT at the head is benign — windows
+  // are contiguous, so a shift-down just re-reads a row already recorded in
+  // seenOrderIds. The real risk is a row LEAVING the current candidate set
+  // between two windows of the SAME request (e.g. an in_transit delivery
+  // transitions to delivered while an "active" scope scan is mid-flight):
+  // every row after it shifts up by one, and the row that shifts past the
+  // window boundary is skipped for this request, with no signal. It is not
+  // detected as truncated because the scan does reach the end of the stream —
+  // it simply reads a version of it that changed underneath it. Only
+  // reachable when a single request needs more than one SCAN_WINDOW to
+  // answer (order count in the active candidate set exceeds SCAN_WINDOW), and
+  // self-corrects on the next fetch. Same offset-paging class as the existing
+  // Orders list. A keyset cursor on (created_at, id) would remove this; not
+  // done here to keep this fix narrowly scoped to the verification defect.
   const resolved: DeliveryRow[] = [];
   const seenOrderIds = new Set<string>();
   let scanned = 0;
@@ -568,9 +609,15 @@ export async function listDeliveriesForMerchant(
       firstPerOrder.push(row);
     }
 
-    let batch = verifyLatest
-      ? await keepOnlyLatestAttempts(ctx.organizationId, firstPerOrder)
-      : firstPerOrder;
+    let batch = firstPerOrder;
+    if (verifyLatest) {
+      const verification = await keepOnlyLatestAttempts(ctx.organizationId, firstPerOrder);
+      batch = verification.kept;
+      // An order whose latest-attempt verification could not be resolved
+      // makes this page's answer provably incomplete, same as the scan
+      // safety valve below — never presented as a certain "zero" or "done".
+      if (verification.unresolved) truncated = true;
+    }
 
     if (needle && batch.length > 0) {
       const enriched = await enrich(batch);
