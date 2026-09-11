@@ -487,6 +487,55 @@
   box-shadow: inset 0 -1px 0 0 var(--border-default);
 }
 
+/*
+ * Entry motion. One calm move for the whole app: a 6px rise as content fades
+ * in. Transform and opacity only, so it composites off the main thread and
+ * never shifts layout. "both" holds the start state through any stagger delay
+ * so a delayed item never flashes at its resting position first.
+ */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* A single block arriving: a loaded section, a new message, a feedback state. */
+@utility animate-rise {
+  animation: rise-in var(--dur-base) var(--ease-out) both;
+}
+
+/*
+ * Skeleton → content. The same rise, but as short as --dur-fast: the swap
+ * should read as "the wait is over", never as an animation the merchant watches.
+ */
+@utility content-in {
+  animation: rise-in var(--dur-fast) var(--ease-out) both;
+}
+
+/*
+ * List-item entry. Children of a .list-enter container rise in with a short
+ * stagger so a list reads as one arrival rather than a hard cut. Capped at the
+ * eighth child — below that, items share the last delay and the tail of a long
+ * list never waits. Infinite-scroll pages and filtered re-renders only animate
+ * the nodes that actually mount; existing rows keep their place.
+ */
+.list-enter > * {
+  animation: rise-in var(--dur-base) var(--ease-out) both;
+}
+.list-enter > *:nth-child(1) { animation-delay: 0ms; }
+.list-enter > *:nth-child(2) { animation-delay: 24ms; }
+.list-enter > *:nth-child(3) { animation-delay: 48ms; }
+.list-enter > *:nth-child(4) { animation-delay: 72ms; }
+.list-enter > *:nth-child(5) { animation-delay: 96ms; }
+.list-enter > *:nth-child(6) { animation-delay: 120ms; }
+.list-enter > *:nth-child(7) { animation-delay: 144ms; }
+.list-enter > *:nth-child(n+8) { animation-delay: 168ms; }
+
 
 @layer base {
   * {
@@ -610,5 +659,16 @@ select:focus-visible {
   [class*="apsi-motion-"] {
     animation: none !important;
     transform: none !important;
+  }
+  /*
+   * Entry motion collapses to an instant cut. `both` would otherwise hold
+   * delayed list items at opacity:0 for the length of their stagger, so the
+   * delay must go to zero along with the duration.
+   */
+  .animate-rise,
+  .content-in,
+  .list-enter > * {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
   }
 }
