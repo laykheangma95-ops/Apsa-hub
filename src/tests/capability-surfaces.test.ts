@@ -60,6 +60,54 @@ const SURFACES: Array<{
     serverFile: "src/server/orders/service.ts",
   },
   {
+    name: "Product catalogue list",
+    uiFile: "src/routes/app.products.tsx",
+    key: "products.read",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product catalogue — add product",
+    uiFile: "src/routes/app.products.tsx",
+    key: "products.create",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product catalogue — category management",
+    uiFile: "src/routes/app.products.tsx",
+    key: "products.manage_categories",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product detail — edit basics",
+    uiFile: "src/routes/app.products.$id.tsx",
+    key: "products.update_basic",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product detail — price controls",
+    uiFile: "src/routes/app.products.$id.tsx",
+    key: "products.update_price",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product detail — cost controls",
+    uiFile: "src/routes/app.products.$id.tsx",
+    key: "products.update_cost",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product detail — cost visibility",
+    uiFile: "src/routes/app.products.$id.tsx",
+    key: "products.view_cost",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
+    name: "Product detail — archive",
+    uiFile: "src/routes/app.products.$id.tsx",
+    key: "products.archive",
+    serverFile: "src/server/products/service.ts",
+  },
+  {
     name: "Deliveries list",
     uiFile: "src/routes/app.deliveries.tsx",
     key: "delivery.read",
@@ -186,6 +234,12 @@ describe("denied surfaces stay non-leaky", () => {
   });
 
   it("gated screens do not fetch the data they are not allowed to show", () => {
+    expect(read("src/routes/app.products.tsx")).toContain(
+      "enabled: !detailOpen && canReadProducts",
+    );
+    expect(read("src/routes/app.products.$id.tsx")).toContain(
+      "enabled: canReadProducts && idLooksValid",
+    );
     expect(read("src/routes/app.orders.tsx")).toContain("enabled: !detailOpen && canReadOrders");
     expect(read("src/routes/app.deliveries.tsx")).toContain(
       "enabled: !detailOpen && canReadDeliveries",

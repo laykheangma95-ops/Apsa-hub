@@ -165,6 +165,7 @@ export function BottomNav({
       | "/app/pos"
       | "/app/team"
       | "/app/orders"
+      | "/app/products"
       | "/app/deliveries"
       | "/app/settings",
   ) {
@@ -317,6 +318,7 @@ interface MobileTabProps {
       | "/app/pos"
       | "/app/team"
       | "/app/orders"
+      | "/app/products"
       | "/app/deliveries"
       | "/app/settings",
   ) => void;
@@ -461,6 +463,7 @@ function SheetGroupList({
       | "/app/pos"
       | "/app/team"
       | "/app/orders"
+      | "/app/products"
       | "/app/deliveries"
       | "/app/settings",
   ) => void;
@@ -495,6 +498,7 @@ function SheetAction({
       | "/app/pos"
       | "/app/team"
       | "/app/orders"
+      | "/app/products"
       | "/app/deliveries"
       | "/app/settings",
   ) => void;

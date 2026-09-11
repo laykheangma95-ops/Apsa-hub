@@ -167,6 +167,10 @@
       "profileAccount": {
         "label": "Profile / account",
         "description": "Profile and account settings are not in the app yet."
+      },
+      "productCatalog": {
+        "label": "Product catalogue",
+        "description": "Names, variants and prices for what you sell."
       }
     },
     "tabWithCount": "{{tab}}, {{count}} need attention"
@@ -1316,5 +1320,131 @@
       "title": "Access could not be checked",
       "body": "APSA could not confirm what you are allowed to do right now. Try again in a moment."
     }
+  },
+  "catalog": {
+    "list": {
+      "title": "Products",
+      "subtitle": "Your catalogue — names, variants and prices",
+      "searchPlaceholder": "Search the products below",
+      "searchScope": "Searches only the products loaded on this page, not the whole catalogue.",
+      "pageLimit": "This page shows the first {{count}} products. Pick a category to narrow it down.",
+      "status": {
+        "active": "Active",
+        "archived": "Archived"
+      },
+      "statusLabel": "Product list",
+      "categoryFilter": "Category",
+      "categoryAll": "All",
+      "addProduct": "Add product",
+      "manageCategories": "Categories",
+      "variants": "Variants: {{count}}",
+      "noPrice": "No price yet",
+      "empty": {
+        "activeTitle": "No products yet",
+        "activeBody": "Products you add will show up here.",
+        "archivedTitle": "Nothing archived",
+        "archivedBody": "Products you archive stay here instead of being deleted."
+      },
+      "noMatches": {
+        "title": "Nothing matches that",
+        "body": "Only the products loaded on this page were searched. Clear the search or pick another category."
+      },
+      "error": {
+        "title": "Products didn't load",
+        "body": "Check your connection and try again."
+      }
+    },
+    "detail": {
+      "title": "Product",
+      "basics": "Product details",
+      "nameKm": "Name (Khmer)",
+      "nameKmHint": "Required. This is the name your customers see.",
+      "nameKmMissing": "Enter the Khmer name.",
+      "nameEn": "Name (English)",
+      "nameEnHint": "Optional.",
+      "descriptionKm": "Description (Khmer)",
+      "descriptionEn": "Description (English)",
+      "category": "Category",
+      "categoryNone": "No category",
+      "save": "Save changes",
+      "saved": "Product saved",
+      "readOnly": "You can view this product but not change it.",
+      "archivedNotice": "This product is archived. It stays in your records and is not sold.",
+      "variants": "Variants",
+      "variantsActive": "Active",
+      "variantsArchived": "Archived",
+      "variantsEmpty": "No variants in this list.",
+      "addVariant": "Add variant",
+      "editVariant": "Edit variant",
+      "costHidden": "Cost is not shown to your account.",
+      "notFound": {
+        "title": "Product not found",
+        "body": "This product does not exist in your business, or it is no longer available to you."
+      },
+      "error": {
+        "title": "Product didn't load",
+        "body": "Check your connection and try again."
+      },
+      "archive": {
+        "action": "Archive product",
+        "title": "Archive this product?",
+        "body": "It stops being offered for sale and stays in your records. Nothing is deleted.",
+        "confirm": "Archive",
+        "done": "Product archived"
+      }
+    },
+    "variant": {
+      "create": "Add variant",
+      "edit": "Edit variant",
+      "name": "Variant name",
+      "nameHint": "Optional — for example a size or a colour.",
+      "unnamed": "Unnamed variant",
+      "sku": "SKU",
+      "barcode": "Barcode",
+      "price": "Selling price",
+      "cost": "Cost",
+      "costOptional": "Optional.",
+      "currency": "Currency",
+      "weight": "Weight (grams)",
+      "priceLocked": "Your account cannot change prices.",
+      "costLocked": "Your account cannot change cost.",
+      "costWithheld": "Cost is not shown to your account, so it is left unchanged.",
+      "invalidPrice": "Enter a price like 12.50 for USD or 4000 for riel.",
+      "invalidCost": "Enter a cost like 12.50 for USD or 4000 for riel.",
+      "invalidWeight": "Enter a whole number of grams.",
+      "created": "Variant added",
+      "saved": "Variant saved",
+      "archiveAction": "Archive variant",
+      "restoreAction": "Restore variant",
+      "archived": "Variant archived",
+      "restored": "Variant restored"
+    },
+    "category": {
+      "title": "Categories",
+      "manage": "Manage categories",
+      "add": "Add category",
+      "nameKm": "Category name (Khmer)",
+      "nameEn": "Category name (English)",
+      "nameKmMissing": "Enter the Khmer name.",
+      "created": "Category added",
+      "saved": "Category saved",
+      "archive": "Archive",
+      "restore": "Restore",
+      "empty": "No categories yet. Add one to group your products.",
+      "error": {
+        "title": "Categories didn't load",
+        "body": "Check your connection and try again."
+      }
+    },
+    "error": {
+      "denied": "You do not have permission for this action.",
+      "not_found": "That record is no longer available.",
+      "duplicate_sku": "That SKU is already used by another variant in this business.",
+      "duplicate_barcode": "That barcode is already used by another variant in this business.",
+      "invalid_money": "That amount is not valid. Enter it again.",
+      "generic": "That didn't save. Try again."
+    },
+    "save": "Save",
+    "saving": "Saving"
   }
 }

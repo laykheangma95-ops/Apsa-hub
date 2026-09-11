@@ -41,8 +41,21 @@ export const UI_PERMISSION_KEYS = [
   // Customers — src/server/customers/service.ts
   "customers.read",
   "customers.view_sensitive",
-  // Products — src/server/products/service.ts
+  // Products — src/server/products/service.ts. Every key here is required or
+  // checked there (getProductCatalog/getProductDetail, createProduct,
+  // updateProduct, updateVariant, archiveProduct, createCategory,
+  // updateCategory) and seeded by supabase/migrations/019_product_permissions.sql.
+  // view_cost and update_cost are listed separately on purpose: seeing a cost
+  // and changing one are different grants, and the server withholds the cost
+  // value itself rather than trusting the browser to hide it.
+  "products.read",
   "products.create",
+  "products.update_basic",
+  "products.update_price",
+  "products.update_cost",
+  "products.view_cost",
+  "products.archive",
+  "products.manage_categories",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
   // Team — src/server/team/service.ts
