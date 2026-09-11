@@ -67,6 +67,46 @@ export interface TransitionDeliveryRpcResult {
 export interface ListDeliveriesOptions {
   order_id?: string | undefined;
   status?: DeliveryStatus | undefined;
+  /** Alternative to `status`: matches any status in the list. Mutually exclusive with `status`. */
+  statuses?: DeliveryStatus[] | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
+}
+
+/**
+ * One deterministic window of the raw delivery stream, used by the
+ * latest-per-order scan in the service layer. Ordering is always
+ * `created_at DESC, id DESC` — the id keeps the order total even when two
+ * rows share a timestamp, so a window boundary can never duplicate or drop a
+ * row within a single scan.
+ */
+export interface ScanDeliveriesOptions {
+  /** Restricts the scan to candidate rows. Omitted/undefined scans every status. */
+  statuses?: DeliveryStatus[] | undefined;
+  offset: number;
+  limit: number;
+}
+
+/**
+ * Just enough of a delivery row to decide which attempt is an order's latest.
+ * Deliberately not the full row — this read fans out across a page of orders,
+ * so it stays a three-column projection.
+ */
+export interface DeliveryAttemptRef {
+  id: string;
+  order_id: string;
+  created_at: string;
+}
+
+/** Minimal org-scoped order reference used to enrich a delivery list row. Never the full Order domain shape. */
+export interface OrderRefRow {
+  id: string;
+  order_number: string;
+  customer_id: string | null;
+}
+
+/** Minimal org-scoped customer reference — a display name only, never phone/address. */
+export interface CustomerRefRow {
+  id: string;
+  display_name: string;
 }

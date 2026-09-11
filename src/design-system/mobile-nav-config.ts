@@ -37,7 +37,7 @@ export interface MobileNavActionConfig {
   descriptionKey: string;
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
-  to?: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders";
+  to?: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries";
 }
 
 export interface MobileNavSheetGroup {
@@ -152,7 +152,8 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           labelKey: "nav.salesActions.delivery.label",
           descriptionKey: "nav.salesActions.delivery.description",
           icon: Truck,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/deliveries",
         },
         {
           id: "returns-refunds",
