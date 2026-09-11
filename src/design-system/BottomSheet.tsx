@@ -63,6 +63,29 @@ export function BottomSheet({
     document.body.style.overflow = "hidden";
     panelRef.current?.focus();
 
+    /*
+     * Keyboard-safe fields. A sheet is fixed to the viewport, so on iOS the
+     * opening keyboard can cover the very input the merchant just tapped —
+     * the discount field, the cash-received field, an invite form. When a
+     * field takes focus, bring it back inside the sheet's own scroll pane
+     * once the keyboard has had a beat to settle. The pane scrolls, not the
+     * page, so the sheet itself never jumps.
+     */
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
+    const onFocusIn = (event: FocusEvent) => {
+      const field = event.target;
+      if (!(field instanceof HTMLElement)) return;
+      if (!/^(INPUT|TEXTAREA|SELECT)$/.test(field.tagName)) return;
+      // Only fields inside this sheet — never chase focus elsewhere.
+      if (!panelRef.current?.contains(field)) return;
+      focusTimer = setTimeout(() => {
+        field.scrollIntoView({
+          block: "center",
+          behavior: reduceMotion ? "auto" : "smooth",
+        });
+      }, 300);
+    };
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         onOpenChange(false);
@@ -87,12 +110,15 @@ export function BottomSheet({
     };
 
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
+      if (focusTimer) clearTimeout(focusTimer);
       document.body.style.overflow = previousOverflow;
       restoreRef.current?.focus?.();
     };
-  }, [open, onOpenChange]);
+  }, [open, onOpenChange, reduceMotion]);
 
   return (
     <AnimatePresence>
@@ -126,9 +152,19 @@ export function BottomSheet({
               if (info.offset.y > 90 || info.velocity.y > 700) onOpenChange(false);
             }}
             initial={{ y: "100%" }}
-            animate={{ y: 0 }}
+            animate={{ y: "0%" }}
             exit={{ y: "100%" }}
-            transition={{ duration: reduceMotion ? 0 : 0.26, ease: [0.2, 0, 0, 1] }}
+            /*
+             * A spring, not a tween: the sheet answers a thumb, so it should
+             * arrive the way iOS sheets do — quick, settled, no overshoot
+             * bounce. Damping 40 keeps it firm; it lands in roughly the same
+             * ~260ms the old tween took, so no merchant action is delayed.
+             */
+            transition={
+              reduceMotion
+                ? { duration: 0 }
+                : { type: "spring", stiffness: 380, damping: 40, mass: 0.9 }
+            }
             style={{ maxHeight: SNAP_HEIGHT[snap] }}
             className={cn(
               "elevation-3 relative flex w-full max-w-[var(--screen-max)] flex-col rounded-t-[28px] bg-surface-elevated outline-none",

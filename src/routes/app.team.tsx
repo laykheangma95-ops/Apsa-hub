@@ -128,7 +128,7 @@ function TeamScreen() {
                   className="mb-3"
                 />
               ) : null}
-              <ul className="space-y-2 lg:grid lg:grid-cols-2 lg:gap-2 lg:space-y-0">
+              <ul className="list-enter space-y-2 lg:grid lg:grid-cols-2 lg:gap-2 lg:space-y-0">
                 {members.map((member) => (
                   <li key={member.id}>
                     <StaffRow member={member} onOpen={setSelected} />

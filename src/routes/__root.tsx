@@ -79,7 +79,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       {
         name: "viewport",
-        content: "width=device-width, initial-scale=1, viewport-fit=cover",
+        // interactive-widget=resizes-content: Android Chrome shrinks the
+        // layout viewport when the keyboard opens, so the composer and sheet
+        // footers stay above it instead of being covered. Ignored where
+        // unsupported; safe-area behaviour is unchanged.
+        content:
+          "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
       },
       { name: "theme-color", content: "#f7faff" },
       { title: "APSA — Business operating system for Cambodian sellers" },
