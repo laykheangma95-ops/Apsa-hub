@@ -539,6 +539,16 @@ function ConversationScreen() {
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onFocus={() => {
+              /*
+               * Keyboard-safe composer: once the keyboard has had a beat to
+               * open, keep the newest message in view above it instead of
+               * letting the thread sit scrolled somewhere upstream.
+               */
+              window.setTimeout(() => {
+                endRef.current?.scrollIntoView({ block: "end" });
+              }, 300);
+            }}
             enterKeyHint="send"
             disabled={!canReply}
             {...(canReply ? {} : { "aria-describedby": "composer-permission-note" })}
