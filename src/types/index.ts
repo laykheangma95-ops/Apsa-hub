@@ -550,7 +550,13 @@ export interface Shop {
 }
 
 export interface AttentionItem {
-  id: "unread_conversations" | "awaiting_payment" | "awaiting_delivery" | "low_stock";
+  id:
+    | "unread_conversations"
+    | "awaiting_payment"
+    | "payments_needing_review"
+    | "awaiting_delivery"
+    | "low_stock"
+    | "orders_needing_action";
   count: number;
   tone: "info" | "warning" | "danger";
 }
@@ -563,17 +569,30 @@ export interface MetricPoint {
 export interface Metric {
   id: string;
   value: string;
-  deltaPercent: number;
+  deltaPercent: number | null;
   series: MetricPoint[];
 }
 
 export type MetricRange = "today" | "week" | "month";
 
+export type HomeSection<T> =
+  | { status: "available"; data: T }
+  | { status: "permission_denied" }
+  | { status: "error" }
+  | { status: "truncated" };
+
 export interface HomeSummary {
-  greetingName: string;
-  revenue: Money;
-  revenueDeltaPercent: number;
-  revenueSeries: MetricPoint[];
-  attention: AttentionItem[];
-  metrics: Metric[];
+  range: MetricRange;
+  orders: HomeSection<{
+    periodCount: number;
+    awaitingPaymentCount: number;
+    actionNeededCount: number;
+  }>;
+  payments: HomeSection<{ needsReviewCount: number }>;
+  /** Lifetime net collection for the cohort of orders created in the selected period. */
+  finance: HomeSection<{ netCollectedForCreatedOrders: Money[] }>;
+  /** Active variants whose total stock across all modeled locations is <= 0. */
+  inventory: HomeSection<{ outOfStockVariantCount: number }>;
+  /** Latest-attempt delivery actions only; superseded attempts never contribute. */
+  delivery: HomeSection<{ actionCount: number }>;
 }

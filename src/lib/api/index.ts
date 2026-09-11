@@ -16,7 +16,6 @@ import {
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
-import { homeSummaries } from "@/lib/mock/home";
 import { orders, nextOrderSequence } from "@/lib/mock/orders";
 import { couriers, shops, staff, activeShopId, workspaces } from "@/lib/mock/shop";
 import {
@@ -78,7 +77,8 @@ export interface ConversationFilter {
 }
 
 export async function getHomeSummary(range: MetricRange = "today"): Promise<HomeSummary> {
-  return resolve(homeSummaries[range]);
+  const { getHomeSummaryFn } = await import("@/api/home");
+  return getHomeSummaryFn({ data: { range } });
 }
 
 function mockGetConversations(filter?: ConversationFilter): Conversation[] {

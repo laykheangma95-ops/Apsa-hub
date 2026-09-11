@@ -17,10 +17,12 @@
  * client bundle. This file itself is safe to bundle for the client.
  */
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { checkAppGuardFn } from "@/api/app-guard";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
+import { enforceHomeCachePrincipal } from "@/lib/home-query";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -64,6 +66,20 @@ export const Route = createFileRoute("/app")({
 function AppLayout() {
   const { session, organizationId } = Route.useRouteContext();
   const capabilities = Route.useLoaderData();
+  const queryClient = useQueryClient();
+
+  /*
+   * Home holds another organization's operational data, and one browser tab
+   * can serve more than one principal: sign out, sign in as somebody else,
+   * or switch the active organization, all without a full page load.
+   *
+   * This runs during render rather than in an effect on purpose. An effect
+   * fires after children have already rendered, which would let Home paint
+   * the previous principal's numbers for a frame. Both identifiers come from
+   * the server guard's route context, never from client input, and are used
+   * only to partition the cache — they authorize nothing.
+   */
+  enforceHomeCachePrincipal(queryClient, session.userId, organizationId);
 
   return (
     <CapabilityProvider

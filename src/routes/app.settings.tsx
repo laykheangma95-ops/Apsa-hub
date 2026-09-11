@@ -24,6 +24,7 @@ import { useCapabilities } from "@/hooks/use-capabilities";
 import { useLanguage } from "@/lib/i18n";
 import { notifyError } from "@/lib/feedback";
 import { resolveBusinessSectionView } from "@/lib/settings-view";
+import { clearHomeQueries } from "@/lib/home-query";
 
 export const Route = createFileRoute("/app/settings")({
   head: () => ({
@@ -240,6 +241,11 @@ function SettingsScreen() {
       // Runs after navigate() above so Settings has already unmounted and
       // this can't trigger a visible unauthenticated refetch/error flash
       // on this screen first.
+      //
+      // Home's tenant data is purged through its own central helper first:
+      // that call cannot throw, so the most sensitive cache is gone even if
+      // the blanket clear() below fails.
+      clearHomeQueries(queryClient);
       queryClient.clear();
       setSigningOut(false);
     }
