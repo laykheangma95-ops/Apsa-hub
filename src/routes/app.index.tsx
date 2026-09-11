@@ -14,11 +14,14 @@ import {
   HomeSkeleton,
   MetricTile,
   QuickActionGrid,
+  visibleQuickActions,
   ScreenBleed,
   SegmentedControl,
   type QuickActionId,
   type Segment,
 } from "@/design-system";
+import { useCapabilities } from "@/hooks/use-capabilities";
+import type { UiPermissionKey } from "@/lib/capabilities";
 import type { AttentionItem, HomeSummary, Metric, MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
@@ -49,6 +52,21 @@ const ATTENTION_ROUTE: Partial<
   payments_needing_review: "/app/orders",
   awaiting_delivery: "/app/deliveries",
   orders_needing_action: "/app/orders",
+};
+
+/**
+ * The permission each attention destination needs — the same key its screen
+ * and its server functions require. A member without it still sees the count
+ * (it is their own organization's work), but the row stops pretending to be a
+ * link to somewhere they cannot go.
+ */
+const ATTENTION_PERMISSION: Record<
+  "/app/inbox" | "/app/orders" | "/app/deliveries",
+  UiPermissionKey
+> = {
+  "/app/inbox": "messages.read",
+  "/app/orders": "orders.read",
+  "/app/deliveries": "orders.read",
 };
 
 function attentionItems(summary: HomeSummary): AttentionItem[] {
@@ -144,6 +162,7 @@ function metricItems(summary: HomeSummary): Metric[] {
 function BusinessHome() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const capabilities = useCapabilities();
   const { session, organizationId } = Route.useRouteContext();
   const [range, setRange] = useState<MetricRange>("today");
   const [createOpen, setCreateOpen] = useState(false);
@@ -161,6 +180,20 @@ function BusinessHome() {
     value,
     label: t(`home.range.${value}`),
   }));
+
+  /*
+   * Each starting point is keyed to the permission its destination actually
+   * needs server-side. "Send invoice" has no backend yet and opens an honest
+   * "not built" sheet for everyone, so there is no permission to key it to.
+   */
+  const quickActionsAvailable: Partial<Record<QuickActionId, boolean>> = {
+    receivePayment: capabilities.can("orders.create"),
+    newOrder: capabilities.can("orders.read"),
+    addProduct: capabilities.can("products.create"),
+  };
+
+  // A heading with nothing under it is worse than no section.
+  const hasQuickActions = visibleQuickActions(quickActionsAvailable).length > 0;
 
   function handleQuickAction(id: QuickActionId) {
     if (id === "newOrder") {
@@ -204,7 +237,9 @@ function BusinessHome() {
               {attention.length > 0 ? (
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   {attention.map((item) => {
-                    const to = ATTENTION_ROUTE[item.id];
+                    const route = ATTENTION_ROUTE[item.id];
+                    const to =
+                      route && capabilities.can(ATTENTION_PERMISSION[route]) ? route : undefined;
                     return (
                       <AttentionCard
                         key={item.id}
@@ -290,12 +325,14 @@ function BusinessHome() {
               </div>
             </section>
 
-            <section aria-labelledby="actions-heading" className="stack-group">
-              <h2 id="actions-heading" className="text-label px-1 text-text-secondary">
-                {t("home.quickActions")}
-              </h2>
-              <QuickActionGrid onAction={handleQuickAction} />
-            </section>
+            {hasQuickActions ? (
+              <section aria-labelledby="actions-heading" className="stack-group">
+                <h2 id="actions-heading" className="text-label px-1 text-text-secondary">
+                  {t("home.quickActions")}
+                </h2>
+                <QuickActionGrid onAction={handleQuickAction} available={quickActionsAvailable} />
+              </section>
+            ) : null}
           </div>
         ) : null}
       </main>

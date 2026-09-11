@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { BottomSheet, StatusChip } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { INVITABLE_ROLES, RoleOption } from "@/components/team/RoleOption";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import {
   cancelInvite,
   changeStaffRole,
@@ -58,6 +59,12 @@ export function StaffDetailSheet({
   onRemoved,
 }: StaffDetailSheetProps) {
   const { t } = useTranslation();
+  const capabilities = useCapabilities();
+  // The same keys changeMembershipRole / removeMembership require server-side.
+  // The server still re-checks them, and CORRECTION-001's "below your own role"
+  // cap lives there too — this only decides whether the control is offered.
+  const canAssignRoles = capabilities.can("team.roles_assign");
+  const canRemove = capabilities.can("team.remove");
   const [editingRole, setEditingRole] = useState(false);
   const [role, setRole] = useState<StaffRole>("sales");
   const [notice, setNotice] = useState<string | null>(null);
@@ -262,21 +269,30 @@ export function StaffDetailSheet({
                 </Button>
               ) : (
                 <>
-                  <Button
-                    variant="outline"
-                    className="tap-target h-12 w-full"
-                    onClick={() => setEditingRole(true)}
-                  >
-                    {t("team.detail.changeRole")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="tap-target h-12 w-full text-status-danger-text"
-                    disabled={busy}
-                    onClick={() => void remove()}
-                  >
-                    {t("team.detail.removeAccess")}
-                  </Button>
+                  {canAssignRoles ? (
+                    <Button
+                      variant="outline"
+                      className="tap-target h-12 w-full"
+                      onClick={() => setEditingRole(true)}
+                    >
+                      {t("team.detail.changeRole")}
+                    </Button>
+                  ) : null}
+                  {canRemove ? (
+                    <Button
+                      variant="outline"
+                      className="tap-target h-12 w-full text-status-danger-text"
+                      disabled={busy}
+                      onClick={() => void remove()}
+                    >
+                      {t("team.detail.removeAccess")}
+                    </Button>
+                  ) : null}
+                  {!canAssignRoles && !canRemove ? (
+                    <p className="text-body-sm text-center text-text-secondary" role="status">
+                      {t("capability.actionDenied")}
+                    </p>
+                  ) : null}
                 </>
               )}
             </div>

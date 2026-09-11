@@ -9,10 +9,11 @@ import { StaffRow } from "@/components/team/StaffRow";
 import { InviteStaffSheet } from "@/components/team/InviteStaffSheet";
 import { StaffDetailSheet } from "@/components/team/StaffDetailSheet";
 import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
-import { currentRole, getTeam, getWorkspaces } from "@/lib/api";
+import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
+import { useCapabilities } from "@/hooks/use-capabilities";
+import { getTeam, getWorkspaces } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { permissionsFor } from "@/lib/permissions";
 import { isPermissionDeniedError } from "@/lib/team-errors";
 import type { Staff } from "@/types";
 
@@ -39,7 +40,11 @@ export const Route = createFileRoute("/app/team")({
 function TeamScreen() {
   const { t } = useTranslation();
   const { language } = useLanguage();
-  const permissions = permissionsFor(currentRole);
+  const capabilities = useCapabilities();
+  // listTeamFn requires team.read; inviteStaffFn requires team.invite. Both are
+  // re-checked on the server for every call — this only decides what is shown.
+  const canReadTeam = capabilities.can("team.read");
+  const canInvite = capabilities.can("team.invite");
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -51,7 +56,7 @@ function TeamScreen() {
   const teamQuery = useQuery({
     queryKey: ["team"],
     queryFn: getTeam,
-    enabled: permissions.manageTeam,
+    enabled: canReadTeam,
   });
   const workspaceQuery = useQuery({ queryKey: ["workspaces"], queryFn: getWorkspaces });
 
@@ -76,7 +81,7 @@ function TeamScreen() {
         title={t("team.title")}
         subtitle={workspaceName || undefined}
         onShopSwitch={() => setSwitcherOpen(true)}
-        {...(permissions.manageTeam
+        {...(canInvite
           ? {
               action: (
                 <button
@@ -96,8 +101,8 @@ function TeamScreen() {
         <p className="text-body-sm px-1 text-text-secondary">{t("team.subtitle")}</p>
 
         <div className="mt-3">
-          {!permissions.manageTeam ? (
-            <OperationalState title={t("team.restricted.title")} body={t("team.restricted.body")} />
+          {!canReadTeam ? (
+            <CapabilityDeniedState capabilities={capabilities} />
           ) : teamQuery.isLoading ? (
             <ListSkeleton rows={4} />
           ) : teamQuery.isError ? (

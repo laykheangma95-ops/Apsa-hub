@@ -19,11 +19,26 @@ import {
   Users,
 } from "lucide-react";
 
+import type { CapabilityView, UiPermissionKey } from "@/lib/capabilities";
+
 export type BusinessNavVariant = "online-seller" | "mart";
 export type MobileNavTabId = "home" | "inbox" | "resolve" | "sales" | "more" | "stock";
 export type MobileNavActionAvailability = "live" | "assistive" | "coming-soon";
 
-export interface MobileNavTabConfig {
+/**
+ * What the member must be able to do for an entry to be worth showing.
+ *
+ * These are the real, server-enforced permission keys — not a role matrix.
+ * `requiresAll` is every key; `requiresAny` is at least one. An entry with
+ * neither is available to any active member (Home, Settings, and the
+ * not-built-yet placeholders, which are disabled for everyone anyway).
+ */
+export interface MobileNavRequirement {
+  requiresAll?: readonly UiPermissionKey[];
+  requiresAny?: readonly UiPermissionKey[];
+}
+
+export interface MobileNavTabConfig extends MobileNavRequirement {
   id: MobileNavTabId;
   labelKey: string;
   icon: LucideIcon;
@@ -31,13 +46,20 @@ export interface MobileNavTabConfig {
   to?: "/app" | "/app/inbox";
 }
 
-export interface MobileNavActionConfig {
+export interface MobileNavActionConfig extends MobileNavRequirement {
   id: string;
   labelKey: string;
   descriptionKey: string;
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
-  to?: "/app" | "/app/inbox" | "/app/pos" | "/app/team" | "/app/orders" | "/app/deliveries";
+  to?:
+    | "/app"
+    | "/app/inbox"
+    | "/app/pos"
+    | "/app/team"
+    | "/app/orders"
+    | "/app/deliveries"
+    | "/app/settings";
 }
 
 export interface MobileNavSheetGroup {
@@ -56,9 +78,22 @@ export interface BusinessNavVariantConfig {
 const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
   tabs: [
     { id: "home", labelKey: "nav.home", icon: Home, kind: "route", to: "/app" },
-    { id: "inbox", labelKey: "nav.inbox", icon: Inbox, kind: "route", to: "/app/inbox" },
+    {
+      id: "inbox",
+      labelKey: "nav.inbox",
+      icon: Inbox,
+      kind: "route",
+      to: "/app/inbox",
+      requiresAll: ["messages.read"],
+    },
     { id: "resolve", labelKey: "nav.resolve", icon: Search, kind: "sheet" },
-    { id: "sales", labelKey: "nav.sales", icon: ShoppingBag, kind: "sheet" },
+    {
+      id: "sales",
+      labelKey: "nav.sales",
+      icon: ShoppingBag,
+      kind: "sheet",
+      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+    },
     { id: "more", labelKey: "nav.more", icon: Menu, kind: "sheet" },
   ],
   resolveGroups: [
@@ -80,6 +115,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: Users,
           availability: "assistive",
           to: "/app/inbox",
+          requiresAll: ["messages.read"],
         },
         {
           id: "find-order",
@@ -117,6 +153,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: ShoppingBag,
           availability: "live",
           to: "/app/pos",
+          requiresAll: ["orders.create"],
         },
         {
           id: "new-order",
@@ -125,6 +162,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: Package,
           availability: "assistive",
           to: "/app/inbox",
+          requiresAll: ["orders.create", "messages.read"],
         },
       ],
     },
@@ -139,6 +177,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: Package,
           availability: "live",
           to: "/app/orders",
+          requiresAll: ["orders.read"],
         },
         {
           id: "payments",
@@ -154,6 +193,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: Truck,
           availability: "live",
           to: "/app/deliveries",
+          requiresAll: ["delivery.read"],
         },
         {
           id: "returns-refunds",
@@ -198,6 +238,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           icon: Users,
           availability: "live",
           to: "/app/team",
+          requiresAll: ["team.read"],
         },
       ],
     },
@@ -231,7 +272,8 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           labelKey: "nav.moreActions.settings.label",
           descriptionKey: "nav.moreActions.settings.description",
           icon: Settings,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/settings",
         },
         {
           id: "profile-account",
@@ -248,7 +290,13 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
 const MART_CONFIG: BusinessNavVariantConfig = {
   tabs: [
     { id: "home", labelKey: "nav.home", icon: Home, kind: "route", to: "/app" },
-    { id: "sales", labelKey: "nav.sales", icon: ShoppingBag, kind: "sheet" },
+    {
+      id: "sales",
+      labelKey: "nav.sales",
+      icon: ShoppingBag,
+      kind: "sheet",
+      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+    },
     { id: "resolve", labelKey: "nav.resolve", icon: Search, kind: "sheet" },
     { id: "stock", labelKey: "nav.stock", icon: Boxes, kind: "sheet" },
     { id: "more", labelKey: "nav.more", icon: Menu, kind: "sheet" },
@@ -297,4 +345,50 @@ export function resolveMobileNavActiveTab(
   }
   if (pathname.startsWith("/app/team") || pathname.startsWith("/app/customers")) return "more";
   return undefined;
+}
+
+// ── Capability filtering ──────────────────────────────────────────────────────
+
+/**
+ * Whether an entry is worth showing to this member.
+ *
+ * Fail-closed by construction: `capabilities.can()` returns false in every
+ * state except "ready", so an unresolved snapshot hides every gated entry
+ * rather than advertising work the server will refuse.
+ */
+export function isNavEntryAvailable(
+  entry: MobileNavRequirement,
+  capabilities: Pick<CapabilityView, "canAll" | "canAny">,
+): boolean {
+  if (entry.requiresAll && !capabilities.canAll(entry.requiresAll)) return false;
+  if (entry.requiresAny && !capabilities.canAny(entry.requiresAny)) return false;
+  return true;
+}
+
+/**
+ * Drop every nav destination the member has no supported access to, then drop
+ * any sheet group left with nothing in it — an empty section header is a
+ * worse answer than no section at all.
+ *
+ * Pure: same config + same capabilities in, same config out. Hiding here is
+ * presentation only; each destination is still guarded server-side.
+ */
+export function filterBusinessNavConfig(
+  config: BusinessNavVariantConfig,
+  capabilities: Pick<CapabilityView, "canAll" | "canAny">,
+): BusinessNavVariantConfig {
+  const filterGroups = (groups: readonly MobileNavSheetGroup[]): readonly MobileNavSheetGroup[] =>
+    groups
+      .map((group) => ({
+        ...group,
+        actions: group.actions.filter((action) => isNavEntryAvailable(action, capabilities)),
+      }))
+      .filter((group) => group.actions.length > 0);
+
+  return {
+    tabs: config.tabs.filter((tab) => isNavEntryAvailable(tab, capabilities)),
+    resolveGroups: filterGroups(config.resolveGroups),
+    salesGroups: filterGroups(config.salesGroups),
+    moreGroups: filterGroups(config.moreGroups),
+  };
 }

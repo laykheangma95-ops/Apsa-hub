@@ -19,6 +19,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { getSessionFn } from "@/api/auth";
 import { CreateOrganizationInputSchema } from "@/lib/org-schema";
 import type { CreateOrganizationResult } from "@/lib/org-schema";
+import type { AuthorizationContext } from "@/server/auth/authorization";
+import type { OrganizationProfile } from "@/server/org/get-organization-profile";
 
 export { slugSchema, CreateOrganizationInputSchema } from "@/lib/org-schema";
 export type {
@@ -26,6 +28,7 @@ export type {
   CreateOrganizationResult,
   CreateOrganizationSuccess,
 } from "@/lib/org-schema";
+export type { OrganizationProfile } from "@/server/org/get-organization-profile";
 
 export const createOrganizationFn = createServerFn()
   .validator((data: unknown) => CreateOrganizationInputSchema.parse(data))
@@ -43,3 +46,46 @@ export const createOrganizationFn = createServerFn()
 
     return createOrganizationForFounder(session, data);
   });
+
+// ── getOrganizationProfileFn — Settings "Business" section ─────────────────────
+//
+// Read-only. organizationId is NEVER accepted from the caller — always derived
+// from the caller's own active DB membership. Identical resolveAuthContext
+// pattern to src/api/team.ts / src/api/customers.ts.
+
+async function resolveAuthContext(): Promise<AuthorizationContext> {
+  const session = await getSessionFn();
+  if (!session || !session.emailVerified) {
+    const { UnauthorizedError } = await import("@/server/auth/authorization");
+    throw new UnauthorizedError("Not authenticated");
+  }
+
+  const { supabaseAdmin } = await import("@/lib/supabase/server");
+  const { AuthorizationService } = await import("@/server/auth/authorization");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: rawMembership } = await (supabaseAdmin as any)
+    .from("memberships")
+    .select("organization_id")
+    .eq("user_id", session.userId)
+    .eq("status", "active")
+    .order("joined_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!rawMembership) {
+    const { ForbiddenError } = await import("@/server/auth/authorization");
+    throw new ForbiddenError("No active organization membership");
+  }
+
+  const membership = rawMembership as { organization_id: string };
+  return AuthorizationService.forRequest(session.userId, membership.organization_id);
+}
+
+export const getOrganizationProfileFn = createServerFn().handler(
+  async (): Promise<OrganizationProfile> => {
+    const authCtx = await resolveAuthContext();
+    const { getOrganizationProfile } = await import("@/server/org/get-organization-profile");
+    return getOrganizationProfile(authCtx);
+  },
+);

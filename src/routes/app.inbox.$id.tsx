@@ -42,11 +42,13 @@ import {
 } from "@/api/inbox";
 import {
   buildSmartActionSuggestion,
+  filterSmartActionSuggestion,
   toPrepareOrderItems,
   toRepeatOrderItems,
   type PrepareOrderItemInput,
   type SmartActionId,
 } from "@/lib/conversation/smart-actions";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -105,6 +107,16 @@ function ConversationScreen() {
   const [savingStatus, setSavingStatus] = useState(false);
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const capabilities = useCapabilities();
+  /*
+   * The three things this screen can start, keyed to the permission each one
+   * needs server-side: replying (messages.reply), turning the thread into an
+   * order (orders.create), and opening the customer record (customers.read).
+   * Every one of them is authorized again by the server when it is invoked.
+   */
+  const canReply = capabilities.can("messages.reply");
+  const canCreateOrder = capabilities.can("orders.create");
+  const canViewCustomer = capabilities.can("customers.read");
 
   const [draft, setDraft] = useState("");
   const [appended, setAppended] = useState<Message[]>([]);
@@ -158,7 +170,7 @@ function ConversationScreen() {
   // SECURITY / TENANT ISOLATION: "intent/suggestion layer is never
   // security-authoritative"). Every action it names still goes through the
   // same server-authoritative path a manual tap would.
-  const suggestion = useMemo(
+  const rawSuggestion = useMemo(
     () =>
       buildSmartActionSuggestion({
         messages: messages.map((message) => ({
@@ -171,6 +183,13 @@ function ConversationScreen() {
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [messages.length, customer, products],
+  );
+
+  // Suggestions this member cannot carry out are dropped before they reach the
+  // strip. The engine still runs the same way — only the offer narrows.
+  const suggestion = useMemo(
+    () => filterSmartActionSuggestion(rawSuggestion, capabilities),
+    [rawSuggestion, capabilities],
   );
 
   useEffect(() => {
@@ -486,7 +505,15 @@ function ConversationScreen() {
           </div>
         ) : null}
 
-        {isProductionId(id) ? (
+        {!canReply ? (
+          <p
+            id="composer-permission-note"
+            className="text-caption px-4 pt-2 text-text-secondary"
+            role="status"
+          >
+            {t("capability.actionDenied")}
+          </p>
+        ) : isProductionId(id) ? (
           <p className="text-caption px-4 pt-2 text-text-secondary">
             {t("conversation.providerPending")}
           </p>
@@ -513,6 +540,8 @@ function ConversationScreen() {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             enterKeyHint="send"
+            disabled={!canReply}
+            {...(canReply ? {} : { "aria-describedby": "composer-permission-note" })}
             placeholder={t("conversation.composerPlaceholder")}
             aria-label={t("conversation.composerPlaceholder")}
             className="h-12 min-w-0 flex-1 rounded-full border-border-default bg-surface-primary px-4"
@@ -520,7 +549,7 @@ function ConversationScreen() {
           <button
             type="submit"
             aria-label={t("conversation.send")}
-            disabled={isProductionId(id) || draft.trim().length === 0}
+            disabled={!canReply || isProductionId(id) || draft.trim().length === 0}
             className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
           >
             <Send className="size-5" aria-hidden />
@@ -536,19 +565,33 @@ function ConversationScreen() {
         snap="half"
       >
         <div className="space-y-2">
+          {/*
+           * Kept visible but disabled when the member lacks orders.create:
+           * the row is the one place that teaches "turning a chat into an
+           * order is a thing you need access for". Hiding it would just leave
+           * a gap they cannot ask about.
+           */}
           <ActionRow
             emphasis
             icon={ShoppingBag}
             label={t("conversation.createOrder")}
-            description={t("conversation.actions.createOrderBody")}
-            disabled={!customer}
+            description={
+              canCreateOrder
+                ? t("conversation.actions.createOrderBody")
+                : t("capability.actionDenied")
+            }
+            disabled={!customer || !canCreateOrder}
             onClick={startOrder}
           />
           <ActionRow
             icon={UserRound}
             label={t("conversation.actions.viewCustomer")}
-            description={t("conversation.actions.viewCustomerBody")}
-            disabled={!customer}
+            description={
+              canViewCustomer
+                ? t("conversation.actions.viewCustomerBody")
+                : t("capability.actionDenied")
+            }
+            disabled={!customer || !canViewCustomer}
             onClick={() => {
               setActionsOpen(false);
               setCustomerOpen(true);

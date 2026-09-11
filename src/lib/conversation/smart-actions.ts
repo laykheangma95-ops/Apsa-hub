@@ -25,6 +25,7 @@ import {
   type ResolvedItem,
   type SuggestedActionId,
 } from "@/lib/intent";
+import type { CapabilityView, UiPermissionKey } from "@/lib/capabilities";
 import type { Product } from "@/types";
 
 /**
@@ -58,6 +59,49 @@ export const SMART_ACTION_IDS: readonly SmartActionId[] = [
   "send_price",
   "delivery_info",
 ];
+
+/**
+ * The permission each Smart Action needs, matching what the surface it opens
+ * will ask the server for: the three order actions all open Prepare Order,
+ * whose Create Draft calls createOrder (orders.create); the six prompt actions
+ * put a message in the composer (messages.reply); view_customer opens the
+ * customer record (customers.read).
+ *
+ * Suggesting work the server will refuse is worse than suggesting nothing, so
+ * a member without the key simply never sees that chip.
+ */
+export const SMART_ACTION_PERMISSION: Record<SmartActionId, UiPermissionKey> = {
+  prepare_order: "orders.create",
+  repeat_order: "orders.create",
+  view_product: "orders.create",
+  view_customer: "customers.read",
+  check_stock: "messages.reply",
+  ask_quantity: "messages.reply",
+  ask_variant: "messages.reply",
+  ask_address: "messages.reply",
+  send_price: "messages.reply",
+  delivery_info: "messages.reply",
+};
+
+/**
+ * Drop every suggested action this member cannot carry out, promoting the
+ * first surviving secondary action when the primary is dropped. Pure.
+ *
+ * Presentation only — the Prepare Order sheet and the composer are still
+ * authorized independently by the server.
+ */
+export function filterSmartActionSuggestion(
+  suggestion: SmartActionSuggestion,
+  capabilities: Pick<CapabilityView, "can">,
+): SmartActionSuggestion {
+  const allowed = [
+    ...(suggestion.primary ? [suggestion.primary] : []),
+    ...suggestion.secondary,
+  ].filter((action) => capabilities.can(SMART_ACTION_PERMISSION[action]));
+
+  const [primary = null, ...secondary] = allowed;
+  return { ...suggestion, primary, secondary };
+}
 
 /** One candidate line item, with its (possibly ambiguous) catalog match. */
 export interface ResolvedSmartOrderItem {
