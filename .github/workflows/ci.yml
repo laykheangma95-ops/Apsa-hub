@@ -131,6 +131,22 @@ jobs:
         # NOTE: this is static SQL analysis. It does not connect to, and
         # cannot prove anything about, the live hosted Supabase project.
 
+  staging-readiness:
+    name: Staging readiness check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run check:staging-readiness
+        # Offline only. It reports which migrations are PENDING against the
+        # hosted project and whether generated types have gone stale for the
+        # migrations already applied. It does NOT connect to Supabase, does NOT
+        # apply migrations, and a green run here is NOT a staging verification —
+        # see docs/STAGING_VERIFICATION.md.
+
   secret-scan:
     name: Secret leak scan
     runs-on: ubuntu-latest
