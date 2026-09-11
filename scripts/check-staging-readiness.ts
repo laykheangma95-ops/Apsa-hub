@@ -97,8 +97,11 @@ for (const bad of inventory.malformed) {
   fail(`Migration file does not follow NNN_description.sql: ${bad}`);
 }
 for (const dup of inventory.duplicates) {
+  const spellings = dup.rawPrefixes.length > 1 ? ` (written as ${dup.rawPrefixes.join(", ")})` : "";
   fail(
-    `Migration number ${dup.prefix} is used by ${dup.files.length} files: ${dup.files.join(", ")}`,
+    `Migration number ${dup.number}${spellings} is used by ${dup.files.length} files: ` +
+      `${dup.files.join(", ")}. Migrations are applied by ordinal, so differently-spelled ` +
+      `prefixes for the same number still collide on the hosted project.`,
   );
 }
 if (inventory.malformed.length === 0 && inventory.duplicates.length === 0) {

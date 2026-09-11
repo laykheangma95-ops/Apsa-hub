@@ -27,8 +27,16 @@ export interface MigrationInventory {
   entries: MigrationEntry[];
   /** Files that do not follow the NNN_description.sql convention. */
   malformed: string[];
-  /** Numbers used by more than one file — always a blocking condition. */
-  duplicates: Array<{ prefix: string; files: string[] }>;
+  /**
+   * Migration numbers used by more than one file — always a blocking condition.
+   *
+   * Grouping is by the PARSED NUMBER, not the raw prefix string, because the
+   * database applies migrations by ordinal: "09_a.sql" and "9_b.sql" are both
+   * migration 9 and collide on the hosted project even though their prefix
+   * strings differ. `prefix` is the canonical decimal form of that number, and
+   * `rawPrefixes` preserves the differing spellings actually on disk.
+   */
+  duplicates: Array<{ number: number; prefix: string; rawPrefixes: string[]; files: string[] }>;
   /** Numbers absent from an otherwise contiguous range (informational). */
   gaps: number[];
 }
@@ -61,15 +69,23 @@ export function buildMigrationInventory(fileNames: string[]): MigrationInventory
     a.number === b.number ? a.file.localeCompare(b.file) : a.number - b.number,
   );
 
-  const byPrefix = new Map<string, string[]>();
+  // Group by parsed number, never by the raw prefix string: "09_a.sql" and
+  // "9_b.sql" are the same migration ordinal and must collide.
+  const byNumber = new Map<number, MigrationEntry[]>();
   for (const entry of entries) {
-    const list = byPrefix.get(entry.prefix) ?? [];
-    list.push(entry.file);
-    byPrefix.set(entry.prefix, list);
+    const list = byNumber.get(entry.number) ?? [];
+    list.push(entry);
+    byNumber.set(entry.number, list);
   }
-  const duplicates = [...byPrefix.entries()]
-    .filter(([, files]) => files.length > 1)
-    .map(([prefix, files]) => ({ prefix, files }));
+  const duplicates = [...byNumber.entries()]
+    .filter(([, group]) => group.length > 1)
+    .sort(([a], [b]) => a - b)
+    .map(([number, group]) => ({
+      number,
+      prefix: String(number),
+      rawPrefixes: [...new Set(group.map((e) => e.prefix))],
+      files: group.map((e) => e.file),
+    }));
 
   const gaps: number[] = [];
   const seen = new Set(entries.map((e) => e.number));
@@ -385,4 +401,620 @@ export function collectAuthenticatedRpcs(contents: string[]): string[] {
     }
   }
   return [...names].sort();
+}
+
+// ── Project URL identity ─────────────────────────────────────────────────────
+
+/**
+ * Reduce a Supabase project URL to a comparable identity.
+ *
+ * Two spellings of the same project must never read as two different projects,
+ * or the "staging is not production" guard can be walked around by appending a
+ * slash or changing the case of the host. Normalization lower-cases the scheme
+ * and host, drops the default port, strips a trailing slash and discards query
+ * and fragment. A value that is not a parseable absolute URL is lower-cased and
+ * trailing-slash-stripped so it still compares stably rather than silently
+ * becoming "different from everything".
+ *
+ * Returns "" for an absent or whitespace-only value. Nothing secret passes
+ * through here — a project URL is not a credential — but the result is still
+ * only ever used for comparison, never printed alongside a key.
+ */
+export function normalizeSupabaseUrl(value: string | undefined): string {
+  const raw = (value ?? "").trim();
+  if (raw.length === 0) return "";
+  try {
+    const url = new URL(raw);
+    const scheme = url.protocol.toLowerCase();
+    const host = url.hostname.toLowerCase();
+    const defaultPort =
+      (scheme === "https:" && url.port === "443") || (scheme === "http:" && url.port === "80");
+    const port = url.port.length > 0 && !defaultPort ? `:${url.port}` : "";
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return `${scheme}//${host}${port}${pathname}`;
+  } catch {
+    return raw.toLowerCase().replace(/\/+$/, "");
+  }
+}
+
+/** True when two URLs denote the same Supabase project after normalization. */
+export function sameSupabaseProject(a: string | undefined, b: string | undefined): boolean {
+  const left = normalizeSupabaseUrl(a);
+  const right = normalizeSupabaseUrl(b);
+  return left.length > 0 && left === right;
+}
+
+// ── Key role identification (never discloses key material) ───────────────────
+
+export type KeyRole = "anon" | "service_role" | "publishable" | "secret" | "unknown";
+
+/**
+ * Identify what role a Supabase key claims, WITHOUT returning, logging or
+ * echoing any part of the key.
+ *
+ * Legacy keys are unsigned-inspectable JWTs whose payload carries a `role`
+ * claim; current keys are prefixed (`sb_publishable_…`, `sb_secret_…`). Only
+ * the role word leaves this function. No signature is verified and no network
+ * call is made — this is a cheap confusion check ("is the service-role key in
+ * the anon slot?"), not authentication.
+ */
+export function describeKeyRole(key: string | undefined): KeyRole {
+  const raw = (key ?? "").trim();
+  if (raw.length === 0) return "unknown";
+  if (raw.startsWith("sb_publishable_")) return "publishable";
+  if (raw.startsWith("sb_secret_")) return "secret";
+
+  const parts = raw.split(".");
+  const payload = parts.length === 3 ? parts[1] : undefined;
+  if (payload === undefined || payload.length === 0) return "unknown";
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    const claims = JSON.parse(json) as { role?: unknown };
+    const role = typeof claims.role === "string" ? claims.role.toLowerCase() : "";
+    if (role === "anon") return "anon";
+    if (role === "service_role") return "service_role";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** True when a key's claimed role is a privileged, server-only one. */
+export function isPrivilegedKeyRole(role: KeyRole): boolean {
+  return role === "service_role" || role === "secret";
+}
+
+/** True when a key's claimed role is a browser-safe, public one. */
+export function isPublicKeyRole(role: KeyRole): boolean {
+  return role === "anon" || role === "publishable";
+}
+
+// ── Hosted-probe safety gate (fail closed) ───────────────────────────────────
+
+export interface ProbeGateInput {
+  stagingUrl: string | undefined;
+  /**
+   * The production URL witness. A hosted probe is only allowed once the runner
+   * has stated which project is production, so that "is this staging?" is a
+   * question that was actually answered rather than skipped.
+   */
+  productionUrlWitness: string | undefined;
+  anonKey: string | undefined;
+  serviceKey: string | undefined;
+  orgAId?: string | undefined;
+  orgBId?: string | undefined;
+}
+
+export interface ProbeGateResult {
+  /** True only when every refusal condition is clear. */
+  allowed: boolean;
+  /** Stable machine codes for the conditions that blocked the run. */
+  refusals: string[];
+  /** Operator-facing reasons, in the same order. Never contains a key value. */
+  messages: string[];
+}
+
+/**
+ * Decide whether ANY hosted probe may run.
+ *
+ * This is fail-closed by construction: the result is `allowed` only when every
+ * condition below is affirmatively clear, so a missing variable refuses rather
+ * than skipping a comparison. In particular an absent production URL witness is
+ * a refusal, not a pass — the earlier "refuse when staging === production"
+ * shape silently allowed every hosted probe whenever the production URL simply
+ * was not set in the shell.
+ *
+ * This gate takes no opinion on write probes and reads no flag: it must be
+ * evaluated before any client is constructed, so that no command-line option
+ * can be positioned to bypass it.
+ */
+export function evaluateProbeGate(input: ProbeGateInput): ProbeGateResult {
+  const refusals: string[] = [];
+  const messages: string[] = [];
+  const refuse = (code: string, message: string) => {
+    refusals.push(code);
+    messages.push(message);
+  };
+
+  const staging = normalizeSupabaseUrl(input.stagingUrl);
+  const production = normalizeSupabaseUrl(input.productionUrlWitness);
+  const anon = (input.anonKey ?? "").trim();
+  const service = (input.serviceKey ?? "").trim();
+
+  if (staging.length === 0) {
+    refuse(
+      "staging_url_missing",
+      "STAGING_SUPABASE_URL is not set — there is no project to probe.",
+    );
+  }
+  if (anon.length === 0) {
+    refuse("anon_key_missing", "STAGING_SUPABASE_ANON_KEY is not set.");
+  }
+  if (service.length === 0) {
+    refuse("service_key_missing", "STAGING_SUPABASE_SERVICE_ROLE_KEY is not set.");
+  }
+
+  if (production.length === 0) {
+    refuse(
+      "production_witness_missing",
+      "No production URL witness is set (VITE_SUPABASE_URL or PRODUCTION_SUPABASE_URL). " +
+        "Without it, 'staging is not production' cannot be checked at all, so no hosted probe may run.",
+    );
+  } else if (staging.length > 0 && staging === production) {
+    refuse(
+      "staging_is_production",
+      "STAGING_SUPABASE_URL and the production URL witness resolve to the SAME project after " +
+        "normalization — refusing to probe the production project.",
+    );
+  }
+
+  if (anon.length > 0 && anon === service) {
+    refuse("keys_identical", "The anon key and the service-role key hold the same value.");
+  }
+
+  const anonRole = describeKeyRole(anon);
+  const serviceRole = describeKeyRole(service);
+  if (anon.length > 0 && isPrivilegedKeyRole(anonRole)) {
+    refuse(
+      "anon_slot_privileged",
+      `STAGING_SUPABASE_ANON_KEY carries a privileged role ("${anonRole}") — the keys are swapped. ` +
+        "Probing with a privileged key in the anonymous slot would report false RLS passes.",
+    );
+  }
+  if (service.length > 0 && isPublicKeyRole(serviceRole)) {
+    refuse(
+      "service_slot_public",
+      `STAGING_SUPABASE_SERVICE_ROLE_KEY carries a public role ("${serviceRole}") — the keys are swapped.`,
+    );
+  }
+
+  const orgA = (input.orgAId ?? "").trim();
+  const orgB = (input.orgBId ?? "").trim();
+  if (orgA.length > 0 && orgB.length > 0 && orgA.toLowerCase() === orgB.toLowerCase()) {
+    refuse(
+      "org_ids_identical",
+      "STAGING_ORG_A_ID and STAGING_ORG_B_ID are the same organization — cross-tenant isolation " +
+        "cannot be proven by reading one organization against itself.",
+    );
+  }
+
+  return { allowed: refusals.length === 0, refusals, messages };
+}
+
+// ── Probe verdicts ───────────────────────────────────────────────────────────
+
+export type Verdict = "PASS" | "FAIL" | "INCONCLUSIVE";
+
+/** Postgres/PostgREST codes that mean "refused by authorization", and nothing else. */
+export const AUTHORIZATION_DENIAL_CODES = ["42501", "PGRST301", "PGRST302"] as const;
+
+/**
+ * True only for a code that positively means the request was refused because
+ * the caller was not authorized. Any other error — a malformed id (22P02), a
+ * trigger or check violation, a validation failure, a missing function — is a
+ * refusal for some other reason and must never be read as proof of security.
+ */
+export function isAuthorizationDenial(code: string | undefined | null): boolean {
+  if (typeof code !== "string") return false;
+  return (AUTHORIZATION_DENIAL_CODES as readonly string[]).includes(code);
+}
+
+export interface RlsObservation {
+  /** Error code returned to the anonymous client, if it was refused. */
+  errorCode?: string | null;
+  /** Rows the anonymous client actually received. */
+  anonRowCount: number;
+  /**
+   * Rows the SERVICE-ROLE client counts in the same table, or null when the
+   * count could not be obtained. This is what separates "RLS held" from "the
+   * table simply had nothing in it".
+   */
+  adminRowCount: number | null;
+}
+
+export interface VerdictResult {
+  verdict: Verdict;
+  /** Stable machine reason code. */
+  reason: string;
+}
+
+/**
+ * Decide what an anonymous read actually proved about RLS.
+ *
+ * The critical case is the empty table. A zero-row anonymous read of a table
+ * that is itself empty distinguishes nothing: an unprotected empty table and a
+ * perfectly protected empty table return exactly the same thing. That is
+ * INCONCLUSIVE and must never be counted toward an RLS-proven total. Only a
+ * table the service role can see rows in, which the anonymous client reads zero
+ * of, proves that RLS is doing the work.
+ */
+export function classifyRlsObservation(observation: RlsObservation): VerdictResult {
+  const { errorCode, anonRowCount, adminRowCount } = observation;
+
+  if (typeof errorCode === "string" && errorCode.length > 0) {
+    if (isAuthorizationDenial(errorCode)) {
+      return { verdict: "PASS", reason: "authorization_denial" };
+    }
+    return { verdict: "INCONCLUSIVE", reason: "refused_for_other_reason" };
+  }
+
+  if (anonRowCount > 0) {
+    return { verdict: "FAIL", reason: "rows_exposed_to_anonymous" };
+  }
+
+  if (adminRowCount === null) {
+    return { verdict: "INCONCLUSIVE", reason: "admin_count_unavailable" };
+  }
+  if (adminRowCount === 0) {
+    return { verdict: "INCONCLUSIVE", reason: "table_empty" };
+  }
+  return { verdict: "PASS", reason: "rows_exist_but_anonymous_read_none" };
+}
+
+/**
+ * Decide what a write probe proved.
+ *
+ * A write that is not refused is a tenant-isolation failure. A write refused
+ * with an authorization code is the only successful proof. Everything else —
+ * a malformed uuid, a trigger raising, a check constraint, a not-null
+ * violation — means the request never reached the authorization decision, so it
+ * proves nothing and must not be recorded as a refusal.
+ */
+export function classifyWriteProbe(error: { code?: string | null } | null): VerdictResult {
+  if (error === null || error === undefined) {
+    return { verdict: "FAIL", reason: "write_accepted" };
+  }
+  if (isAuthorizationDenial(error.code)) {
+    return { verdict: "PASS", reason: "authorization_denial" };
+  }
+  return { verdict: "INCONCLUSIVE", reason: "refused_for_other_reason" };
+}
+
+/**
+ * Decide what an RPC probe proved.
+ *
+ * PGRST202 (function not found in the schema cache for this role) and PGRST203
+ * (ambiguous overload) are explicitly INCONCLUSIVE: the call never reached an
+ * authorization decision, so neither can stand in for "the anonymous caller was
+ * denied".
+ */
+export function classifyRpcProbe(error: { code?: string | null } | null): VerdictResult {
+  if (error === null || error === undefined) {
+    return { verdict: "FAIL", reason: "executed_for_anonymous_caller" };
+  }
+  if (isAuthorizationDenial(error.code)) {
+    return { verdict: "PASS", reason: "authorization_denial" };
+  }
+  if (error.code === "PGRST202" || error.code === "PGRST203") {
+    return { verdict: "INCONCLUSIVE", reason: "not_resolvable_for_role" };
+  }
+  return { verdict: "INCONCLUSIVE", reason: "refused_for_other_reason" };
+}
+
+// ── RPC signatures, volatility and safe dummy arguments ──────────────────────
+
+export interface RpcParameter {
+  /** Declared parameter name, or undefined for a positional-only parameter. */
+  name?: string;
+  /** Declared SQL type, lower-cased. */
+  type: string;
+  /** True when the parameter declares a DEFAULT and may be omitted. */
+  hasDefault: boolean;
+  /** True for OUT parameters, which a caller never supplies. */
+  isOut: boolean;
+}
+
+export interface RpcSignature {
+  name: string;
+  parameters: RpcParameter[];
+  /**
+   * True unless the function is provably read-only. A function is treated as
+   * mutating when its body contains a write statement OR it is not declared
+   * STABLE/IMMUTABLE — the conservative direction, so an unparseable or
+   * unusual definition is never assumed safe to invoke.
+   */
+  mutating: boolean;
+  /** True when declared STABLE or IMMUTABLE. */
+  readOnlyDeclared: boolean;
+}
+
+const WRITE_STATEMENT_RE =
+  /\b(?:INSERT\s+INTO|UPDATE\s+[a-z_"]|DELETE\s+FROM|TRUNCATE|MERGE\s+INTO|COPY\s+|CREATE\s+(?:TABLE|INDEX|SEQUENCE|TYPE)|ALTER\s+(?:TABLE|SEQUENCE|TYPE)|DROP\s+(?:TABLE|INDEX|SEQUENCE|TYPE)|NEXTVAL|SETVAL)\b/i;
+
+/**
+ * Split a SQL argument list on top-level commas, ignoring commas nested inside
+ * parentheses (numeric(10,2)) or inside a quoted default.
+ */
+function splitTopLevel(args: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | undefined;
+  let current = "";
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i] as string;
+    if (quote !== undefined) {
+      current += ch;
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) parts.push(current);
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+function parseParameter(raw: string): RpcParameter | undefined {
+  const hasDefault = /\bDEFAULT\b/i.test(raw) || /(^|[^:!<>=])=\s*[^=]/.test(raw);
+  let text = raw.replace(/\s+DEFAULT\s+[\s\S]*$/i, "").trim();
+  text = text.replace(/\s*(?<![:!<>=])=\s*[^=][\s\S]*$/, "").trim();
+  if (text.length === 0) return undefined;
+
+  let isOut = false;
+  const modeMatch = /^(IN|OUT|INOUT|VARIADIC)\s+/i.exec(text);
+  if (modeMatch && modeMatch[1] !== undefined) {
+    const mode = modeMatch[1].toUpperCase();
+    isOut = mode === "OUT";
+    text = text.slice(modeMatch[0].length).trim();
+  }
+
+  const tokens = text.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return undefined;
+  if (tokens.length === 1) {
+    return { type: (tokens[0] as string).toLowerCase(), hasDefault, isOut };
+  }
+  const name = (tokens[0] as string).replace(/^"|"$/g, "");
+  const type = tokens.slice(1).join(" ").toLowerCase();
+  return { name, type, hasDefault, isOut };
+}
+
+/**
+ * Extract the declared signature of every public function the migrations
+ * create, together with a conservative read-only/mutating classification.
+ *
+ * Only the declaration is parsed; nothing is executed and nothing is connected
+ * to. The result is what lets a hosted probe be BOTH safe (never invoke a
+ * mutating function speculatively) and meaningful (call with arguments that
+ * actually bind, instead of always bouncing off PGRST202).
+ */
+export function collectRpcSignatures(contents: string[]): RpcSignature[] {
+  const byName = new Map<string, RpcSignature>();
+  const header =
+    /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?"?([a-z_][a-z0-9_]*)"?\s*\(/gi;
+
+  for (const sql of contents) {
+    const stripped = stripSqlComments(sql);
+    header.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = header.exec(stripped)) !== null) {
+      const name = match[1];
+      if (name === undefined) continue;
+
+      // Balanced scan of the argument list.
+      let depth = 1;
+      let i = header.lastIndex;
+      let quote: string | undefined;
+      for (; i < stripped.length && depth > 0; i++) {
+        const ch = stripped[i];
+        if (quote !== undefined) {
+          if (ch === quote) quote = undefined;
+          continue;
+        }
+        if (ch === "'" || ch === '"') quote = ch;
+        else if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+      }
+      const args = stripped.slice(header.lastIndex, Math.max(header.lastIndex, i - 1));
+      const parameters = splitTopLevel(args)
+        .map(parseParameter)
+        .filter((p): p is RpcParameter => p !== undefined);
+
+      // Everything between the argument list and the function body carries the
+      // volatility declaration; the body carries the statements.
+      const rest = stripped.slice(i);
+      const dollar = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(rest);
+      const preamble = dollar ? rest.slice(0, dollar.index) : rest.slice(0, 400);
+      let body = "";
+      if (dollar) {
+        const tag = dollar[0];
+        const bodyStart = dollar.index + tag.length;
+        const close = rest.indexOf(tag, bodyStart);
+        body = close === -1 ? rest.slice(bodyStart) : rest.slice(bodyStart, close);
+      }
+
+      const readOnlyDeclared = /\b(?:STABLE|IMMUTABLE)\b/i.test(preamble);
+      const writes = WRITE_STATEMENT_RE.test(body);
+      const signature: RpcSignature = {
+        name,
+        parameters,
+        readOnlyDeclared,
+        mutating: writes || !readOnlyDeclared,
+      };
+
+      // A later CREATE OR REPLACE wins; a name that is mutating in ANY
+      // definition stays mutating, so an overload cannot launder it.
+      const existing = byName.get(name);
+      byName.set(
+        name,
+        existing === undefined
+          ? signature
+          : { ...signature, mutating: signature.mutating || existing.mutating },
+      );
+      header.lastIndex = i;
+    }
+  }
+
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Build a type-correct, inert argument object for an RPC probe.
+ *
+ * PostgREST resolves an RPC by the named arguments supplied, so probing every
+ * function with `{}` makes any function that has required parameters answer
+ * PGRST202 ("not found") regardless of how its permissions are configured —
+ * which reads as inconclusive forever and hides a genuinely exposed function.
+ * Supplying a correctly-typed placeholder for each required parameter lets the
+ * call reach the authorization decision.
+ *
+ * Values are deliberately inert: the nil UUID, empty string, zero, false, the
+ * epoch. They identify no real row.
+ */
+export function rpcDummyArgs(signature: RpcSignature): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  for (const parameter of signature.parameters) {
+    if (parameter.isOut) continue;
+    if (parameter.name === undefined) continue;
+    if (parameter.hasDefault) continue;
+    args[parameter.name] = dummyValueForType(parameter.type);
+  }
+  return args;
+}
+
+/** Map a declared SQL type to an inert placeholder value of that type. */
+export function dummyValueForType(sqlType: string): unknown {
+  const type = sqlType.toLowerCase().trim();
+  if (/\[\]$/.test(type) || /^_/.test(type)) return [];
+  if (/\buuid\b/.test(type)) return "00000000-0000-0000-0000-000000000000";
+  if (/\bbool(ean)?\b/.test(type)) return false;
+  if (/\b(jsonb|json)\b/.test(type)) return {};
+  if (
+    /\b(smallint|integer|int2|int4|int8|int|bigint|numeric|decimal|real|double\s+precision|float)\b/.test(
+      type,
+    )
+  ) {
+    return 0;
+  }
+  if (/\b(timestamptz|timestamp|date)\b/.test(type)) return "1970-01-01T00:00:00Z";
+  if (/\btime\b/.test(type)) return "00:00:00";
+  if (/\b(text|varchar|character\s+varying|char|citext|name)\b/.test(type)) return "";
+  // Enums and domain types are text over the wire; an empty string is inert.
+  return "";
+}
+
+// ── Trigger-protected tables ─────────────────────────────────────────────────
+
+const CREATE_TRIGGER_RE =
+  /CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+[a-z_][a-z0-9_]*\s+[\s\S]*?\bON\s+(?:public\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+
+/**
+ * Collect tables that carry a trigger.
+ *
+ * A write probe against a trigger-protected table is worthless as a security
+ * proof: the trigger can raise before the authorization decision is reached, so
+ * the refusal that comes back says nothing about tenant isolation. These tables
+ * are excluded from write-probe target selection.
+ */
+export function collectTriggerProtectedTables(contents: string[]): string[] {
+  const tables = new Set<string>();
+  for (const sql of contents) {
+    const stripped = stripSqlComments(sql);
+    CREATE_TRIGGER_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = CREATE_TRIGGER_RE.exec(stripped)) !== null) {
+      if (m[1] !== undefined) tables.add(m[1]);
+    }
+  }
+  return [...tables].sort();
+}
+
+/**
+ * Pick a write-probe target: tenant-scoped, present on the hosted project, and
+ * not trigger-protected. Returns undefined when no such table exists, which the
+ * caller must report as NOT CONFIGURED rather than inventing a target.
+ */
+export function selectWriteProbeTarget(
+  tenantScopedTables: string[],
+  triggerProtectedTables: string[],
+): string | undefined {
+  const protectedSet = new Set(triggerProtectedTables);
+  return [...tenantScopedTables].sort().find((t) => !protectedSet.has(t));
+}
+
+// ── Bounded execution ────────────────────────────────────────────────────────
+
+/**
+ * Resolve a promise, or reject once `ms` have passed.
+ *
+ * Every hosted call is wrapped in this so that an unreachable or hanging
+ * staging project ends the run with a reported timeout instead of holding the
+ * process open forever.
+ */
+export function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out after ${ms}ms: ${label}`));
+    }, ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+export interface Deadline {
+  /** True once the overall budget is spent. */
+  expired(): boolean;
+  /** Milliseconds left, never negative. */
+  remaining(): number;
+}
+
+/** A monotonic overall budget for a whole verification run. */
+export function createDeadline(totalMs: number, now: () => number = Date.now): Deadline {
+  const start = now();
+  return {
+    expired: () => now() - start >= totalMs,
+    remaining: () => Math.max(0, totalMs - (now() - start)),
+  };
+}
+
+/** Read a positive integer from the environment, falling back to a default. */
+export function readTimeoutMs(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const raw = (env[name] ?? "").trim();
+  if (raw.length === 0) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
 }

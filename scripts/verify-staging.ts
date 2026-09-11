@@ -7,11 +7,22 @@
  * rows — is proven here or not at all.
  *
  * SAFETY CONTRACT
- *   · Reads only. No INSERT/UPDATE/DELETE and no RPC that mutates is called
- *     unless --allow-write-probes is passed explicitly.
+ *   · No INSERT/UPDATE/DELETE is issued unless --allow-write-probes is passed.
+ *   · In default mode, only RPCs this checkout can statically prove to be
+ *     read-only (declared STABLE/IMMUTABLE with no write statement in the body)
+ *     are invoked. An RPC that is mutating, or whose definition cannot be
+ *     parsed, is NOT called — it is reported INCONCLUSIVE.
+ *
+ *     This is the honest form of the guarantee. The script cannot promise that
+ *     "no mutating RPC can ever execute" in general, because whether a function
+ *     runs for an anonymous caller is decided by the hosted project's grants,
+ *     not by this file. What it can guarantee, and does, is that it never asks
+ *     a function to run unless that function is provably read-only. If a
+ *     mutating RPC has been wrongly granted to `anon`, the danger is the grant;
+ *     this tool simply refuses to be the thing that pulls the trigger.
  *   · Never applies migrations and never changes hosted configuration.
- *   · Refuses to run when STAGING_SUPABASE_URL matches VITE_SUPABASE_URL, so
- *     it cannot be pointed at the production project by a stale shell.
+ *   · Refuses to run at all unless a production URL witness is present and
+ *     proves the target is NOT the production project. See evaluateProbeGate().
  *   · Never prints a key, token, cookie, email address, message body, customer
  *     name, phone number or any other row content — only table names, counts,
  *     error codes and pass/fail verdicts.
@@ -25,17 +36,31 @@
  * INCONCLUSIVE and NOT CONFIGURED are never counted as passes, and the script
  * exits non-zero if a security-relevant check did not positively pass.
  *
+ * WHAT COUNTS AS PROOF
+ *   Only an explicit authorization refusal (42501, PGRST301, PGRST302) proves a
+ *   denial. A zero-row read proves RLS only when the service role can see rows
+ *   in that same table — on an EMPTY table, a protected and an unprotected read
+ *   are indistinguishable, so an empty table is always INCONCLUSIVE. No canary
+ *   row is ever inserted to manufacture a result.
+ *
  * Required environment (staging project — never production):
  *   STAGING_SUPABASE_URL
  *   STAGING_SUPABASE_ANON_KEY
  *   STAGING_SUPABASE_SERVICE_ROLE_KEY
  *
+ * Required safety witness — the run refuses without it:
+ *   VITE_SUPABASE_URL or PRODUCTION_SUPABASE_URL
+ *
  * Optional — enables the authenticated, multi-organization checks:
- *   STAGING_ORG_A_ID, STAGING_ORG_B_ID
+ *   STAGING_ORG_A_ID, STAGING_ORG_B_ID   (must be two different organizations)
  *   STAGING_OWNER_A_EMAIL,   STAGING_OWNER_A_PASSWORD
  *   STAGING_MANAGER_A_EMAIL, STAGING_MANAGER_A_PASSWORD
  *   STAGING_STAFF_A_EMAIL,   STAGING_STAFF_A_PASSWORD
  *   STAGING_OWNER_B_EMAIL,   STAGING_OWNER_B_PASSWORD
+ *
+ * Optional — bounded execution (milliseconds):
+ *   STAGING_REQUEST_TIMEOUT_MS  default 15000  per hosted request
+ *   STAGING_GLOBAL_TIMEOUT_MS   default 300000 for the whole run
  *
  * Usage:
  *   bun run scripts/verify-staging.ts
@@ -43,13 +68,30 @@
  * Exit codes:
  *   0 — every check that ran passed, and nothing security-relevant was left unproven
  *   1 — a check failed, or a security-relevant check could not be proven
- *   2 — prerequisites missing; nothing was verified (fail closed)
+ *   2 — prerequisites missing or the safety gate refused; nothing was verified
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { collectMigrationTables, collectAuthenticatedRpcs } from "./lib/staging-readiness.ts";
+import {
+  collectMigrationTables,
+  collectAuthenticatedRpcs,
+  collectRpcSignatures,
+  collectTriggerProtectedTables,
+  selectWriteProbeTarget,
+  rpcDummyArgs,
+  evaluateProbeGate,
+  classifyRlsObservation,
+  classifyWriteProbe,
+  classifyRpcProbe,
+  isAuthorizationDenial,
+  describeKeyRole,
+  createDeadline,
+  readTimeoutMs,
+  withTimeout,
+  type RpcSignature,
+} from "./lib/staging-readiness.ts";
 
 const ROOT = process.cwd();
 const MIGRATIONS_DIR = path.join(ROOT, "supabase/migrations");
@@ -87,58 +129,131 @@ const section = (t: string) => console.log(`\n── ${t} ${"─".repeat(Math.ma
  * requested value back (a row id, a column value); only the stable error code
  * is ever printed.
  */
-function safeCode(error: { code?: string; message?: string } | null): string {
+function safeCode(error: { code?: string | null; message?: string } | null | undefined): string {
   if (!error) return "none";
-  return error.code && error.code.length > 0 ? error.code : "unspecified";
+  return typeof error.code === "string" && error.code.length > 0 ? error.code : "unspecified";
 }
 
-// ── Prerequisites (fail closed) ──────────────────────────────────────────────
+// ── Safety gate — evaluated before any client exists ─────────────────────────
+//
+// Ordering is the enforcement mechanism for M1/"--allow-write-probes cannot
+// bypass the guard": the gate is evaluated here, at module top level, before a
+// single Supabase client is constructed and before any flag influences control
+// flow. A refusal exits the process, so there is no code path on which a flag
+// could reach a hosted request that the gate did not clear.
 
-section("Prerequisites");
+section("Prerequisites and safety gate");
 
 const URL = (process.env["STAGING_SUPABASE_URL"] ?? "").trim();
 const ANON = (process.env["STAGING_SUPABASE_ANON_KEY"] ?? "").trim();
 const SERVICE = (process.env["STAGING_SUPABASE_SERVICE_ROLE_KEY"] ?? "").trim();
+const ORG_A = (process.env["STAGING_ORG_A_ID"] ?? "").trim();
+const ORG_B = (process.env["STAGING_ORG_B_ID"] ?? "").trim();
 
-const required: Array<[string, string]> = [
-  ["STAGING_SUPABASE_URL", URL],
-  ["STAGING_SUPABASE_ANON_KEY", ANON],
-  ["STAGING_SUPABASE_SERVICE_ROLE_KEY", SERVICE],
-];
-const absent = required.filter(([, v]) => v.length === 0).map(([n]) => n);
+/**
+ * The production URL witness. Either variable may carry it, but one of them
+ * MUST: without a production URL to compare against, "this is not production"
+ * is an unanswered question, and the gate refuses rather than assuming.
+ */
+const PRODUCTION_WITNESS =
+  (process.env["PRODUCTION_SUPABASE_URL"] ?? "").trim() ||
+  (process.env["VITE_SUPABASE_URL"] ?? "").trim();
 
-if (absent.length > 0) {
-  for (const name of absent) missing(`${name} is not set`);
+const gate = evaluateProbeGate({
+  stagingUrl: URL,
+  productionUrlWitness: PRODUCTION_WITNESS,
+  anonKey: ANON,
+  serviceKey: SERVICE,
+  orgAId: ORG_A,
+  orgBId: ORG_B,
+});
+
+if (!gate.allowed) {
+  for (const message of gate.messages) console.error(`  REFUSED         ${message}`);
   console.error(
-    `\n  Nothing was verified. Staging verification has NOT passed — it did not run.\n` +
-      `  Provide the variables above (see docs/STAGING_VERIFICATION.md) and re-run.\n`,
+    `\n  REFUSING TO RUN — no hosted request was made. Nothing was verified, and staging\n` +
+      `  verification has NOT passed.\n\n` +
+      `  Codes: ${gate.refusals.join(", ")}\n` +
+      `  See docs/STAGING_VERIFICATION.md for what each prerequisite is and why it is\n` +
+      `  mandatory. --allow-write-probes does not relax any of the above.\n`,
   );
   process.exit(2);
 }
 
-const PROD_URL = (process.env["VITE_SUPABASE_URL"] ?? "").trim();
-if (PROD_URL.length > 0 && PROD_URL === URL) {
-  console.error(
-    `\n  REFUSING TO RUN: STAGING_SUPABASE_URL is identical to VITE_SUPABASE_URL.\n` +
-      `  Staging must be a separate Supabase project from production.\n`,
-  );
-  process.exit(2);
-}
-if (ANON === SERVICE) {
-  console.error(`\n  REFUSING TO RUN: anon key and service-role key hold the same value.\n`);
-  process.exit(2);
-}
-pass("Staging credentials present and distinct from the production project.");
+pass(
+  "Safety gate cleared: staging URL present, production URL witness present and different, " +
+    "keys distinct and in the correct roles, organizations distinct.",
+);
+info(
+  `Key roles as claimed: anon slot = ${describeKeyRole(ANON)}, service slot = ${describeKeyRole(SERVICE)} ` +
+    "(claim only — no key material is read out, logged or verified against a signature).",
+);
 if (!allowWriteProbes) {
   info("Write probes disabled (default). Run with --allow-write-probes to include them.");
+  info("Default mode also skips every RPC this checkout cannot prove read-only — see the header.");
 }
 
-const anon: SupabaseClient = createClient(URL, ANON, {
+// ── Bounded execution ────────────────────────────────────────────────────────
+
+const REQUEST_TIMEOUT_MS = readTimeoutMs(process.env, "STAGING_REQUEST_TIMEOUT_MS", 15_000);
+const GLOBAL_TIMEOUT_MS = readTimeoutMs(process.env, "STAGING_GLOBAL_TIMEOUT_MS", 300_000);
+const deadline = createDeadline(GLOBAL_TIMEOUT_MS);
+let timedOut = false;
+
+info(
+  `Bounded run: ${REQUEST_TIMEOUT_MS}ms per request, ${GLOBAL_TIMEOUT_MS}ms overall. ` +
+    "An unreachable staging project ends the run instead of hanging.",
+);
+
+/** A hard stop, so no hosted call can hold the process open past the budget. */
+const watchdog = setTimeout(() => {
+  console.error(
+    `\n  GLOBAL TIMEOUT — the run exceeded ${GLOBAL_TIMEOUT_MS}ms and was stopped.\n` +
+      `  Staging verification has NOT passed.\n`,
+  );
+  process.exit(1);
+}, GLOBAL_TIMEOUT_MS);
+watchdog.unref?.();
+
+/** fetch with a per-request abort, injected into every Supabase client. */
+const boundedFetch: typeof fetch = (input, init) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const upstream = init?.signal;
+  if (upstream) {
+    if (upstream.aborted) controller.abort();
+    else upstream.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+};
+
+const clientOptions = {
   auth: { autoRefreshToken: false, persistSession: false },
-});
-const admin: SupabaseClient = createClient(URL, SERVICE, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
+  global: { fetch: boundedFetch },
+} as const;
+
+/**
+ * Await a hosted call under both budgets. A thrown error (abort, DNS failure,
+ * TLS failure) is returned rather than propagated, so the caller reports it as
+ * INCONCLUSIVE instead of the run dying mid-section with a partial tally.
+ */
+async function attempt<T>(label: string, work: () => PromiseLike<T>): Promise<T | Error> {
+  if (deadline.expired()) {
+    timedOut = true;
+    return new Error(`global timeout reached before: ${label}`);
+  }
+  const budget = Math.max(1, Math.min(REQUEST_TIMEOUT_MS + 1_000, deadline.remaining()));
+  try {
+    return await withTimeout(Promise.resolve(work()), budget, label);
+  } catch (error) {
+    const wrapped = error instanceof Error ? error : new Error(String(error));
+    if (/timed out/i.test(wrapped.message) || wrapped.name === "AbortError") timedOut = true;
+    return wrapped;
+  }
+}
+
+const anon: SupabaseClient = createClient(URL, ANON, clientOptions);
+const admin: SupabaseClient = createClient(URL, SERVICE, clientOptions);
 
 // ── Expected surface, derived from the migrations in this checkout ───────────
 
@@ -150,7 +265,11 @@ const migrationContents = migrationFiles.map((f) =>
   fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8"),
 );
 const expectedTables = collectMigrationTables(migrationContents);
-const authenticatedRpcs = collectAuthenticatedRpcs(migrationContents);
+const grantedRpcNames = new Set(collectAuthenticatedRpcs(migrationContents));
+const rpcSignatures = collectRpcSignatures(migrationContents).filter((s) =>
+  grantedRpcNames.has(s.name),
+);
+const triggerProtectedTables = collectTriggerProtectedTables(migrationContents);
 
 // ── 1. Schema parity against the hosted project ──────────────────────────────
 
@@ -158,11 +277,21 @@ section("1. Schema parity (service role)");
 
 const presentTables: string[] = [];
 const absentTables: string[] = [];
+/** Service-role row count per present table — the witness H1 depends on. */
+const adminRowCounts = new Map<string, number | null>();
 
 for (const table of expectedTables) {
-  const { error } = await admin.from(table).select("*", { head: true, count: "exact" });
+  const result = await attempt(`count ${table}`, () =>
+    admin.from(table).select("*", { head: true, count: "exact" }),
+  );
+  if (result instanceof Error) {
+    unclear(`Table ${table}: hosted request did not complete — presence not determined.`);
+    continue;
+  }
+  const { error, count } = result;
   if (!error) {
     presentTables.push(table);
+    adminRowCounts.set(table, typeof count === "number" ? count : null);
   } else if (error.code === "42P01" || error.code === "PGRST205") {
     absentTables.push(table);
   } else {
@@ -180,70 +309,157 @@ if (absentTables.length === 0 && presentTables.length === expectedTables.length)
   info("Apply the pending migrations to staging before trusting any result below.");
 }
 
-// ── 2. RLS: an anonymous client must read nothing ────────────────────────────
+// ── 2. RLS: an anonymous client must read nothing it should not ──────────────
+//
+// H1: a zero-row anonymous read is only evidence when the service role can see
+// rows in that same table. On an empty table the two hypotheses — "RLS blocked
+// the read" and "there was nothing to read" — produce identical output, so the
+// table is reported INCONCLUSIVE and never counted as RLS-proven. No row is
+// inserted to force the question; manufacturing evidence by writing to a hosted
+// project is not something a read-only verifier gets to do.
 
 section("2. Row Level Security — anonymous client");
 
 let rlsProven = 0;
+let rlsEmpty = 0;
+let rlsUnclear = 0;
+
 for (const table of presentTables) {
-  const { data, error } = await anon.from(table).select("*").limit(1);
-  if (error) {
-    // 42501 permission denied / PGRST301 no JWT are both correct refusals.
-    if (error.code === "42501" || error.code === "PGRST301" || error.code === "PGRST302") {
-      rlsProven++;
-    } else {
-      unclear(
-        `RLS on ${table}: refused with code ${safeCode(error)} — refusal not attributable to RLS.`,
-      );
-    }
-  } else if ((data ?? []).length === 0) {
+  const result = await attempt(`anon read ${table}`, () => anon.from(table).select("*").limit(1));
+  if (result instanceof Error) {
+    rlsUnclear++;
+    unclear(`RLS on ${table}: hosted request did not complete — RLS not exercised.`);
+    continue;
+  }
+  const { data, error } = result;
+  const adminCount = adminRowCounts.get(table) ?? null;
+  const verdict = classifyRlsObservation({
+    errorCode: error?.code ?? null,
+    anonRowCount: (data ?? []).length,
+    adminRowCount: adminCount,
+  });
+
+  if (verdict.verdict === "PASS") {
     rlsProven++;
-  } else {
+  } else if (verdict.verdict === "FAIL") {
     fail(
       `RLS on ${table}: anonymous client received ${(data ?? []).length} row(s) — tenant data is exposed.`,
     );
+  } else if (verdict.reason === "table_empty") {
+    rlsEmpty++;
+  } else if (verdict.reason === "admin_count_unavailable") {
+    rlsUnclear++;
+    unclear(
+      `RLS on ${table}: the service-role row count is unavailable, so a zero-row anonymous read ` +
+        `proves nothing.`,
+    );
+  } else {
+    rlsUnclear++;
+    unclear(
+      `RLS on ${table}: refused with code ${safeCode(error)} — refusal not attributable to RLS.`,
+    );
   }
 }
+
 if (presentTables.length === 0) {
   missing("No tables present on staging — RLS could not be exercised.");
-} else if (rlsProven === presentTables.length) {
-  pass(`Anonymous client reads nothing from all ${rlsProven} tables present on staging.`);
+} else {
+  if (rlsProven > 0) {
+    pass(
+      `RLS positively proven on ${rlsProven} of ${presentTables.length} table(s): the service role ` +
+        `sees rows there and the anonymous client saw none (or was refused by authorization).`,
+    );
+  }
+  if (rlsEmpty > 0) {
+    unclear(
+      `${rlsEmpty} of ${presentTables.length} table(s) are EMPTY on staging. An anonymous read of an ` +
+        `empty table returns zero rows whether or not RLS is enforced, so these prove nothing and ` +
+        `are NOT counted as RLS-proven. Seed representative rows in each organization on staging ` +
+        `and re-run; this tool will not insert canary rows into a hosted project.`,
+    );
+  }
+  if (rlsProven === 0 && rlsEmpty === 0 && rlsUnclear === 0) {
+    unclear("No table produced a usable RLS observation.");
+  }
 }
 
 // ── 3. Unauthenticated RPC access ────────────────────────────────────────────
+//
+// M3: default mode invokes only RPCs proven read-only by static analysis of
+// this checkout's migrations. M4: each is called with type-correct placeholder
+// arguments derived from its declared signature, so a function with required
+// parameters reaches the authorization decision instead of bouncing off
+// PGRST202 ("not found") forever and reading as permanently inconclusive.
 
 section("3. Unauthenticated RPC access");
 
+const readOnlyRpcs = rpcSignatures.filter((s) => !s.mutating);
+const mutatingRpcs = rpcSignatures.filter((s) => s.mutating);
+
 let rpcDenied = 0;
 let rpcProbed = 0;
-for (const fn of authenticatedRpcs) {
+
+async function probeRpc(signature: RpcSignature): Promise<void> {
   rpcProbed++;
-  // Deliberately called with no arguments: a correctly-secured RPC refuses an
-  // anonymous caller before argument binding, so a signature mismatch here is
-  // itself evidence the call was reached — reported as inconclusive, not pass.
-  const { error } = await anon.rpc(fn, {});
-  if (!error) {
-    fail(`RPC ${fn} executed for an ANONYMOUS caller — it must require authentication.`);
-    continue;
+  const args = rpcDummyArgs(signature);
+  const argNote =
+    Object.keys(args).length === 0
+      ? "no required arguments"
+      : `${Object.keys(args).length} placeholder argument(s)`;
+  const result = await attempt(`anon rpc ${signature.name}`, () => anon.rpc(signature.name, args));
+  if (result instanceof Error) {
+    unclear(`RPC ${signature.name}: hosted request did not complete — denial not proven.`);
+    return;
   }
-  if (error.code === "42501" || error.code === "PGRST301" || error.code === "PGRST302") {
+  const { error } = result;
+  const verdict = classifyRpcProbe(error ?? null);
+  if (verdict.verdict === "PASS") {
     rpcDenied++;
-  } else if (error.code === "PGRST202" || error.code === "PGRST203") {
-    // Not found / ambiguous under the anon role's search path. Not a proof of
-    // denial-by-authorization, so it is not counted as a pass.
+  } else if (verdict.verdict === "FAIL") {
+    fail(
+      `RPC ${signature.name} executed for an ANONYMOUS caller — it must require authentication.`,
+    );
+  } else if (verdict.reason === "not_resolvable_for_role") {
     unclear(
-      `RPC ${fn}: not resolvable for the anon role (code ${safeCode(error)}) — denial not proven.`,
+      `RPC ${signature.name}: not resolvable for the anon role (code ${safeCode(error)}), called with ` +
+        `${argNote}. PostgREST reports a missing function and an unmatched signature identically, so ` +
+        `this is NOT proof of denial by authorization.`,
     );
   } else {
     unclear(
-      `RPC ${fn}: refused with code ${safeCode(error)} — denial not attributable to authorization.`,
+      `RPC ${signature.name}: refused with code ${safeCode(error)} — denial not attributable to authorization.`,
     );
   }
 }
-if (rpcProbed === 0) {
+
+for (const signature of readOnlyRpcs) {
+  await probeRpc(signature);
+}
+
+if (mutatingRpcs.length > 0) {
+  if (allowWriteProbes) {
+    info(
+      `Probing ${mutatingRpcs.length} mutating RPC(s) because --allow-write-probes was passed. ` +
+        `If the hosted project has wrongly granted one to anon, this WILL execute it.`,
+    );
+    for (const signature of mutatingRpcs) {
+      await probeRpc(signature);
+    }
+  } else {
+    unclear(
+      `${mutatingRpcs.length} RPC(s) granted to \`authenticated\` are not provably read-only and were ` +
+        `NOT invoked: ${mutatingRpcs.map((s) => s.name).join(", ")}. Calling them anonymously is how ` +
+        `you would find out they are exposed — and also how you would execute them. Their anonymous ` +
+        `denial is therefore UNPROVEN here; re-run with --allow-write-probes against a disposable ` +
+        `staging project to prove it, or audit the grants directly.`,
+    );
+  }
+}
+
+if (rpcSignatures.length === 0) {
   missing("No authenticated-granted RPCs found in local migrations — nothing to probe.");
-} else if (rpcDenied === rpcProbed) {
-  pass(`All ${rpcProbed} authenticated-only RPCs refused the anonymous caller.`);
+} else if (rpcProbed > 0 && rpcDenied === rpcProbed) {
+  pass(`All ${rpcProbed} probed RPC(s) refused the anonymous caller with an authorization code.`);
 }
 
 // ── 4. Hosted migration history ──────────────────────────────────────────────
@@ -251,26 +467,30 @@ if (rpcProbed === 0) {
 section("4. Hosted migration history");
 
 {
-  const { data, error } = await admin
-    .schema("supabase_migrations")
-    .from("schema_migrations")
-    .select("version");
-  if (error) {
-    unclear(
-      `supabase_migrations.schema_migrations is not readable over REST (code ${safeCode(error)}). ` +
-        `This is normal for a project that has not exposed that schema; confirm the applied list ` +
-        `from the Supabase dashboard instead and record it in supabase/hosted-migrations.lock.json.`,
-    );
+  const result = await attempt("hosted migration history", () =>
+    admin.schema("supabase_migrations").from("schema_migrations").select("version"),
+  );
+  if (result instanceof Error) {
+    unclear("Hosted migration history: request did not complete — parity not determined.");
   } else {
-    const versions = (data ?? []) as Array<{ version: string }>;
-    info(`Hosted history reports ${versions.length} applied migration(s).`);
-    if (versions.length === migrationFiles.length) {
-      pass(`Hosted history count matches the ${migrationFiles.length} local migrations.`);
-    } else {
-      fail(
-        `Hosted history reports ${versions.length} applied migration(s) but this checkout has ` +
-          `${migrationFiles.length} — staging and this branch are not at parity.`,
+    const { data, error } = result;
+    if (error) {
+      unclear(
+        `supabase_migrations.schema_migrations is not readable over REST (code ${safeCode(error)}). ` +
+          `This is normal for a project that has not exposed that schema; confirm the applied list ` +
+          `from the Supabase dashboard instead and record it in supabase/hosted-migrations.lock.json.`,
       );
+    } else {
+      const versions = (data ?? []) as Array<{ version: string }>;
+      info(`Hosted history reports ${versions.length} applied migration(s).`);
+      if (versions.length === migrationFiles.length) {
+        pass(`Hosted history count matches the ${migrationFiles.length} local migrations.`);
+      } else {
+        fail(
+          `Hosted history reports ${versions.length} applied migration(s) but this checkout has ` +
+            `${migrationFiles.length} — staging and this branch are not at parity.`,
+        );
+      }
     }
   }
 }
@@ -300,20 +520,20 @@ const managerA = account(
 );
 const staffA = account("Staff (Org A)", "STAGING_STAFF_A_EMAIL", "STAGING_STAFF_A_PASSWORD");
 const ownerB = account("Owner (Org B)", "STAGING_OWNER_B_EMAIL", "STAGING_OWNER_B_PASSWORD");
-const ORG_A = (process.env["STAGING_ORG_A_ID"] ?? "").trim();
-const ORG_B = (process.env["STAGING_ORG_B_ID"] ?? "").trim();
 
 /** Sign in and return a client bound to that session, or undefined on failure. */
 async function signIn(
   acc: Account,
 ): Promise<{ client: SupabaseClient; token: string } | undefined> {
-  const client = createClient(URL, ANON, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-  const { data, error } = await client.auth.signInWithPassword({
-    email: acc.email,
-    password: acc.password,
-  });
+  const client = createClient(URL, ANON, clientOptions);
+  const result = await attempt(`sign in ${acc.label}`, () =>
+    client.auth.signInWithPassword({ email: acc.email, password: acc.password }),
+  );
+  if (result instanceof Error) {
+    unclear(`${acc.label}: sign-in request did not complete.`);
+    return undefined;
+  }
+  const { data, error } = result;
   if (error || !data.session) {
     fail(`${acc.label}: sign-in failed (code ${safeCode(error)}).`);
     return undefined;
@@ -343,51 +563,124 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
   if (sessionA) {
     pass(`${ownerA.label}: verified-email sign-in succeeded.`);
 
-    // 5a. Cross-tenant read using a known-good, guessed organization id.
+    // 5a. Cross-tenant read using the real Org B id — the IDOR case.
+    //
+    // This carries exactly the same empty-table trap as H1, one level deeper:
+    // Org A reading zero Org B rows proves isolation only if Org B HAS rows in
+    // that table. The witness is therefore a service-role count scoped to Org B,
+    // not the table's total, and the same classifier decides the verdict.
     let leaks = 0;
+    let proven = 0;
+    let noOrgBRows = 0;
     let checked = 0;
     for (const table of tenantScoped) {
       checked++;
-      const { data, error } = await sessionA.client
-        .from(table)
-        .select("id")
-        .eq("organization_id", ORG_B)
-        .limit(1);
-      if (error) {
-        if (error.code !== "42501" && error.code !== "PGRST301") {
-          unclear(
-            `Cross-tenant read of ${table}: code ${safeCode(error)} — denial not attributable to RLS.`,
-          );
-        }
-      } else if ((data ?? []).length > 0) {
+      const witness = await attempt(`org B row count ${table}`, () =>
+        admin.from(table).select("*", { head: true, count: "exact" }).eq("organization_id", ORG_B),
+      );
+      const orgBRowCount =
+        witness instanceof Error || witness.error || typeof witness.count !== "number"
+          ? null
+          : witness.count;
+
+      const result = await attempt(`cross-tenant read ${table}`, () =>
+        sessionA.client.from(table).select("id").eq("organization_id", ORG_B).limit(1),
+      );
+      if (result instanceof Error) {
+        unclear(
+          `Cross-tenant read of ${table}: request did not complete — isolation not exercised.`,
+        );
+        continue;
+      }
+      const { data, error } = result;
+      const verdict = classifyRlsObservation({
+        errorCode: error?.code ?? null,
+        anonRowCount: (data ?? []).length,
+        adminRowCount: orgBRowCount,
+      });
+
+      if (verdict.verdict === "FAIL") {
         leaks++;
         fail(
           `TENANT ISOLATION BREACH: Org A member read ${(data ?? []).length} row(s) from ${table} belonging to Org B.`,
         );
+      } else if (verdict.verdict === "PASS") {
+        proven++;
+      } else if (verdict.reason === "table_empty") {
+        noOrgBRows++;
+      } else if (verdict.reason === "admin_count_unavailable") {
+        unclear(
+          `Cross-tenant read of ${table}: Org B's row count is unavailable, so Org A reading zero ` +
+            `rows proves nothing.`,
+        );
+      } else {
+        unclear(
+          `Cross-tenant read of ${table}: code ${safeCode(error)} — denial not attributable to RLS.`,
+        );
       }
     }
-    if (checked > 0 && leaks === 0) {
-      pass(`Org A member read zero Org B rows across all ${checked} tenant-scoped tables.`);
-    } else if (checked === 0) {
+    if (checked === 0) {
       missing("No tenant-scoped tables present on staging — cross-tenant read was not exercised.");
+    } else {
+      if (leaks === 0 && proven > 0) {
+        pass(
+          `Tenant isolation positively proven on ${proven} of ${checked} tenant-scoped table(s): ` +
+            `Org B holds rows there and the Org A member read none of them.`,
+        );
+      }
+      if (noOrgBRows > 0) {
+        unclear(
+          `${noOrgBRows} of ${checked} tenant-scoped table(s) hold NO Org B rows on staging. Org A ` +
+            `reading zero rows from an organization that has none proves nothing about isolation, ` +
+            `so these are NOT counted as proven. Seed Org B data and re-run.`,
+        );
+      }
     }
 
-    // 5b. Cross-tenant write attempt (opt-in only; a denied write changes nothing).
+    // 5b. Cross-tenant write attempt (opt-in only).
+    //
+    // M2: a refusal only counts when it is an AUTHORIZATION refusal. A trigger
+    // raising, a check constraint, a malformed id or a validation error all
+    // refuse the write without the authorization decision ever being reached,
+    // so none of them proves tenant isolation. The target is therefore chosen
+    // to exclude trigger-protected tables, and the update is a no-op by value —
+    // it sets organization_id to the value it already filters on, so even in
+    // the failing case where the write is accepted, no column changes.
     if (allowWriteProbes) {
-      const target = tenantScoped[0];
-      if (target !== undefined) {
-        const { error } = await sessionA.client
-          .from(target)
-          .update({ organization_id: ORG_B })
-          .eq("organization_id", ORG_B);
-        if (!error) {
-          fail(
-            `TENANT ISOLATION BREACH: Org A member's UPDATE against Org B rows in ${target} was accepted.`,
-          );
+      const target = selectWriteProbeTarget(tenantScoped, triggerProtectedTables);
+      if (target === undefined) {
+        missing(
+          "No tenant-scoped table on staging is free of triggers, so no write probe target is " +
+            "trustworthy — a trigger can refuse before authorization is reached, which would prove " +
+            "nothing. Cross-tenant WRITE denial was NOT verified.",
+        );
+      } else {
+        const result = await attempt(`cross-tenant write ${target}`, () =>
+          sessionA.client
+            .from(target)
+            .update({ organization_id: ORG_B })
+            .eq("organization_id", ORG_B),
+        );
+        if (result instanceof Error) {
+          unclear(`Cross-tenant write against ${target}: request did not complete.`);
         } else {
-          pass(
-            `Org A member's cross-tenant UPDATE against ${target} was refused (code ${safeCode(error)}).`,
-          );
+          const verdict = classifyWriteProbe(result.error ?? null);
+          if (verdict.verdict === "PASS") {
+            pass(
+              `Org A member's cross-tenant UPDATE against ${target} was refused by AUTHORIZATION ` +
+                `(code ${safeCode(result.error)}).`,
+            );
+          } else if (verdict.verdict === "FAIL") {
+            fail(
+              `TENANT ISOLATION BREACH: Org A member's UPDATE against Org B rows in ${target} was accepted.`,
+            );
+          } else {
+            unclear(
+              `Cross-tenant UPDATE against ${target} was refused with code ${safeCode(result.error)}, ` +
+                `which is not an authorization denial. The request did not reach the authorization ` +
+                `decision, so tenant isolation on writes remains UNPROVEN.`,
+            );
+          }
         }
       }
     } else {
@@ -398,13 +691,17 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
 
     // 5c. Sign-out must revoke the access token server-side.
     const revokedToken = sessionA.token;
-    await sessionA.client.auth.signOut();
+    await attempt("sign out Owner A", () => sessionA.client.auth.signOut());
     const revokedProbe = createClient(URL, ANON, {
-      auth: { autoRefreshToken: false, persistSession: false },
-      global: { headers: { Authorization: `Bearer ${revokedToken}` } },
+      ...clientOptions,
+      global: { ...clientOptions.global, headers: { Authorization: `Bearer ${revokedToken}` } },
     });
-    const afterSignOut = await revokedProbe.auth.getUser(revokedToken);
-    if (afterSignOut.error || !afterSignOut.data.user) {
+    const afterSignOut = await attempt("probe revoked token", () =>
+      revokedProbe.auth.getUser(revokedToken),
+    );
+    if (afterSignOut instanceof Error) {
+      unclear("Revoked-token probe did not complete — revocation not verified.");
+    } else if (afterSignOut.error || !afterSignOut.data.user) {
       pass("Access token is rejected after sign-out — revocation is enforced server-side.");
     } else {
       fail(
@@ -413,31 +710,38 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
     }
 
     // 5d. A structurally invalid token must never authenticate.
-    const invalid = await anon.auth.getUser("invalid.token.value");
-    if (invalid.error || !invalid.data.user) {
+    const invalid = await attempt("probe invalid token", () =>
+      anon.auth.getUser("invalid.token.value"),
+    );
+    if (invalid instanceof Error) {
+      unclear("Invalid-token probe did not complete.");
+    } else if (invalid.error || !invalid.data.user) {
       pass("Invalid session token is rejected.");
     } else {
       fail("Invalid session token resolved to a user — token validation is not enforced.");
     }
 
-    // 5e. User A → sign-out → User B must yield a different identity, proving
-    //     no identity is cached across the transition.
+    // 5e. User A → sign-out → User B must yield a different identity.
     const sessionB = await signIn(ownerB);
     if (sessionB) {
-      const who = await sessionB.client.auth.getUser();
-      const bId = who.data.user?.id ?? "";
-      const aProbe = await anon.auth.getUser(revokedToken);
-      const aId = aProbe.data.user?.id ?? "";
-      if (bId.length > 0 && bId !== aId) {
-        pass(
-          "User A → sign-out → User B yields a distinct identity — no cross-principal session reuse.",
-        );
+      const who = await attempt("identify User B", () => sessionB.client.auth.getUser());
+      const aProbe = await attempt("re-probe User A token", () => anon.auth.getUser(revokedToken));
+      if (who instanceof Error || aProbe instanceof Error) {
+        unclear("Session-transition probe did not complete.");
       } else {
-        fail(
-          "User B's session resolved to User A's identity, or to no identity — session transition is unsafe.",
-        );
+        const bId = who.data.user?.id ?? "";
+        const aId = aProbe.data.user?.id ?? "";
+        if (bId.length > 0 && bId !== aId) {
+          pass(
+            "User A → sign-out → User B yields a distinct identity — no cross-principal session reuse.",
+          );
+        } else {
+          fail(
+            "User B's session resolved to User A's identity, or to no identity — session transition is unsafe.",
+          );
+        }
       }
-      await sessionB.client.auth.signOut();
+      await attempt("sign out Owner B", () => sessionB.client.auth.signOut());
     }
   }
 
@@ -451,31 +755,63 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
     for (const acc of [managerA, staffA]) {
       const s = await signIn(acc);
       if (!s) continue;
-      const { data, error } = await s.client
-        .from("audit_logs")
-        .select("id")
-        .eq("organization_id", ORG_A)
-        .limit(1);
+      const result = await attempt(`${acc.label} audit_logs read`, () =>
+        s.client.from("audit_logs").select("id").eq("organization_id", ORG_A).limit(1),
+      );
+      if (result instanceof Error) {
+        unclear(`${acc.label}: audit_logs read did not complete — role enforcement not verified.`);
+        await attempt(`sign out ${acc.label}`, () => s.client.auth.signOut());
+        continue;
+      }
+      const { data, error } = result;
       const rows = (data ?? []).length;
       if (acc === staffA) {
         if (!error && rows > 0) {
           fail(
             "Staff account read audit_logs — audit access must be restricted to privileged roles.",
           );
+        } else if (isAuthorizationDenial(error?.code)) {
+          pass(`Staff account is refused audit_logs by authorization (code ${safeCode(error)}).`);
+        } else if (!error && rows === 0) {
+          // Same empty-table trap as H1: zero rows only means something when
+          // the service role can see rows there.
+          const auditCount = adminRowCounts.get("audit_logs") ?? null;
+          if (auditCount === null) {
+            unclear(
+              "Staff audit_logs read returned zero rows, but the service-role count is unavailable — " +
+                "restriction not proven.",
+            );
+          } else if (auditCount === 0) {
+            unclear(
+              "Staff audit_logs read returned zero rows, but audit_logs is EMPTY on staging — an " +
+                "unrestricted read of an empty table looks identical. Restriction NOT proven; seed " +
+                "audit rows for Org A and re-run.",
+            );
+          } else {
+            pass(
+              `Staff account read zero audit_logs rows while the service role sees ${auditCount} — ` +
+                "audit access is restricted.",
+            );
+          }
         } else {
-          pass(`Staff account cannot read audit_logs (code ${safeCode(error)}, ${rows} row(s)).`);
+          unclear(
+            `Staff audit_logs read was refused with code ${safeCode(error)} — refusal not attributable ` +
+              "to authorization, so the restriction is not proven.",
+          );
         }
       } else {
         info(
           `Manager audit_logs read returned ${rows} row(s) (code ${safeCode(error)}) — compare against PERMISSIONS_MATRIX.md.`,
         );
       }
-      await s.client.auth.signOut();
+      await attempt(`sign out ${acc.label}`, () => s.client.auth.signOut());
     }
   }
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
+
+clearTimeout(watchdog);
 
 console.log(`\n${"═".repeat(64)}`);
 console.log(
@@ -483,11 +819,18 @@ console.log(
 );
 console.log("═".repeat(64));
 
+if (timedOut) {
+  console.error(
+    `\n  One or more hosted requests timed out. Results above are partial and must NOT be recorded\n` +
+      `  as a staging verification.\n`,
+  );
+}
+
 if (failed > 0) {
   console.error(`\n  STAGING VERIFICATION FAILED — ${failed} check(s) did not hold.\n`);
   process.exit(1);
 }
-if (inconclusive > 0 || unconfigured > 0) {
+if (inconclusive > 0 || unconfigured > 0 || timedOut) {
   console.error(
     `\n  STAGING VERIFICATION INCOMPLETE — ${inconclusive} inconclusive, ${unconfigured} not configured.\n` +
       `  Do NOT record this run as "staging verified". Only the ${passed} PASS line(s) above were proven.\n`,
