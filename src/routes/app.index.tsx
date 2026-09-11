@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getHomeSummary } from "@/lib/api";
 import { homeQueryKey } from "@/lib/home-query";
+import { attentionNoticeKey } from "@/lib/home-attention";
 import { formatMoney } from "@/lib/money";
 import {
   AppHeader,
@@ -175,6 +176,9 @@ function BusinessHome() {
   const summary = homeQuery.data;
   const attention = summary ? attentionItems(summary) : [];
   const metrics = summary ? metricItems(summary) : [];
+  // An empty attention list is only reassuring when Home actually knows the
+  // list is empty. Anything less says so rather than implying a settled zero.
+  const noticeKey = summary ? attentionNoticeKey(summary, attention.length) : null;
 
   const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
     value,
@@ -249,11 +253,10 @@ function BusinessHome() {
                     );
                   })}
                 </div>
-              ) : (
-                <p className="mt-2 px-1 text-body-sm text-text-secondary">
-                  {t("home.noAttention")}
-                </p>
-              )}
+              ) : null}
+              {noticeKey ? (
+                <p className="mt-2 px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
+              ) : null}
             </section>
 
             <section aria-labelledby="overview-heading" className="stack-group">
