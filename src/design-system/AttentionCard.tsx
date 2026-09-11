@@ -13,8 +13,10 @@ import type { AttentionItem } from "@/types";
 const ICONS: Record<AttentionItem["id"], LucideIcon> = {
   unread_conversations: MessageSquare,
   awaiting_payment: Wallet,
+  payments_needing_review: Wallet,
   awaiting_delivery: Truck,
   low_stock: AlertTriangle,
+  orders_needing_action: AlertTriangle,
 };
 
 const TONE: Record<AttentionItem["tone"], string> = {

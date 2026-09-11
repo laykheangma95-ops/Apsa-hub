@@ -1,20 +1,16 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { TrendingDown, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
-import { getActiveShop, getHomeSummary } from "@/lib/api";
-import { localName, percent } from "@/lib/format";
+import { getHomeSummary } from "@/lib/api";
+import { homeQueryKey } from "@/lib/home-query";
+import { attentionNoticeKey } from "@/lib/home-attention";
 import { formatMoney } from "@/lib/money";
-import { useLanguage } from "@/lib/i18n";
 import {
   AppHeader,
-  ApsiInsightCard,
   AttentionCard,
   BottomNav,
   BottomSheet,
-  EmptyState,
   ErrorState,
   HomeSkeleton,
   MetricTile,
@@ -22,15 +18,12 @@ import {
   visibleQuickActions,
   ScreenBleed,
   SegmentedControl,
-  Sparkline,
   type QuickActionId,
   type Segment,
 } from "@/design-system";
-import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { cn } from "@/lib/utils";
 import type { UiPermissionKey } from "@/lib/capabilities";
-import type { AttentionItem, MetricRange } from "@/types";
+import type { AttentionItem, HomeSummary, Metric, MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
   head: () => ({
@@ -38,14 +31,12 @@ export const Route = createFileRoute("/app/")({
       { title: "Business Home — APSA" },
       {
         name: "description",
-        content:
-          "Today's revenue, what needs attention, quick actions and business metrics for your shop.",
+        content: "What needs attention now across orders, payments, stock, and delivery.",
       },
       { property: "og:title", content: "Business Home — APSA" },
       {
         property: "og:description",
-        content:
-          "Revenue, attention items, quick actions and metrics in one Khmer-first home screen.",
+        content: "A permission-aware command center for current business work.",
       },
     ],
   }),
@@ -54,15 +45,14 @@ export const Route = createFileRoute("/app/")({
 
 const RANGES: MetricRange[] = ["today", "week", "month"];
 
-/**
- * Where an attention row goes. Only the destinations that exist today are
- * listed — a row with no route stays a plain, honest count rather than a
- * button that leads nowhere.
- */
-const ATTENTION_ROUTE: Partial<Record<AttentionItem["id"], "/app/inbox" | "/app/orders">> = {
+const ATTENTION_ROUTE: Partial<
+  Record<AttentionItem["id"], "/app/inbox" | "/app/orders" | "/app/deliveries">
+> = {
   unread_conversations: "/app/inbox",
   awaiting_payment: "/app/orders",
-  awaiting_delivery: "/app/orders",
+  payments_needing_review: "/app/orders",
+  awaiting_delivery: "/app/deliveries",
+  orders_needing_action: "/app/orders",
 };
 
 /**
@@ -71,30 +61,124 @@ const ATTENTION_ROUTE: Partial<Record<AttentionItem["id"], "/app/inbox" | "/app/
  * (it is their own organization's work), but the row stops pretending to be a
  * link to somewhere they cannot go.
  */
-const ATTENTION_PERMISSION: Record<"/app/inbox" | "/app/orders", UiPermissionKey> = {
+const ATTENTION_PERMISSION: Record<
+  "/app/inbox" | "/app/orders" | "/app/deliveries",
+  UiPermissionKey
+> = {
   "/app/inbox": "messages.read",
   "/app/orders": "orders.read",
+  "/app/deliveries": "orders.read",
 };
+
+function attentionItems(summary: HomeSummary): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  if (summary.orders.status === "available") {
+    if (summary.orders.data.awaitingPaymentCount > 0) {
+      items.push({
+        id: "awaiting_payment",
+        count: summary.orders.data.awaitingPaymentCount,
+        tone: "warning",
+      });
+    }
+    if (summary.orders.data.actionNeededCount > 0) {
+      items.push({
+        id: "orders_needing_action",
+        count: summary.orders.data.actionNeededCount,
+        tone: "warning",
+      });
+    }
+  }
+  if (summary.payments.status === "available" && summary.payments.data.needsReviewCount > 0) {
+    items.push({
+      id: "payments_needing_review",
+      count: summary.payments.data.needsReviewCount,
+      tone: "danger",
+    });
+  }
+  if (
+    summary.inventory.status === "available" &&
+    summary.inventory.data.outOfStockVariantCount > 0
+  ) {
+    items.push({
+      id: "low_stock",
+      count: summary.inventory.data.outOfStockVariantCount,
+      tone: "danger",
+    });
+  }
+  if (summary.delivery.status === "available" && summary.delivery.data.actionCount > 0) {
+    items.push({
+      id: "awaiting_delivery",
+      count: summary.delivery.data.actionCount,
+      tone: "info",
+    });
+  }
+  return items;
+}
+
+function metricItems(summary: HomeSummary): Metric[] {
+  const metrics: Metric[] = [];
+  if (summary.orders.status === "available") {
+    metrics.push(
+      {
+        id: "orders",
+        value: String(summary.orders.data.periodCount),
+        deltaPercent: null,
+        series: [],
+      },
+      {
+        id: "awaiting_payment",
+        value: String(summary.orders.data.awaitingPaymentCount),
+        deltaPercent: null,
+        series: [],
+      },
+    );
+  }
+  if (summary.payments.status === "available") {
+    metrics.push({
+      id: "payments_needing_review",
+      value: String(summary.payments.data.needsReviewCount),
+      deltaPercent: null,
+      series: [],
+    });
+  }
+  if (summary.delivery.status === "available") {
+    metrics.push({
+      id: "delivery_actions",
+      value: String(summary.delivery.data.actionCount),
+      deltaPercent: null,
+      series: [],
+    });
+  }
+  if (summary.inventory.status === "available") {
+    metrics.push({
+      id: "low_stock",
+      value: String(summary.inventory.data.outOfStockVariantCount),
+      deltaPercent: null,
+      series: [],
+    });
+  }
+  return metrics;
+}
 
 function BusinessHome() {
   const { t } = useTranslation();
-  const { language } = useLanguage();
   const navigate = useNavigate();
   const capabilities = useCapabilities();
+  const { session, organizationId } = Route.useRouteContext();
   const [range, setRange] = useState<MetricRange>("today");
   const [createOpen, setCreateOpen] = useState(false);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
-  const [insightDismissed, setInsightDismissed] = useState(false);
 
-  const shopQuery = useQuery({ queryKey: ["shop"], queryFn: getActiveShop });
   const homeQuery = useQuery({
-    queryKey: ["home", range],
+    queryKey: homeQueryKey(session.userId, organizationId, range),
     queryFn: () => getHomeSummary(range),
   });
 
   const summary = homeQuery.data;
-  const isEmpty = summary && summary.revenue.amount === 0;
-  const unread = summary?.attention.find((item) => item.id === "unread_conversations")?.count ?? 0;
+  const attention = summary ? attentionItems(summary) : [];
+  const metrics = summary ? metricItems(summary) : [];
+  // An empty attention list is only reassuring when Home actually knows the
+  // list is empty. Anything less says so rather than implying a settled zero.
+  const noticeKey = summary ? attentionNoticeKey(summary, attention.length) : null;
 
   const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
     value,
@@ -116,8 +200,6 @@ function BusinessHome() {
   const hasQuickActions = visibleQuickActions(quickActionsAvailable).length > 0;
 
   function handleQuickAction(id: QuickActionId) {
-    // Only two of the four have a real destination today. The rest open the
-    // create sheet, which says plainly what is and is not built yet.
     if (id === "newOrder") {
       void navigate({ to: "/app/orders" });
       return;
@@ -131,17 +213,9 @@ function BusinessHome() {
 
   return (
     <ScreenBleed bottom="nav">
-      <AppHeader
-        title={shopQuery.data ? localName(shopQuery.data, language) : t("brand.name")}
-        subtitle={shopQuery.data?.city}
-        onShopSwitch={() => setSwitcherOpen(true)}
-        notificationCount={unread}
-      >
-        {/* Greeting scrolls away with the page — only the bar stays pinned. */}
+      <AppHeader title={t("brand.name")} action={null}>
         <div className="pb-1">
-          <h1 className="text-h1 text-text-primary">
-            {t("home.greeting", { name: summary?.greetingName ?? "" })}
-          </h1>
+          <h1 className="text-h1 text-text-primary">{t("home.greeting")}</h1>
           <p className="text-body-sm text-text-secondary">{t("home.subtitle")}</p>
         </div>
       </AppHeader>
@@ -158,32 +232,15 @@ function BusinessHome() {
           />
         ) : null}
 
-        {summary && isEmpty ? (
-          <EmptyState
-            title={t("home.empty.title")}
-            body={t("home.empty.body")}
-            action={
-              <Button className="press tap-target h-12 px-6" onClick={() => setCreateOpen(true)}>
-                {t("home.empty.action")}
-              </Button>
-            }
-          />
-        ) : null}
-
-        {summary && !isEmpty ? (
+        {summary ? (
           <div className="stack-section screen-gutter pt-4">
-            {/*
-             * What needs doing comes before what already happened. On a phone
-             * the merchant sees roughly one screen before scrolling, and that
-             * screen should be work, not a report.
-             */}
-            {summary.attention.length > 0 ? (
-              <section aria-labelledby="attention-heading">
-                <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
-                  {t("home.attention")}
-                </h2>
+            <section aria-labelledby="attention-heading">
+              <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
+                {t("home.attention")}
+              </h2>
+              {attention.length > 0 ? (
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  {summary.attention.map((item) => {
+                  {attention.map((item) => {
                     const route = ATTENTION_ROUTE[item.id];
                     const to =
                       route && capabilities.can(ATTENTION_PERMISSION[route]) ? route : undefined;
@@ -196,15 +253,16 @@ function BusinessHome() {
                     );
                   })}
                 </div>
-              </section>
-            ) : null}
+              ) : null}
+              {noticeKey ? (
+                <p className="mt-2 px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
+              ) : null}
+            </section>
 
             <section aria-labelledby="overview-heading" className="stack-group">
-              <div className="flex min-w-0 items-center justify-between gap-3 px-1">
-                <h2 id="overview-heading" className="text-label min-w-0 text-text-secondary">
-                  {t("home.overview")}
-                </h2>
-              </div>
+              <h2 id="overview-heading" className="text-label px-1 text-text-secondary">
+                {t("home.overview")}
+              </h2>
 
               <SegmentedControl
                 segments={rangeSegments}
@@ -213,27 +271,60 @@ function BusinessHome() {
                 label={t("home.overview")}
               />
 
-              <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-                <p className="text-label text-text-secondary">{t("home.revenue")}</p>
-                <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <p className="text-financial-lg min-w-0 text-text-primary">
-                    {formatMoney(summary.revenue)}
-                  </p>
-                  <RevenueDelta value={summary.revenueDeltaPercent} />
-                </div>
-                <Sparkline series={summary.revenueSeries} tone="success" />
-              </section>
+              {summary.finance.status === "available" ? (
+                <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+                  <p className="text-label text-text-secondary">{t("home.revenue")}</p>
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    {summary.finance.data.netCollectedForCreatedOrders.length > 0 ? (
+                      summary.finance.data.netCollectedForCreatedOrders.map((amount) => (
+                        <p
+                          key={amount.currency}
+                          className="text-financial-lg min-w-0 text-text-primary"
+                        >
+                          {formatMoney(amount)}
+                        </p>
+                      ))
+                    ) : (
+                      <p className="text-body-sm text-text-secondary">{t("home.noSettledSales")}</p>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <p className="px-1 text-body-sm text-text-secondary">
+                  {t(
+                    summary.finance.status === "permission_denied"
+                      ? "home.financialsUnavailable"
+                      : "home.financialsError",
+                  )}
+                </p>
+              )}
 
-              <div className="grid grid-cols-2 gap-2">
-                {summary.metrics.map((metric) => (
-                  <MetricTile
-                    key={metric.id}
-                    label={t(`home.metrics.${metric.id}`)}
-                    value={metric.value}
-                    deltaPercent={metric.deltaPercent}
-                    series={metric.series}
-                  />
-                ))}
+              {metrics.length > 0 ? (
+                <div className="grid grid-cols-2 gap-2">
+                  {metrics.map((metric) => (
+                    <MetricTile
+                      key={metric.id}
+                      label={t(`home.metrics.${metric.id}`)}
+                      value={metric.value}
+                      deltaPercent={metric.deltaPercent}
+                      series={metric.series}
+                    />
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="space-y-1 px-1" aria-live="polite">
+                {(["orders", "payments", "inventory", "delivery"] as const).map((domain) => {
+                  const status = summary[domain].status;
+                  if (status === "available") return null;
+                  return (
+                    <p key={domain} className="text-caption text-text-secondary">
+                      {t(`home.sectionState.${status}`, {
+                        domain: t(`home.domains.${domain}`),
+                      })}
+                    </p>
+                  );
+                })}
               </div>
             </section>
 
@@ -245,25 +336,11 @@ function BusinessHome() {
                 <QuickActionGrid onAction={handleQuickAction} available={quickActionsAvailable} />
               </section>
             ) : null}
-
-            {!insightDismissed ? (
-              <ApsiInsightCard
-                emotion="thinking"
-                title={t("home.apsi.title")}
-                body={t("home.apsi.body")}
-                onDismiss={() => setInsightDismissed(true)}
-              />
-            ) : null}
           </div>
         ) : null}
       </main>
 
-      <WorkspaceSwitcherSheet open={switcherOpen} onOpenChange={setSwitcherOpen} />
-      <BottomNav
-        workspace="business"
-        onCreate={() => setCreateOpen(true)}
-        {...(unread > 0 ? { badges: { inbox: unread } } : {})}
-      />
+      <BottomNav workspace="business" onCreate={() => setCreateOpen(true)} />
 
       <BottomSheet
         open={createOpen}
@@ -286,25 +363,5 @@ function BusinessHome() {
         </ul>
       </BottomSheet>
     </ScreenBleed>
-  );
-}
-
-/** Direction is carried by an arrow and a sign, never by the colour alone. */
-function RevenueDelta({ value }: { value: number }) {
-  const up = value >= 0;
-  const Arrow = up ? TrendingUp : TrendingDown;
-
-  return (
-    <span
-      className={cn(
-        "text-caption tnum inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5",
-        up
-          ? "bg-status-success-soft text-status-success-text"
-          : "bg-status-danger-soft text-status-danger-text",
-      )}
-    >
-      <Arrow className="size-3" aria-hidden />
-      {percent(value)}
-    </span>
   );
 }

@@ -634,3 +634,36 @@ export async function listDeliveriesForMerchant(
   const pageRows = resolved.slice(offset, offset + limit);
   return { items: await enrich(pageRows), hasMore, truncated };
 }
+
+export interface DeliveryAttentionCount {
+  count: number;
+  complete: boolean;
+}
+
+const HOME_ACTION_STATUSES: readonly DeliveryStatus[] = ["pending", "preparing", "ready", "failed"];
+
+/**
+ * Home reuses the merchant list's authoritative latest-attempt derivation.
+ * If that derivation reaches its explicit safety valve, the count is withheld
+ * as incomplete rather than presenting a truncated number as truth.
+ */
+export async function getDeliveryAttentionCount(
+  ctx: AuthorizationContext,
+): Promise<DeliveryAttentionCount> {
+  ctx.require("delivery.read");
+  let count = 0;
+  let offset = 0;
+
+  while (true) {
+    const page = await listDeliveriesForMerchant(ctx, {
+      limit: MERCHANT_LIST_MAX_LIMIT,
+      offset,
+    });
+    if (page.truncated) return { count, complete: false };
+
+    count += page.items.filter((item) => HOME_ACTION_STATUSES.includes(item.status)).length;
+    if (!page.hasMore) return { count, complete: true };
+    if (page.items.length === 0) return { count, complete: false };
+    offset += page.items.length;
+  }
+}

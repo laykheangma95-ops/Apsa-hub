@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { customers } from "@/lib/mock/customers";
 import { conversations } from "@/lib/mock/conversations";
-import { homeSummaries } from "@/lib/mock/home";
 import { staff } from "@/lib/mock/shop";
 import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
 import { UI_PERMISSION_KEYS } from "@/lib/capabilities";
@@ -32,7 +31,7 @@ import {
   QuickActionGrid,
   StatusChip,
 } from "@/design-system";
-import type { StatusKey } from "@/types";
+import type { AttentionItem, Metric, StatusKey } from "@/types";
 
 export const Route = createFileRoute("/design")({
   head: () => ({
@@ -51,6 +50,17 @@ export const Route = createFileRoute("/design")({
   }),
   component: DesignReference,
 });
+
+/** Component-gallery fixtures only; never used by the production Home data path. */
+const DESIGN_HOME_METRICS: Metric[] = [
+  { id: "orders", value: "38", deltaPercent: 12.4, series: [] },
+  { id: "payments_needing_review", value: "3", deltaPercent: null, series: [] },
+];
+
+const DESIGN_HOME_ATTENTION: AttentionItem[] = [
+  { id: "orders_needing_action", count: 4, tone: "warning" },
+  { id: "payments_needing_review", count: 3, tone: "danger" },
+];
 
 const ALL_STATUSES: StatusKey[] = [
   "unread",
@@ -275,7 +285,7 @@ function DesignReference() {
           />
 
           <div className="grid grid-cols-2 gap-2">
-            {homeSummaries.today.metrics.map((metric) => (
+            {DESIGN_HOME_METRICS.map((metric) => (
               <MetricTile
                 key={metric.id}
                 label={t(`home.metrics.${metric.id}`)}
@@ -287,7 +297,7 @@ function DesignReference() {
           </div>
 
           <div className="grid gap-2 sm:grid-cols-2">
-            {homeSummaries.today.attention.map((item) => (
+            {DESIGN_HOME_ATTENTION.map((item) => (
               <AttentionCard key={item.id} item={item} />
             ))}
           </div>

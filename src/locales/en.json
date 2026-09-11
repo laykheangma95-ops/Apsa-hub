@@ -346,16 +346,24 @@
     }
   },
   "home": {
-    "greeting": "Good morning, {{name}}",
-    "subtitle": "Here's what's happening today.",
-    "revenue": "Revenue",
+    "greeting": "Command center",
+    "subtitle": "What needs your attention right now?",
+    "revenue": "Net collected for orders created in this period",
+    "noSettledSales": "No net collection for orders created in this period",
+    "financialsUnavailable": "You do not have permission to view financial totals.",
+    "financialsError": "Financial totals are unavailable right now.",
     "attention": "Needs attention",
     "attentionSubtitle": "What to do now",
+    "noAttention": "Nothing currently needs attention in the areas you can access.",
+    "attentionIncomplete": "Some of these checks did not complete, so this list may be incomplete.",
+    "attentionUnavailable": "You do not have access to the areas this list is built from.",
     "attentionItems": {
       "unread_conversations": "Unread conversations",
       "awaiting_payment": "Orders awaiting payment",
+      "payments_needing_review": "Payments needing review",
       "awaiting_delivery": "Orders waiting for delivery",
-      "low_stock": "Low stock products"
+      "low_stock": "Out-of-stock variants",
+      "orders_needing_action": "Orders needing action"
     },
     "quickActions": "Quick actions",
     "actions": {
@@ -372,13 +380,25 @@
     },
     "metrics": {
       "orders": "Orders",
+      "awaiting_payment": "Orders awaiting payment",
+      "payments_needing_review": "Payments needing review",
       "new_customers": "New customers",
       "avg_order": "Average order",
-      "messages": "Messages"
+      "messages": "Messages",
+      "pending_payments": "Pending payments",
+      "delivery_actions": "Delivery actions",
+      "low_stock": "Out of stock"
     },
-    "apsi": {
-      "title": "You replied to 26 messages today.",
-      "body": "That's your best day this week. Three follow-ups are still waiting."
+    "domains": {
+      "orders": "Orders",
+      "payments": "Payments",
+      "inventory": "Inventory",
+      "delivery": "Delivery"
+    },
+    "sectionState": {
+      "permission_denied": "{{domain}} is unavailable because you do not have access.",
+      "error": "{{domain}} is unavailable right now.",
+      "truncated": "{{domain}} could not be counted completely, so no partial total is shown."
     },
     "empty": {
       "title": "Today is quiet",

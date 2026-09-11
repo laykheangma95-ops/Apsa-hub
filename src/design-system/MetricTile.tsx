@@ -6,7 +6,7 @@ import type { MetricPoint } from "@/types";
 interface MetricTileProps {
   label: string;
   value: string;
-  deltaPercent?: number;
+  deltaPercent?: number | null;
   series?: MetricPoint[];
   className?: string;
 }
@@ -74,7 +74,7 @@ export function MetricTile({ label, value, deltaPercent, series, className }: Me
     >
       <span className="text-caption chip-text text-text-secondary">{label}</span>
       <span className="text-h2 tnum mt-0.5 truncate text-text-primary">{value}</span>
-      {deltaPercent !== undefined ? (
+      {typeof deltaPercent === "number" ? (
         <span
           className={cn(
             "text-caption tnum mt-1.5 inline-flex w-fit items-center gap-1 rounded-full px-1.5 py-0.5",
