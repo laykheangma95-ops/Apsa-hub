@@ -336,13 +336,28 @@ describe("Test 8: Mandatory export audit is enforced", () => {
     // auditLog() throws a programming-error if called with 'customers.export'
     // because it's in MANDATORY_AUDIT_ACTIONS. This guards against accidental mis-use.
     // The service correctly uses auditLogRequired() — verified by code review.
+    //
+    // Freshly imported with a cache-busting query rather than using the
+    // statically-imported `auditLog` above: Bun's mock.module() replaces a
+    // module's cache entry for the rest of the whole `bun test` process, and
+    // other files (e.g. team-domain.test.ts's installPassthroughAuthMocks(),
+    // which stubs auditLog as a no-op) never restore it. If one of those runs
+    // earlier in Bun's file schedule, the statically-imported `auditLog`
+    // binding here can resolve to that leaked no-op instead of the real
+    // guard, so this assertion would see a resolved promise instead of a
+    // rejection. The `?isolate=` suffix forces a fresh, never-mocked
+    // evaluation of the real module every run. See team-repository.test.ts's
+    // header comment for the same class of Bun module-cache hazard.
+    const isolate = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const { auditLog: realAuditLog } = await import(`../server/auth/audit?isolate=${isolate}`);
+
     const fakeCtx = {
       userId: USER_ORG_A_OWNER,
       organizationId: ORG_A_ID,
     } as unknown as Parameters<typeof auditLog>[0];
 
     await expect(
-      auditLog(fakeCtx, { action: "customers.export", resourceType: "customers" }),
+      realAuditLog(fakeCtx, { action: "customers.export", resourceType: "customers" }),
     ).rejects.toThrow(/mandatory-audit/);
   });
 
