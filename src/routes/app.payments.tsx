@@ -52,9 +52,11 @@ import {
   classifyPaymentError,
   findPaymentFilter,
   isFullyRefundedUiPayment,
+  paymentAccessDenied,
   paymentNeedsReview,
   PAYMENT_FILTERS,
   reconciliationIsQuiet,
+  visiblePaymentRows,
   type PaymentFilterId,
   type UiPayment,
   type UiPaymentReconciliation,
@@ -286,12 +288,42 @@ function PaymentsListScreen() {
     enabled: !detailOpen && canReconcile,
   });
 
+  const errorKind = paymentsQuery.isError ? classifyPaymentError(paymentsQuery.error) : null;
+
+  /*
+   * Cached rows are read through visiblePaymentRows, never off
+   * paymentsQuery.data directly.
+   *
+   * React Query retains the last successful pages when a refetch fails, which
+   * is right for a blip and wrong for a 403: a member whose payments.read was
+   * revoked, whose membership ended, or whose session died would otherwise go
+   * on reading real amounts, order ids and verification states under a
+   * "you don't have access" panel until something invalidated the cache. The
+   * mask is synchronous — it takes effect on this render, with no refetch and
+   * no invalidation — and it is narrow: only forbidden and unauthorized
+   * withhold, so an ordinary transient failure still shows the rows the
+   * server really did send alongside its retry affordance.
+   */
+  const listDenied = paymentAccessDenied(errorKind);
+
   const items = useMemo(
-    () => paymentsQuery.data?.pages.flatMap((page) => page.items) ?? [],
-    [paymentsQuery.data],
+    () =>
+      visiblePaymentRows(
+        paymentsQuery.data?.pages.flatMap((page) => page.items),
+        errorKind,
+      ),
+    [paymentsQuery.data, errorKind],
   );
 
-  const errorKind = paymentsQuery.isError ? classifyPaymentError(paymentsQuery.error) : null;
+  /*
+   * Reconciliation is a separate request with a separate permission
+   * (payments.reconcile) and so a separate denial: its aggregate amounts are
+   * a disclosure in their own right and are withheld on their own 403, even
+   * while the list itself is still readable.
+   */
+  const reconciliationErrorKind = reconciliationQuery.isError
+    ? classifyPaymentError(reconciliationQuery.error)
+    : null;
 
   useEffect(() => {
     if (errorKind === "unauthorized") void navigate({ to: "/sign-in" });
@@ -319,7 +351,7 @@ function PaymentsListScreen() {
   if (errorKind === "unauthorized") return null; // redirecting, see the effect above
 
   const showEmpty = paymentsQuery.isSuccess && items.length === 0;
-  const summaries = reconciliationQuery.data ?? [];
+  const summaries = visiblePaymentRows(reconciliationQuery.data, reconciliationErrorKind);
   const loudSummaries = summaries.filter((summary) => !reconciliationIsQuiet(summary));
 
   return (
@@ -410,7 +442,7 @@ function PaymentsListScreen() {
            * merchant is told so and can load it, and when the button is gone
            * the list really is the end of the filtered set.
            */}
-          {paymentsQuery.hasNextPage ? (
+          {paymentsQuery.hasNextPage && !listDenied ? (
             <Button
               variant="ghost"
               className="tap-target h-11 w-full"

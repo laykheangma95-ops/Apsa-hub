@@ -537,7 +537,7 @@ describe("the client boundary in src/lib/api", () => {
     expect(seen[0]!.data).toEqual({ paymentId: PAYMENT_ID, to: "bank_verified" });
   });
 
-  it("sends a refund as an integer minor amount with its reason, and nothing else", async () => {
+  it("sends a refund as an integer minor amount with its reason and its key, and nothing else", async () => {
     const seen: ListCall[] = [];
     stubPaymentsApi({
       refund: (call) => {
@@ -547,17 +547,36 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { refundRealPayment } = await import("../lib/api");
-    await refundRealPayment(PAYMENT_ID, 2000, "Damaged item");
+    await refundRealPayment(PAYMENT_ID, 2000, "Damaged item", "refund-key-1");
 
     expect(seen[0]!.data).toEqual({
       paymentId: PAYMENT_ID,
       amountMinor: 2000,
       reason: "Damaged item",
+      idempotencyKey: "refund-key-1",
     });
     expect(Number.isInteger(seen[0]!.data!["amountMinor"])).toBe(true);
     // No currency is sent: a refund is always in the payment's own currency,
     // which the server already knows.
     expect(Object.keys(seen[0]!.data!)).not.toContain("currency");
+  });
+
+  it("refuses to start a refund with no idempotency key, without reaching the server", async () => {
+    let calls = 0;
+    stubPaymentsApi({
+      refund: () => {
+        calls += 1;
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const { refundRealPayment } = await import("../lib/api");
+    for (const key of ["", "   "]) {
+      const error = await expectRejects(() => refundRealPayment(PAYMENT_ID, 2000, "Damaged", key));
+      expect(error.message).toMatch(/idempotency key is required/i);
+    }
+    // Fails closed: an unprotected refund is never attempted at all.
+    expect(calls).toBe(0);
   });
 
   it("sends a reversal as a payment id and a reason only", async () => {
@@ -572,5 +591,263 @@ describe("the client boundary in src/lib/api", () => {
     const { reverseRealPayment } = await import("../lib/api");
     await reverseRealPayment(PAYMENT_ID, "Recorded in error");
     expect(seen[0]!.data).toEqual({ paymentId: PAYMENT_ID, reason: "Recorded in error" });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. Refund retry idempotency — the defect Codex reproduced on PR #55
+//
+// The bug was narrow and expensive: src/lib/api's refund wrapper sent no
+// idempotency key, so refund_payment_v1's replay protection (migration 040)
+// was never armed. A refund that COMMITTED in PostgreSQL but whose response
+// never reached the tab looks, from the browser, exactly like one that never
+// ran — and the merchant's obvious "try again" wrote a second refund event
+// and returned a customer's money twice.
+//
+// These tests do not assert that a key is "sent". They stand a fake ledger up
+// with refund_payment_v1's OWN key semantics (see migration 040 lines 228-276:
+// a refund event carries idempotency_key; a key that already named a refund on
+// this payment returns that refund's stored result stamped `replayed: true`
+// and writes nothing; the same key with different terms is rejected) and then
+// count what ends up in it after the real UI retry sequence runs through the
+// real client boundary.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface LedgerRefundEvent {
+  paymentId: string;
+  amountMinor: number;
+  reason: string;
+  idempotencyKey: string | null;
+}
+
+/**
+ * A stand-in for refund_payment_v1 + the payments row it settles, faithful on
+ * the only axis these tests turn on: what a repeated idempotency key does.
+ */
+function makeRefundLedger(principalMinor: number) {
+  const events: LedgerRefundEvent[] = [];
+
+  function refundedTotal(): number {
+    return events.reduce((total, event) => total + event.amountMinor, 0);
+  }
+
+  return {
+    events,
+    refundedTotal,
+    /** Exactly one row per committed refund, whatever the transport did. */
+    countFor(key: string): number {
+      return events.filter((event) => event.idempotencyKey === key).length;
+    },
+    call(data: Record<string, unknown>): {
+      status: string;
+      refunded_total: number;
+      replayed: boolean;
+    } {
+      const paymentId = data["paymentId"] as string;
+      const amountMinor = data["amountMinor"] as number;
+      const reason = data["reason"] as string;
+      const rawKey = data["idempotencyKey"];
+      const key = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey.trim() : null;
+
+      if (key !== null) {
+        const previous = events.find(
+          (event) => event.paymentId === paymentId && event.idempotencyKey === key,
+        );
+        if (previous) {
+          if (previous.amountMinor !== amountMinor || previous.reason !== reason) {
+            throw Object.assign(
+              new Error("Refund idempotency key conflicts with original request"),
+              { statusCode: 409 },
+            );
+          }
+          // Replay: the first refund's own answer, and NOTHING written.
+          return { status: "success", refunded_total: refundedTotal(), replayed: true };
+        }
+      }
+
+      if (refundedTotal() + amountMinor > principalMinor) {
+        throw Object.assign(new Error("Refund exceeds the paid amount"), { statusCode: 400 });
+      }
+
+      events.push({ paymentId, amountMinor, reason, idempotencyKey: key });
+      return { status: "success", refunded_total: refundedTotal(), replayed: false };
+    },
+  };
+}
+
+describe("a refund retry after a lost response records one refund, not two", () => {
+  /**
+   * The merchant's side of the screen, reduced to the two things that decide
+   * the key: the refund sheet opens (a new deliberate refund decision), and
+   * confirm is pressed (an attempt at the decision currently on screen). This
+   * is the same sequence src/routes/app.payments.$id.tsx runs — resolve
+   * against the held intent, store it back, hand the key to the wrapper —
+   * with the ref replaced by a local.
+   */
+  async function makeRefundScreen(paymentId: string) {
+    const { resolveRefundIntent } = await import("../lib/payments");
+    const { refundRealPayment } = await import("../lib/api");
+    type Intent = Awaited<ReturnType<typeof resolveRefundIntent>>;
+    let held: Intent | null = null;
+
+    return {
+      /** Pressing the Refund action row. */
+      openSheet() {
+        held = null;
+      },
+      keysUsed: [] as string[],
+      async confirm(this: { keysUsed: string[] }, amountMinor: number, reason: string) {
+        const intent = resolveRefundIntent(held, { paymentId, amountMinor, reason });
+        held = intent;
+        this.keysUsed.push(intent.idempotencyKey);
+        // A rejection propagates with `held` still set: a failed attempt does
+        // NOT discard the intent, which is the whole point.
+        return await refundRealPayment(paymentId, amountMinor, reason, intent.idempotencyKey);
+      },
+      succeeded() {
+        held = null;
+      },
+    };
+  }
+
+  it("THE REPORTED DEFECT: refund commits, the response is lost, the merchant retries — one ledger refund, one refunded amount", async () => {
+    const ledger = makeRefundLedger(10_000);
+    let dropNextResponse = true;
+
+    stubPaymentsApi({
+      refund: (call) => {
+        // The RPC runs and COMMITS either way; only the answer is lost.
+        ledger.call(call.data!);
+        if (dropNextResponse) {
+          dropNextResponse = false;
+          throw Object.assign(new Error("network error: connection reset"), {
+            /* no statusCode — a transport failure, not a server verdict */
+          });
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+
+    // Attempt 1: committed server-side, lost in transit.
+    await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    // Attempt 2: the merchant presses confirm again — the same decision.
+    await screen.confirm(2_000, "Damaged item");
+    screen.succeeded();
+
+    // Exactly one refund is in the ledger, for exactly the refunded amount.
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.refundedTotal()).toBe(2_000);
+    // Because the retry carried the identical key.
+    expect(screen.keysUsed).toHaveLength(2);
+    expect(screen.keysUsed[0]).toBe(screen.keysUsed[1]!);
+    expect(ledger.countFor(screen.keysUsed[0]!)).toBe(1);
+  });
+
+  it("without a key the very same sequence double-refunds — proving the key is what fixes it", async () => {
+    const ledger = makeRefundLedger(10_000);
+
+    // The pre-fix wrapper: same two attempts, no key.
+    ledger.call({ paymentId: PAYMENT_ID, amountMinor: 2_000, reason: "Damaged item" });
+    ledger.call({ paymentId: PAYMENT_ID, amountMinor: 2_000, reason: "Damaged item" });
+
+    expect(ledger.events).toHaveLength(2);
+    expect(ledger.refundedTotal()).toBe(4_000);
+  });
+
+  it("retries the same decision any number of times and still records one refund", async () => {
+    const ledger = makeRefundLedger(10_000);
+    let failuresLeft = 3;
+
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        if (failuresLeft > 0) {
+          failuresLeft -= 1;
+          throw new Error("network error: connection reset");
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    }
+    await screen.confirm(2_000, "Damaged item");
+
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.refundedTotal()).toBe(2_000);
+    expect(new Set(screen.keysUsed).size).toBe(1);
+  });
+
+  it("two deliberate refunds of the same amount and reason are two refunds, with two keys", async () => {
+    const ledger = makeRefundLedger(10_000);
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+    screen.succeeded();
+
+    // The merchant opens the sheet again and refunds another 2,000 — a
+    // genuinely separate decision that happens to repeat the terms exactly.
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+    screen.succeeded();
+
+    expect(ledger.events).toHaveLength(2);
+    expect(ledger.refundedTotal()).toBe(4_000);
+    expect(screen.keysUsed[0]).not.toBe(screen.keysUsed[1]!);
+  });
+
+  it("changing the amount mid-sheet is a different refund and never reuses the bound key", async () => {
+    const ledger = makeRefundLedger(10_000);
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+    // Same open sheet, corrected amount: reusing the first key here would be
+    // rejected outright by refund_payment_v1 as conflicting terms.
+    await screen.confirm(3_000, "Damaged item");
+
+    expect(screen.keysUsed[0]).not.toBe(screen.keysUsed[1]!);
+    expect(ledger.events).toHaveLength(2);
+    expect(ledger.refundedTotal()).toBe(5_000);
+  });
+
+  it("a retry after a server verdict is still safe: no refund was written, so the key was never bound", async () => {
+    const ledger = makeRefundLedger(1_000);
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!); // throws: 2,000 exceeds a 1,000 principal
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    const first = await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    expect((first as { statusCode?: number }).statusCode).toBe(400);
+    const second = await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    expect((second as { statusCode?: number }).statusCode).toBe(400);
+
+    expect(ledger.events).toHaveLength(0);
+    expect(ledger.refundedTotal()).toBe(0);
   });
 });

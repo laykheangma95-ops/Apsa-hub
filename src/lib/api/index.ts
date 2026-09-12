@@ -1351,14 +1351,35 @@ export async function verifyRealPayment(
  * Refund, in full or in part. The refunded total is derived by SQL from the
  * immutable refund event ledger; `amountMinor` is this one refund only, in the
  * payment's own currency, as an integer minor unit.
+ *
+ * `idempotencyKey` is REQUIRED, and is the whole reason a retry is safe.
+ * refund_payment_v1 (migration 040) binds the key to the refund event it
+ * wrote, so the same key sent again returns that first refund stamped
+ * `replayed: true` rather than recording a second one — the server then
+ * replays its own audit write and answers success. Sending no key would put
+ * this path back where a lost response plus the merchant's obvious "try
+ * again" returns a customer's money twice, so there is deliberately no
+ * default and no optional parameter here: a caller with nothing to send has
+ * no business starting a refund.
+ *
+ * The key belongs to ONE logical refund decision and is minted by
+ * resolveRefundIntent in src/lib/payments.ts, never here — this wrapper is
+ * called once per attempt, so minting inside it would hand every retry a new
+ * key and defeat the protection entirely.
  */
 export async function refundRealPayment(
   paymentId: string,
   amountMinor: number,
   reason: string,
+  idempotencyKey: string,
 ): Promise<UiPaymentDetail> {
+  if (!idempotencyKey || idempotencyKey.trim().length === 0) {
+    throw Object.assign(new Error("A refund idempotency key is required"), { statusCode: 400 });
+  }
   const { refundPaymentFn } = await import("@/api/payments");
-  const detail = await refundPaymentFn({ data: { paymentId, amountMinor, reason } });
+  const detail = await refundPaymentFn({
+    data: { paymentId, amountMinor, reason, idempotencyKey },
+  });
   return mapPaymentDetailToUi(detail);
 }
 

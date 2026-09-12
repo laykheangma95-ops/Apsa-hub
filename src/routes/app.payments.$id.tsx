@@ -35,7 +35,7 @@ import {
   UserCheck,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ActionRow,
@@ -83,8 +83,11 @@ import {
   paymentErrorKey,
   paymentNeedsReview,
   refundEventsOf,
+  resolveRefundIntent,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
+  visiblePaymentRecord,
   type PaymentVerificationState,
+  type RefundIntent,
   type UiPaymentDetail,
 } from "@/lib/payments";
 
@@ -161,7 +164,19 @@ function PaymentDetailScreen() {
     retry: false,
   });
 
-  const payment = paymentQuery.data;
+  const queryErrorKind = paymentQuery.isError ? classifyPaymentError(paymentQuery.error) : null;
+
+  /*
+   * The cached payment is read through visiblePaymentRecord, never off
+   * paymentQuery.data directly, so an explicit 403/401 on a refresh empties
+   * this screen on the very next render rather than leaving the previous
+   * answer on display. The forbidden branch below also returns early, but
+   * that is statement order and statement order is not a guarantee — this is
+   * the gate, and src/tests/payments-operations-ui.test.ts asserts no payment
+   * surface reads around it. Transient failures are untouched: only forbidden
+   * and unauthorized mask (see paymentAccessDenied).
+   */
+  const payment = visiblePaymentRecord(paymentQuery.data, queryErrorKind);
 
   /*
    * Order settlement is a SEPARATE read against order_payment_totals, gated on
@@ -178,6 +193,16 @@ function PaymentDetailScreen() {
 
   const [verifyTarget, setVerifyTarget] = useState<PaymentVerificationState | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  /*
+   * The logical refund decision currently on screen, and the idempotency key
+   * every attempt at it carries. Held in a ref rather than state on purpose:
+   * it must be readable and writable from inside mutationFn without that
+   * write scheduling a render, and it must survive the re-renders a failed
+   * attempt causes. Cleared when the refund sheet opens (a new deliberate
+   * refund) and again once a refund has landed, so two identical deliberate
+   * refunds get two keys and are two refunds — see resolveRefundIntent.
+   */
+  const refundIntentRef = useRef<RefundIntent | null>(null);
   const [reverseOpen, setReverseOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -212,14 +237,36 @@ function PaymentDetailScreen() {
   });
 
   const refundMutation = useMutation({
-    mutationFn: ({ amountMinor, reason }: { amountMinor: number; reason: string }) =>
-      refundRealPayment(id, amountMinor, reason),
+    mutationFn: ({ amountMinor, reason }: { amountMinor: number; reason: string }) => {
+      /*
+       * Resolve BEFORE the request and store it back, so a retry of this same
+       * decision — the merchant pressing confirm again after a request that
+       * may or may not have committed — sends the identical key and is
+       * replayed by refund_payment_v1 instead of refunding a second time.
+       */
+      const intent = resolveRefundIntent(refundIntentRef.current, {
+        paymentId: id,
+        amountMinor,
+        reason,
+      });
+      refundIntentRef.current = intent;
+      return refundRealPayment(id, amountMinor, reason, intent.idempotencyKey);
+    },
     onSuccess: () => {
+      // The decision is settled; the next refund is a new one and needs a new key.
+      refundIntentRef.current = null;
       setRefundOpen(false);
       setActionError(null);
       invalidatePayments();
       notifySuccess(t("payments.actions.refund.done"));
     },
+    /*
+     * Deliberately NOT cleared on error. A failure may be a lost response over
+     * a refund that committed, and only the retained key makes the retry a
+     * replay. A failure the server actually decided (invalid amount, wrong
+     * state, denied) wrote no refund event, so its key was never bound and
+     * reusing it costs nothing.
+     */
     onError: handleActionError,
   });
 
@@ -233,8 +280,6 @@ function PaymentDetailScreen() {
     },
     onError: handleActionError,
   });
-
-  const queryErrorKind = paymentQuery.isError ? classifyPaymentError(paymentQuery.error) : null;
 
   useEffect(() => {
     if (queryErrorKind === "unauthorized") void navigate({ to: "/sign-in" });
@@ -315,7 +360,16 @@ function PaymentDetailScreen() {
   const showReverse = canReverse && canReverseUiPayment(payment);
   const hasAnyAction = verificationTargets.length > 0 || showRefund || showReverse;
 
-  const settlement = settlementQuery.data;
+  /*
+   * Settlement figures are a disclosure of their own and pass the same gate:
+   * a 403 on the settlement refresh drops the cached received/refunded/net
+   * numbers immediately instead of leaving them under the panel's own
+   * "unavailable" message.
+   */
+  const settlement = visiblePaymentRecord(
+    settlementQuery.data,
+    settlementQuery.isError ? classifyPaymentError(settlementQuery.error) : null,
+  );
   const pending = verifyMutation.isPending || refundMutation.isPending || reverseMutation.isPending;
 
   /**
@@ -600,6 +654,8 @@ function PaymentDetailScreen() {
                   disabled={pending}
                   onClick={() => {
                     setActionError(null);
+                    // Opening the sheet IS the new deliberate refund action.
+                    refundIntentRef.current = null;
                     setRefundOpen(true);
                   }}
                 />

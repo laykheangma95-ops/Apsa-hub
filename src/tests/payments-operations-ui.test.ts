@@ -52,12 +52,18 @@ import {
   mapPaymentReconciliationToUi,
   mapPaymentSummaryToUi,
   paymentErrorKey,
+  paymentAccessDenied,
   paymentNeedsReview,
   PAYMENT_FILTERS,
   reconciliationIsQuiet,
   refundEventsOf,
+  newRefundIdempotencyKey,
+  resolveRefundIntent,
   UI_VERIFICATION_TRANSITIONS,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
+  visiblePaymentRecord,
+  visiblePaymentRows,
+  type PaymentErrorKind,
 } from "@/lib/payments";
 import { UI_PERMISSION_KEYS, createFixtureCapabilityView } from "@/lib/capabilities";
 import {
@@ -921,6 +927,268 @@ describe("production boundary", () => {
       expect(detail).not.toContain(forbidden);
       expect(readSource(LIST_ROUTE)).not.toContain(forbidden);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 14. Refund intent identity — P1 of the post-merge review of PR #55
+//
+// The wire-level proof (a committed refund, a lost response, a retry, one
+// ledger row) lives in the runtime file, which can stand a fake ledger up.
+// This section pins the RULE that decides the key, and pins the screens to it.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("N. one logical refund, one idempotency key", () => {
+  const request = { paymentId: PAYMENT_ID, amountMinor: 2_000, reason: "Damaged item" };
+
+  it("a new decision gets a fresh key", () => {
+    const first = resolveRefundIntent(null, request);
+    const second = resolveRefundIntent(null, request);
+    expect(first.idempotencyKey).not.toBe(second.idempotencyKey);
+  });
+
+  it("retrying the same decision keeps the very same intent, key included", () => {
+    const intent = resolveRefundIntent(null, request);
+    const retry = resolveRefundIntent(intent, request);
+    expect(retry).toBe(intent);
+    expect(retry.idempotencyKey).toBe(intent.idempotencyKey);
+  });
+
+  it("a different amount or reason is a different refund and mints a new key", () => {
+    const intent = resolveRefundIntent(null, request);
+    expect(resolveRefundIntent(intent, { ...request, amountMinor: 3_000 }).idempotencyKey).not.toBe(
+      intent.idempotencyKey,
+    );
+    expect(
+      resolveRefundIntent(intent, { ...request, reason: "Wrong size" }).idempotencyKey,
+    ).not.toBe(intent.idempotencyKey);
+    expect(
+      resolveRefundIntent(intent, { ...request, paymentId: ORDER_ID }).idempotencyKey,
+    ).not.toBe(intent.idempotencyKey);
+  });
+
+  it("whitespace around the reason is not a different refund", () => {
+    const intent = resolveRefundIntent(null, request);
+    const retry = resolveRefundIntent(intent, { ...request, reason: "  Damaged item  " });
+    expect(retry.idempotencyKey).toBe(intent.idempotencyKey);
+    // The intent carries the trimmed form — what the server compares a replay against.
+    expect(intent.reason).toBe("Damaged item");
+  });
+
+  it("the key is opaque: never the payment id, the amount or the reason", () => {
+    const keys = Array.from({ length: 50 }, () => newRefundIdempotencyKey());
+    for (const key of keys) {
+      expect(key).not.toContain(PAYMENT_ID);
+      expect(key).not.toContain("2000");
+      expect(key).not.toContain("Damaged");
+      expect(key.trim().length).toBeGreaterThan(8);
+      // Fits the server validator: z.string().trim().min(1).max(200).
+      expect(key.length).toBeLessThanOrEqual(200);
+    }
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("two refunds identical in every field still get different keys", () => {
+    // The same terms twice is two real refunds totalling twice the amount, so
+    // a key derived from the terms would silently collapse them into one.
+    const a = resolveRefundIntent(null, request);
+    const b = resolveRefundIntent(null, request);
+    expect(a.amountMinor).toBe(b.amountMinor);
+    expect(a.reason).toBe(b.reason);
+    expect(a.idempotencyKey).not.toBe(b.idempotencyKey);
+  });
+
+  it("the refund wrapper requires a key and the server function accepts one", () => {
+    const api = readSource(API_INDEX);
+    // Required parameter, not an optional one a caller can forget.
+    expect(api).toContain("idempotencyKey: string,\n): Promise<UiPaymentDetail>");
+    expect(api).toContain("data: { paymentId, amountMinor, reason, idempotencyKey }");
+    // And the boundary it is sent to validates it.
+    const serverFn = readSource("src/api/payments.ts");
+    expect(serverFn).toContain("idempotencyKey: z.string().trim().min(1).max(200).nullish()");
+  });
+
+  it("the detail screen resolves an intent and never mints a key per attempt", () => {
+    const detail = readSource(DETAIL_ROUTE);
+    expect(detail).toContain("resolveRefundIntent(refundIntentRef.current");
+    expect(detail).toContain("refundRealPayment(id, amountMinor, reason, intent.idempotencyKey)");
+    // Minting inside the wrapper or the mutation body would hand every retry
+    // a new key and defeat the whole mechanism.
+    expect(detail).not.toContain("newRefundIdempotencyKey(");
+    expect(readSource(API_INDEX)).not.toContain("newRefundIdempotencyKey");
+  });
+
+  it("the intent is dropped when a new refund starts and when one lands, and never on failure", () => {
+    const detail = readSource(DETAIL_ROUTE);
+    const opensSheet = detail.indexOf("setRefundOpen(true)");
+    const clearsOnOpen = detail.lastIndexOf("refundIntentRef.current = null", opensSheet);
+    expect(clearsOnOpen).toBeGreaterThan(-1);
+
+    const onSuccess = detail.indexOf("setRefundOpen(false)");
+    const clearsOnSuccess = detail.lastIndexOf("refundIntentRef.current = null", onSuccess);
+    expect(clearsOnSuccess).toBeGreaterThan(-1);
+    expect(clearsOnSuccess).not.toBe(clearsOnOpen);
+
+    // Exactly two clears: opening the sheet and a landed refund. A third in
+    // an error path would turn a lost response back into a second refund.
+    expect(detail.split("refundIntentRef.current = null").length - 1).toBe(2);
+  });
+
+  it("no payment screen invents a refund key from the payment's own fields", () => {
+    for (const file of [LIST_ROUTE, DETAIL_ROUTE, PAYMENTS_LIB, API_INDEX]) {
+      const source = readSource(file);
+      expect(source).not.toMatch(/idempotencyKey\s*[:=]\s*`?\$?\{?\s*paymentId/);
+      expect(source).not.toMatch(/idempotencyKey\s*[:=]\s*.*amountMinor/);
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 15. Cached payment data after an explicit denial — P2 of the same review
+//
+// React Query keeps the last successful data when a refetch fails. For a blip
+// that is correct. For a 403 it means a member who has just lost payments.read
+// goes on reading real amounts, order ids and verification states under a
+// denial panel. The gate below is the one thing standing between a cached row
+// and the screen, and it must act on the render, not on the cache.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("O. an explicit denial withholds cached payment data immediately", () => {
+  const cachedRows = [
+    mapPaymentSummaryToUi(
+      serverSummary({ id: PAYMENT_ID, amount: { amount: 12_500, currency: "USD" } }),
+    ),
+    mapPaymentSummaryToUi(
+      serverSummary({ id: ORDER_ID, amount: { amount: 40_000, currency: "KHR" } }),
+    ),
+  ];
+
+  const DENYING: PaymentErrorKind[] = ["forbidden", "unauthorized"];
+  const NOT_DENYING: PaymentErrorKind[] = ["not_found", "conflict", "invalid", "server_error"];
+
+  it("positive control: with no error the cached rows are exactly what renders", () => {
+    expect(visiblePaymentRows(cachedRows, null)).toEqual(cachedRows);
+    expect(visiblePaymentRecord(cachedRows[0], null)).toBe(cachedRows[0]!);
+  });
+
+  it("THE REPORTED DEFECT: a 403 on refresh renders no rows even though the cache still holds them", () => {
+    // The cache is untouched — this is exactly the state React Query leaves
+    // behind after a failed refetch — and nothing is rendered from it.
+    expect(cachedRows).toHaveLength(2);
+    expect(visiblePaymentRows(cachedRows, "forbidden")).toEqual([]);
+    expect(visiblePaymentRecord(cachedRows[0], "forbidden")).toBeNull();
+  });
+
+  it("no amount, order id or verification state survives a denial", () => {
+    const rendered = visiblePaymentRows(cachedRows, "forbidden");
+    const serialized = JSON.stringify(rendered);
+    for (const secret of [PAYMENT_ID, ORDER_ID, "12500", "40000", "staff_confirmed", "khqr"]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(rendered).toEqual([]);
+  });
+
+  it("every definitive denial withholds, and nothing else does", () => {
+    for (const kind of DENYING) {
+      expect(paymentAccessDenied(kind)).toBe(true);
+      expect(visiblePaymentRows(cachedRows, kind)).toEqual([]);
+      expect(visiblePaymentRecord(cachedRows[0], kind)).toBeNull();
+    }
+    for (const kind of NOT_DENYING) {
+      expect(paymentAccessDenied(kind)).toBe(false);
+    }
+    expect(paymentAccessDenied(null)).toBe(false);
+    expect(paymentAccessDenied(undefined)).toBe(false);
+  });
+
+  it("an unknown network failure stays honest and keeps the rows the server really sent", () => {
+    // classifyPaymentError puts a bare transport failure in server_error, and
+    // a transient failure must not blank out valid rows.
+    const transient = classifyPaymentError(new Error("network error: connection reset"));
+    expect(transient).toBe("server_error");
+    expect(visiblePaymentRows(cachedRows, transient)).toEqual(cachedRows);
+    expect(visiblePaymentRecord(cachedRows[0], transient)).toBe(cachedRows[0]!);
+
+    // Same for a 500 and for a conflict on some other action.
+    for (const err of [
+      Object.assign(new Error("boom"), { statusCode: 500 }),
+      Object.assign(new Error("changed concurrently"), { statusCode: 409 }),
+    ]) {
+      expect(visiblePaymentRows(cachedRows, classifyPaymentError(err))).toEqual(cachedRows);
+    }
+  });
+
+  it("a real 403 from the payment service classifies as a denial", () => {
+    // The shape src/server/payments/service.ts actually throws.
+    const err = Object.assign(new Error("Missing permission: payments.read"), { statusCode: 403 });
+    expect(paymentAccessDenied(classifyPaymentError(err))).toBe(true);
+    // And the fallback path, for a statusCode that did not survive the RPC boundary.
+    expect(
+      paymentAccessDenied(classifyPaymentError(new Error("Missing permission: payments.read"))),
+    ).toBe(true);
+  });
+
+  it("withholding needs no invalidation and no refetch — it is a pure render decision", () => {
+    const sources = [readSource(LIST_ROUTE), readSource(DETAIL_ROUTE)].join("\n");
+    // Nothing removes or resets the query cache to achieve the denial: that
+    // would only make the same query mount and fetch again.
+    expect(sources).not.toContain("removeQueries");
+    expect(sources).not.toContain("resetQueries");
+    expect(sources).not.toContain("setQueryData");
+    // And the gate itself touches nothing but its arguments.
+    const lib = readSource(PAYMENTS_LIB);
+    const gate = lib.slice(lib.indexOf("export function visiblePaymentRows"));
+    expect(gate).not.toContain("queryClient");
+    expect(gate).not.toContain("await");
+  });
+
+  it("the list renders rows and reconciliation only through the gate", () => {
+    // Whitespace-normalised so a prettier reflow cannot pass or fail this.
+    const list = readSource(LIST_ROUTE).replace(/\s+/g, " ");
+    expect(list).toContain(
+      "visiblePaymentRows( paymentsQuery.data?.pages.flatMap((page) => page.items), errorKind, )",
+    );
+    expect(list).toContain("visiblePaymentRows(reconciliationQuery.data, reconciliationErrorKind)");
+    // Never straight off the cache.
+    expect(list).not.toMatch(/= paymentsQuery\.data\?\.pages\.flatMap[^;]{0,60}\?\? \[\]/);
+    expect(list).not.toContain("reconciliationQuery.data ?? []");
+    // The error kind the gate consumes is recomputed every render, never held
+    // in state that could lag behind the current answer.
+    expect(list).toContain(
+      "paymentsQuery.isError ? classifyPaymentError(paymentsQuery.error) : null",
+    );
+    expect(list).toContain("reconciliationQuery.isError");
+  });
+
+  it("the list offers no further pages once denied", () => {
+    expect(readSource(LIST_ROUTE)).toContain("paymentsQuery.hasNextPage && !listDenied");
+  });
+
+  it("the detail surface applies the same rule to the payment and to its settlement", () => {
+    const detail = readSource(DETAIL_ROUTE).replace(/\s+/g, " ");
+    expect(detail).toContain("visiblePaymentRecord(paymentQuery.data, queryErrorKind)");
+    expect(detail).toContain("visiblePaymentRecord( settlementQuery.data,");
+    expect(detail).not.toContain("const payment = paymentQuery.data;");
+    expect(detail).not.toContain("const settlement = settlementQuery.data;");
+  });
+
+  it("the detail screen's denial state is reached before anything is drawn from the payment", () => {
+    const detail = readSource(DETAIL_ROUTE);
+    const forbiddenBranch = detail.indexOf('queryErrorKind === "forbidden"');
+    const firstRender = detail.indexOf("formatMoney(payment.amount)");
+    expect(forbiddenBranch).toBeGreaterThan(-1);
+    expect(firstRender).toBeGreaterThan(forbiddenBranch);
+  });
+
+  it("a denial never describes the data behind it", () => {
+    const list = readSource(LIST_ROUTE);
+    // The forbidden panel says only that access is refused — no count, no
+    // amount, no filter summary is interpolated into it.
+    expect(list).toContain('t("payments.list.forbidden.title")');
+    expect(list).toContain('t("payments.list.forbidden.body")');
+    expect(list).not.toMatch(/forbidden\.body",\s*\{/);
+    // And a denial is not dressed up as an empty list.
+    expect(list).toContain("paymentsQuery.isSuccess && items.length === 0");
   });
 });
 

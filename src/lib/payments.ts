@@ -455,6 +455,96 @@ export function refundEventsOf(detail: UiPaymentDetail): UiPaymentEvent[] {
   return detail.events.filter((event) => event.eventType === "refund");
 }
 
+// ── Refund intent identity (idempotency) ─────────────────────────────────────
+//
+// refund_payment_v1 (migration 040) is idempotent ON A KEY and only on a key:
+// the refund event carries `idempotency_key`, the partial unique index
+// payment_refund_idempotency makes (organization_id, payment_id,
+// idempotency_key) unique, and a second call carrying a key that already
+// named a refund returns THAT refund's own result stamped `replayed: true`
+// instead of writing a second refund event. A call reusing a key with a
+// different amount or reason is rejected outright rather than quietly
+// treated as either one.
+//
+// None of that protects anything unless the browser actually sends a key, and
+// it only protects a retry if the SAME key comes back. A refund whose response
+// is lost — the RPC committed inside PostgreSQL, the connection died before
+// the answer reached the tab — is, from the browser, indistinguishable from
+// one that never ran. Without a key the obvious "try again" records a second
+// refund event and returns a customer's money twice.
+//
+// A RefundIntent is therefore ONE logical refund decision: minted once when
+// the merchant opens the refund sheet, reused for every retry of that same
+// decision, and discarded the moment the refund is known to have landed.
+//
+// The key is OPAQUE — crypto.randomUUID() — and is deliberately NOT derived
+// from the payment id, the amount or the reason. Deriving it from those would
+// be the same defect pointing the other way: two deliberate $20 "Damaged item"
+// refunds on one payment are two real refunds totalling $40, and a derived key
+// would silently collapse the second into a replay of the first.
+
+/** One logical refund decision, and the key every attempt at it must carry. */
+export interface RefundIntent {
+  /** Opaque. Never derived from paymentId, amountMinor or reason. */
+  readonly idempotencyKey: string;
+  readonly paymentId: string;
+  readonly amountMinor: number;
+  /** Trimmed, because that is the form the server compares a replay against. */
+  readonly reason: string;
+}
+
+/**
+ * A fresh opaque refund key.
+ *
+ * Fails closed: without a real random source there is no safe key, and a
+ * refund with no safe key is exactly the unprotected retry this exists to
+ * prevent — so no refund is attempted at all.
+ */
+export function newRefundIdempotencyKey(): string {
+  const source = globalThis.crypto;
+  if (!source || typeof source.randomUUID !== "function") {
+    throw new Error("A refund cannot be started without a secure random source");
+  }
+  return `refund-${source.randomUUID()}`;
+}
+
+/**
+ * The intent this confirm press belongs to.
+ *
+ * `held` is the intent the screen is already carrying for the open refund
+ * sheet. If this press asks for the very same refund (same payment, same
+ * integer minor amount, same trimmed reason) it is a RETRY of that decision
+ * and keeps its key, so a lost response cannot become a second refund. If any
+ * of the three differs the merchant is asking for a different refund, which
+ * must not inherit a key the server may already have bound to other terms.
+ *
+ * A NEW deliberate refund starts with `held` null — the screen drops the
+ * intent when the refund sheet opens and again once a refund has landed — so
+ * it always mints a new key even when its amount and reason repeat an earlier
+ * refund exactly.
+ */
+export function resolveRefundIntent(
+  held: RefundIntent | null | undefined,
+  request: { paymentId: string; amountMinor: number; reason: string },
+  mintKey: () => string = newRefundIdempotencyKey,
+): RefundIntent {
+  const reason = request.reason.trim();
+  if (
+    held &&
+    held.paymentId === request.paymentId &&
+    held.amountMinor === request.amountMinor &&
+    held.reason === reason
+  ) {
+    return held;
+  }
+  return {
+    idempotencyKey: mintKey(),
+    paymentId: request.paymentId,
+    amountMinor: request.amountMinor,
+    reason,
+  };
+}
+
 // ── Error classification ──────────────────────────────────────────────────────
 //
 // src/server/payments/service.ts throws Error instances carrying a
@@ -505,4 +595,51 @@ export function classifyPaymentError(err: unknown): PaymentErrorKind {
 /** i18n key for a classified payment error. Mirrors catalogErrorKey. */
 export function paymentErrorKey(kind: PaymentErrorKind): string {
   return `payments.errors.${kind}`;
+}
+
+// ── Withholding cached data on an explicit denial ────────────────────────────
+//
+// TanStack Query keeps the last successful `data` when a refetch fails. For
+// an ordinary blip that is the right behaviour and this module keeps it: a
+// timed-out poll on a patchy connection must not blank out payment rows the
+// server really did send.
+//
+// A 403/401 is not a blip. It is the server's current, definitive answer that
+// this principal may not read these payments — a revoked payments.read, a
+// membership ended, a session no longer good. The cached rows were true when
+// they were fetched and are not true now, and the screen must stop showing
+// them on the very next render: not after an invalidation, not after a
+// successful refetch, not after a navigation. So the denial is applied to the
+// RENDER rather than to the cache — a synchronous mask needs no round trip
+// and cannot race a refetch, and removing the entry instead would only make
+// the same query mount and fetch again.
+//
+// Only forbidden and unauthorized mask. not_found has its own honest screen;
+// conflict, invalid and server_error are transient or request-specific and
+// leave real rows alone.
+
+/** True when the server has definitively refused this read for this principal. */
+export function paymentAccessDenied(kind: PaymentErrorKind | null | undefined): boolean {
+  return kind === "forbidden" || kind === "unauthorized";
+}
+
+/**
+ * The rows a payments surface may render right now — the single required gate
+ * between a cached page of payments and anything drawn from it.
+ */
+export function visiblePaymentRows<T>(
+  rows: readonly T[] | null | undefined,
+  kind: PaymentErrorKind | null | undefined,
+): T[] {
+  if (paymentAccessDenied(kind)) return [];
+  return rows ? [...rows] : [];
+}
+
+/** The same gate for a single cached record (a payment detail, a settlement). */
+export function visiblePaymentRecord<T>(
+  record: T | null | undefined,
+  kind: PaymentErrorKind | null | undefined,
+): T | null {
+  if (paymentAccessDenied(kind)) return null;
+  return record ?? null;
 }
