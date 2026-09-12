@@ -169,7 +169,9 @@ function ProductListScreen() {
   const canReadProducts = identityOk && capabilities.can("products.read");
   const canCreateProduct = identityOk && capabilities.can("products.create");
   const canManageCategories = identityOk && capabilities.can("products.manage_categories");
-  const canSetCost = identityOk && capabilities.can("products.update_cost");
+  // Cost goes through canSensitive: no cost-entry affordance while the current
+  // capability snapshot is unconfirmed (see CapabilityView.canSensitive).
+  const canSetCost = identityOk && capabilities.canSensitive("products.update_cost");
 
   const organizationId = routeOrganizationId;
 

@@ -101,18 +101,6 @@ export function VariantSheet({
     weight?: string;
   }>({});
 
-  // Re-seed when the sheet opens on a different variant, so an edit never
-  // starts from the previous row's values. Also re-seeds on a mid-session
-  // products.view_cost change, so a sheet left open across a revocation
-  // strips any already-loaded cost out of form state immediately rather
-  // than leaving it to be masked only by the costVisible render-gate below.
-  useEffect(() => {
-    if (!open) return;
-    setForm(variant ? formFor(variant, permissions.canViewCost) : emptyForm());
-    setFormError(null);
-    setFieldErrors({});
-  }, [open, variant, permissions.canViewCost]);
-
   /*
    * One pure decision, shared with the tests: which fields this form offers.
    * A locked price is never resent, because the server reads any price key in
@@ -122,6 +110,43 @@ export function VariantSheet({
     permissions,
     isEdit,
   );
+
+  // Re-seed when the sheet opens on a different variant, so an edit never
+  // starts from the previous row's values.
+  useEffect(() => {
+    if (!open) return;
+    setForm(variant ? formFor(variant, costVisible) : emptyForm());
+    setFormError(null);
+    setFieldErrors({});
+    // costVisible is deliberately not a dependency: a mid-session change is
+    // handled by the cost-only effect below, which does not discard the rest
+    // of what the merchant has typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, variant]);
+
+  /*
+   * Cost visibility, tracked live and on its own.
+   *
+   * Losing it mid-session — a revocation, or a failed background capability
+   * refresh leaving an unconfirmed snapshot — must empty the cost out of form
+   * state immediately, before any server response arrives, so a value the
+   * member may no longer see cannot be read back or resubmitted. Regaining it
+   * re-seeds the cost from the variant, which is not cosmetic: costEditable
+   * with an empty costText submits `costAmount: null`, i.e. it would CLEAR a
+   * stored cost the member never meant to touch.
+   *
+   * Only the cost fields are touched, so a transient error does not throw away
+   * a half-typed name, SKU or price.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const cost = variant ? visibleVariantCost(variant, costVisible) : null;
+    setForm((previous) => ({
+      ...previous,
+      costText: cost ? formatMinorUnitsForInput(cost.amount, cost.currency) : "",
+      costCurrency: cost?.currency ?? previous.costCurrency,
+    }));
+  }, [open, variant, costVisible]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((previous) => ({ ...previous, [key]: value }));

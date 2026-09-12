@@ -124,6 +124,19 @@ export type CapabilityState = "pending" | "denied" | "ready";
 
 export interface CapabilityView {
   state: CapabilityState;
+  /**
+   * True when this view is served from a snapshot we already held whose LATEST
+   * refresh failed — "ready", but not currently confirmed by the server.
+   *
+   * `can()` deliberately still answers from that retained snapshot (see the
+   * background-refetch note in createCapabilityView): emptying a merchant's
+   * navigation every time a refresh times out on a patchy connection would be
+   * its own defect. `canSensitive()` does not. Anything whose mere DISPLAY
+   * discloses something — a cost, a margin — must not ride on a snapshot the
+   * server has not just confirmed, because a permission revoked in that same
+   * unconfirmed window would still read as granted here.
+   */
+  stale: boolean;
   /** Server-derived role label, for display only. null unless state is "ready". */
   role: string | null;
   /** null unless state is "ready". */
@@ -133,26 +146,42 @@ export interface CapabilityView {
   can(key: UiPermissionKey): boolean;
   canAll(keys: readonly UiPermissionKey[]): boolean;
   canAny(keys: readonly UiPermissionKey[]): boolean;
+  /**
+   * `can()`, narrowed for sensitive DISPLAY: additionally false whenever this
+   * view is not a currently-confirmed "ready" snapshot.
+   *
+   * True requires all of: the snapshot resolved to "ready" (so not pending,
+   * not denied/unauthenticated/email_unverified/no_membership, and not an
+   * identity mismatch — createCapabilityView denies those outright), the
+   * latest capability query did NOT error (`stale` false), and the key is
+   * actually granted. Authorizes nothing — the server re-checks every action
+   * regardless; this only decides whether a value may be drawn.
+   */
+  canSensitive(key: UiPermissionKey): boolean;
 }
 
 function buildView(
   state: CapabilityState,
   reason: CapabilityView["reason"],
   snapshot: CapabilitySnapshot | null,
+  stale = false,
 ): CapabilityView {
   const granted: ReadonlySet<string> =
     state === "ready" && snapshot ? new Set<string>(snapshot.permissions) : new Set<string>();
 
   const can = (key: UiPermissionKey): boolean => granted.has(key);
+  const confirmed = state === "ready" && !stale;
 
   return {
     state,
+    stale,
     reason,
     role: state === "ready" && snapshot ? snapshot.role : null,
     organizationId: state === "ready" && snapshot ? snapshot.organizationId : null,
     can,
     canAll: (keys) => keys.length > 0 && keys.every(can),
     canAny: (keys) => keys.some(can),
+    canSensitive: (key) => confirmed && can(key),
   };
 }
 
@@ -187,6 +216,11 @@ export function createCapabilityView(input: CapabilityViewInput): CapabilityView
    * is still the last thing the server actually said about this exact member.
    * Revocation does not come through this path — a revoked member gets a
    * successful response saying "no_membership", handled below.
+   *
+   * That tolerance is scoped to `can()`. A retained snapshot whose refresh
+   * failed is marked `stale`, and `canSensitive()` refuses it: a permission
+   * revoked during exactly that unconfirmed window would still read as
+   * granted, so nothing whose display is itself a disclosure may ride on it.
    */
   if (!input.result) {
     if (input.isError) return buildView("denied", "unavailable", null);
@@ -205,7 +239,10 @@ export function createCapabilityView(input: CapabilityViewInput): CapabilityView
 
   // Defence in depth: ignore anything outside the declared UI vocabulary.
   const permissions = result.permissions.filter(isUiPermissionKey);
-  return buildView("ready", null, { ...result, permissions });
+  // isError here means: this snapshot is retained, but the latest refresh of
+  // it failed. Still "ready" for navigation; never "confirmed" for a
+  // sensitive value — see CapabilityView.stale / canSensitive.
+  return buildView("ready", null, { ...result, permissions }, input.isError);
 }
 
 /**

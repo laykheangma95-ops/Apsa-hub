@@ -17,6 +17,9 @@
  *      products.view_cost mid-session — cache partitioning alone cannot catch
  *      this since the key never changes, so every cost-rendering surface must
  *      mask through visibleVariantCost() off the CURRENT capability state.
+ *   M. Cost masking when the capability snapshot is retained but UNCONFIRMED
+ *      (background refresh rejected). can() tolerates that for navigation;
+ *      cost must not, so both product screens gate cost on canSensitive().
  *   E. Duplicate SKU / barcode — the 409 reaches the merchant as its own
  *      message, not a generic failure.
  *   F. Archive — archive, never delete; confirmation before it happens.
@@ -356,27 +359,74 @@ describe("A. capability visibility states", () => {
 });
 
 describe("A2. each gated surface names the key its server function requires", () => {
-  const surfaces: Array<{ name: string; file: string; key: string }> = [
-    { name: "product list", file: LIST_ROUTE, key: "products.read" },
-    { name: "add product", file: LIST_ROUTE, key: "products.create" },
-    { name: "category management", file: LIST_ROUTE, key: "products.manage_categories" },
-    { name: "initial cost entry", file: LIST_ROUTE, key: "products.update_cost" },
-    { name: "product detail", file: DETAIL_ROUTE, key: "products.read" },
-    { name: "edit product basics", file: DETAIL_ROUTE, key: "products.update_basic" },
-    { name: "price controls", file: DETAIL_ROUTE, key: "products.update_price" },
-    { name: "cost controls", file: DETAIL_ROUTE, key: "products.update_cost" },
-    { name: "cost visibility", file: DETAIL_ROUTE, key: "products.view_cost" },
-    { name: "archive product", file: DETAIL_ROUTE, key: "products.archive" },
+  /*
+   * `reader` records WHICH capability reader the surface uses, and it is part
+   * of the contract, not an implementation detail: cost is the one thing on
+   * these screens whose display is itself a disclosure, so it reads through
+   * the narrowed canSensitive() (false whenever the snapshot is unconfirmed —
+   * see section M). Everything else keeps the ordinary stale-tolerant can().
+   */
+  const surfaces: Array<{
+    name: string;
+    file: string;
+    key: string;
+    reader: "can" | "canSensitive";
+  }> = [
+    { name: "product list", file: LIST_ROUTE, key: "products.read", reader: "can" },
+    { name: "add product", file: LIST_ROUTE, key: "products.create", reader: "can" },
+    {
+      name: "category management",
+      file: LIST_ROUTE,
+      key: "products.manage_categories",
+      reader: "can",
+    },
+    {
+      name: "initial cost entry",
+      file: LIST_ROUTE,
+      key: "products.update_cost",
+      reader: "canSensitive",
+    },
+    { name: "product detail", file: DETAIL_ROUTE, key: "products.read", reader: "can" },
+    {
+      name: "edit product basics",
+      file: DETAIL_ROUTE,
+      key: "products.update_basic",
+      reader: "can",
+    },
+    { name: "price controls", file: DETAIL_ROUTE, key: "products.update_price", reader: "can" },
+    {
+      name: "cost controls",
+      file: DETAIL_ROUTE,
+      key: "products.update_cost",
+      reader: "canSensitive",
+    },
+    {
+      name: "cost visibility",
+      file: DETAIL_ROUTE,
+      key: "products.view_cost",
+      reader: "canSensitive",
+    },
+    { name: "archive product", file: DETAIL_ROUTE, key: "products.archive", reader: "can" },
   ];
 
   const serverSource = read("src/server/products/service.ts");
 
   for (const surface of surfaces) {
-    it(`${surface.name} gates on ${surface.key}, which the service enforces`, () => {
-      expect(read(surface.file)).toContain(`capabilities.can("${surface.key}")`);
+    it(`${surface.name} gates on ${surface.key} via ${surface.reader}(), which the service enforces`, () => {
+      expect(read(surface.file)).toContain(`capabilities.${surface.reader}("${surface.key}")`);
       expect(serverSource).toContain(`"${surface.key}"`);
     });
   }
+
+  it("every cost key is read through canSensitive, and no other key is", () => {
+    for (const surface of surfaces) {
+      const isCostKey =
+        surface.key === "products.view_cost" || surface.key === "products.update_cost";
+      expect(`${surface.key}:${surface.reader}`).toBe(
+        `${surface.key}:${isCostKey ? "canSensitive" : "can"}`,
+      );
+    }
+  });
 
   it("both screens read capabilities from the one shared hook", () => {
     for (const file of [LIST_ROUTE, DETAIL_ROUTE]) {
@@ -1174,8 +1224,232 @@ describe("L. same-principal products.view_cost revocation masks cached cost imme
     const detail = read(DETAIL_ROUTE);
     expect(detail).toContain("canViewCost={canViewCost}");
     expect(detail).toMatch(
-      /canViewCost\s*=\s*identityOk\s*&&\s*capabilities\.can\("products\.view_cost"\)/,
+      /canViewCost\s*=\s*identityOk\s*&&\s*capabilities\.canSensitive\("products\.view_cost"\)/,
     );
+  });
+});
+
+// ── M. An unconfirmed capability snapshot cannot show a cached cost ───────────
+//
+// L covers an explicit revocation. This covers the narrower P1 underneath it:
+// the member is NOT revoked as far as the browser knows — same user, same
+// organization, prior authorized snapshot still held — but the background
+// capability refresh REJECTED. createCapabilityView deliberately keeps that
+// snapshot alive for navigation (see U1 in capability-model.test.ts), so
+// `can("products.view_cost")` still answers true. A revocation landing inside
+// that unconfirmed window would look identical, so cost must fail closed on
+// canSensitive, before any further server response arrives.
+
+describe("M. a retained-but-unconfirmed capability snapshot shows no cost", () => {
+  const cachedVariant: CatalogVariant = {
+    id: "v1",
+    productId: PRODUCT_A,
+    sku: "SKU-1",
+    barcode: null,
+    name: "Regular",
+    price: { amount: 1500, currency: "USD" },
+    cost: { amount: 900, currency: "USD" },
+    weightGrams: null,
+    status: "ACTIVE",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+
+  const ALL_COST_KEYS: UiPermissionKey[] = [
+    "products.read",
+    "products.view_cost",
+    "products.update_cost",
+    "products.update_basic",
+  ];
+
+  /** The capability view for USER_A / ORG_A, with the query state varied. */
+  function viewFor(overrides: { isPending?: boolean; isError?: boolean } = {}) {
+    return createCapabilityView({
+      result: {
+        status: "active",
+        userId: USER_A,
+        organizationId: ORG_A,
+        role: "MANAGER",
+        permissions: ALL_COST_KEYS,
+      },
+      isPending: false,
+      isError: false,
+      expectedUserId: USER_A,
+      expectedOrganizationId: ORG_A,
+      ...overrides,
+    });
+  }
+
+  /**
+   * Exactly how both product screens derive their cost gates, reproduced so
+   * the assertions below run against the real composition rather than a
+   * restatement of it: identity + canSensitive, then variantFieldAccess.
+   */
+  function costGates(capabilities: ReturnType<typeof viewFor>, identityOk = true) {
+    const canViewCost = identityOk && capabilities.canSensitive("products.view_cost");
+    const canUpdateCost = identityOk && capabilities.canSensitive("products.update_cost");
+    const canUpdateBasic = identityOk && capabilities.can("products.update_basic");
+    const access = variantFieldAccess(
+      {
+        canCreate: true,
+        canUpdateBasic,
+        canUpdatePrice: true,
+        canUpdateCost,
+        canViewCost,
+      },
+      true,
+    );
+    return { canViewCost, canUpdateCost, canUpdateBasic, access };
+  }
+
+  it("positive control: a confirmed snapshot shows the cost and allows editing it", () => {
+    const { canViewCost, access } = costGates(viewFor());
+
+    expect(canViewCost).toBe(true);
+    expect(visibleVariantCost(cachedVariant, canViewCost)).toEqual({
+      amount: 900,
+      currency: "USD",
+    });
+    expect(access.costVisible).toBe(true);
+    expect(access.costEditable).toBe(true);
+  });
+
+  it("a rejected background refresh hides the cached cost immediately", () => {
+    const stale = viewFor({ isError: true });
+
+    // The snapshot is retained and still lists the key — this is the exact
+    // condition the reviewer flagged.
+    expect(stale.state).toBe("ready");
+    expect(stale.can("products.view_cost")).toBe(true);
+    expect(cachedVariant.cost).toEqual({ amount: 900, currency: "USD" });
+
+    // Nothing renders it: the gate is canSensitive, which refuses a stale view.
+    const { canViewCost } = costGates(stale);
+    expect(canViewCost).toBe(false);
+    expect(visibleVariantCost(cachedVariant, canViewCost)).toBeNull();
+  });
+
+  it("an open VariantSheet clears its cost and submits no cost field after the error", () => {
+    const stale = viewFor({ isError: true });
+    const { access } = costGates(stale);
+
+    // No cost field is offered, and no cost-edit affordance survives — even
+    // though update_cost and update_basic are both still in the snapshot.
+    expect(access.costVisible).toBe(false);
+    expect(access.costEditable).toBe(false);
+
+    // The value the already-open form holds after the cost-sync effect runs:
+    // the effect recomputes exactly this and writes it into costText.
+    const cost = visibleVariantCost(cachedVariant, access.costVisible);
+    expect(cost).toBeNull();
+    const costTextAfterError = cost ? formatMinorUnitsForInput(cost.amount, cost.currency) : "";
+    expect(costTextAfterError).toBe("");
+
+    // And the submit payload: the cost keys live inside a `costEditable`
+    // branch, so with costEditable false the patch carries no cost key at all.
+    const sheet = read("src/components/products/VariantSheet.tsx");
+    expect(sheet).toContain("...(costEditable");
+    expect(sheet).toMatch(/\.\.\.\(costEditable\s*\n?\s*\?\s*\{\s*costAmount/);
+  });
+
+  it("pending, denied, no-membership, identity mismatch and error all fail closed", () => {
+    const cases: Array<[string, ReturnType<typeof viewFor>]> = [
+      ["pending", UNRESOLVED_CAPABILITIES],
+      ["errored with a retained snapshot", viewFor({ isError: true })],
+      [
+        "errored with nothing retained",
+        createCapabilityView({
+          result: undefined,
+          isPending: false,
+          isError: true,
+          expectedUserId: USER_A,
+          expectedOrganizationId: ORG_A,
+        }),
+      ],
+      [
+        "no membership",
+        createCapabilityView({
+          result: { status: "no_membership" },
+          isPending: false,
+          isError: false,
+          expectedUserId: USER_A,
+          expectedOrganizationId: ORG_A,
+        }),
+      ],
+      [
+        "unauthenticated",
+        createCapabilityView({
+          result: { status: "unauthenticated" },
+          isPending: false,
+          isError: false,
+          expectedUserId: USER_A,
+          expectedOrganizationId: ORG_A,
+        }),
+      ],
+      [
+        "identity mismatch",
+        createCapabilityView({
+          result: {
+            status: "active",
+            userId: USER_A,
+            organizationId: ORG_B,
+            role: "OWNER",
+            permissions: ALL_COST_KEYS,
+          },
+          isPending: false,
+          isError: false,
+          expectedUserId: USER_A,
+          expectedOrganizationId: ORG_A,
+        }),
+      ],
+    ];
+
+    for (const [label, capabilities] of cases) {
+      const { canViewCost, access } = costGates(capabilities);
+      expect(`${label}:${canViewCost}`).toBe(`${label}:false`);
+      expect(`${label}:${visibleVariantCost(cachedVariant, canViewCost)}`).toBe(`${label}:null`);
+      expect(`${label}:${access.costVisible}`).toBe(`${label}:false`);
+      expect(`${label}:${access.costEditable}`).toBe(`${label}:false`);
+    }
+
+    // Pending is also covered by the route's own identity gate, which fails
+    // closed independently when the route context has no organization yet.
+    const { canViewCost: noIdentity } = costGates(viewFor(), false);
+    expect(noIdentity).toBe(false);
+  });
+
+  it("both product screens gate cost on canSensitive, and nothing else on it", () => {
+    const detail = read(DETAIL_ROUTE);
+    const list = read(LIST_ROUTE);
+
+    // Cost — and only cost — uses the narrowed reader.
+    expect(detail).toContain('capabilities.canSensitive("products.view_cost")');
+    expect(detail).toContain('capabilities.canSensitive("products.update_cost")');
+    expect(list).toContain('capabilities.canSensitive("products.update_cost")');
+
+    // The non-sensitive gates keep the ordinary stale-tolerant reader, so a
+    // timed-out background refresh does not blank the rest of the screen.
+    expect(detail).toContain('capabilities.can("products.read")');
+    expect(detail).toContain('capabilities.can("products.update_basic")');
+    expect(detail).toContain('capabilities.can("products.update_price")');
+    expect(list).toContain('capabilities.can("products.read")');
+    expect(list).toContain('capabilities.can("products.create")');
+    expect(list).toContain('capabilities.can("products.manage_categories")');
+
+    // No cost key is read through the stale-tolerant reader anywhere.
+    for (const source of [detail, list]) {
+      expect(source).not.toContain('capabilities.can("products.view_cost")');
+      expect(source).not.toContain('capabilities.can("products.update_cost")');
+    }
+  });
+
+  it("the variant form tracks cost visibility live, on its own effect", () => {
+    // The cost-only effect is what makes an ALREADY-OPEN sheet safe: it
+    // depends on costVisible, so a mid-session loss empties costText without
+    // waiting for a refetch — and without discarding the rest of the form.
+    const sheet = read("src/components/products/VariantSheet.tsx");
+    expect(sheet).toContain("visibleVariantCost(variant, costVisible)");
+    expect(sheet).toContain("}, [open, variant, costVisible]);");
   });
 });
 

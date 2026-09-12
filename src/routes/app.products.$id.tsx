@@ -204,8 +204,16 @@ function ProductDetailScreen() {
   const canReadProducts = identityOk && capabilities.can("products.read");
   const canUpdateBasic = identityOk && capabilities.can("products.update_basic");
   const canUpdatePrice = identityOk && capabilities.can("products.update_price");
-  const canUpdateCost = identityOk && capabilities.can("products.update_cost");
-  const canViewCost = identityOk && capabilities.can("products.view_cost");
+  /*
+   * The two cost keys go through canSensitive, not can: cost is the one value
+   * on this screen whose mere display is a disclosure, so it may not ride on a
+   * retained capability snapshot whose latest refresh failed (a revocation
+   * landing in that unconfirmed window would still read as granted). Every
+   * other gate here keeps the ordinary stale-tolerant reader, so a timed-out
+   * background refresh does not blank out the rest of the screen.
+   */
+  const canUpdateCost = identityOk && capabilities.canSensitive("products.update_cost");
+  const canViewCost = identityOk && capabilities.canSensitive("products.view_cost");
   const canCreateProduct = identityOk && capabilities.can("products.create");
   const canArchiveProduct = identityOk && capabilities.can("products.archive");
 
