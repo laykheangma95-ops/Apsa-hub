@@ -446,7 +446,18 @@
     "unfulfilled": "មិនទាន់រៀបចំទំនិញ",
     "processing": "កំពុងរៀបចំ",
     "fulfilled": "រៀបចំរួច",
-    "preparing": "កំពុងរៀបចំដឹកជញ្ជូន"
+    "preparing": "កំពុងរៀបចំដឹកជញ្ជូន",
+    "synced": "បានធ្វើសមកាលកម្ម",
+    "connected": "បានតភ្ជាប់",
+    "new_message": "សារថ្មី",
+    "ai_suggested": "ដំបូន្មានពី AI",
+    "in_review": "កំពុងត្រួតពិនិត្យ",
+    "approved": "បានអនុម័ត",
+    "cod_pending": "រង់ចាំ COD",
+    "scheduled": "បានកำណត់ពេល",
+    "in_delivery": "កំពុងដឹកជញ្ជូន",
+    "archived": "បានរក្សាទុក",
+    "paused": "បានផ្អាក"
   },
   "channel": {
     "facebook": "ហ្វេសប៊ុក",

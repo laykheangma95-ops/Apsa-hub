@@ -446,7 +446,18 @@
     "unfulfilled": "Not yet fulfilled",
     "processing": "Processing",
     "fulfilled": "Fulfilled",
-    "preparing": "Preparing"
+    "preparing": "Preparing",
+    "synced": "Synced",
+    "connected": "Connected",
+    "new_message": "New message",
+    "ai_suggested": "AI suggested",
+    "in_review": "In review",
+    "approved": "Approved",
+    "cod_pending": "COD pending",
+    "scheduled": "Scheduled",
+    "in_delivery": "In delivery",
+    "archived": "Archived",
+    "paused": "Paused"
   },
   "channel": {
     "facebook": "Facebook",

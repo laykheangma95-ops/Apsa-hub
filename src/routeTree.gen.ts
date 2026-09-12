@@ -14,6 +14,7 @@ import { Route as AccessDeniedRouteImport } from './routes/access-denied'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
 import { Route as DesignMascotRouteImport } from './routes/design-mascot'
+import { Route as DesignStatusBadgeRouteImport } from './routes/design-status-badge'
 import { Route as OnboardingRouteImport } from './routes/onboarding'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
@@ -54,6 +55,11 @@ const DesignRoute = DesignRouteImport.update({
 const DesignMascotRoute = DesignMascotRouteImport.update({
   id: '/design-mascot',
   path: '/design-mascot',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DesignStatusBadgeRoute = DesignStatusBadgeRouteImport.update({
+  id: '/design-status-badge',
+  path: '/design-status-badge',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OnboardingRoute = OnboardingRouteImport.update({
@@ -143,6 +149,7 @@ export interface FileRoutesByFullPath {
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
   '/design-mascot': typeof DesignMascotRoute
+  '/design-status-badge': typeof DesignStatusBadgeRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -165,6 +172,7 @@ export interface FileRoutesByTo {
   '/access-denied': typeof AccessDeniedRoute
   '/design': typeof DesignRoute
   '/design-mascot': typeof DesignMascotRoute
+  '/design-status-badge': typeof DesignStatusBadgeRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -189,6 +197,7 @@ export interface FileRoutesById {
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRoute
   '/design-mascot': typeof DesignMascotRoute
+  '/design-status-badge': typeof DesignStatusBadgeRoute
   '/onboarding': typeof OnboardingRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -214,6 +223,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/design'
     | '/design-mascot'
+    | '/design-status-badge'
     | '/onboarding'
     | '/sign-in'
     | '/sign-up'
@@ -236,6 +246,7 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/design'
     | '/design-mascot'
+    | '/design-status-badge'
     | '/onboarding'
     | '/sign-in'
     | '/sign-up'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/design'
     | '/design-mascot'
+    | '/design-status-badge'
     | '/onboarding'
     | '/sign-in'
     | '/sign-up'
@@ -283,6 +295,7 @@ export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   DesignRoute: typeof DesignRoute
   DesignMascotRoute: typeof DesignMascotRoute
+  DesignStatusBadgeRoute: typeof DesignStatusBadgeRoute
   OnboardingRoute: typeof OnboardingRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
@@ -325,6 +338,13 @@ declare module '@tanstack/react-router' {
       path: '/design-mascot'
       fullPath: '/design-mascot'
       preLoaderRoute: typeof DesignMascotRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/design-status-badge': {
+      id: '/design-status-badge'
+      path: '/design-status-badge'
+      fullPath: '/design-status-badge'
+      preLoaderRoute: typeof DesignStatusBadgeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/onboarding': {
@@ -508,6 +528,7 @@ const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   DesignRoute: DesignRoute,
   DesignMascotRoute: DesignMascotRoute,
+  DesignStatusBadgeRoute: DesignStatusBadgeRoute,
   OnboardingRoute: OnboardingRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,

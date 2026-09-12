@@ -59,6 +59,34 @@
   --status-info-soft: #eaf2fe;
   --status-info-text: #1a4aab;
 
+  /* Status extended tones — the StatusBadge liquid-glass palette.
+     Each tone ships as a trio: base (icon/border), -soft (surface), -text
+     (label). Soft/text pairs keep WCAG-AA contrast on the page surface. */
+  --status-neutral: #64748b;
+  --status-neutral-soft: #f1f5fb;
+  --status-neutral-text: #475569;
+  --status-cyan: #0891b2;
+  --status-cyan-soft: #e0f7fa;
+  --status-cyan-text: #0e7490;
+  --status-teal: #0d9488;
+  --status-teal-soft: #e2f6f3;
+  --status-teal-text: #0f766e;
+  --status-orange: #ea7c1f;
+  --status-orange-soft: #fdf1e4;
+  --status-orange-text: #9a4a06;
+  --status-purple: #8b5cf6;
+  --status-purple-soft: #f3effe;
+  --status-purple-text: #6d28d9;
+  --status-violet: #7c3aed;
+  --status-violet-soft: #f1ebfe;
+  --status-violet-text: #5b21b6;
+  --status-pink: #ec4899;
+  --status-pink-soft: #fdeef6;
+  --status-pink-text: #be185d;
+  --status-indigo: #6366f1;
+  --status-indigo-soft: #edeffe;
+  --status-indigo-text: #4338ca;
+
   /* Channels — always with an icon, never colour alone */
   --channel-facebook: #1877f2;
   --channel-instagram: #e1306c;
@@ -216,6 +244,31 @@
   --color-status-info-soft: var(--status-info-soft);
   --color-status-info-text: var(--status-info-text);
 
+  --color-status-neutral: var(--status-neutral);
+  --color-status-neutral-soft: var(--status-neutral-soft);
+  --color-status-neutral-text: var(--status-neutral-text);
+  --color-status-cyan: var(--status-cyan);
+  --color-status-cyan-soft: var(--status-cyan-soft);
+  --color-status-cyan-text: var(--status-cyan-text);
+  --color-status-teal: var(--status-teal);
+  --color-status-teal-soft: var(--status-teal-soft);
+  --color-status-teal-text: var(--status-teal-text);
+  --color-status-orange: var(--status-orange);
+  --color-status-orange-soft: var(--status-orange-soft);
+  --color-status-orange-text: var(--status-orange-text);
+  --color-status-purple: var(--status-purple);
+  --color-status-purple-soft: var(--status-purple-soft);
+  --color-status-purple-text: var(--status-purple-text);
+  --color-status-violet: var(--status-violet);
+  --color-status-violet-soft: var(--status-violet-soft);
+  --color-status-violet-text: var(--status-violet-text);
+  --color-status-pink: var(--status-pink);
+  --color-status-pink-soft: var(--status-pink-soft);
+  --color-status-pink-text: var(--status-pink-text);
+  --color-status-indigo: var(--status-indigo);
+  --color-status-indigo-soft: var(--status-indigo-soft);
+  --color-status-indigo-text: var(--status-indigo-text);
+
   --color-channel-facebook: var(--channel-facebook);
   --color-channel-instagram: var(--channel-instagram);
   --color-channel-telegram: var(--channel-telegram);
@@ -359,6 +412,25 @@
   background-color: var(--surface-glass);
   backdrop-filter: blur(var(--surface-glass-blur)) saturate(var(--surface-glass-saturate));
   box-shadow: var(--glass-inner-highlight), var(--elevation-3);
+}
+
+/*
+ * Status badges. The component injects --badge-tone / --badge-soft /
+ * --badge-text from the status token trios, so every tone flows through
+ * here without a per-tone utility or a hex inside a component.
+ */
+@utility badge-glass {
+  color: var(--badge-text);
+  background-color: color-mix(in srgb, var(--badge-soft) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-tone) 32%, transparent);
+  box-shadow: var(--glass-inner-highlight), var(--elevation-2);
+  backdrop-filter: blur(8px) saturate(140%);
+}
+
+@utility badge-flat {
+  color: var(--badge-text);
+  background-color: var(--badge-soft);
+  border: 1px solid color-mix(in srgb, var(--badge-tone) 18%, transparent);
 }
 
 /* Native-feeling press: quick scale + brightness, no bounce. */
@@ -618,6 +690,16 @@ select:focus-visible {
 [data-lang="km"] .tap-target {
   min-height: 48px;
   min-width: 48px;
+}
+/*
+ * Chips hold a single line: English labels ellipsis instead of wrapping, so a
+ * badge or chip keeps its height and its icon stays aligned. Height comes from
+ * the px/py rhythm of the badge, not the label, so truncation never changes it.
+ */
+.chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Khmer has no spaces between words — never ellipsis-truncate it in a chip. */
 [data-lang="km"] .chip-text {

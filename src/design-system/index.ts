@@ -63,4 +63,6 @@ export {
 } from "./QuickActionGrid";
 export { Timeline, type TimelineItem } from "./Timeline";
 export { StatusChip } from "./StatusChip";
+export { StatusBadge, STATUS_BADGE_KEYS } from "./StatusBadge";
+export type { StatusBadgeKey, StatusBadgeTone } from "./StatusBadge";
 export { StatusHero } from "./StatusHero";
