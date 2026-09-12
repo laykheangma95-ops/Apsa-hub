@@ -43,6 +43,7 @@ import {
   catalogErrorKey,
   catalogKeys,
   classifyCatalogError,
+  enforceCatalogCachePrincipal,
   getCatalogProduct,
   isCatalogId,
   listCatalogCategories,
@@ -163,15 +164,40 @@ function ProductDetailScreen() {
   const queryClient = useQueryClient();
   const capabilities = useCapabilities();
 
-  const canReadProducts = capabilities.can("products.read");
-  const canUpdateBasic = capabilities.can("products.update_basic");
-  const canUpdatePrice = capabilities.can("products.update_price");
-  const canUpdateCost = capabilities.can("products.update_cost");
-  const canViewCost = capabilities.can("products.view_cost");
-  const canCreateProduct = capabilities.can("products.create");
-  const canArchiveProduct = capabilities.can("products.archive");
+  /*
+   * Identity for the catalog cache comes from the /app route guard's own
+   * server-derived context — never from the capability snapshot. See
+   * src/lib/catalog.ts's "React Query cache identity" section and the
+   * matching comment in src/routes/app.products.tsx.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
 
-  const organizationId = capabilities.organizationId ?? "unresolved";
+  /*
+   * Fail closed rather than fall back to a placeholder key: an incomplete
+   * route identity, or a capability snapshot whose resolved organization has
+   * diverged from the route's, disables every read and action on this screen
+   * instead of guessing which principal's data to show.
+   */
+  const identityOk =
+    Boolean(userId) &&
+    Boolean(routeOrganizationId) &&
+    (capabilities.state !== "ready" || capabilities.organizationId === routeOrganizationId);
+
+  // Purges every catalog entry the instant this tab's principal changes —
+  // independent, defense-in-depth isolation alongside Settings' full
+  // queryClient.clear() on sign-out. A no-op unless the principal changed.
+  enforceCatalogCachePrincipal(queryClient, userId, routeOrganizationId);
+
+  const canReadProducts = identityOk && capabilities.can("products.read");
+  const canUpdateBasic = identityOk && capabilities.can("products.update_basic");
+  const canUpdatePrice = identityOk && capabilities.can("products.update_price");
+  const canUpdateCost = identityOk && capabilities.can("products.update_cost");
+  const canViewCost = identityOk && capabilities.can("products.view_cost");
+  const canCreateProduct = identityOk && capabilities.can("products.create");
+  const canArchiveProduct = identityOk && capabilities.can("products.archive");
+
+  const organizationId = routeOrganizationId;
 
   /*
    * A malformed id is answered here instead of being sent to the server, which
@@ -191,14 +217,14 @@ function ProductDetailScreen() {
   const productQuery = useQuery({
     // Archived variants are fetched too, so the Archived tab shows the truth
     // rather than an empty list. The read still requires products.read.
-    queryKey: catalogKeys.product(organizationId, id),
+    queryKey: catalogKeys.product(userId, organizationId, id),
     queryFn: () => getCatalogProduct(id, true),
     enabled: canReadProducts && idLooksValid,
     retry: false,
   });
 
   const categoriesQuery = useQuery({
-    queryKey: catalogKeys.categories(organizationId),
+    queryKey: catalogKeys.categories(userId, organizationId),
     queryFn: () => listCatalogCategories(false),
     enabled: canReadProducts && canUpdateBasic,
   });
@@ -225,7 +251,7 @@ function ProductDetailScreen() {
   }, [product]);
 
   function invalidate() {
-    void queryClient.invalidateQueries({ queryKey: [CATALOG_QUERY_ROOT, organizationId] });
+    void queryClient.invalidateQueries({ queryKey: [CATALOG_QUERY_ROOT, userId, organizationId] });
   }
 
   async function saveBasics() {
@@ -469,10 +495,12 @@ function ProductDetailScreen() {
                       <VariantRow
                         key={variant.id}
                         variant={variant}
-                        // Editing cost needs both keys: without view_cost the
-                        // sheet has no cost to edit, so update_cost alone would
-                        // open a form with every field locked.
-                        canEdit={canUpdateBasic || canUpdatePrice || (canUpdateCost && canViewCost)}
+                        // Cost is never independently editable — editing it
+                        // also requires products.update_basic (see
+                        // variantFieldAccess in src/lib/catalog.ts) — so the
+                        // Edit entry point only ever needs to check the two
+                        // permissions that can unlock a field on their own.
+                        canEdit={canUpdateBasic || canUpdatePrice}
                         canArchive={canUpdateBasic}
                         busy={variantBusyId === variant.id}
                         onEdit={() => {

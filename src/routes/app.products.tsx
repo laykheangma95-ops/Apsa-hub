@@ -31,6 +31,7 @@ import {
   CATALOG_QUERY_ROOT,
   catalogKeys,
   categoryLabel,
+  enforceCatalogCachePrincipal,
   listCatalogCategories,
   listCatalogProducts,
   productLeadPrice,
@@ -119,6 +120,39 @@ function ProductListScreen() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const detailOpen = pathname !== "/app/products" && pathname.startsWith("/app/products/");
 
+  /*
+   * Identity for the catalog cache comes from the /app route guard's own
+   * server-derived context (validated session + DB membership) — never from
+   * the capability snapshot, which is presentation data fetched on a separate
+   * request. Two members of the same organization can hold different
+   * products.view_cost permission, so this identity must include the user,
+   * not just the organization: an organization-only key would let one
+   * member's cached cost data be read back for the next member who signs in
+   * to the same tab. See src/lib/catalog.ts's "React Query cache identity"
+   * section.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+
+  /*
+   * Fail closed rather than fall back to a placeholder key: if the route's
+   * own identity is somehow incomplete, or the capability snapshot's resolved
+   * organization has diverged from the route's (a stale snapshot mid an
+   * organization switch), nothing is fetched and nothing is offered — never
+   * key a request under a shared placeholder like "unresolved", which could
+   * quietly pool two different principals' data together.
+   */
+  const identityOk =
+    Boolean(userId) &&
+    Boolean(routeOrganizationId) &&
+    (capabilities.state !== "ready" || capabilities.organizationId === routeOrganizationId);
+
+  // Purges every catalog entry the instant this tab's principal changes —
+  // independent, defense-in-depth isolation alongside Settings' full
+  // queryClient.clear() on sign-out (src/routes/app.settings.tsx). Runs on
+  // every render; it is a no-op unless the principal actually changed.
+  enforceCatalogCachePrincipal(queryClient, userId, routeOrganizationId);
+
   const [status, setStatus] = useState<CatalogListStatus>("ACTIVE");
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -132,23 +166,21 @@ function ProductListScreen() {
    * updateVariant's cost branch → products.update_cost. A member without one
    * sees no entry point here and is refused by the server regardless.
    */
-  const canReadProducts = capabilities.can("products.read");
-  const canCreateProduct = capabilities.can("products.create");
-  const canManageCategories = capabilities.can("products.manage_categories");
-  const canSetCost = capabilities.can("products.update_cost");
+  const canReadProducts = identityOk && capabilities.can("products.read");
+  const canCreateProduct = identityOk && capabilities.can("products.create");
+  const canManageCategories = identityOk && capabilities.can("products.manage_categories");
+  const canSetCost = identityOk && capabilities.can("products.update_cost");
 
-  // Cache rows under the organization the server resolved for this member, so
-  // one browser tab cannot serve another tenant's catalogue after a switch.
-  const organizationId = capabilities.organizationId ?? "unresolved";
+  const organizationId = routeOrganizationId;
 
   const productsQuery = useQuery({
-    queryKey: catalogKeys.products(organizationId, status, categoryId),
+    queryKey: catalogKeys.products(userId, organizationId, status, categoryId),
     queryFn: () => listCatalogProducts({ status, categoryId }),
     enabled: !detailOpen && canReadProducts,
   });
 
   const categoriesQuery = useQuery({
-    queryKey: catalogKeys.categories(organizationId),
+    queryKey: catalogKeys.categories(userId, organizationId),
     queryFn: () => listCatalogCategories(canManageCategories),
     enabled: !detailOpen && canReadProducts,
   });
@@ -162,9 +194,9 @@ function ProductListScreen() {
   const visible = useMemo(() => searchLoadedProducts(products, search), [products, search]);
   const pageIsFull = products.length >= CATALOG_PAGE_LIMIT;
 
-  /** Every catalog list/detail row for THIS organization, and nothing else. */
+  /** Every catalog list/detail row for THIS principal, and nothing else. */
   function invalidateCatalog() {
-    void queryClient.invalidateQueries({ queryKey: [CATALOG_QUERY_ROOT, organizationId] });
+    void queryClient.invalidateQueries({ queryKey: [CATALOG_QUERY_ROOT, userId, organizationId] });
   }
 
   if (detailOpen) return <Outlet />;
@@ -331,7 +363,7 @@ function ProductListScreen() {
           categories={categories}
           onChanged={() => {
             void queryClient.invalidateQueries({
-              queryKey: catalogKeys.categories(organizationId),
+              queryKey: catalogKeys.categories(userId, organizationId),
             });
             invalidateCatalog();
           }}

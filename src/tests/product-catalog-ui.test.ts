@@ -25,6 +25,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
+import { QueryClient } from "@tanstack/react-query";
 import { ForbiddenError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
 import {
@@ -36,10 +37,13 @@ import {
 } from "../lib/capabilities";
 import {
   CATALOG_PAGE_LIMIT,
+  CATALOG_QUERY_ROOT,
   catalogErrorKey,
   catalogKeys,
   categoryLabel,
   classifyCatalogError,
+  clearCatalogQueries,
+  enforceCatalogCachePrincipal,
   formatMinorUnitsForInput,
   isCatalogId,
   parseMinorUnits,
@@ -84,6 +88,8 @@ const PRODUCT_KEYS: UiPermissionKey[] = [
 const ORG_A = "aaaaaaaa-0000-0000-0000-000000000001";
 const ORG_B = "bbbbbbbb-0000-0000-0000-000000000002";
 const USER_A = "11111111-0000-0000-0000-000000000001";
+/** A second member of Org A — same organization as USER_A, different account. */
+const USER_B = "22222222-0000-0000-0000-000000000002";
 const PRODUCT_A = "cccccccc-0000-0000-0000-0000000000a1";
 /** A real row that belongs to Org B. Org A must never reach it. */
 const PRODUCT_B = "dddddddd-0000-0000-0000-0000000000b1";
@@ -417,6 +423,19 @@ describe("A3. variant form fields follow the keys the server checks", () => {
     expect(access.priceEditable).toBe(true);
   });
 
+  /*
+   * Creation is not subject to the update_basic requirement below — createVariant
+   * requires only products.create per field (src/server/products/service.ts) —
+   * so the cost-only combination that is refused on edit is accepted on create.
+   */
+  it("creating can set a cost with only view_cost + update_cost — no update_basic needed", () => {
+    const access = variantFieldAccess(
+      { ...none, canCreate: true, canUpdateCost: true, canViewCost: true },
+      false,
+    );
+    expect(access.costEditable).toBe(true);
+  });
+
   it("a member with no keys is offered no editable field", () => {
     for (const isEdit of [true, false]) {
       const access = variantFieldAccess(none, isEdit);
@@ -440,18 +459,44 @@ describe("A3. variant form fields follow the keys the server checks", () => {
     expect(access.costEditable).toBe(false);
   });
 
+  /*
+   * Blocker #2 (independent review): updateVariant's own authorization
+   * (src/server/products/service.ts) requires products.update_basic for any
+   * patch that is not a price change — which every cost-only edit is. The
+   * view_cost + update_cost combination alone used to render an editable
+   * cost-save action that the server would refuse every time. It must not.
+   */
   it("cost cannot be edited without also being visible", () => {
-    const blind = variantFieldAccess({ ...none, canUpdateCost: true }, true);
+    const blind = variantFieldAccess({ ...none, canUpdateCost: true, canUpdateBasic: true }, true);
     expect(blind.costVisible).toBe(false);
     expect(blind.costEditable).toBe(false);
-
-    const sighted = variantFieldAccess({ ...none, canUpdateCost: true, canViewCost: true }, true);
-    expect(sighted.costEditable).toBe(true);
   });
 
   it("seeing a cost does not let it be changed", () => {
-    const access = variantFieldAccess({ ...none, canViewCost: true }, true);
+    const access = variantFieldAccess({ ...none, canViewCost: true, canUpdateBasic: true }, true);
     expect(access.costVisible).toBe(true);
+    expect(access.costEditable).toBe(false);
+  });
+
+  it("view_cost + update_cost alone — WITHOUT update_basic — cannot edit cost on an existing variant", () => {
+    const access = variantFieldAccess({ ...none, canUpdateCost: true, canViewCost: true }, true);
+    expect(access.costVisible).toBe(true);
+    // The value is visible (read-only) but the action the old UI offered here
+    // would always have been rejected by the server. It must not be offered.
+    expect(access.costEditable).toBe(false);
+  });
+
+  it("the fully permitted combination — view_cost + update_cost + update_basic — can edit cost", () => {
+    const access = variantFieldAccess(
+      { ...none, canUpdateCost: true, canViewCost: true, canUpdateBasic: true },
+      true,
+    );
+    expect(access.costVisible).toBe(true);
+    expect(access.costEditable).toBe(true);
+  });
+
+  it("update_basic alone, without update_cost, still cannot edit cost", () => {
+    const access = variantFieldAccess({ ...none, canUpdateBasic: true, canViewCost: true }, true);
     expect(access.costEditable).toBe(false);
   });
 });
@@ -500,6 +545,41 @@ describe("B. the server refuses every catalog action the UI could have offered",
         { cost_amount: 100 },
       ),
     );
+  });
+
+  /*
+   * Blocker #2 (independent review): this is precisely the combination the
+   * old UI would have offered an editable cost-save action for — view_cost +
+   * update_cost, missing update_basic. The fixed UI now hides that action
+   * (see A3 above), but a bypass — devtools, a stale client, a direct call —
+   * must still be refused server-side. It always was; this pins it so it
+   * cannot regress silently alongside the UI fix.
+   */
+  it("bypassing the UI: view_cost + update_cost WITHOUT update_basic is still refused server-side", async () => {
+    const { updateVariant } = await import("../server/products/service");
+    await expectForbidden(() =>
+      updateVariant(
+        ctxWith(["products.read", "products.view_cost", "products.update_cost"]),
+        VARIANT_B,
+        { cost_amount: 100, cost_currency: "USD" },
+      ),
+    );
+  });
+
+  it("the fully permitted combination succeeds, proving the refusal above is about the missing key, not the request shape", async () => {
+    const db = orgBFixture();
+    const { updateVariant } = await import("../server/products/service");
+    await withDb(db, async () => {
+      const updated = await updateVariant(
+        ctxWith(
+          ["products.read", "products.view_cost", "products.update_cost", "products.update_basic"],
+          ORG_B,
+        ),
+        VARIANT_B,
+        { cost_amount: 1234, cost_currency: "USD" },
+      );
+      expect(updated.cost).toEqual({ amount: 1234, currency: "USD" });
+    });
   });
 
   it("archiving requires products.archive", async () => {
@@ -643,18 +723,198 @@ describe("C. a product, variant or category id from another organization", () =>
     expect(read(DETAIL_ROUTE)).toContain("isCatalogId(id)");
   });
 
-  it("catalog cache keys are partitioned by organization", () => {
-    const a = catalogKeys.products(ORG_A, "ACTIVE", null);
-    const b = catalogKeys.products(ORG_B, "ACTIVE", null);
-    expect(a).not.toEqual(b);
-    expect(catalogKeys.product(ORG_A, PRODUCT_A)).not.toEqual(
-      catalogKeys.product(ORG_B, PRODUCT_A),
+  it("catalog cache keys are partitioned by organization AND by user", () => {
+    // Same user, different organization.
+    expect(catalogKeys.products(USER_A, ORG_A, "ACTIVE", null)).not.toEqual(
+      catalogKeys.products(USER_A, ORG_B, "ACTIVE", null),
     );
-    expect(catalogKeys.categories(ORG_A)).not.toEqual(catalogKeys.categories(ORG_B));
-    // Both screens key their queries on the server-derived organization.
+    // Different user, SAME organization — the exact shape blocker #1 fixed.
+    expect(catalogKeys.products(USER_A, ORG_A, "ACTIVE", null)).not.toEqual(
+      catalogKeys.products(USER_B, ORG_A, "ACTIVE", null),
+    );
+    expect(catalogKeys.product(USER_A, ORG_A, PRODUCT_A)).not.toEqual(
+      catalogKeys.product(USER_B, ORG_A, PRODUCT_A),
+    );
+    expect(catalogKeys.categories(USER_A, ORG_A)).not.toEqual(
+      catalogKeys.categories(USER_B, ORG_A),
+    );
+  });
+
+  it("both screens derive catalog identity from the server-derived route context, not the capability snapshot", () => {
     for (const file of [LIST_ROUTE, DETAIL_ROUTE]) {
-      expect(read(file)).toContain("capabilities.organizationId");
+      const source = read(file);
+      expect(source).toContain("Route.useRouteContext()");
+      expect(source).toContain("session.userId");
+      expect(source).toContain("enforceCatalogCachePrincipal(");
+      // The pre-fix fallback — an organization-only, placeholder-keyed read —
+      // is gone from the actual code (comments are allowed to describe it).
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      expect(code).not.toMatch(/organizationId\s*\?\?\s*["']unresolved["']/);
+      expect(source).toContain("catalogKeys.categories(userId, organizationId");
     }
+    expect(read(LIST_ROUTE)).toContain("catalogKeys.products(userId, organizationId");
+    expect(read(DETAIL_ROUTE)).toContain("catalogKeys.product(userId, organizationId");
+  });
+
+  it("both screens fail closed when the route identity is incomplete or diverges from the capability snapshot", () => {
+    for (const file of [LIST_ROUTE, DETAIL_ROUTE]) {
+      const source = read(file);
+      expect(source).toContain("identityOk");
+      expect(source).toContain("capabilities.organizationId === routeOrganizationId");
+      // Every permission this screen offers is gated behind identityOk — a
+      // mismatched or incomplete identity turns every one of them off.
+      expect(source).toContain("identityOk && capabilities.can(");
+    }
+  });
+});
+
+// ── K. Catalog cache isolation between two members of the SAME organization ──
+
+describe("K. cost data does not survive a sign-out/sign-in into a different member of the same org", () => {
+  const SHARED_ORG = ORG_A;
+
+  /** A distinguishable payload: only USER_A's session gets cost back. */
+  function catalogFor(viewerId: string): CatalogProduct[] {
+    return [
+      fakeProduct({
+        id: PRODUCT_A,
+        variants: [
+          {
+            id: "v1",
+            productId: PRODUCT_A,
+            sku: "SKU-1",
+            barcode: null,
+            name: "",
+            price: { amount: 1500, currency: "USD" },
+            cost: viewerId === USER_A ? { amount: 900, currency: "USD" } : null,
+            weightGrams: null,
+            status: "ACTIVE",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    ];
+  }
+
+  /**
+   * Stands in for listCatalogProducts()/getCatalogProduct(): identity comes
+   * only from the session the fake server holds, exactly like the real
+   * server functions, which resolve the caller from the validated session
+   * cookie — never from a parameter this test could pass in.
+   */
+  function createFakeServer() {
+    let session: { userId: string; organizationId: string } | null = null;
+    return {
+      signIn(userId: string, organizationId: string) {
+        session = { userId, organizationId };
+      },
+      signOut() {
+        session = null;
+      },
+      async listProducts(): Promise<CatalogProduct[]> {
+        if (!session) throw new Error("Not authenticated");
+        return catalogFor(session.userId);
+      },
+    };
+  }
+
+  function cachedCatalogEntries(client: QueryClient) {
+    return client
+      .getQueryCache()
+      .getAll()
+      .filter((query) => query.queryKey[0] === CATALOG_QUERY_ROOT);
+  }
+
+  it("User B (same org, no products.view_cost) cannot render or read User A's cached cost", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    // 1. User A signs in and loads the catalog. Cost is visible.
+    server.signIn(USER_A, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_A, SHARED_ORG);
+    const aKey = catalogKeys.products(USER_A, SHARED_ORG, "ACTIVE", null);
+    const aList = await client.fetchQuery({ queryKey: aKey, queryFn: () => server.listProducts() });
+    expect(aList[0]!.variants[0]!.cost).toEqual({ amount: 900, currency: "USD" });
+
+    // 2. User A signs out. Settings' explicit clear runs (app.settings.tsx).
+    server.signOut();
+    clearCatalogQueries(client);
+    expect(client.getQueryData(aKey)).toBeUndefined();
+    expect(cachedCatalogEntries(client)).toHaveLength(0);
+
+    // 3. User B signs in — the SAME organization, but without products.view_cost.
+    server.signIn(USER_B, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_B, SHARED_ORG);
+    const bKey = catalogKeys.products(USER_B, SHARED_ORG, "ACTIVE", null);
+
+    // Before B's own fetch resolves, neither B's nor A's key holds anything.
+    expect(client.getQueryData(bKey)).toBeUndefined();
+    expect(client.getQueryData(aKey)).toBeUndefined();
+
+    // 4. B's own load returns B's view — no cost — and nothing of A's.
+    const bList = await client.fetchQuery({ queryKey: bKey, queryFn: () => server.listProducts() });
+    expect(bList[0]!.variants[0]!.cost).toBeNull();
+    expect(client.getQueryData(aKey)).toBeUndefined();
+  });
+
+  it("purges A's cached cost even when the explicit sign-out clear never ran", async () => {
+    // Defense in depth, matching enforceHomeCachePrincipal's own second test
+    // (src/tests/home-cache-isolation.test.ts): the principal-keyed cache
+    // must catch this on its own, independent of Settings' queryClient.clear().
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_A, SHARED_ORG);
+    await client.fetchQuery({
+      queryKey: catalogKeys.products(USER_A, SHARED_ORG, "ACTIVE", null),
+      queryFn: () => server.listProducts(),
+    });
+
+    // No clearCatalogQueries() at all — straight to B mounting the same org.
+    server.signIn(USER_B, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_B, SHARED_ORG);
+
+    expect(
+      client.getQueryData(catalogKeys.products(USER_A, SHARED_ORG, "ACTIVE", null)),
+    ).toBeUndefined();
+    expect(cachedCatalogEntries(client)).toHaveLength(0);
+  });
+
+  it("the same isolation holds for the product detail query, not just the list", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_A, SHARED_ORG);
+    const aDetailKey = catalogKeys.product(USER_A, SHARED_ORG, PRODUCT_A);
+    await client.fetchQuery({
+      queryKey: aDetailKey,
+      queryFn: async () => (await server.listProducts())[0]!,
+    });
+    expect(client.getQueryData(aDetailKey)).toBeDefined();
+
+    server.signIn(USER_B, SHARED_ORG);
+    enforceCatalogCachePrincipal(client, USER_B, SHARED_ORG);
+
+    expect(client.getQueryData(aDetailKey)).toBeUndefined();
+  });
+
+  it("documents the bug directly: an organization-only key cannot distinguish A from B", () => {
+    // The pre-fix key shape — organization only. Recreated here (not
+    // exported, and must not be) purely to demonstrate why it was unsafe.
+    const legacyKey = (organizationId: string) =>
+      [CATALOG_QUERY_ROOT, organizationId, "products", "ACTIVE", "all"] as const;
+
+    // A and B, same organization, produced the IDENTICAL key under the old
+    // shape — so B's read was A's cache entry, cost included.
+    expect(legacyKey(SHARED_ORG)).toEqual(legacyKey(SHARED_ORG));
+
+    // The real, fixed key includes the user, so A and B never collide.
+    expect(catalogKeys.products(USER_A, SHARED_ORG, "ACTIVE", null)).not.toEqual(
+      catalogKeys.products(USER_B, SHARED_ORG, "ACTIVE", null),
+    );
   });
 });
 
@@ -800,7 +1060,15 @@ describe("E. duplicate SKU and barcode reach the merchant as themselves", () => 
 
 describe("F. archive semantics are preserved", () => {
   it("the UI never calls a delete path", () => {
-    const sources = [read(CATALOG_LIB), read(LIST_ROUTE), read(DETAIL_ROUTE)].join("\n");
+    /*
+     * WeakMap#delete is the JS primitive enforceCatalogCachePrincipal uses to
+     * drop a stale cache-identity fingerprint (src/lib/catalog.ts) — it is
+     * cache bookkeeping, not a data-deletion call, and is excluded here so it
+     * cannot be confused with one.
+     */
+    const sources = [read(CATALOG_LIB), read(LIST_ROUTE), read(DETAIL_ROUTE)]
+      .join("\n")
+      .replace(/LAST_CATALOG_PRINCIPAL\.delete\([^)]*\)/g, "");
     expect(sources).not.toMatch(/deleteProduct|deleteVariant|deleteCategory|\.delete\(/);
   });
 

@@ -20,6 +20,7 @@
  * Cost is NOT derived here. `variant.cost` is null unless the server decided
  * the caller has products.view_cost; the browser never reconstructs it.
  */
+import type { QueryClient } from "@tanstack/react-query";
 import type { Currency, CompanionColor, Money } from "@/types";
 
 // ── Shapes returned by the server (src/server/products/service.ts) ───────────
@@ -95,9 +96,16 @@ export function isCatalogId(id: string): boolean {
 
 // ── React Query cache identity ───────────────────────────────────────────────
 //
-// Partitioned by the organization the server resolved for this member (read
-// from the capability snapshot, never from the URL), so catalog rows can never
-// be served back to a different tenant after an organization switch.
+// Partitioned by BOTH the authenticated user AND the organization the server
+// resolved for them — never by organization alone. Two members of the same
+// organization can hold different permissions (products.view_cost in
+// particular), so an organization-only key would let one member's cached cost
+// data be read back for another member of the same organization who signs in
+// after them in the same browser tab. Both values must come from the
+// server-derived route context (/app's beforeLoad guard, via
+// Route.useRouteContext()) — never from the capability snapshot (which is
+// presentation data, fetched separately, and not the identity boundary) and
+// never from client input.
 
 export const CATALOG_QUERY_ROOT = "catalog";
 
@@ -105,13 +113,83 @@ export const CATALOG_QUERY_ROOT = "catalog";
 export const CATALOG_PAGE_LIMIT = 200;
 
 export const catalogKeys = {
-  products: (organizationId: string, status: CatalogListStatus, categoryId: string | null) =>
-    [CATALOG_QUERY_ROOT, organizationId, "products", status, categoryId ?? "all"] as const,
-  product: (organizationId: string, productId: string) =>
-    [CATALOG_QUERY_ROOT, organizationId, "product", productId] as const,
-  categories: (organizationId: string) =>
-    [CATALOG_QUERY_ROOT, organizationId, "categories"] as const,
+  products: (
+    userId: string,
+    organizationId: string,
+    status: CatalogListStatus,
+    categoryId: string | null,
+  ) =>
+    [CATALOG_QUERY_ROOT, userId, organizationId, "products", status, categoryId ?? "all"] as const,
+  product: (userId: string, organizationId: string, productId: string) =>
+    [CATALOG_QUERY_ROOT, userId, organizationId, "product", productId] as const,
+  categories: (userId: string, organizationId: string) =>
+    [CATALOG_QUERY_ROOT, userId, organizationId, "categories"] as const,
 };
+
+/** Every catalog cache entry lives under this prefix, in any tab. */
+const CATALOG_QUERY_PREFIX = [CATALOG_QUERY_ROOT] as const;
+
+/**
+ * The principal (userId + organizationId) whose catalog data this tab's cache
+ * currently holds. Keyed by QueryClient, not component state, so it survives
+ * the unmount/remount cycle of a client-side sign-out then sign-in — the case
+ * where one tab serves two different members of the same organization.
+ */
+const LAST_CATALOG_PRINCIPAL = new WeakMap<QueryClient, string>();
+
+/**
+ * Drop every catalog cache entry, for every principal, in this tab.
+ *
+ * `removeQueries` (not `invalidateQueries`) is deliberate: invalidation leaves
+ * the previous principal's payload — cost included — readable in the cache
+ * until a refetch resolves, which is exactly the window a departed member's
+ * data must not survive into. Mirrors clearHomeQueries in
+ * src/lib/home-query.ts, which this module deliberately parallels.
+ *
+ * Never throws. Nothing here may block navigation or sign-out.
+ */
+export function clearCatalogQueries(queryClient: QueryClient): void {
+  try {
+    queryClient.removeQueries({ queryKey: CATALOG_QUERY_PREFIX });
+  } catch {
+    // A cache that cannot be pruned must never keep stale data readable by
+    // pretending the clear succeeded silently — but it also must never throw
+    // and block whatever the caller is doing (navigating, signing out).
+  } finally {
+    try {
+      LAST_CATALOG_PRINCIPAL.delete(queryClient);
+    } catch {
+      // Ignore — nothing here may block the caller.
+    }
+  }
+}
+
+/**
+ * Drop the catalog cache whenever the authenticated principal differs from
+ * the one it was filled for, and leave it alone otherwise so ordinary caching
+ * still works within one member's session.
+ *
+ * This is independent, defense-in-depth isolation: it does not replace
+ * queryClient.clear() on an explicit sign-out (src/routes/app.settings.tsx),
+ * it covers the same case Home's enforceHomeCachePrincipal covers — the
+ * global clear failing partway, or a future client-side account switch that
+ * does not go through Settings' sign-out path.
+ *
+ * `userId` and `organizationId` must come from the server-derived route
+ * context, never from the capability snapshot or client input — they are a
+ * cache partition only, never an authorization claim.
+ */
+export function enforceCatalogCachePrincipal(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+): void {
+  // "/" cannot appear in a UUID, so no two principals can produce one string.
+  const principal = `${userId}/${organizationId}`;
+  if (LAST_CATALOG_PRINCIPAL.get(queryClient) === principal) return;
+  clearCatalogQueries(queryClient);
+  LAST_CATALOG_PRINCIPAL.set(queryClient, principal);
+}
 
 // ── Money: integer minor units, parsed without floating point ────────────────
 
@@ -239,14 +317,32 @@ export interface VariantFieldAccess {
  * Which variant fields the form offers, for a create or an edit.
  *
  * Creating needs a price (the server requires price_amount), so the whole form
- * belongs to products.create. Editing splits: basic fields under
- * products.update_basic, price under products.update_price, cost under
- * products.update_cost.
+ * belongs to products.create; createVariant/createProduct check nothing else
+ * per field.
  *
- * Cost is editable only when it is also visible: without products.view_cost the
- * server does not send the current cost at all, so an "edit" could only ever
- * overwrite a value the member cannot see with one they invented. The form
- * therefore sends no cost field in that case, rather than guessing.
+ * Editing is stricter, and follows updateVariant's actual authorization
+ * exactly (src/server/products/service.ts):
+ *
+ *   const isChangingPrice = price_amount !== undefined || price_currency !== undefined;
+ *   const isChangingCost  = cost_amount  !== undefined || cost_currency  !== undefined;
+ *   if (isChangingPrice) ctx.require("products.update_price");
+ *   else                 ctx.require("products.update_basic");   // <- fires for a cost-only patch
+ *   if (isChangingCost)  ctx.require("products.update_cost");
+ *
+ * A cost-only edit (no price field in the same patch) does NOT skip the price
+ * check into nothing — it falls into the `else`, so the server also demands
+ * products.update_basic. Gating cost editing on update_cost + view_cost alone
+ * (as this used to) offered an action the server would refuse every time: a
+ * member with exactly those two keys but not update_basic would see an
+ * enabled Save button that always came back 403. Cost is therefore editable
+ * only with all three: products.view_cost (there must be a value to edit),
+ * products.update_cost (permission to change it), and products.update_basic
+ * (the server's own requirement for any patch that is not a price change).
+ *
+ * Cost is visible independently of all of that — view_cost alone shows the
+ * value read-only. Without view_cost the server does not send a cost at all,
+ * so an "edit" could only ever overwrite a value the member cannot see with
+ * one they invented; the form sends no cost field in that case.
  */
 export function variantFieldAccess(
   permissions: VariantPermissions,
@@ -256,7 +352,9 @@ export function variantFieldAccess(
     basicEditable: isEdit ? permissions.canUpdateBasic : permissions.canCreate,
     priceEditable: isEdit ? permissions.canUpdatePrice : permissions.canCreate,
     costVisible: permissions.canViewCost,
-    costEditable: permissions.canUpdateCost && permissions.canViewCost,
+    costEditable: isEdit
+      ? permissions.canUpdateCost && permissions.canViewCost && permissions.canUpdateBasic
+      : permissions.canUpdateCost && permissions.canViewCost,
   };
 }
 
