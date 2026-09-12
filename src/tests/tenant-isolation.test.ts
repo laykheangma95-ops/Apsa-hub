@@ -49,6 +49,8 @@
  */
 
 import { describe, it, expect, beforeAll } from "bun:test";
+import * as fs from "fs";
+import * as path from "path";
 import {
   AuthorizationService,
   ForbiddenError,
@@ -281,6 +283,87 @@ describe("U3: MANDATORY_AUDIT_ACTIONS set is correct", () => {
     for (const action of lowRisk) {
       expect(MANDATORY_AUDIT_ACTIONS.has(action)).toBe(false);
     }
+  });
+});
+
+describe("U4: U2/U3 exercise the real audit module, not a leaked test double", () => {
+  /**
+   * How U2/U3 above silently stopped testing anything:
+   *
+   * bun's module mocking MERGES its factory into the live module namespace,
+   * and mock.restore() does NOT undo it. So a test file that rebinds
+   * auditLog() to a no-op double replaces it for the rest of the bun process —
+   * including for every file bun evaluates afterwards. This file imports
+   * auditLog statically, so whenever bun ordered such a file first, U2's
+   * "throws for a mandatory action" assertions ran against the no-op double
+   * and failed; in the reverse order they passed. Pure file-ordering luck.
+   *
+   * Files that genuinely need audit doubles therefore run in their own spawned
+   * process as *.runtime.ts (see team-domain.test.ts, payment-domain.test.ts).
+   * These two checks keep it that way: the first catches a leak from any
+   * source at runtime, the second fails deterministically — in any file
+   * order, on any platform — the moment a shared-process test reintroduces one.
+   */
+
+  /** Exports U2/U3 above assert on. Rebinding one of these disarms them. */
+  const AUDIT_EXPORTS_UNDER_TEST = ["auditLog", "MANDATORY_AUDIT_ACTIONS"] as const;
+
+  /** Doc comments describe these mocks; only real code installs one. */
+  function stripComments(source: string): string {
+    return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  }
+
+  /** The `{...}` object literal a module-mock factory returns, brace-balanced. */
+  function factoryObjectLiteral(source: string, from: number): string {
+    const open = source.indexOf("{", from);
+    if (open < 0) return "";
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}" && --depth === 0) return source.slice(open, i + 1);
+    }
+    return source.slice(open);
+  }
+
+  it("auditLog() is the module's own implementation, not a mock function", () => {
+    // bun mock functions expose a `.mock` bookkeeping object on their
+    // prototype; a plain exported function has no such property. `in` is what
+    // detects it — hasOwnProperty() is always false here and would make this
+    // assertion unfireable.
+    expect("mock" in auditLog).toBe(false);
+    expect("mock" in auditLogRequired).toBe(false);
+    expect(MANDATORY_AUDIT_ACTIONS).toBeInstanceOf(Set);
+  });
+
+  it("no test sharing this process rebinds an audit export U2/U3 assert on", () => {
+    const testsDir = import.meta.dir;
+    // *.runtime.ts files are spawned in their own process and cannot leak here.
+    const sharedProcessTests = fs
+      .readdirSync(testsDir)
+      .filter((file) => file.endsWith(".test.ts") || file.endsWith(".test.js"))
+      .sort();
+
+    // Guards the scan itself: a glob that matched nothing would pass vacuously.
+    expect(sharedProcessTests.length).toBeGreaterThan(20);
+
+    const offenders: string[] = [];
+    for (const file of sharedProcessTests) {
+      const source = stripComments(fs.readFileSync(path.join(testsDir, file), "utf-8"));
+      const call = /mock\.module\(\s*["'][^"']*auth\/audit["']\s*,/g;
+      for (let m = call.exec(source); m !== null; m = call.exec(source)) {
+        const literal = factoryObjectLiteral(source, m.index + m[0].length);
+        for (const key of AUDIT_EXPORTS_UNDER_TEST) {
+          // A shorthand (`auditLog,`) or explicit (`auditLog:`) property. A
+          // factory that omits the key leaves the real export in place, since
+          // module mocks merge rather than replace.
+          if (new RegExp(`[{,]\\s*${key}\\s*[,:}]`).test(literal)) {
+            offenders.push(`${file} rebinds ${key}`);
+          }
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
   });
 });
 

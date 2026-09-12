@@ -26,6 +26,21 @@ function read(rel: string): string {
   return fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
 }
 
+/**
+ * Repo-relative paths in this file are compared against forward-slash literals
+ * ("src/routes/design…", "src/lib/capabilities.ts"), so they must be spelled
+ * the same way on every platform. path.relative() emits the host separator, so
+ * on Windows it returns "src\\routes\\design.tsx" and every one of those
+ * comparisons silently stops matching: U4 reports the design gallery and the
+ * capability plumbing as offenders, and U6's "is this key actually consulted"
+ * scan quietly loses its src/lib/capabilities.ts exclusion and passes
+ * vacuously. Normalising here keeps the checks — and their security intent —
+ * identical on Linux, macOS and Windows.
+ */
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 function findFiles(dir: string, exts: string[]): string[] {
   const abs = path.resolve(ROOT, dir);
   if (!fs.existsSync(abs)) return [];
@@ -34,10 +49,28 @@ function findFiles(dir: string, exts: string[]): string[] {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (exts.some((ext) => entry.name.endsWith(ext))) out.push(path.relative(ROOT, full));
+      else if (exts.some((ext) => entry.name.endsWith(ext)))
+        out.push(toPosixPath(path.relative(ROOT, full)));
     }
   })(abs);
   return out;
+}
+
+/**
+ * The only places allowed to name the design-gallery capability fixture: the
+ * gallery routes themselves, and the two modules that define the capability
+ * plumbing the fixture plugs into. Everything else referencing the fixture is
+ * a signed-in surface taking its capabilities from scaffolding — the thing U4
+ * exists to catch.
+ */
+const FIXTURE_ALLOWED_FILES = new Set([
+  "src/hooks/use-capabilities.tsx",
+  "src/lib/capabilities.ts",
+]);
+
+function mayReferenceCapabilityFixture(file: string): boolean {
+  const relative = toPosixPath(file);
+  return relative.startsWith("src/routes/design") || FIXTURE_ALLOWED_FILES.has(relative);
 }
 
 const BROWSER_SOURCE = [
@@ -47,6 +80,50 @@ const BROWSER_SOURCE = [
   ...findFiles("src/hooks", [".ts", ".tsx"]),
   ...findFiles("src/lib", [".ts", ".tsx"]),
 ];
+
+// ── U0: the structural scan itself is platform-independent ─────────────
+
+describe("U0: repo-relative paths are compared the same way on every platform", () => {
+  // Regression guard for a Windows-only failure: findFiles() used to return
+  // path.relative() output verbatim, i.e. "src\\routes\\design.tsx" on Windows,
+  // while every filter below compares against forward-slash literals. U4 then
+  // flagged the design gallery and the capability plumbing as offenders, and
+  // U6 lost its src/lib/capabilities.ts exclusion. These assertions fail
+  // against the un-normalised behaviour on any platform, Linux included.
+
+  it("rewrites Windows separators to the forward-slash convention", () => {
+    expect(toPosixPath("src\\routes\\design.tsx")).toBe("src/routes/design.tsx");
+    expect(toPosixPath("src\\lib\\capabilities.ts")).toBe("src/lib/capabilities.ts");
+    // Already-POSIX paths (Linux, macOS, and CI) are passed through untouched.
+    expect(toPosixPath("src/lib/capabilities.ts")).toBe("src/lib/capabilities.ts");
+  });
+
+  it("scans a non-empty file list, and every entry is forward-slashed", () => {
+    expect(BROWSER_SOURCE.length).toBeGreaterThan(0);
+    expect(BROWSER_SOURCE.filter((file) => file.includes("\\"))).toEqual([]);
+  });
+
+  it("the U4 fixture allow-list matches whichever separator the host uses", () => {
+    for (const file of [
+      "src/routes/design.tsx",
+      "src/routes/design-mascot.tsx",
+      "src/hooks/use-capabilities.tsx",
+      "src/lib/capabilities.ts",
+    ]) {
+      expect(mayReferenceCapabilityFixture(file)).toBe(true);
+      expect(mayReferenceCapabilityFixture(file.replace(/\//g, "\\"))).toBe(true);
+    }
+  });
+
+  it("still refuses to exempt an ordinary signed-in surface", () => {
+    // The separator fix must not turn the allow-list into a pass-through: a
+    // real /app route importing the fixture is exactly what U4 must catch.
+    for (const file of ["src/routes/app.pos.tsx", "src/components/pos/PosCart.tsx"]) {
+      expect(mayReferenceCapabilityFixture(file)).toBe(false);
+      expect(mayReferenceCapabilityFixture(file.replace(/\//g, "\\"))).toBe(false);
+    }
+  });
+});
 
 // ── U1: the mock role layer is gone and does not come back ───────────────────
 
@@ -142,9 +219,7 @@ describe("U4: the capability fixture is gallery/test scaffolding only", () => {
   it("is not imported by any /app route or shared app component", () => {
     const offenders = BROWSER_SOURCE.filter(
       (file) =>
-        !file.startsWith("src/routes/design") &&
-        file !== "src/hooks/use-capabilities.tsx" &&
-        file !== "src/lib/capabilities.ts" &&
+        !mayReferenceCapabilityFixture(file) &&
         /CapabilityFixtureProvider|createFixtureCapabilityView/.test(read(file)),
     );
     expect(offenders).toEqual([]);
