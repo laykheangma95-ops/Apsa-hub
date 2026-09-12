@@ -6,22 +6,30 @@
  * so service.ts never touches the real repository.ts. This file does the
  * opposite — it imports the REAL repository.ts and mocks only its one
  * dependency, `@/lib/supabase/server`, with a call-recording fake query
- * builder. `repository.ts` captures `supabaseAdmin` into a module-scope
- * `const db` at first import, so it must be the first (and only) thing in
- * the whole `bun test` process to import `@/server/team/repository` —
- * sharing a file with anything that mocks the repository module itself
- * would let a stale, already-real-bound copy leak in via module caching.
+ * builder.
  *
- * For the same reason, this whole file runs its repository.ts exercises
- * inside ONE `it()`, against ONE shared fake `supabaseAdmin`: a second
- * `it()` calling `await import("../server/team/repository")` again would
- * get back the SAME cached module — still bound to whichever builder was in
- * effect the first time it was imported, regardless of a fresh
- * `mock.module()` call. `makeFakeSupabaseAdmin()`'s `resolve` callback is
- * given the table name and every `.eq()` filter applied since the last
- * `.from()`, so one builder can stand in for several distinct
- * tables/queries — including two different lookups against the SAME table
- * with different filters — within a single pass.
+ * `repository.ts` captures `supabaseAdmin` into a module-scope `const db` at
+ * first import. Bun's `mock.module()` replaces a module's cache entry for
+ * the rest of the whole `bun test` process — not just the file that called
+ * it — and nothing restores it automatically between test files. Depending
+ * on Bun's (non-alphabetical, content-sensitive) file scheduling, this file
+ * can run after something that already imported or mocked
+ * `@/server/team/repository` (e.g. team-domain.test.ts's
+ * `installRepoMock()`), so a plain `await import("../server/team/repository")`
+ * here could silently return that stale cached module — never touching the
+ * builder below — instead of a fresh, builder-bound one, leaving `calls`
+ * empty and failing the assertions below. The `?isolate=` query suffix
+ * forces Bun to treat the import as a brand-new module specifier every run,
+ * guaranteeing a fresh evaluation of the real repository.ts bound to THIS
+ * test's builder regardless of what already ran in the process.
+ *
+ * This file still runs its repository.ts exercises inside ONE `it()`,
+ * against ONE shared fake `supabaseAdmin`, for simplicity — not because a
+ * second `it()` would be unsafe anymore. `makeFakeSupabaseAdmin()`'s
+ * `resolve` callback is given the table name and every `.eq()` filter
+ * applied since the last `.from()`, so one builder can stand in for several
+ * distinct tables/queries — including two different lookups against the
+ * SAME table with different filters — within a single pass.
  *
  * Run: bun test src/tests/team-repository.test.ts
  */
@@ -102,7 +110,10 @@ describe("Repository query safety", () => {
     });
     mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: builder }));
 
-    const repository = await import("../server/team/repository");
+    // See file header: cache-bust so this always re-evaluates the real
+    // repository.ts against the builder above, never a stale cached module.
+    const isolate = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const repository = await import(`../server/team/repository?isolate=${isolate}`);
 
     // ── findPendingInvitationByEmail: exact match, never .ilike() ──────────
     await repository.findPendingInvitationByEmail(ORG_A, "  Someone@Example.COM  ");
