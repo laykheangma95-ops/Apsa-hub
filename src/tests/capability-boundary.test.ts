@@ -208,17 +208,34 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
       }
     }
 
-    // Transition permission maps: `confirmed: "orders.confirm",` etc.
-    const stateMachine = read("src/server/orders/state-machine.ts");
-    for (const mapName of [
-      "LIFECYCLE_TRANSITION_PERMISSIONS",
-      "FULFILLMENT_TRANSITION_PERMISSIONS",
-    ]) {
-      const start = stateMachine.indexOf(`export const ${mapName}`);
-      if (start < 0) continue;
-      const block = stripComments(stateMachine.slice(start, stateMachine.indexOf("};", start)));
-      for (const match of block.matchAll(/:\s*["']([a-z_]+\.[a-z_]+)["']/g)) {
-        keys.add(match[1]!);
+    /*
+     * Transition permission maps: `confirmed: "orders.confirm",` etc. A key
+     * that only ever appears in one of these is still genuinely enforced —
+     * the service looks the target up in the map and passes the result
+     * straight to ctx.require, so the literal never appears inside a
+     * require() call for the regex above to find.
+     *
+     * The Payment domain does exactly the same thing:
+     * src/server/payments/service.ts#verifyPayment reads
+     * VERIFICATION_TRANSITION_PERMISSIONS[to] and calls ctx.require(permission).
+     */
+    const permissionMaps: Array<[string, readonly string[]]> = [
+      [
+        "src/server/orders/state-machine.ts",
+        ["LIFECYCLE_TRANSITION_PERMISSIONS", "FULFILLMENT_TRANSITION_PERMISSIONS"],
+      ],
+      ["src/server/payments/state-machine.ts", ["VERIFICATION_TRANSITION_PERMISSIONS"]],
+    ];
+
+    for (const [file, mapNames] of permissionMaps) {
+      const stateMachine = read(file);
+      for (const mapName of mapNames) {
+        const start = stateMachine.indexOf(`export const ${mapName}`);
+        if (start < 0) continue;
+        const block = stripComments(stateMachine.slice(start, stateMachine.indexOf("};", start)));
+        for (const match of block.matchAll(/:\s*["']([a-z_]+\.[a-z_]+)["']/g)) {
+          keys.add(match[1]!);
+        }
       }
     }
 
@@ -239,6 +256,9 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     expect(enforced.size).toBeGreaterThan(20);
     expect(enforced.has("team.read")).toBe(true);
     expect(enforced.has("orders.confirm")).toBe(true);
+    // Only reachable through the Payment state machine's permission map.
+    expect(enforced.has("payments.manual_confirm")).toBe(true);
+    expect(enforced.has("payments.verify")).toBe(true);
     // An audit action name that no handler requires must NOT read as enforced.
     expect(enforced.has("orders.refund")).toBe(false);
   });

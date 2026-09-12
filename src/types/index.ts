@@ -158,7 +158,12 @@ export type StatusKey =
   | "processing"
   | "fulfilled"
   // Production Delivery domain (src/server/deliveries/state-machine.ts).
-  | "preparing";
+  | "preparing"
+  // Production Payment domain (src/server/payments/state-machine.ts). Its
+  // other settlement statuses — pending / paid / failed / refunded — already
+  // exist above; only 'reversed' (a claim voided before or instead of
+  // settling) had no counterpart in the mock vocabulary.
+  | "reversed";
 
 export type CompanionColor = "nilo" | "minto" | "vela" | "suri" | "luma";
 

@@ -34,10 +34,29 @@ export const UI_PERMISSION_KEYS = [
   "orders.create",
   "orders.confirm",
   "orders.cancel",
-  // Refunds are a Payment-domain action: refundPayment requires payments.refund
-  // (src/server/payments/service.ts). The historical orders.refund key no
-  // longer authorizes anything, so the UI must not gate on it.
+  // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
+  // action: refundPayment requires payments.refund. The historical
+  // orders.refund key no longer authorizes anything, so the UI must not gate
+  // on it.
+  //
+  // manual_confirm and verify are listed separately on purpose, and are not
+  // interchangeable: staff_confirmed — the "Confirm payment received" move
+  // that works with no bank integration at all — needs only
+  // payments.manual_confirm, while every escalation or correction
+  // (manager_verified, bank_verified, mismatch, clearing a flagged duplicate)
+  // needs payments.verify. Both come from VERIFICATION_TRANSITION_PERMISSIONS
+  // in src/server/payments/state-machine.ts, which verifyPayment() feeds
+  // straight into ctx.require.
+  //
+  // payments.view_provider_reference is deliberately NOT here: the server
+  // withholds the reference value itself rather than trusting the browser to
+  // hide it, so the UI has nothing to decide and needs no bit for it.
+  "payments.read",
+  "payments.manual_confirm",
+  "payments.verify",
   "payments.refund",
+  "payments.reverse",
+  "payments.reconcile",
   // Customers — src/server/customers/service.ts
   "customers.read",
   "customers.view_sensitive",

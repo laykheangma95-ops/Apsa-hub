@@ -13,6 +13,7 @@ import {
   RotateCcw,
   ShoppingBag,
   Truck,
+  Undo2,
   Wallet,
   X,
   type LucideIcon,
@@ -69,6 +70,8 @@ const MAP: Record<StatusKey, { tone: Tone; icon: LucideIcon }> = {
   fulfilled: { tone: "success", icon: PackageCheck },
   // Production Delivery domain (src/server/deliveries/state-machine.ts).
   preparing: { tone: "info", icon: Package },
+  // Production Payment domain (src/server/payments/state-machine.ts).
+  reversed: { tone: "neutral", icon: Undo2 },
 };
 
 interface StatusChipProps {

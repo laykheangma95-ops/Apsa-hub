@@ -46,21 +46,31 @@ export interface MobileNavTabConfig extends MobileNavRequirement {
   to?: "/app" | "/app/inbox";
 }
 
+/**
+ * Every destination a nav entry may point at.
+ *
+ * Declared once and reused by BottomNav's own handlers, which previously
+ * repeated this union by hand in four places — so adding a hub meant editing
+ * five lists and the build only caught it because they disagreed.
+ */
+export type MobileNavRoute =
+  | "/app"
+  | "/app/inbox"
+  | "/app/pos"
+  | "/app/team"
+  | "/app/orders"
+  | "/app/products"
+  | "/app/deliveries"
+  | "/app/payments"
+  | "/app/settings";
+
 export interface MobileNavActionConfig extends MobileNavRequirement {
   id: string;
   labelKey: string;
   descriptionKey: string;
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
-  to?:
-    | "/app"
-    | "/app/inbox"
-    | "/app/pos"
-    | "/app/team"
-    | "/app/orders"
-    | "/app/products"
-    | "/app/deliveries"
-    | "/app/settings";
+  to?: MobileNavRoute;
 }
 
 export interface MobileNavSheetGroup {
@@ -93,7 +103,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
       labelKey: "nav.sales",
       icon: ShoppingBag,
       kind: "sheet",
-      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+      requiresAny: ["orders.read", "orders.create", "delivery.read", "payments.read"],
     },
     { id: "more", labelKey: "nav.more", icon: Menu, kind: "sheet" },
   ],
@@ -185,7 +195,9 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           labelKey: "nav.salesActions.payments.label",
           descriptionKey: "nav.salesActions.payments.description",
           icon: CreditCard,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/payments",
+          requiresAll: ["payments.read"],
         },
         {
           id: "delivery",
@@ -310,7 +322,7 @@ const MART_CONFIG: BusinessNavVariantConfig = {
       labelKey: "nav.sales",
       icon: ShoppingBag,
       kind: "sheet",
-      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+      requiresAny: ["orders.read", "orders.create", "delivery.read", "payments.read"],
     },
     { id: "resolve", labelKey: "nav.resolve", icon: Search, kind: "sheet" },
     { id: "stock", labelKey: "nav.stock", icon: Boxes, kind: "sheet" },
@@ -339,6 +351,7 @@ export function resolveMobileNavActiveTab(
     if (
       pathname.startsWith("/app/pos") ||
       pathname.startsWith("/app/orders") ||
+      pathname.startsWith("/app/payments") ||
       pathname.startsWith("/app/deliveries")
     ) {
       return "sales";
@@ -358,6 +371,7 @@ export function resolveMobileNavActiveTab(
   if (
     pathname.startsWith("/app/pos") ||
     pathname.startsWith("/app/orders") ||
+    pathname.startsWith("/app/payments") ||
     pathname.startsWith("/app/deliveries")
   ) {
     return "sales";

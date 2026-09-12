@@ -120,7 +120,7 @@
       },
       "payments": {
         "label": "Payments",
-        "description": "A dedicated payments hub is not in the app yet."
+        "description": "Settlement, verification and refunds for every payment."
       },
       "delivery": {
         "label": "Delivery",
@@ -450,7 +450,8 @@
     "unfulfilled": "Not yet fulfilled",
     "processing": "Processing",
     "fulfilled": "Fulfilled",
-    "preparing": "Preparing"
+    "preparing": "Preparing",
+    "reversed": "Reversed"
   },
   "channel": {
     "facebook": "Facebook",
@@ -1446,5 +1447,228 @@
     },
     "save": "Save",
     "saving": "Saving"
+  },
+  "payments": {
+    "list": {
+      "title": "Payments",
+      "subtitle": "Every payment claim, and what still needs a decision.",
+      "filterScope": "Filters run on the server, across every payment in your business — not just the rows on this page. Mismatch, suspected duplicate and unverified are listed separately because they are different findings.",
+      "partialRefundNote": "A partly refunded payment still reads as Paid. Open a payment to see each refund.",
+      "loadMore": "Load more payments",
+      "loadingMore": "Loading…",
+      "empty": {
+        "title": "No payments yet",
+        "body": "Payments recorded against your orders appear here, newest first."
+      },
+      "emptyFilter": {
+        "title": "Nothing matches this filter",
+        "body": "No payment in your business is in this state right now. Try another filter."
+      },
+      "error": {
+        "title": "Could not load payments",
+        "body": "The payment list did not come back. Nothing was changed."
+      },
+      "forbidden": {
+        "title": "Payments are not open to you",
+        "body": "Your role does not include reading payment records."
+      }
+    },
+    "filters": {
+      "label": "Payment filters",
+      "all": "All"
+    },
+    "row": {
+      "order": "Order {{id}}",
+      "needsReview": "Needs review",
+      "fullyRefunded": "Fully refunded"
+    },
+    "attention": {
+      "currencyLabel": "Needs attention · {{currency}}",
+      "needsReview": "Waiting on a decision",
+      "codUnsettled": "Cash on delivery, not settled",
+      "entry": "{{count}} · {{amount}}",
+      "separateCurrencies": "Counted per currency. US dollars and riel are never added together."
+    },
+    "status": {
+      "label": "Payment status",
+      "help": "Whether this one payment settled. Separate from verification and from refunds.",
+      "pending": "Pending",
+      "paid": "Paid",
+      "failed": "Failed",
+      "reversed": "Reversed",
+      "refunded": "Refunded"
+    },
+    "verification": {
+      "label": "Verification",
+      "help": "How far the claim that this money arrived has been checked. It never means the payment settled on its own.",
+      "unverified": "Not checked",
+      "staff_confirmed": "Staff confirmed",
+      "manager_verified": "Manager verified",
+      "bank_verified": "Bank verified",
+      "mismatch": "Mismatch",
+      "duplicate_suspected": "Possible duplicate"
+    },
+    "method": {
+      "label": "Method",
+      "cash": "Cash",
+      "khqr": "KHQR",
+      "bank_transfer": "Bank transfer",
+      "cod": "Cash on delivery",
+      "codNote": "Cash on delivery is a collection arrangement. It never means the money has arrived."
+    },
+    "detail": {
+      "title": "Payment",
+      "details": "Payment details",
+      "reference": "Reference",
+      "note": "Note",
+      "recordedAt": "Recorded {{at}}",
+      "order": {
+        "title": "Order",
+        "view": "Open the order",
+        "id": "Linked order",
+        "noAccess": "Your role does not include reading orders.",
+        "note": "Payment never changes an order directly. The order's own payment and refund state is derived from the payment ledger."
+      },
+      "notFound": {
+        "title": "Payment not found",
+        "body": "This payment does not exist in your business, or the link is out of date."
+      },
+      "error": {
+        "title": "Could not load this payment",
+        "body": "The payment did not come back. Nothing was changed."
+      }
+    },
+    "settlement": {
+      "title": "Order settlement",
+      "note": "Worked out in the database from the whole order's payment ledger — not from this one payment.",
+      "unavailable": "Settlement figures are not available for this order right now.",
+      "total": "Order total",
+      "received": "Received",
+      "refunded": "Refunded",
+      "net": "Net",
+      "paymentStatus": "Order payment",
+      "refundStatus": "Order refunds",
+      "overpaid": "Received {{amount}} more than the order total. Worth a look.",
+      "orderPaymentStatus": {
+        "unpaid": "Unpaid",
+        "pending": "Pending",
+        "paid": "Paid",
+        "failed": "Failed"
+      },
+      "refundStatusValue": {
+        "none": "No refunds",
+        "partial": "Partly refunded",
+        "full": "Fully refunded"
+      }
+    },
+    "refunds": {
+      "title": "Refunds on this payment",
+      "empty": "No refunds recorded against this payment.",
+      "noAmount": "Amount not recorded",
+      "note": "Each line is one refund from the payment's permanent history. A refund never cancels the payment — it is recorded beside it."
+    },
+    "evidence": {
+      "title": "Evidence",
+      "empty": "No evidence attached.",
+      "note": "Evidence is a document, not a settlement. Attaching a screenshot or receipt changes nothing about this payment.",
+      "type": {
+        "screenshot": "Screenshot",
+        "qr_scan": "QR scan",
+        "receipt": "Receipt",
+        "other": "Other document"
+      }
+    },
+    "history": {
+      "title": "History",
+      "empty": "No history recorded.",
+      "event": {
+        "created": "Payment recorded",
+        "evidence_attached": "Evidence attached",
+        "staff_confirmed": "Staff confirmed the payment",
+        "manager_verified": "Manager verified the payment",
+        "bank_verified": "Bank verified the payment",
+        "verification_failed": "Marked as a mismatch",
+        "correction": "Details corrected",
+        "reversal": "Payment reversed",
+        "refund": "Refund recorded",
+        "duplicate_flagged": "Flagged as a possible duplicate"
+      }
+    },
+    "actions": {
+      "title": "What you can do",
+      "readOnly": "You can view this payment, but your role does not include changing it.",
+      "frozen": "This payment is {{status}} and can no longer be changed.",
+      "working": "Working…",
+      "reasonRequired": "Reason",
+      "reasonOptional": "Reason (optional)",
+      "reasonHint": "Written into this payment's permanent history.",
+      "serverNote": "Every action here is checked again by the server before anything changes.",
+      "verify": {
+        "staff_confirmed": {
+          "label": "Confirm payment received",
+          "body": "You checked and the money arrived. This settles the payment as paid.",
+          "submit": "Confirm received",
+          "done": "Payment confirmed as received."
+        },
+        "manager_verified": {
+          "label": "Verify as manager",
+          "body": "Re-confirm the payment at manager level, above a staff confirmation.",
+          "submit": "Verify",
+          "done": "Payment verified at manager level."
+        },
+        "bank_verified": {
+          "label": "Mark as bank verified",
+          "body": "The payment was matched against the bank record.",
+          "submit": "Mark bank verified",
+          "done": "Payment marked as bank verified."
+        },
+        "mismatch": {
+          "label": "Flag a mismatch",
+          "body": "The claim did not hold up on inspection. The payment stops counting as settled.",
+          "submit": "Flag mismatch",
+          "done": "Payment flagged as a mismatch."
+        },
+        "unverified": {
+          "label": "Send back for checking",
+          "body": "Reopen this payment so it can be checked again from the start.",
+          "submit": "Send back",
+          "done": "Payment sent back for checking."
+        },
+        "duplicate_suspected": {
+          "label": "Flag as a possible duplicate",
+          "body": "Set this payment aside as a suspected duplicate.",
+          "submit": "Flag duplicate",
+          "done": "Payment flagged as a possible duplicate."
+        }
+      },
+      "refund": {
+        "label": "Refund",
+        "rowBody": "Return money from this payment, in full or in part.",
+        "title": "Refund this payment",
+        "body": "The payment stays on record as paid. The refund is recorded beside it.",
+        "amountLabel": "Refund amount ({{currency}})",
+        "amountHint": "This payment is {{amount}}. Refunds are always in the payment's own currency.",
+        "note": "How much is still refundable is worked out from this payment's history. A refund larger than that is refused.",
+        "submit": "Record refund",
+        "done": "Refund recorded."
+      },
+      "reverse": {
+        "label": "Reverse",
+        "rowBody": "Void this payment claim. Use a refund instead when money actually moved back.",
+        "title": "Reverse this payment",
+        "body": "The payment stops counting as settled. Nothing is deleted — the record stays with its history.",
+        "note": "Use this when the payment should never have been recorded. If money genuinely went back to the customer, record a refund instead.",
+        "submit": "Reverse payment",
+        "done": "Payment reversed."
+      }
+    },
+    "errors": {
+      "unauthorized": "Your session has ended. Sign in again.",
+      "forbidden": "Your role does not include that action.",
+      "not_found": "This payment is no longer available.",
+      "conflict": "This payment changed while you had it open. Reload and try again.",
+      "invalid": "That could not be accepted. Check the amount and the reason.",
+      "server_error": "Something went wrong. Nothing was changed."
+    }
   }
 }
