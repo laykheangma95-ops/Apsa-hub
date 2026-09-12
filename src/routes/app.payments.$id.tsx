@@ -78,6 +78,7 @@ import {
   canRefundUiPayment,
   canReverseUiPayment,
   classifyPaymentError,
+  governingPaymentDenial,
   isPaymentId,
   isTerminalUiPaymentStatus,
   paymentErrorKey,
@@ -194,13 +195,28 @@ function PaymentDetailScreen() {
   const [verifyTarget, setVerifyTarget] = useState<PaymentVerificationState | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
   /*
-   * The logical refund decision currently on screen, and the idempotency key
-   * every attempt at it carries. Held in a ref rather than state on purpose:
-   * it must be readable and writable from inside mutationFn without that
-   * write scheduling a render, and it must survive the re-renders a failed
-   * attempt causes. Cleared when the refund sheet opens (a new deliberate
-   * refund) and again once a refund has landed, so two identical deliberate
-   * refunds get two keys and are two refunds — see resolveRefundIntent.
+   * The UNRESOLVED refund decision this screen is carrying, and the
+   * idempotency key every attempt at it must reuse.
+   *
+   * Held in a ref rather than state on purpose: it is read and written from
+   * inside mutationFn, where a state write would schedule a pointless render,
+   * and it has to survive every re-render a failed attempt causes — including
+   * the ones from closing and reopening the refund sheet.
+   *
+   * IT IS CLEARED IN EXACTLY ONE PLACE: a confirmed server result. Not when
+   * the sheet closes, and not when it reopens. A refund that committed in
+   * PostgreSQL and lost its response leaves the merchant with a sheet they
+   * will very often close and reopen before trying again, and minting a new
+   * key on that reopen would refund a customer twice — the defect this ref
+   * exists to prevent. An intent with no confirmed outcome therefore
+   * outlives the sheet, and only resolveRefundIntent's own terms check
+   * (payment, integer minor amount, normalised reason) decides whether the
+   * next press inherits its key or starts a new decision.
+   *
+   * Its lifetime is this payment-detail screen: a plain component ref, never
+   * persisted, never shared between payments (resolveRefundIntent rejects a
+   * held intent whose paymentId differs) and never readable by another
+   * principal or another tab.
    */
   const refundIntentRef = useRef<RefundIntent | null>(null);
   const [reverseOpen, setReverseOpen] = useState(false);
@@ -253,7 +269,13 @@ function PaymentDetailScreen() {
       return refundRealPayment(id, amountMinor, reason, intent.idempotencyKey);
     },
     onSuccess: () => {
-      // The decision is settled; the next refund is a new one and needs a new key.
+      /*
+       * The only place the intent is dropped. The server has confirmed an
+       * outcome for this decision — a fresh refund or a replay of the one it
+       * already held — so the key has done its job and the NEXT refund, even
+       * one repeating these exact terms, is a separate refund that must mint
+       * a separate key.
+       */
       refundIntentRef.current = null;
       setRefundOpen(false);
       setActionError(null);
@@ -261,11 +283,12 @@ function PaymentDetailScreen() {
       notifySuccess(t("payments.actions.refund.done"));
     },
     /*
-     * Deliberately NOT cleared on error. A failure may be a lost response over
-     * a refund that committed, and only the retained key makes the retry a
+     * Deliberately NOT cleared on error, and deliberately not cleared by the
+     * sheet closing afterwards. A failure may be a lost response over a
+     * refund that committed, and only the retained key makes the retry a
      * replay. A failure the server actually decided (invalid amount, wrong
      * state, denied) wrote no refund event, so its key was never bound and
-     * reusing it costs nothing.
+     * reusing it costs nothing either way.
      */
     onError: handleActionError,
   });
@@ -361,14 +384,18 @@ function PaymentDetailScreen() {
   const hasAnyAction = verificationTargets.length > 0 || showRefund || showReverse;
 
   /*
-   * Settlement figures are a disclosure of their own and pass the same gate:
-   * a 403 on the settlement refresh drops the cached received/refunded/net
-   * numbers immediately instead of leaving them under the panel's own
-   * "unavailable" message.
+   * Settlement figures are payment amounts too, and they pass the same gate
+   * under the same rule as the list's reconciliation band: a 403 on the
+   * settlement refresh drops the cached received/refunded/net numbers, AND a
+   * 403 on the payment read governs them as well, so a settlement response
+   * held from before a revocation cannot outlive the payment it describes.
    */
   const settlement = visiblePaymentRecord(
     settlementQuery.data,
-    settlementQuery.isError ? classifyPaymentError(settlementQuery.error) : null,
+    governingPaymentDenial(
+      queryErrorKind,
+      settlementQuery.isError ? classifyPaymentError(settlementQuery.error) : null,
+    ),
   );
   const pending = verifyMutation.isPending || refundMutation.isPending || reverseMutation.isPending;
 
@@ -654,8 +681,14 @@ function PaymentDetailScreen() {
                   disabled={pending}
                   onClick={() => {
                     setActionError(null);
-                    // Opening the sheet IS the new deliberate refund action.
-                    refundIntentRef.current = null;
+                    /*
+                     * No intent reset here. Reopening the sheet is how a
+                     * merchant retries after a failure they could not read
+                     * the outcome of, so an unresolved intent must survive it
+                     * and keep its key; a genuinely new refund is the one
+                     * that follows a CONFIRMED result, and onSuccess has
+                     * already cleared the intent by then.
+                     */
                     setRefundOpen(true);
                   }}
                 />

@@ -52,6 +52,7 @@ import {
   mapPaymentReconciliationToUi,
   mapPaymentSummaryToUi,
   paymentErrorKey,
+  governingPaymentDenial,
   paymentAccessDenied,
   paymentNeedsReview,
   PAYMENT_FILTERS,
@@ -1018,20 +1019,78 @@ describe("N. one logical refund, one idempotency key", () => {
     expect(readSource(API_INDEX)).not.toContain("newRefundIdempotencyKey");
   });
 
-  it("the intent is dropped when a new refund starts and when one lands, and never on failure", () => {
+  it("a confirmed result is the ONLY thing that drops the intent", () => {
     const detail = readSource(DETAIL_ROUTE);
+
+    // Exactly one clear site in the whole screen.
+    expect(detail.split("refundIntentRef.current = null").length - 1).toBe(1);
+
+    // And it is inside the refund mutation's success handler.
+    const mutationStart = detail.indexOf("const refundMutation = useMutation({");
+    const onSuccess = detail.indexOf("onSuccess: () => {", mutationStart);
+    const onError = detail.indexOf("onError: handleActionError", mutationStart);
+    const clear = detail.indexOf("refundIntentRef.current = null", mutationStart);
+    expect(mutationStart).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(onSuccess);
+    expect(clear).toBeLessThan(onError);
+  });
+
+  it("REGRESSION: opening the refund sheet does not reset the intent", () => {
+    // This is the P1 defect of the second review. Clearing on open makes
+    // commit -> lost response -> close -> reopen -> retry mint a new key and
+    // refund the customer twice.
+    const detail = readSource(DETAIL_ROUTE).replace(/\/\*[\s\S]*?\*\//g, "");
     const opensSheet = detail.indexOf("setRefundOpen(true)");
-    const clearsOnOpen = detail.lastIndexOf("refundIntentRef.current = null", opensSheet);
-    expect(clearsOnOpen).toBeGreaterThan(-1);
+    expect(opensSheet).toBeGreaterThan(-1);
+    // Nothing resets the intent anywhere near the open handler.
+    const window = detail.slice(Math.max(0, opensSheet - 400), opensSheet + 200);
+    expect(window).not.toContain("refundIntentRef.current = null");
 
-    const onSuccess = detail.indexOf("setRefundOpen(false)");
-    const clearsOnSuccess = detail.lastIndexOf("refundIntentRef.current = null", onSuccess);
-    expect(clearsOnSuccess).toBeGreaterThan(-1);
-    expect(clearsOnSuccess).not.toBe(clearsOnOpen);
+    // Nor does closing it: onOpenChange is the plain setter, with no reset.
+    expect(detail).toContain("<PaymentRefundSheet");
+    expect(detail).toContain("onOpenChange={setRefundOpen}");
+  });
 
-    // Exactly two clears: opening the sheet and a landed refund. A third in
-    // an error path would turn a lost response back into a second refund.
-    expect(detail.split("refundIntentRef.current = null").length - 1).toBe(2);
+  it("the intent is screen-local: a ref, never persisted or shared", () => {
+    const detail = readSource(DETAIL_ROUTE);
+    expect(detail).toContain("useRef<RefundIntent | null>(null)");
+    for (const sink of [
+      "localStorage",
+      "sessionStorage",
+      "indexedDB",
+      "document.cookie",
+      "globalThis.",
+      "window.__",
+    ]) {
+      expect(detail).not.toContain(sink);
+    }
+    // Not parked in the query cache either, where another surface could read it.
+    expect(detail).not.toMatch(/setQueryData[\s\S]{0,80}[Ii]ntent/);
+
+    /*
+     * And module scope holds no intent STORE — no Map keyed by payment id, no
+     * mutable module-level binding that would outlive the screen and be
+     * reachable from another one. RefundIntent may appear there only as the
+     * type import; the single value binding is the component's own ref.
+     */
+    const moduleHead = detail.slice(0, detail.indexOf("function PaymentDetailScreen"));
+    const afterImports = moduleHead.slice(moduleHead.lastIndexOf('from "@/lib/payments";'));
+    expect(afterImports).not.toContain("RefundIntent");
+    expect(moduleHead).not.toMatch(/new (Weak)?Map/);
+    expect(detail.match(/refundIntentRef/g)?.length).toBeGreaterThan(0);
+    // The ref is created inside the component, once.
+    expect(detail.split("useRef<RefundIntent | null>(null)").length - 1).toBe(1);
+    expect(detail.indexOf("useRef<RefundIntent | null>(null)")).toBeGreaterThan(
+      detail.indexOf("function PaymentDetailScreen"),
+    );
+  });
+
+  it("an intent for another payment is never inherited", () => {
+    const other = "40000000-0000-0000-0000-000000000009";
+    const held = resolveRefundIntent(null, request);
+    const moved = resolveRefundIntent(held, { ...request, paymentId: other });
+    expect(moved.idempotencyKey).not.toBe(held.idempotencyKey);
+    expect(moved.paymentId).toBe(other);
   });
 
   it("no payment screen invents a refund key from the payment's own fields", () => {
@@ -1148,7 +1207,9 @@ describe("O. an explicit denial withholds cached payment data immediately", () =
     expect(list).toContain(
       "visiblePaymentRows( paymentsQuery.data?.pages.flatMap((page) => page.items), errorKind, )",
     );
-    expect(list).toContain("visiblePaymentRows(reconciliationQuery.data, reconciliationErrorKind)");
+    expect(list).toContain("visiblePaymentRows(reconciliationQuery.data, reconciliationDenial)");
+    // And that denial is the LIST's as well as reconciliation's own.
+    expect(list).toContain("governingPaymentDenial(errorKind, reconciliationErrorKind)");
     // Never straight off the cache.
     expect(list).not.toMatch(/= paymentsQuery\.data\?\.pages\.flatMap[^;]{0,60}\?\? \[\]/);
     expect(list).not.toContain("reconciliationQuery.data ?? []");
@@ -1189,6 +1250,151 @@ describe("O. an explicit denial withholds cached payment data immediately", () =
     expect(list).not.toMatch(/forbidden\.body",\s*\{/);
     // And a denial is not dressed up as an empty list.
     expect(list).toContain("paymentsQuery.isSuccess && items.length === 0");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 16. One screen, several reads, one denial — P2 of the second review
+//
+// Gating each query on its OWN error leaves the hole Codex found: the payment
+// list 403s and its rows vanish, while the reconciliation band — still holding
+// a successful response fetched before the revocation — keeps real money on
+// screen. A screen is only as readable as the read that carries it.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("P. a denial on the carrying read governs every surface on the screen", () => {
+  const reconciliation: UiPaymentReconciliation[] = [
+    {
+      currency: "USD",
+      needsReview: { count: 3, amount: { amount: 47_500, currency: "USD" } },
+      pending: { count: 2, amount: { amount: 30_000, currency: "USD" } },
+      mismatch: { count: 1, amount: { amount: 12_500, currency: "USD" } },
+      duplicateSuspected: { count: 0, amount: { amount: 0, currency: "USD" } },
+      codUnsettled: { count: 4, amount: { amount: 88_000, currency: "USD" } },
+    },
+  ];
+
+  it("positive control: with both reads healthy the band renders in full", () => {
+    const denial = governingPaymentDenial(null, null);
+    expect(denial).toBeNull();
+    expect(visiblePaymentRows(reconciliation, denial)).toEqual(reconciliation);
+  });
+
+  it("THE REPORTED DEFECT: reconciliation still cached, list 403 — no amount renders", () => {
+    // Reconciliation's OWN query is perfectly healthy and holding data.
+    const reconciliationOwnError = null;
+    const listError = classifyPaymentError(
+      Object.assign(new Error("Missing permission: payments.read"), { statusCode: 403 }),
+    );
+
+    const denial = governingPaymentDenial(listError, reconciliationOwnError);
+    expect(denial).toBe("forbidden");
+
+    const rendered = visiblePaymentRows(reconciliation, denial);
+    expect(rendered).toEqual([]);
+
+    // Not one figure from the retained aggregate survives.
+    const serialized = JSON.stringify(rendered);
+    for (const amount of ["47500", "30000", "12500", "88000", "USD"]) {
+      expect(serialized).not.toContain(amount);
+    }
+    // The cache itself is untouched — this is a render decision, as designed.
+    expect(reconciliation[0]!.needsReview.amount.amount).toBe(47_500);
+  });
+
+  it("a 401 on the list governs just the same", () => {
+    const denial = governingPaymentDenial("unauthorized", null);
+    expect(denial).toBe("unauthorized");
+    expect(visiblePaymentRows(reconciliation, denial)).toEqual([]);
+  });
+
+  it("reconciliation's own denial still withholds it while the list stays readable", () => {
+    const denial = governingPaymentDenial(null, "forbidden");
+    expect(denial).toBe("forbidden");
+    expect(visiblePaymentRows(reconciliation, denial)).toEqual([]);
+  });
+
+  it("a transient failure on either read withholds nothing", () => {
+    for (const pair of [
+      ["server_error", null],
+      [null, "server_error"],
+      ["conflict", "invalid"],
+      ["not_found", "server_error"],
+      ["server_error", "server_error"],
+    ] as const) {
+      const denial = governingPaymentDenial(pair[0], pair[1]);
+      expect(denial).toBeNull();
+      expect(visiblePaymentRows(reconciliation, denial)).toEqual(reconciliation);
+    }
+  });
+
+  it("a real denial beats a transient failure whichever read carries it", () => {
+    expect(governingPaymentDenial("server_error", "forbidden")).toBe("forbidden");
+    expect(governingPaymentDenial("forbidden", "server_error")).toBe("forbidden");
+    expect(governingPaymentDenial(undefined, null, "unauthorized")).toBe("unauthorized");
+  });
+
+  it("the list empties the WHOLE screen on a list denial, not just its rows", () => {
+    const list = readSource(LIST_ROUTE);
+    const denialReturn = list.indexOf("if (listDenied) {");
+    expect(denialReturn).toBeGreaterThan(-1);
+
+    // Everything that could disclose or act on payment data is rendered
+    // after this return, so a denial reaches none of it.
+    for (const surface of [
+      "<AttentionBand",
+      "<ChipRow",
+      "items.map((payment)",
+      "payments.list.loadMore",
+      "payments.list.partialRefundNote",
+      "payments.list.filterScope",
+    ]) {
+      const at = list.indexOf(surface);
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeGreaterThan(denialReturn);
+    }
+
+    // What the denial branch itself renders: the refusal, and nothing else.
+    const branch = list.slice(denialReturn, list.indexOf("const showEmpty"));
+    expect(branch).toContain("payments.list.forbidden.title");
+    expect(branch).toContain("payments.list.forbidden.body");
+    for (const leak of ["AttentionBand", "PaymentRow", "formatMoney", "loadMore", "Chip"]) {
+      expect(branch).not.toContain(leak);
+    }
+  });
+
+  it("the transient error panel keeps its retry and no longer speaks for denials", () => {
+    const list = readSource(LIST_ROUTE).replace(/\s+/g, " ");
+    // One inline error state, transient-only, with a retry.
+    expect(list).toContain('title={t("payments.list.error.title")}');
+    expect(list).toContain("onRetry={() => void paymentsQuery.refetch()}");
+    // The old inline forbidden branch is gone — denials return above instead.
+    expect(list).not.toContain('errorKind === "forbidden" ? t("payments.list.forbidden.title")');
+  });
+
+  it("the detail screen's settlement is governed by the payment read too", () => {
+    const detail = readSource(DETAIL_ROUTE).replace(/\s+/g, " ");
+    expect(detail).toContain("governingPaymentDenial( queryErrorKind,");
+    expect(detail).toContain("visiblePaymentRecord( settlementQuery.data,");
+  });
+
+  it("every cached read on both payment screens passes a gate", () => {
+    // A standing audit: any future `somethingQuery.data` that is not handed
+    // to one of the two gates is a new disclosure route and fails here.
+    for (const file of [LIST_ROUTE, DETAIL_ROUTE]) {
+      const source = readSource(file)
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\s+/g, " ");
+      const reads = source.match(/\b\w*[Qq]uery\.data\b/g) ?? [];
+      expect(reads.length).toBeGreaterThan(0);
+      for (const read of reads) {
+        const at = source.indexOf(read);
+        const before = source.slice(Math.max(0, at - 140), at);
+        expect(
+          before.includes("visiblePaymentRows(") || before.includes("visiblePaymentRecord("),
+        ).toBe(true);
+      }
+    }
   });
 });
 

@@ -624,6 +624,27 @@ export function paymentAccessDenied(kind: PaymentErrorKind | null | undefined): 
 }
 
 /**
+ * The denial governing a surface fed by SEVERAL reads.
+ *
+ * A screen is only as readable as the read that carries it. /app/payments
+ * runs two: the payment list (payments.read) and the reconciliation
+ * aggregate (payments.reconcile). If the LIST is refused, the member is not
+ * entitled to that screen's data at all, and reconciliation amounts held
+ * from an earlier fetch are exactly as disclosing as the rows — a per-query
+ * check would leave them on display, which is the whole defect. So each
+ * dependent surface passes the kinds it depends on, in order, and the first
+ * definitive denial among them governs.
+ *
+ * Returns null when none of them is a denial, so transient failures keep
+ * flowing to the ordinary retry behaviour untouched.
+ */
+export function governingPaymentDenial(
+  ...kinds: readonly (PaymentErrorKind | null | undefined)[]
+): PaymentErrorKind | null {
+  return kinds.find((kind) => paymentAccessDenied(kind)) ?? null;
+}
+
+/**
  * The rows a payments surface may render right now — the single required gate
  * between a cached page of payments and anything drawn from it.
  */

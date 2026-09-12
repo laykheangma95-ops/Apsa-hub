@@ -645,7 +645,12 @@ function makeRefundLedger(principalMinor: number) {
     } {
       const paymentId = data["paymentId"] as string;
       const amountMinor = data["amountMinor"] as number;
-      const reason = data["reason"] as string;
+      /*
+       * service.ts#refundPayment passes `reason.trim()` to the repository, so
+       * the RPC only ever compares trimmed reasons — the same normalisation
+       * resolveRefundIntent applies when deciding whether a press is a retry.
+       */
+      const reason = (data["reason"] as string).trim();
       const rawKey = data["idempotencyKey"];
       const key = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey.trim() : null;
 
@@ -688,24 +693,38 @@ describe("a refund retry after a lost response records one refund, not two", () 
     const { resolveRefundIntent } = await import("../lib/payments");
     const { refundRealPayment } = await import("../lib/api");
     type Intent = Awaited<ReturnType<typeof resolveRefundIntent>>;
+    // The screen's useRef. Nothing but a confirmed result clears it.
     let held: Intent | null = null;
 
     return {
-      /** Pressing the Refund action row. */
-      openSheet() {
-        held = null;
-      },
       keysUsed: [] as string[],
+      /**
+       * Pressing the Refund action row. Deliberately does NOT touch the
+       * intent — an unresolved refund must survive close -> reopen, which is
+       * exactly what a merchant does after a failure they could not read.
+       */
+      openSheet() {},
+      /** Dismissing the sheet. Also deliberately inert. */
+      closeSheet() {},
+      /** Pressing Confirm. Resolves against the held intent, then sends. */
       async confirm(this: { keysUsed: string[] }, amountMinor: number, reason: string) {
         const intent = resolveRefundIntent(held, { paymentId, amountMinor, reason });
         held = intent;
         this.keysUsed.push(intent.idempotencyKey);
         // A rejection propagates with `held` still set: a failed attempt does
         // NOT discard the intent, which is the whole point.
-        return await refundRealPayment(paymentId, amountMinor, reason, intent.idempotencyKey);
-      },
-      succeeded() {
+        const detail = await refundRealPayment(
+          paymentId,
+          amountMinor,
+          reason,
+          intent.idempotencyKey,
+        );
+        // The mutation's onSuccess — the single place the intent is dropped.
         held = null;
+        return detail;
+      },
+      heldKey() {
+        return held?.idempotencyKey ?? null;
       },
     };
   }
@@ -735,7 +754,6 @@ describe("a refund retry after a lost response records one refund, not two", () 
     await expectRejects(() => screen.confirm(2_000, "Damaged item"));
     // Attempt 2: the merchant presses confirm again — the same decision.
     await screen.confirm(2_000, "Damaged item");
-    screen.succeeded();
 
     // Exactly one refund is in the ledger, for exactly the refunded amount.
     expect(ledger.events).toHaveLength(1);
@@ -797,13 +815,11 @@ describe("a refund retry after a lost response records one refund, not two", () 
 
     screen.openSheet();
     await screen.confirm(2_000, "Damaged item");
-    screen.succeeded();
 
     // The merchant opens the sheet again and refunds another 2,000 — a
     // genuinely separate decision that happens to repeat the terms exactly.
     screen.openSheet();
     await screen.confirm(2_000, "Damaged item");
-    screen.succeeded();
 
     expect(ledger.events).toHaveLength(2);
     expect(ledger.refundedTotal()).toBe(4_000);
@@ -829,6 +845,182 @@ describe("a refund retry after a lost response records one refund, not two", () 
     expect(screen.keysUsed[0]).not.toBe(screen.keysUsed[1]!);
     expect(ledger.events).toHaveLength(2);
     expect(ledger.refundedTotal()).toBe(5_000);
+  });
+
+  it("THE REPORTED DEFECT (round 2): commit, lost response, CLOSE the sheet, reopen, retry — still one refund", async () => {
+    const ledger = makeRefundLedger(10_000);
+    let dropNextResponse = true;
+
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!); // commits either way
+        if (dropNextResponse) {
+          dropNextResponse = false;
+          throw new Error("network error: connection reset");
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+
+    screen.openSheet();
+    await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+
+    // The merchant gives up on this attempt, dismisses the sheet, then comes
+    // back to it — the exact sequence that used to mint a second key.
+    screen.closeSheet();
+    const keyAcrossClose = screen.heldKey();
+    expect(keyAcrossClose).not.toBeNull();
+    screen.openSheet();
+    expect(screen.heldKey()).toBe(keyAcrossClose);
+
+    await screen.confirm(2_000, "Damaged item");
+
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.refundedTotal()).toBe(2_000);
+    expect(screen.keysUsed).toHaveLength(2);
+    expect(screen.keysUsed[0]).toBe(screen.keysUsed[1]!);
+    expect(ledger.countFor(screen.keysUsed[0]!)).toBe(1);
+  });
+
+  it("survives many close/reopen cycles between attempts", async () => {
+    const ledger = makeRefundLedger(10_000);
+    let failuresLeft = 2;
+
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        if (failuresLeft > 0) {
+          failuresLeft -= 1;
+          throw new Error("network error: connection reset");
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      screen.openSheet();
+      await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+      screen.closeSheet();
+    }
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+
+    expect(new Set(screen.keysUsed).size).toBe(1);
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.refundedTotal()).toBe(2_000);
+  });
+
+  it("a deliberate new refund AFTER a confirmed success gets a fresh key and is a second refund", async () => {
+    const ledger = makeRefundLedger(10_000);
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+    // The confirmed result released the intent.
+    expect(screen.heldKey()).toBeNull();
+
+    screen.closeSheet();
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+
+    expect(screen.keysUsed[0]).not.toBe(screen.keysUsed[1]!);
+    expect(ledger.events).toHaveLength(2);
+    expect(ledger.refundedTotal()).toBe(4_000);
+  });
+
+  it("a REPLAYED server result also releases the intent, so the next refund is a new one", async () => {
+    // Second attempt of a committed refund comes back replayed:true and
+    // resolves — the client cannot and must not distinguish it from a fresh
+    // success, and either way the decision is now settled.
+    const ledger = makeRefundLedger(10_000);
+    let dropNextResponse = true;
+    const replayFlags: boolean[] = [];
+
+    stubPaymentsApi({
+      refund: (call) => {
+        const result = ledger.call(call.data!);
+        replayFlags.push(result.replayed);
+        if (dropNextResponse) {
+          dropNextResponse = false;
+          throw new Error("network error: connection reset");
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    screen.closeSheet();
+    screen.openSheet();
+    await screen.confirm(2_000, "Damaged item");
+
+    expect(replayFlags).toEqual([false, true]);
+    expect(screen.heldKey()).toBeNull();
+
+    // A genuinely new refund now mints its own key.
+    screen.openSheet();
+    await screen.confirm(1_500, "Second return");
+    expect(new Set(screen.keysUsed).size).toBe(2);
+    expect(ledger.events).toHaveLength(2);
+    expect(ledger.refundedTotal()).toBe(3_500);
+  });
+
+  it("changing the amount after a close/reopen is a different refund, not a retry", async () => {
+    const ledger = makeRefundLedger(10_000);
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        throw new Error("network error: connection reset");
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    screen.closeSheet();
+    screen.openSheet();
+    // Corrected amount: must NOT inherit a key the server bound to 2,000.
+    await expectRejects(() => screen.confirm(3_000, "Damaged item"));
+
+    expect(screen.keysUsed[0]).not.toBe(screen.keysUsed[1]!);
+  });
+
+  it("a normalised-identical reason across close/reopen is the same refund", async () => {
+    const ledger = makeRefundLedger(10_000);
+    let dropNextResponse = true;
+    stubPaymentsApi({
+      refund: (call) => {
+        ledger.call(call.data!);
+        if (dropNextResponse) {
+          dropNextResponse = false;
+          throw new Error("network error: connection reset");
+        }
+        return { ...uiSummary(PAYMENT_ID), events: [], evidence: [] };
+      },
+    });
+
+    const screen = await makeRefundScreen(PAYMENT_ID);
+    screen.openSheet();
+    await expectRejects(() => screen.confirm(2_000, "Damaged item"));
+    screen.closeSheet();
+    screen.openSheet();
+    // Retyped with stray whitespace — the same decision to the server.
+    await screen.confirm(2_000, "  Damaged item ");
+
+    expect(screen.keysUsed[0]).toBe(screen.keysUsed[1]!);
+    expect(ledger.events).toHaveLength(1);
+    expect(ledger.refundedTotal()).toBe(2_000);
   });
 
   it("a retry after a server verdict is still safe: no refund was written, so the key was never bound", async () => {

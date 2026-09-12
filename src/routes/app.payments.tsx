@@ -51,6 +51,7 @@ import { formatMoney } from "@/lib/money";
 import {
   classifyPaymentError,
   findPaymentFilter,
+  governingPaymentDenial,
   isFullyRefundedUiPayment,
   paymentAccessDenied,
   paymentNeedsReview,
@@ -317,13 +318,20 @@ function PaymentsListScreen() {
 
   /*
    * Reconciliation is a separate request with a separate permission
-   * (payments.reconcile) and so a separate denial: its aggregate amounts are
-   * a disclosure in their own right and are withheld on their own 403, even
-   * while the list itself is still readable.
+   * (payments.reconcile), so it has a denial of its own — but it is NOT
+   * independent of the list's.
+   *
+   * These aggregates are payment amounts, bucketed. A member the server has
+   * just refused the payment list is not entitled to them either, and
+   * reconciliation holding a successful response from before the revocation
+   * is precisely when a per-query check fails: the rows vanish and the money
+   * stays on screen. governingPaymentDenial makes the list's denial govern
+   * this band as well, whatever reconciliation's own last answer was.
    */
   const reconciliationErrorKind = reconciliationQuery.isError
     ? classifyPaymentError(reconciliationQuery.error)
     : null;
+  const reconciliationDenial = governingPaymentDenial(errorKind, reconciliationErrorKind);
 
   useEffect(() => {
     if (errorKind === "unauthorized") void navigate({ to: "/sign-in" });
@@ -350,8 +358,39 @@ function PaymentsListScreen() {
 
   if (errorKind === "unauthorized") return null; // redirecting, see the effect above
 
+  /*
+   * A definitive denial on the LIST read empties the whole screen, not just
+   * the rows.
+   *
+   * The member has been refused the data this screen exists to show, so
+   * nothing retained from before the refusal may stay on it: no rows, no
+   * reconciliation band or amount, no load-more, no filter chips (each one
+   * is an action on the denied list) and no partial-refund note. What is
+   * left says only that access was refused — a denial must not describe the
+   * data behind it, and must not be dressed up as an empty list either.
+   *
+   * `items` and `summaries` are masked by their own gates regardless, so
+   * this early return is the screen-level consequence of the same rule
+   * rather than the only thing enforcing it.
+   */
+  if (listDenied) {
+    return (
+      <ScreenBleed bottom="nav" surface="raised">
+        <AppHeader title={t("payments.list.title")} subtitle={t("payments.list.subtitle")} />
+        <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 lg:max-w-[var(--screen-max-wide)]">
+          <OperationalState
+            tone="danger"
+            title={t("payments.list.forbidden.title")}
+            body={t("payments.list.forbidden.body")}
+          />
+        </main>
+        <BottomNav />
+      </ScreenBleed>
+    );
+  }
+
   const showEmpty = paymentsQuery.isSuccess && items.length === 0;
-  const summaries = visiblePaymentRows(reconciliationQuery.data, reconciliationErrorKind);
+  const summaries = visiblePaymentRows(reconciliationQuery.data, reconciliationDenial);
   const loudSummaries = summaries.filter((summary) => !reconciliationIsQuiet(summary));
 
   return (
@@ -396,22 +435,18 @@ function PaymentsListScreen() {
           <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
             {paymentsQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
+            {/*
+             * Denials never reach here — they returned above with the whole
+             * screen emptied. What is left is the transient case, which
+             * keeps its honest retry and keeps whatever rows the server
+             * really did send.
+             */}
             {errorKind ? (
               <OperationalState
                 tone="danger"
-                title={
-                  errorKind === "forbidden"
-                    ? t("payments.list.forbidden.title")
-                    : t("payments.list.error.title")
-                }
-                body={
-                  errorKind === "forbidden"
-                    ? t("payments.list.forbidden.body")
-                    : t("payments.list.error.body")
-                }
-                {...(errorKind === "forbidden"
-                  ? {}
-                  : { onRetry: () => void paymentsQuery.refetch() })}
+                title={t("payments.list.error.title")}
+                body={t("payments.list.error.body")}
+                onRetry={() => void paymentsQuery.refetch()}
                 className="rounded-none border-0"
               />
             ) : null}
