@@ -123,7 +123,10 @@ export function BottomSheet({
   return (
     <AnimatePresence>
       {open ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center">
+        // z-[60]: above BottomNav's mobile bar (z-50), regardless of which one
+        // mounts later in a given route's JSX — an open sheet must always sit
+        // over the persistent nav, never under it.
+        <div className="fixed inset-0 z-[60] flex items-end justify-center">
           <motion.button
             type="button"
             aria-label={t("common.close")}

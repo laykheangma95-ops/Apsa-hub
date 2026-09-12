@@ -133,6 +133,11 @@ export function CreateProductSheet({
       title={t("catalog.list.addProduct")}
       snap="full"
       className="lg:max-w-[520px]"
+      footer={
+        <Button className="tap-target h-12 w-full" disabled={saving} onClick={() => void submit()}>
+          {saving ? t("catalog.saving") : t("catalog.list.addProduct")}
+        </Button>
+      }
     >
       <div className="space-y-4">
         <div className="flex flex-col gap-1.5">
@@ -249,10 +254,6 @@ export function CreateProductSheet({
             {formError}
           </p>
         ) : null}
-
-        <Button className="tap-target h-12 w-full" disabled={saving} onClick={() => void submit()}>
-          {saving ? t("catalog.saving") : t("catalog.list.addProduct")}
-        </Button>
       </div>
     </BottomSheet>
   );
