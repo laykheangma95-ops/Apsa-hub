@@ -22,6 +22,7 @@ import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
+import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppProductsRouteImport } from './routes/app.products'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
@@ -31,6 +32,7 @@ import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
+import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
 import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -98,6 +100,11 @@ const AppOrdersRoute = AppOrdersRouteImport.update({
   path: '/orders',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPaymentsRoute = AppPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppPosRoute = AppPosRouteImport.update({
   id: '/pos',
   path: '/pos',
@@ -143,6 +150,11 @@ const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppOrdersRoute,
 } as any)
+const AppPaymentsIdRoute = AppPaymentsIdRouteImport.update({
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppPaymentsRoute,
+} as any)
 const AppProductsIdRoute = AppProductsIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -162,6 +174,7 @@ export interface FileRoutesByFullPath {
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
@@ -172,6 +185,7 @@ export interface FileRoutesByFullPath {
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRoutesByTo {
@@ -186,6 +200,7 @@ export interface FileRoutesByTo {
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
@@ -196,6 +211,7 @@ export interface FileRoutesByTo {
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRoutesById {
@@ -212,6 +228,7 @@ export interface FileRoutesById {
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
@@ -222,6 +239,7 @@ export interface FileRoutesById {
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRouteTypes {
@@ -239,6 +257,7 @@ export interface FileRouteTypes {
     | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
     | '/app/products'
     | '/app/settings'
@@ -249,6 +268,7 @@ export interface FileRouteTypes {
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
     | '/app/orders/$id'
+    | '/app/payments/$id'
     | '/app/products/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -263,6 +283,7 @@ export interface FileRouteTypes {
     | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
     | '/app/products'
     | '/app/settings'
@@ -273,6 +294,7 @@ export interface FileRouteTypes {
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
     | '/app/orders/$id'
+    | '/app/payments/$id'
     | '/app/products/$id'
   id:
     | '__root__'
@@ -288,6 +310,7 @@ export interface FileRouteTypes {
     | '/app/deliveries'
     | '/app/inbox'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
     | '/app/products'
     | '/app/settings'
@@ -298,6 +321,7 @@ export interface FileRouteTypes {
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
     | '/app/orders/$id'
+    | '/app/payments/$id'
     | '/app/products/$id'
   fileRoutesById: FileRoutesById
 }
@@ -407,6 +431,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrdersRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/payments': {
+      id: '/app/payments'
+      path: '/payments'
+      fullPath: '/app/payments'
+      preLoaderRoute: typeof AppPaymentsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/pos': {
       id: '/app/pos'
       path: '/pos'
@@ -470,6 +501,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrdersIdRouteImport
       parentRoute: typeof AppOrdersRoute
     }
+    '/app/payments/$id': {
+      id: '/app/payments/$id'
+      path: '/$id'
+      fullPath: '/app/payments/$id'
+      preLoaderRoute: typeof AppPaymentsIdRouteImport
+      parentRoute: typeof AppPaymentsRoute
+    }
     '/app/products/$id': {
       id: '/app/products/$id'
       path: '/$id'
@@ -516,6 +554,18 @@ const AppOrdersRouteWithChildren = AppOrdersRoute._addFileChildren(
   AppOrdersRouteChildren,
 )
 
+interface AppPaymentsRouteChildren {
+  AppPaymentsIdRoute: typeof AppPaymentsIdRoute
+}
+
+const AppPaymentsRouteChildren: AppPaymentsRouteChildren = {
+  AppPaymentsIdRoute: AppPaymentsIdRoute,
+}
+
+const AppPaymentsRouteWithChildren = AppPaymentsRoute._addFileChildren(
+  AppPaymentsRouteChildren,
+)
+
 interface AppProductsRouteChildren {
   AppProductsIdRoute: typeof AppProductsIdRoute
 }
@@ -532,6 +582,7 @@ interface AppRouteChildren {
   AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
   AppInboxRoute: typeof AppInboxRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
+  AppPaymentsRoute: typeof AppPaymentsRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppProductsRoute: typeof AppProductsRouteWithChildren
   AppSettingsRoute: typeof AppSettingsRoute
@@ -544,6 +595,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppDeliveriesRoute: AppDeliveriesRouteWithChildren,
   AppInboxRoute: AppInboxRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
+  AppPaymentsRoute: AppPaymentsRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppProductsRoute: AppProductsRouteWithChildren,
   AppSettingsRoute: AppSettingsRoute,
