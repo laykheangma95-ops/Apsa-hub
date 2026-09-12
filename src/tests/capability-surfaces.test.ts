@@ -108,6 +108,36 @@ const SURFACES: Array<{
     serverFile: "src/server/products/service.ts",
   },
   {
+    name: "Inventory workspace list",
+    uiFile: "src/routes/app.inventory.tsx",
+    key: "inventory.read",
+    serverFile: "src/server/inventory/service.ts",
+  },
+  {
+    name: "Inventory detail — stock",
+    uiFile: "src/routes/app.inventory.$variantId.tsx",
+    key: "inventory.read",
+    serverFile: "src/server/inventory/service.ts",
+  },
+  {
+    name: "Inventory detail — movement history",
+    uiFile: "src/routes/app.inventory.$variantId.tsx",
+    key: "inventory.view_movements",
+    serverFile: "src/server/inventory/service.ts",
+  },
+  {
+    name: "Inventory detail — receive stock",
+    uiFile: "src/routes/app.inventory.$variantId.tsx",
+    key: "inventory.receive_stock",
+    serverFile: "src/server/inventory/service.ts",
+  },
+  {
+    name: "Inventory detail — manual adjustment",
+    uiFile: "src/routes/app.inventory.$variantId.tsx",
+    key: "inventory.adjust",
+    serverFile: "src/server/inventory/service.ts",
+  },
+  {
     name: "Deliveries list",
     uiFile: "src/routes/app.deliveries.tsx",
     key: "delivery.read",
@@ -243,6 +273,10 @@ describe("denied surfaces stay non-leaky", () => {
     expect(read("src/routes/app.orders.tsx")).toContain("enabled: !detailOpen && canReadOrders");
     expect(read("src/routes/app.deliveries.tsx")).toContain(
       "enabled: !detailOpen && canReadDeliveries",
+    );
+    expect(read("src/routes/app.inventory.tsx")).toContain("enabled: !detailOpen && canReadStock");
+    expect(read("src/routes/app.inventory.$variantId.tsx")).toContain(
+      "enabled: canViewMovements && idLooksValid",
     );
     expect(read("src/routes/app.team.tsx")).toContain("enabled: canReadTeam");
     expect(read("src/routes/app.pos.tsx")).toContain("enabled: canSell");

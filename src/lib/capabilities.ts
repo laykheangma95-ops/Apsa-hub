@@ -56,6 +56,23 @@ export const UI_PERMISSION_KEYS = [
   "products.view_cost",
   "products.archive",
   "products.manage_categories",
+  // Inventory — src/server/inventory/service.ts. Each key is required there
+  // today (listOrganizationStock/getVariantStock -> inventory.read,
+  // listMovementHistory -> inventory.view_movements, recordMovement's
+  // initial/restock branch -> inventory.receive_stock, its manual_adjustment
+  // branch -> inventory.adjust) and seeded by
+  // supabase/migrations/022_inventory_permissions.sql.
+  //
+  // PERMISSIONS_MATRIX.md §13 also lists inventory.transfer, inventory.mark_damage
+  // and inventory.override_reservation. They are deliberately NOT here: no
+  // migration seeds them, no server function checks them, and the movement-type
+  // taxonomy they belong to (transfer/damage/reservation) is post-MVP per
+  // migration 021. Declaring them would create a UI-only gate over behaviour
+  // that does not exist.
+  "inventory.read",
+  "inventory.view_movements",
+  "inventory.receive_stock",
+  "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
   // Team — src/server/team/service.ts
