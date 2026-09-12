@@ -118,6 +118,93 @@ describe("U1: the capability reader fails closed", () => {
   });
 });
 
+// ── U1b: canSensitive — the narrowed reader for values whose display discloses ─
+//
+// can() tolerates a retained snapshot whose background refresh failed (U1
+// above, deliberately). canSensitive() must not: a permission revoked during
+// exactly that unconfirmed window would still read as granted, so anything
+// whose mere display is a disclosure (product cost) has to fail closed there.
+
+describe("U1b: canSensitive fails closed wherever the snapshot is unconfirmed", () => {
+  it("is true only for a confirmed, granted, ready snapshot", () => {
+    const view = viewFor(activeResult(["products.view_cost", "orders.read"]));
+    expect(view.state).toBe("ready");
+    expect(view.stale).toBe(false);
+    expect(view.canSensitive("products.view_cost")).toBe(true);
+    // Not granted stays not granted — canSensitive never widens anything.
+    expect(view.canSensitive("products.update_cost")).toBe(false);
+  });
+
+  it("refuses a retained snapshot whose latest refresh errored, while can() still allows it", () => {
+    // THE P1: same user, same organization, prior authorized snapshot retained,
+    // background capability query rejected. state is still "ready" and the
+    // snapshot still lists products.view_cost.
+    const staleView = viewFor(activeResult(["products.view_cost", "orders.read"]), {
+      isError: true,
+    });
+
+    expect(staleView.state).toBe("ready");
+    expect(staleView.stale).toBe(true);
+    expect(staleView.can("products.view_cost")).toBe(true);
+
+    // ...but nothing sensitive may be drawn from it.
+    expect(staleView.canSensitive("products.view_cost")).toBe(false);
+    expect(staleView.canSensitive("products.update_cost")).toBe(false);
+  });
+
+  it("fails closed for pending, denied, no-membership, identity mismatch and error alike", () => {
+    // Pending — nothing resolved yet.
+    expect(UNRESOLVED_CAPABILITIES.stale).toBe(false);
+    expect(UNRESOLVED_CAPABILITIES.canSensitive("products.view_cost")).toBe(false);
+
+    // Errored with nothing retained.
+    expect(viewFor(undefined, { isError: true }).canSensitive("products.view_cost")).toBe(false);
+
+    // Settled with no data.
+    expect(viewFor(undefined).canSensitive("products.view_cost")).toBe(false);
+
+    // Every denial reason, including a revocation arriving as a success.
+    for (const status of ["unauthenticated", "email_unverified", "no_membership"] as const) {
+      expect(viewFor({ status }).canSensitive("products.view_cost")).toBe(false);
+      expect(viewFor({ status }, { isError: true }).canSensitive("products.view_cost")).toBe(false);
+    }
+
+    // Identity mismatch — snapshot issued to another user, or another org.
+    expect(
+      viewFor(activeResult(["products.view_cost"]), {
+        expectedUserId: "user-b",
+      }).canSensitive("products.view_cost"),
+    ).toBe(false);
+    expect(
+      viewFor(activeResult(["products.view_cost"]), {
+        expectedOrganizationId: "org-b",
+      }).canSensitive("products.view_cost"),
+    ).toBe(false);
+  });
+
+  it("does not widen or break the non-sensitive stale tolerance it sits beside", () => {
+    // Requirement: the global stale-background-refetch tolerance stays exactly
+    // as it was for ordinary navigation/UI. Only canSensitive is narrower.
+    const staleView = viewFor(activeResult(["orders.read", "messages.read", "team.read"]), {
+      isError: true,
+    });
+
+    expect(staleView.state).toBe("ready");
+    expect(staleView.can("orders.read")).toBe(true);
+    expect(staleView.can("messages.read")).toBe(true);
+    expect(staleView.canAll(["orders.read", "messages.read"])).toBe(true);
+    expect(staleView.canAny(["orders.read", "team.invite"])).toBe(true);
+    // And it still grants nothing the snapshot did not list.
+    expect(staleView.can("team.invite")).toBe(false);
+  });
+
+  it("a fixture view is confirmed — design gallery and tests are not stale", () => {
+    const fixture = createFixtureCapabilityView(["products.view_cost"]);
+    expect(fixture.stale).toBe(false);
+    expect(fixture.canSensitive("products.view_cost")).toBe(true);
+  });
+});
+
 // ── U2: server authority ──────────────────────────────────────────────────────
 
 describe("U2: only server-supplied permissions grant anything", () => {

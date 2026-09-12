@@ -58,6 +58,7 @@ export interface MobileNavActionConfig extends MobileNavRequirement {
     | "/app/pos"
     | "/app/team"
     | "/app/orders"
+    | "/app/products"
     | "/app/deliveries"
     | "/app/settings";
 }
@@ -211,6 +212,20 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
       titleKey: "nav.moreGroups.business",
       actions: [
         {
+          /*
+           * The catalogue is live; a dedicated stock workspace still is not,
+           * so the two stay separate entries rather than one entry that
+           * over-promises. Gated on the same key getProductCatalog requires.
+           */
+          id: "product-catalog",
+          labelKey: "nav.moreActions.productCatalog.label",
+          descriptionKey: "nav.moreActions.productCatalog.description",
+          icon: Package,
+          availability: "live",
+          to: "/app/products",
+          requiresAll: ["products.read"],
+        },
+        {
           id: "products-stock",
           labelKey: "nav.moreActions.productsStock.label",
           descriptionKey: "nav.moreActions.productsStock.description",
@@ -328,7 +343,11 @@ export function resolveMobileNavActiveTab(
     ) {
       return "sales";
     }
-    if (pathname.startsWith("/app/team") || pathname.startsWith("/app/customers")) {
+    if (
+      pathname.startsWith("/app/team") ||
+      pathname.startsWith("/app/products") ||
+      pathname.startsWith("/app/customers")
+    ) {
       return "more";
     }
     return undefined;
@@ -343,7 +362,13 @@ export function resolveMobileNavActiveTab(
   ) {
     return "sales";
   }
-  if (pathname.startsWith("/app/team") || pathname.startsWith("/app/customers")) return "more";
+  if (
+    pathname.startsWith("/app/team") ||
+    pathname.startsWith("/app/products") ||
+    pathname.startsWith("/app/customers")
+  ) {
+    return "more";
+  }
   return undefined;
 }
 
