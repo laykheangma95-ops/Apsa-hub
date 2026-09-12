@@ -134,7 +134,7 @@
     "moreActions": {
       "productsStock": {
         "label": "Products / Stock",
-        "description": "A dedicated stock workspace is not in the app yet."
+        "description": "How much of each item you have on hand."
       },
       "customers": {
         "label": "Customers",
@@ -1446,5 +1446,131 @@
     },
     "save": "Save",
     "saving": "Saving"
+  },
+  "inventory": {
+    "saving": "Saving",
+    "movementRecorded": "Stock movement recorded",
+    "error": {
+      "denied": "Your account cannot do this.",
+      "not_found": "This item does not exist in your business, or it is no longer available to you.",
+      "location_not_found": "That location does not exist in your business.",
+      "reason_required": "A reason is required for a manual adjustment.",
+      "invalid_quantity": "Enter a whole number that is not zero.",
+      "duplicate": "This movement was already recorded. Nothing was counted twice.",
+      "audit_blocked": "The adjustment was blocked because its audit record could not be saved. Stock did not change.",
+      "generic": "That did not go through. Check your connection and try again."
+    }
+  },
+  "inventoryList": {
+    "title": "Stock",
+    "subtitle": "What you have on hand right now",
+    "searchPlaceholder": "Search the items below",
+    "searchScope": "Searches only the items loaded on this page, not your whole catalogue.",
+    "filterLabel": "Stock view",
+    "filter": {
+      "all": "All",
+      "negative": "Below zero",
+      "zero": "None left"
+    },
+    "state": {
+      "negative": "Below zero",
+      "zero": "None left"
+    },
+    "sku": "SKU",
+    "unnamedVariant": "Unnamed variant",
+    "unknownQty": "Not loaded",
+    "ledgerNote": "Quantities come from your stock movement record.",
+    "stockTruncated": "Stock was read for the first {{count}} items. Others show as not loaded.",
+    "catalogPageLimit": "This page shows the first {{count}} products.",
+    "empty": {
+      "title": "Nothing to count yet",
+      "body": "Products you add to your catalogue show up here with their stock."
+    },
+    "noMatches": {
+      "title": "Nothing matches that",
+      "body": "Only the items loaded on this page were searched. Clear the search or pick another view."
+    },
+    "needsCatalog": {
+      "title": "Stock cannot be listed",
+      "body": "Your account can see stock but not the product catalogue, so there is no way to say which item each quantity belongs to."
+    },
+    "error": {
+      "title": "Stock didn't load",
+      "body": "Check your connection and try again."
+    }
+  },
+  "inventoryDetail": {
+    "title": "Stock item",
+    "onHand": "On hand",
+    "units": "units",
+    "negativeNotice": "More was sold than your record says was received. Receive the missing stock or adjust it with a reason.",
+    "zeroNotice": "Nothing left on hand.",
+    "byLocation": "By location",
+    "noLocationRows": "No stock movements recorded for this item yet.",
+    "unassignedLocation": "No location",
+    "unknownLocation": "Location not listed",
+    "variantActive": "Active",
+    "variantArchived": "Archived",
+    "noCatalogAccess": "Your account cannot see catalogue details for this item.",
+    "notFound": {
+      "title": "Item not found",
+      "body": "This item does not exist in your business, or it is no longer available to you."
+    },
+    "error": {
+      "title": "Stock didn't load",
+      "body": "Check your connection and try again."
+    }
+  },
+  "receiveStock": {
+    "action": "Receive stock",
+    "title": "Receive stock",
+    "movementType": "Kind of receipt",
+    "type": {
+      "restock": "Restock",
+      "initial": "Opening stock"
+    },
+    "typeHint": {
+      "restock": "New stock arriving for an item you already sell.",
+      "initial": "The stock you already had when you started recording it."
+    },
+    "quantity": "Quantity received",
+    "quantityHint": "Whole units, more than zero.",
+    "invalidQuantity": "Enter a whole number above zero.",
+    "location": "Where it lands",
+    "noLocation": "No location",
+    "confirm": "Record receipt"
+  },
+  "stockAdjustment": {
+    "action": "Adjust stock",
+    "title": "Manual adjustment",
+    "currentOnHand": "On hand now:",
+    "delta": "Change",
+    "deltaHint": "Use a minus sign to write stock down, for example -3.",
+    "invalidDelta": "Enter a whole number that is not zero.",
+    "resultPreview": "{{delta}} leaves {{result}} on hand.",
+    "reason": "Reason",
+    "reasonHint": "Required. This is kept on the record with your name and the time.",
+    "reasonRequiredNote": "Enter a reason to record this adjustment.",
+    "location": "Which location",
+    "noLocation": "No location",
+    "confirm": "Record adjustment"
+  },
+  "movementHistory": {
+    "title": "Stock movements",
+    "loading": "Loading",
+    "loadMore": "Show older movements",
+    "empty": "No stock movements recorded for this item yet.",
+    "denied": "Your account can see stock but not the movements behind it.",
+    "type": {
+      "initial": "Opening stock",
+      "sale": "Sold",
+      "return": "Returned",
+      "manual_adjustment": "Manual adjustment",
+      "restock": "Stock received"
+    },
+    "error": {
+      "title": "Movements didn't load",
+      "body": "Check your connection and try again."
+    }
   }
 }

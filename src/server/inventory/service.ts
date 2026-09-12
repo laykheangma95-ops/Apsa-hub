@@ -37,6 +37,7 @@ import type {
   InventoryStockRow,
   CreateMovementInput,
   ListMovementsOptions,
+  ListOrgStockOptions,
   InventoryMovementTypeDb,
 } from "./types";
 import { INVENTORY_MOVEMENT_TYPES } from "./types";
@@ -69,6 +70,42 @@ export interface VariantStockDetail {
     quantityOnHand: number;
     lastMovementAt: string | null;
   }>;
+}
+
+/**
+ * One active variant's on-hand quantity, for the org-wide Inventory workspace.
+ *
+ * Carries variant IDENTITY ONLY — no name, no SKU, no price, no cost. Those
+ * belong to the Product domain and are read (and authorized) there. This shape
+ * exists so the Inventory domain stays the single authority on quantity while
+ * the Product domain stays the single authority on what a variant IS.
+ */
+export interface OrgStockEntry {
+  variantId: string;
+  productId: string;
+  /**
+   * Summed across every location, exactly as the ledger says — including a
+   * negative total. 0 here means "the ledger nets to zero for this variant",
+   * which is also the honest answer for a variant with no movements at all.
+   */
+  quantityOnHand: number;
+  lastMovementAt: string | null;
+}
+
+export interface OrgStockList {
+  entries: OrgStockEntry[];
+  /**
+   * True when this organization has more active variants (or more per-location
+   * ledger rows) than this read covered. Never silently dropped: a caller that
+   * renders a quantity for a variant outside `entries` would be inventing it.
+   */
+  truncated: boolean;
+}
+
+export interface InventoryLocationSummary {
+  id: string;
+  name: string;
+  status: string;
 }
 
 // ── Mappers ───────────────────────────────────────────────────────────────────
@@ -270,4 +307,106 @@ export async function listMovementHistory(
 
   const rows = await repo.listMovements(ctx.organizationId, opts);
   return rows.map(mapMovement);
+}
+
+// ── Org-wide stock list (read-side only) ──────────────────────────────────────
+
+/** Default active-variant coverage for one org-wide stock read. */
+export const INVENTORY_STOCK_DEFAULT_LIMIT = 500;
+/** Hard ceiling a caller may ask for. Above this the read reports truncation. */
+export const INVENTORY_STOCK_MAX_LIMIT = 1000;
+
+/**
+ * On-hand quantity for every ACTIVE variant in the caller's organization.
+ *
+ * This is the read the Inventory workspace needs and the only thing added to
+ * this domain for it. It does NOT give the Product domain a stock field, and it
+ * does not give the Inventory domain product names: it answers exactly one
+ * question — "how much of each active variant does the ledger say we hold?"
+ *
+ * Two queries (plus one per extra 100-variant chunk), never one per variant:
+ *   1. which variants are active in this organization (identity only);
+ *   2. their ledger balances from the inventory_stock view.
+ *
+ * A variant with NO movement history is returned with quantityOnHand 0. That is
+ * a deliberate, checked answer rather than an omission: "no movements recorded"
+ * and "nothing on hand" are the same operational fact, and leaving the variant
+ * out would make the workspace look like it does not exist.
+ *
+ * Negative balances are returned exactly as the ledger computed them. Clamping
+ * a negative on-hand figure to zero would hide a real operational problem
+ * (oversold stock) behind a number that looks fine.
+ *
+ * organizationId comes from the AuthorizationContext only — never from input.
+ */
+export async function listOrganizationStock(
+  ctx: AuthorizationContext,
+  opts: ListOrgStockOptions = {},
+): Promise<OrgStockList> {
+  ctx.require("inventory.read");
+
+  const requested = opts.limit ?? INVENTORY_STOCK_DEFAULT_LIMIT;
+  const limit = Math.min(Math.max(1, Math.trunc(requested)), INVENTORY_STOCK_MAX_LIMIT);
+
+  // limit + 1: one row past the page tells us there is more, without a count().
+  const variants = await repo.listActiveVariantsForOrg(ctx.organizationId, limit + 1);
+  const overLimit = variants.length > limit;
+  const page = overLimit ? variants.slice(0, limit) : variants;
+
+  if (page.length === 0) return { entries: [], truncated: false };
+
+  const variantIds = page.map((variant) => variant.id);
+  const { rows, truncated: stockTruncated } = await repo.listStockRowsForVariants(
+    ctx.organizationId,
+    variantIds,
+  );
+
+  // Sum the per-location rows down to one total per variant. The view already
+  // nets each (variant, location) pair; this nets across locations.
+  const totals = new Map<string, { quantity: number; lastMovementAt: string | null }>();
+  for (const row of rows) {
+    const current = totals.get(row.variant_id) ?? { quantity: 0, lastMovementAt: null };
+    current.quantity += row.quantity_on_hand;
+    if (
+      row.last_movement_at !== null &&
+      (current.lastMovementAt === null || row.last_movement_at > current.lastMovementAt)
+    ) {
+      current.lastMovementAt = row.last_movement_at;
+    }
+    totals.set(row.variant_id, current);
+  }
+
+  return {
+    entries: page.map((variant) => {
+      const total = totals.get(variant.id);
+      return {
+        variantId: variant.id,
+        productId: variant.product_id,
+        // No ledger rows at all -> 0, stated rather than implied.
+        quantityOnHand: total?.quantity ?? 0,
+        lastMovementAt: total?.lastMovementAt ?? null,
+      };
+    }),
+    truncated: overLimit || stockTruncated,
+  };
+}
+
+/**
+ * Locations in the caller's organization — id, name, status.
+ *
+ * Read-only and deliberately narrow: Inventory needs a human-readable label for
+ * a per-location stock row and a destination when receiving stock. There is no
+ * Location CRUD here, no migration behind it, and nothing beyond those three
+ * fields is exposed. If a dedicated Locations domain is built later, this
+ * helper is the piece it replaces.
+ *
+ * Gated on inventory.read — the same key that lets a member see stock at all.
+ */
+export async function listInventoryLocations(
+  ctx: AuthorizationContext,
+): Promise<InventoryLocationSummary[]> {
+  ctx.require("inventory.read");
+
+  const rows = await repo.listLocationsForOrg(ctx.organizationId);
+  return rows.map((row) => ({ id: row.id, name: row.name, status: row.status }));
 }
