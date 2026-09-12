@@ -358,6 +358,33 @@ export function variantFieldAccess(
   };
 }
 
+// ── Cost masking (pure) ──────────────────────────────────────────────────────
+
+/**
+ * The cost a variant may show THIS render, gated on the CURRENT capability
+ * state rather than on what the cached `CatalogVariant` happens to carry.
+ *
+ * A cached product/variant fetched while the member held products.view_cost
+ * survives in the React Query cache — keyed only by userId + organizationId —
+ * until the next successful refetch. If that same principal's view_cost is
+ * revoked mid-session, the cache is not purged or re-fetched on its own:
+ * capabilities and catalog data are two independent queries. Every surface
+ * that displays a variant's cost MUST call this helper rather than reading
+ * `variant.cost` directly, so a revoked, denied, pending, errored, or
+ * identity-mismatched capability state masks the value on the very next
+ * render — never waiting on a refetch or an invalidation.
+ *
+ * `canViewCost` must itself already be fail-closed (false in every
+ * CapabilityState other than "ready" — see createCapabilityView), which is
+ * exactly what `capabilities.can("products.view_cost")` gives every caller.
+ */
+export function visibleVariantCost(
+  variant: Pick<CatalogVariant, "cost">,
+  canViewCost: boolean,
+): Money | null {
+  return canViewCost ? variant.cost : null;
+}
+
 // ── Server error classification ──────────────────────────────────────────────
 
 export type CatalogErrorKind =

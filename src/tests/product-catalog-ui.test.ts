@@ -11,6 +11,12 @@
  *      organization reads as not-found and mutates nothing.
  *   D. Cost withholding — the browser never reconstructs a cost the server
  *      withheld, and never sends one it cannot see.
+ *   K. Cost isolation across a sign-out/sign-in into a different member of the
+ *      same organization (cache partitioning by userId+organizationId).
+ *   L. Cost masking for the SAME member of the SAME organization losing
+ *      products.view_cost mid-session — cache partitioning alone cannot catch
+ *      this since the key never changes, so every cost-rendering surface must
+ *      mask through visibleVariantCost() off the CURRENT capability state.
  *   E. Duplicate SKU / barcode — the 409 reaches the merchant as its own
  *      message, not a generic failure.
  *   F. Archive — archive, never delete; confirmation before it happens.
@@ -50,7 +56,9 @@ import {
   productLeadPrice,
   searchLoadedProducts,
   variantFieldAccess,
+  visibleVariantCost,
   type CatalogProduct,
+  type CatalogVariant,
   type VariantPermissions,
 } from "../lib/catalog";
 
@@ -994,9 +1002,180 @@ describe("D. a withheld cost stays withheld", () => {
     );
   });
 
-  it("the detail screen renders a cost only when the server sent one", () => {
-    expect(read(DETAIL_ROUTE)).toContain("{variant.cost ? (");
-    expect(read(DETAIL_ROUTE)).toContain("catalog.detail.costHidden");
+  it("the detail screen renders a cost only when the current capability state allows it", () => {
+    const detail = read(DETAIL_ROUTE);
+    // Rendering goes through the masking helper's result, not the raw field.
+    expect(detail).toContain("visibleVariantCost(variant, canViewCost)");
+    expect(detail).toContain("{cost ? (");
+    expect(detail).not.toContain("{variant.cost ? (");
+    expect(detail).toContain("catalog.detail.costHidden");
+  });
+});
+
+// ── K2. same-principal products.view_cost revocation masks cached cost ────────
+//
+// K covers cost never crossing from one member to another. This covers the
+// blocker an independent review found in that same PR: the SAME member,
+// SAME organization, loses products.view_cost mid-session. Cache partitioning
+// by userId+organizationId does nothing there — the key does not change — so
+// masking must happen at render time, off the CURRENT capability state, not
+// off whatever the cached CatalogVariant happens to still be carrying.
+
+describe("L. same-principal products.view_cost revocation masks cached cost immediately", () => {
+  /** Stands in for a product fetched into the cache while view_cost held. */
+  const cachedVariant: CatalogVariant = {
+    id: "v1",
+    productId: PRODUCT_A,
+    sku: "SKU-1",
+    barcode: null,
+    name: "Regular",
+    price: { amount: 1500, currency: "USD" },
+    cost: { amount: 900, currency: "USD" },
+    weightGrams: null,
+    status: "ACTIVE",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+
+  it("positive control: an authorized member still sees the cached cost", () => {
+    expect(visibleVariantCost(cachedVariant, true)).toEqual({ amount: 900, currency: "USD" });
+
+    const access = variantFieldAccess(
+      {
+        canCreate: true,
+        canUpdateBasic: true,
+        canUpdatePrice: true,
+        canUpdateCost: true,
+        canViewCost: true,
+      },
+      true,
+    );
+    expect(access.costVisible).toBe(true);
+    expect(access.costEditable).toBe(true);
+  });
+
+  it("User A / Org A loses products.view_cost: the cache still holds the real cost, but nothing shows it", () => {
+    // 1. User A loaded this product earlier, while authorized — this IS that
+    //    cached row, unchanged, still carrying the real cost value.
+    expect(cachedVariant.cost).toEqual({ amount: 900, currency: "USD" });
+
+    // 2. Same User A, same Org A, revoked mid-session. No refetch, no
+    //    invalidation, no queryClient interaction at all — only the
+    //    capability snapshot changed.
+    const revoked = createFixtureCapabilityView([
+      "products.read",
+      "products.update_cost",
+      "products.update_basic",
+    ]);
+    const canViewCost = revoked.can("products.view_cost");
+    expect(canViewCost).toBe(false);
+
+    // 3. The cached data is untouched — still the pre-revocation cost. This is
+    //    the exact condition the reviewer flagged: partitioning by user+org
+    //    does not protect against this, because the key never changed.
+    expect(cachedVariant.cost).not.toBeNull();
+
+    // 4. The mandatory masking helper refuses it anyway, purely off the
+    //    current capability — this is what makes rendering safe on the very
+    //    next paint rather than after a round trip.
+    expect(visibleVariantCost(cachedVariant, canViewCost)).toBeNull();
+
+    // 5. And no cost-edit affordance survives either, even though this member
+    //    still holds products.update_cost AND products.update_basic — cost
+    //    editing requires view_cost too (requirement: view_cost && update_cost
+    //    && update_basic), so losing view_cost alone is enough to close it.
+    const access = variantFieldAccess(
+      {
+        canCreate: true,
+        canUpdateBasic: true,
+        canUpdatePrice: true,
+        canUpdateCost: true,
+        canViewCost,
+      },
+      true,
+    );
+    expect(access.costVisible).toBe(false);
+    expect(access.costEditable).toBe(false);
+  });
+
+  it("fails closed for pending, denied, and identity-mismatched capability states too", () => {
+    // Still resolving.
+    expect(
+      visibleVariantCost(cachedVariant, UNRESOLVED_CAPABILITIES.can("products.view_cost")),
+    ).toBeNull();
+
+    // Resolved but no usable membership (e.g. removed from the org).
+    const deniedView = createCapabilityView({
+      result: { status: "no_membership" },
+      isPending: false,
+      isError: false,
+      expectedUserId: USER_A,
+      expectedOrganizationId: ORG_A,
+    });
+    expect(visibleVariantCost(cachedVariant, deniedView.can("products.view_cost"))).toBeNull();
+
+    // A snapshot that resolved to a DIFFERENT organization than the route
+    // context expects — mid organization-switch, or a stale response race.
+    // Even though it carries products.view_cost, the identity mismatch alone
+    // must deny everything.
+    const mismatched = createCapabilityView({
+      result: {
+        status: "active",
+        userId: USER_A,
+        organizationId: ORG_B,
+        role: "OWNER",
+        permissions: ["products.read", "products.view_cost"],
+      },
+      isPending: false,
+      isError: false,
+      expectedUserId: USER_A,
+      expectedOrganizationId: ORG_A,
+    });
+    expect(mismatched.state).toBe("denied");
+    expect(visibleVariantCost(cachedVariant, mismatched.can("products.view_cost"))).toBeNull();
+  });
+
+  it("every cost-rendering surface routes through visibleVariantCost — none reads variant.cost directly", () => {
+    const detail = read(DETAIL_ROUTE);
+    const sheet = read("src/components/products/VariantSheet.tsx");
+    const list = read(LIST_ROUTE);
+    const createSheet = read("src/components/products/CreateProductSheet.tsx");
+
+    // Product detail's variant rows.
+    expect(detail).toContain("visibleVariantCost(variant, canViewCost)");
+    expect(detail).not.toContain("{variant.cost ? (");
+    expect(detail).not.toContain("formatMoney(variant.cost)");
+
+    // The edit sheet's form state (seeded from a variant, potentially cached).
+    expect(sheet).toContain("visibleVariantCost(variant, canViewCost)");
+    expect(sheet).not.toContain("variant.cost.amount");
+    expect(sheet).not.toContain("variant.cost?.currency");
+    expect(sheet).not.toContain("variant.cost ?");
+
+    // The product list/card surface shows a lead price only — it has no cost
+    // to mask because it never reads one.
+    expect(list).not.toMatch(/\.cost\b/);
+
+    // Product creation never seeds from a cached variant at all — its cost
+    // field is always a blank input, never read off a `variant` object — so
+    // there is nothing there to mask. (Translation keys like
+    // "catalog.variant.cost" legitimately contain the substring "variant.cost",
+    // so this checks for an actual property access, not just the text.)
+    expect(createSheet).not.toContain("variant.cost.amount");
+    expect(createSheet).not.toContain("variant.cost?.currency");
+    expect(createSheet).not.toContain("variant.cost ?");
+  });
+
+  it("the row-level gate is the live per-render capability, not a value captured once", () => {
+    // VariantRow receives canViewCost as an explicit prop recomputed on every
+    // render of ProductDetailScreen from the live capabilities hook — not
+    // read off the cached variant — so a capability change taking effect on
+    // the very next render (no fetch required) changes what the row draws.
+    const detail = read(DETAIL_ROUTE);
+    expect(detail).toContain("canViewCost={canViewCost}");
+    expect(detail).toMatch(
+      /canViewCost\s*=\s*identityOk\s*&&\s*capabilities\.can\("products\.view_cost"\)/,
+    );
   });
 });
 

@@ -13,6 +13,7 @@ import {
   parseMinorUnits,
   updateCatalogVariant,
   variantFieldAccess,
+  visibleVariantCost,
   type CatalogVariant,
   type VariantPermissions,
 } from "@/lib/catalog";
@@ -52,20 +53,21 @@ function emptyForm(): FormState {
   };
 }
 
-function formFor(variant: CatalogVariant): FormState {
+function formFor(variant: CatalogVariant, canViewCost: boolean): FormState {
+  // Masked through visibleVariantCost — never read variant.cost directly —
+  // so a revoked products.view_cost keeps a stale cached cost out of form
+  // state entirely, not just out of what's rendered. The form then shows an
+  // empty, locked cost and sends no cost field at all — a withheld value is
+  // never reconstructed, defaulted to zero, or echoed back as a change.
+  const cost = visibleVariantCost(variant, canViewCost);
   return {
     name: variant.name,
     sku: variant.sku ?? "",
     barcode: variant.barcode ?? "",
     priceText: formatMinorUnitsForInput(variant.price.amount, variant.price.currency),
     priceCurrency: variant.price.currency,
-    // cost is null whenever the server withheld it. The form then shows an
-    // empty, locked cost and sends no cost field at all — a withheld value is
-    // never reconstructed, defaulted to zero, or echoed back as a change.
-    costText: variant.cost
-      ? formatMinorUnitsForInput(variant.cost.amount, variant.cost.currency)
-      : "",
-    costCurrency: variant.cost?.currency ?? variant.price.currency,
+    costText: cost ? formatMinorUnitsForInput(cost.amount, cost.currency) : "",
+    costCurrency: cost?.currency ?? variant.price.currency,
     weight: variant.weightGrams === null ? "" : String(variant.weightGrams),
   };
 }
@@ -88,7 +90,9 @@ export function VariantSheet({
 }: VariantSheetProps) {
   const { t } = useTranslation();
   const isEdit = variant !== undefined;
-  const [form, setForm] = useState<FormState>(() => (variant ? formFor(variant) : emptyForm()));
+  const [form, setForm] = useState<FormState>(() =>
+    variant ? formFor(variant, permissions.canViewCost) : emptyForm(),
+  );
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{
@@ -98,13 +102,16 @@ export function VariantSheet({
   }>({});
 
   // Re-seed when the sheet opens on a different variant, so an edit never
-  // starts from the previous row's values.
+  // starts from the previous row's values. Also re-seeds on a mid-session
+  // products.view_cost change, so a sheet left open across a revocation
+  // strips any already-loaded cost out of form state immediately rather
+  // than leaving it to be masked only by the costVisible render-gate below.
   useEffect(() => {
     if (!open) return;
-    setForm(variant ? formFor(variant) : emptyForm());
+    setForm(variant ? formFor(variant, permissions.canViewCost) : emptyForm());
     setFormError(null);
     setFieldErrors({});
-  }, [open, variant]);
+  }, [open, variant, permissions.canViewCost]);
 
   /*
    * One pure decision, shared with the tests: which fields this form offers.

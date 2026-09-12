@@ -49,6 +49,7 @@ import {
   listCatalogCategories,
   updateCatalogProduct,
   updateCatalogVariant,
+  visibleVariantCost,
   type CatalogProduct,
   type CatalogVariant,
 } from "@/lib/catalog";
@@ -68,6 +69,7 @@ type VariantFilter = "ACTIVE" | "ARCHIVED";
 
 function VariantRow({
   variant,
+  canViewCost,
   canEdit,
   canArchive,
   busy,
@@ -75,6 +77,13 @@ function VariantRow({
   onToggleStatus,
 }: {
   variant: CatalogVariant;
+  /**
+   * The CURRENT capability, not a property of the cached variant. Passed
+   * through rather than read off `variant.cost` directly so a revoked
+   * products.view_cost masks the row immediately — see visibleVariantCost
+   * in src/lib/catalog.ts.
+   */
+  canViewCost: boolean;
   canEdit: boolean;
   canArchive: boolean;
   busy: boolean;
@@ -83,6 +92,7 @@ function VariantRow({
 }) {
   const { t } = useTranslation();
   const archived = variant.status === "ARCHIVED";
+  const cost = visibleVariantCost(variant, canViewCost);
 
   return (
     <li className="flex min-w-0 flex-col gap-1.5 py-3 first:pt-0 last:pb-0">
@@ -112,12 +122,14 @@ function VariantRow({
           </span>
         ) : null}
         {/*
-         * cost is null both when there is no cost recorded and when the server
-         * withheld it. Either way the browser has no number, so it shows none.
+         * `cost` is already masked by visibleVariantCost above: null both when
+         * there is no cost recorded, when the server withheld it, and when
+         * this row's cached data predates a since-revoked products.view_cost.
+         * Never read `variant.cost` directly here.
          */}
-        {variant.cost ? (
+        {cost ? (
           <span className="text-caption tnum text-text-secondary">
-            {t("catalog.variant.cost")}: {formatMoney(variant.cost)}
+            {t("catalog.variant.cost")}: {formatMoney(cost)}
           </span>
         ) : null}
         {archived ? (
@@ -495,6 +507,7 @@ function ProductDetailScreen() {
                       <VariantRow
                         key={variant.id}
                         variant={variant}
+                        canViewCost={canViewCost}
                         // Cost is never independently editable — editing it
                         // also requires products.update_basic (see
                         // variantFieldAccess in src/lib/catalog.ts) — so the
