@@ -25,6 +25,13 @@
  * below are also proven against real Chromium driving the real component, in
  * src/tests/bottom-sheet-focus-trap.browser.ts, spawned at the end of this file.
  *
+ * That split is why effective disabled state is no longer computed here at all.
+ * Nested `<fieldset disabled>`s made the derived version wrong — a control in
+ * an inner fieldset's first `<legend>` is still disabled by an outer one — so
+ * the trap asks the platform (`:disabled`) and these tests pin that it obeys
+ * the answer. What the answer *is* for each DOM shape is Chromium's to say, and
+ * the browser suite says it.
+ *
  * Run: bun test src/tests/bottom-sheet-focus-trap.test.ts
  */
 import { describe, it, expect } from "bun:test";
@@ -61,11 +68,22 @@ interface CandidateOpts {
   ancestors?: readonly string[];
   /** Computed visibility. Omitted means "no window" — see `isVisible`. */
   visibility?: string;
+  /**
+   * What the browser answers for `:disabled` on this element.
+   *
+   * Stated per case rather than derived, on purpose. Effective disabled state
+   * is the platform's computation now — the trap asks `:disabled` instead of
+   * re-deriving the nested-fieldset rule from ancestor selectors, which is the
+   * defect this file covers — so the honest unit contract is "the trap obeys
+   * the platform's verdict". Every value below is Chromium's own answer for
+   * that DOM shape, taken from the fixture the browser suite drives.
+   */
+  platformDisabled?: boolean;
 }
 
 /**
  * A stubbed element exposing exactly the slice `isTrapFocusable` reads.
- * Rendered, visible and attribute-free unless the test says otherwise.
+ * Rendered, visible, enabled and attribute-free unless the test says otherwise.
  */
 function candidate(
   tagName: string,
@@ -76,7 +94,7 @@ function candidate(
   if (opts.hiddenAncestor) ancestors.add(HIDDEN_ANCESTOR);
   return {
     tagName,
-    hasAttribute: (name) => name in attrs,
+    matches: (selectors) => selectors === ":disabled" && (opts.platformDisabled ?? false),
     getAttribute: (name) => attrs[name] ?? null,
     closest: (selectors) => (ancestors.has(selectors) ? {} : null),
     getClientRects: () => ({ length: opts.rects ?? 1 }),
@@ -179,7 +197,9 @@ describe("isTrapFocusable — what counts as a tab stop", () => {
   });
 
   it("rejects a disabled control, so a saving sheet's spinner button is skipped", () => {
-    expect(isTrapFocusable(candidate("BUTTON", { disabled: "" }))).toBe(false);
+    expect(isTrapFocusable(candidate("BUTTON", { disabled: "" }, { platformDisabled: true }))).toBe(
+      false,
+    );
   });
 
   /*
@@ -241,7 +261,7 @@ describe("isTrapFocusable — controls the browser will not actually focus", () 
   });
 
   it("rejects a control disabled only by an ancestor fieldset", () => {
-    const inFieldset = { ancestors: [DISABLED_FIELDSET] };
+    const inFieldset = { ancestors: [DISABLED_FIELDSET], platformDisabled: true };
     expect(isTrapFocusable(candidate("INPUT", { type: "text" }, inFieldset))).toBe(false);
     expect(isTrapFocusable(candidate("BUTTON", {}, inFieldset))).toBe(false);
     expect(isTrapFocusable(candidate("SELECT", {}, inFieldset))).toBe(false);
@@ -249,7 +269,7 @@ describe("isTrapFocusable — controls the browser will not actually focus", () 
   });
 
   it("keeps a control in the disabled fieldset's first legend, which HTML leaves enabled", () => {
-    const inLegend = { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND] };
+    const inLegend = { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND], platformDisabled: false };
     expect(isTrapFocusable(candidate("BUTTON", {}, inLegend))).toBe(true);
   });
 
@@ -264,6 +284,13 @@ describe("isTrapFocusable — controls the browser will not actually focus", () 
   it("ignores a `disabled` attribute on an element HTML cannot disable", () => {
     expect(isTrapFocusable(candidate("DIV", { disabled: "", tabindex: "0" }))).toBe(true);
     expect(isTrapFocusable(candidate("A", { href: "/x", disabled: "" }))).toBe(true);
+    // Even a selector engine that answered `:disabled` for one of these must
+    // not cost a merchant the control: the tag guard runs first.
+    expect(
+      isTrapFocusable(
+        candidate("DIV", { disabled: "", tabindex: "0" }, { platformDisabled: true }),
+      ),
+    ).toBe(true);
   });
 
   it("keeps a fixed-position control, the classic false negative", () => {
@@ -278,6 +305,100 @@ describe("isTrapFocusable — controls the browser will not actually focus", () 
   });
 });
 
+/*
+ * The nested-fieldset defect.
+ *
+ * HTML's rule is not "the nearest disabled fieldset decides". A control is
+ * disabled if *any* ancestor `<fieldset disabled>` reaches it, and a fieldset
+ * fails to reach only the descendants of its own first `<legend>`. The old
+ * check asked `closest()` two questions — "is a disabled fieldset above me?"
+ * and "is a first legend above me?" — which conflated the legends of different
+ * fieldsets and cleared controls an outer fieldset still disables. Chromium
+ * reports those as `:disabled` and refuses `.focus()`, so the trap nominated a
+ * tab stop focus could not move to and Tab stalled on the control before it.
+ *
+ * So the rule is no longer derived: `isDisabledControl` asks the platform.
+ * These cases pin that contract — the trap follows `:disabled`, whatever the
+ * ancestor shape looks like. That the platform's answers below are the real
+ * ones is proven in Chromium, against the same DOM, in
+ * bottom-sheet-focus-trap.browser.ts.
+ */
+describe("isTrapFocusable — nested disabled fieldsets", () => {
+  /** The shape that fooled the old rule: in a first legend, still disabled. */
+  const NESTED_LEGEND = { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND] };
+
+  it("rejects a first-legend control an outer disabled fieldset still reaches", () => {
+    // <fieldset disabled><fieldset disabled><legend><button>: shielded from
+    // the inner fieldset only. Chromium: :disabled, and .focus() is a no-op.
+    expect(
+      isTrapFocusable(candidate("BUTTON", {}, { ...NESTED_LEGEND, platformDisabled: true })),
+    ).toBe(false);
+    expect(
+      isTrapFocusable(
+        candidate("INPUT", { type: "text" }, { ...NESTED_LEGEND, platformDisabled: true }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a first-legend control no fieldset reaches, ancestor shape notwithstanding", () => {
+    // The same two ancestor selectors match here — a disabled fieldset nested
+    // inside the outer one's own first legend — and this one Chromium does
+    // focus. Dropping it would strand a merchant just as surely.
+    expect(
+      isTrapFocusable(candidate("BUTTON", {}, { ...NESTED_LEGEND, platformDisabled: false })),
+    ).toBe(true);
+  });
+
+  it("rejects a control inside a nested fieldset the outer one cannot reach", () => {
+    // #deep-fs-input: outside the outer fieldset's reach, inside its own
+    // fieldset's. The old rule found a first legend above it and cleared it.
+    expect(
+      isTrapFocusable(
+        candidate("INPUT", { type: "text" }, { ...NESTED_LEGEND, platformDisabled: true }),
+      ),
+    ).toBe(false);
+  });
+
+  /*
+   * The structural half of the fix: the incomplete derivation is gone, not
+   * merely outvoted. If the ancestor selectors came back, two elements with
+   * identical `closest()` answers could no longer disagree — which is exactly
+   * what the two cases above require.
+   */
+  it("no longer decides disabled-ness from ancestor selectors at all", () => {
+    const asked: string[] = [];
+    const probe: TrapCandidate = {
+      ...candidate("BUTTON"),
+      closest: (selectors) => {
+        asked.push(selectors);
+        return null;
+      },
+    };
+    isTrapFocusable(probe);
+    expect(asked).not.toContain(DISABLED_FIELDSET);
+    expect(asked).not.toContain(FIRST_LEGEND);
+    // The one ancestor question the trap still owns is unrelated to disabling.
+    expect(asked).toContain(HIDDEN_ANCESTOR);
+  });
+
+  it("asks the platform exactly `:disabled`, and only of disableable tags", () => {
+    const asked: string[] = [];
+    const probe = (tagName: string): TrapCandidate => ({
+      ...candidate(tagName, { href: "/x" }),
+      matches: (selectors) => {
+        asked.push(selectors);
+        return false;
+      },
+    });
+    isTrapFocusable(probe("BUTTON"));
+    expect(asked).toEqual([":disabled"]);
+    // An <a> is not disableable, so the question is never put.
+    asked.length = 0;
+    isTrapFocusable(probe("A"));
+    expect(asked).toEqual([]);
+  });
+});
+
 describe("collectTrapFocusables — nested and empty sheet content", () => {
   it("keeps document order for deeply nested content and drops non-stops", () => {
     const nameField = candidate("INPUT", { type: "text" });
@@ -288,10 +409,23 @@ describe("collectTrapFocusables — nested and empty sheet content", () => {
       { type: "text" },
       {
         ancestors: [DISABLED_FIELDSET],
+        platformDisabled: true,
       },
     );
-    const legendToggle = candidate("BUTTON", {}, { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND] });
-    const disabledSave = candidate("BUTTON", { disabled: "" });
+    const legendToggle = candidate(
+      "BUTTON",
+      {},
+      { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND], platformDisabled: false },
+    );
+    // Same ancestor shape as `legendToggle`, opposite platform verdict: a
+    // first legend an outer disabled fieldset still reaches. The old rule put
+    // this in the list, and Tab then stalled on `legendToggle` for good.
+    const nestedLegendToggle = candidate(
+      "BUTTON",
+      {},
+      { ancestors: [DISABLED_FIELDSET, FIRST_LEGEND], platformDisabled: true },
+    );
+    const disabledSave = candidate("BUTTON", { disabled: "" }, { platformDisabled: true });
     const save = candidate("BUTTON");
     const panel = {
       // querySelectorAll is depth-first, so this is the order a panel with a
@@ -301,6 +435,7 @@ describe("collectTrapFocusables — nested and empty sheet content", () => {
         hidden,
         invisible,
         legendToggle,
+        nestedLegendToggle,
         inDisabledFieldset,
         disabledSave,
         save,
@@ -432,13 +567,19 @@ describe("browser regression coverage exists for this exact bug", () => {
     expect(fixture).toContain('visibility: "hidden"');
     expect(fixture).toContain("<fieldset disabled>");
     expect(browserSuite).toContain("Input.dispatchKeyEvent");
+    // The page must be the foreground one, or the browser delivers no focus
+    // events and the containment half of the suite stops covering anything.
+    expect(browserSuite).toContain('send("Page.bringToFront")');
   });
 
   it("covers every case the regression calls for", () => {
     for (const proof of [
+      "drives an activated page, so real focus events are delivered",
       "counts exactly the controls Chromium will actually focus",
       "skips a visibility:hidden candidate",
       "skips descendants of <fieldset disabled>",
+      "skips a first-legend control an outer disabled fieldset still reaches",
+      "tabs past nested disabled fieldsets instead of stalling",
       "advances Tab through every valid control and wraps",
       "walks Shift+Tab back through the same controls without stalling",
       "never lets Tab reach the page behind the sheet",

@@ -7,10 +7,13 @@
  * `visibility: hidden` control and a control inside `<fieldset disabled>` both
  * look focusable to a stub — they match the selector, they have client rects,
  * and neither carries a `disabled` attribute — yet `.focus()` on either is a
- * no-op. Because the sheet prevents every Tab, a candidate the browser refuses
- * to focus does not get skipped: focus stays put and the merchant is stranded
- * on the previous control. Reproduced before the fix as Tab, Tab, Tab all
- * leaving focus on #before.
+ * no-op. Nested fieldsets are the same question one level harder: whether a
+ * first-`<legend>` control is disabled depends on which fieldset reaches it,
+ * and only the browser answers that for free. Because the sheet prevents every
+ * Tab, a candidate the browser refuses to focus does not get skipped: focus
+ * stays put and the merchant is stranded on the previous control. Reproduced
+ * before the fix as Tab, Tab, Tab all leaving focus on #before, and as Tab
+ * stalling on #deep-legend-btn once nested fieldsets were in the fixture.
  *
  * So this file drives real Chromium over the DevTools protocol against the real
  * <BottomSheet>: real handlers, real layout, real computed style, real key
@@ -151,6 +154,20 @@ async function startSession(browser: string): Promise<Session> {
 
   await send("Page.enable");
   await send("Runtime.enable");
+  // Activate the tab before anything here asserts on focus.
+  //
+  // The target opened through /json/new is not the foreground page — Chromium
+  // launches with its own new-tab page in front of it — and in an unfocused
+  // document `.focus()` still moves `document.activeElement` while firing no
+  // focus/focusin event at all. The sheet's containment *is* a `focusin`
+  // listener, so without this the suite was driving a page where that listener
+  // never ran: focusing #background left focus on #background and the
+  // assertion read `background` where it expected `dialog`. The whole file
+  // still passed, because dispatching real key events activates the target as
+  // a side effect — so the earlier Tab tests happened to switch it on for the
+  // ones after them. That is a pass that depends on test order, not on the
+  // behaviour under test.
+  await send("Page.bringToFront");
 
   async function evaluate<T>(expression: string): Promise<T> {
     const reply = (await send("Runtime.evaluate", {
@@ -190,6 +207,9 @@ async function startSession(browser: string): Promise<Session> {
   return {
     async open(query: string) {
       await send("Page.navigate", { url: `${server.url.origin}/${query}` });
+      // Re-asserted per load so no single test depends on activation
+      // surviving a navigation, or on having run after another one.
+      await send("Page.bringToFront");
       for (let attempt = 0; attempt < 200; attempt++) {
         await Bun.sleep(25);
         if (await evaluate<boolean>("!!document.getElementById('trigger')")) return;
@@ -269,6 +289,21 @@ describeBrowser("BottomSheet focus trap — real Chromium", () => {
     await page?.close();
   });
 
+  /*
+   * The guard for the harness itself. Every assertion below is about where
+   * focus goes, and in an unfocused document the browser delivers no focus
+   * events — so a suite that forgot to activate its page would still report
+   * green on the parts that only read `activeElement`, and silently stop
+   * covering the `focusin` containment. Asserted first, and per fixture load,
+   * so the harness fails loudly rather than degrading into a weaker test.
+   */
+  it("drives an activated page, so real focus events are delivered", async () => {
+    await openSheet();
+    expect(await page.evaluate<boolean>("document.hasFocus()")).toBe(true);
+    await openSheet("?empty=1");
+    expect(await page.evaluate<boolean>("document.hasFocus()")).toBe(true);
+  }, 60000);
+
   it("counts exactly the controls Chromium will actually focus", async () => {
     await openSheet();
     const reachable = await page.evaluate<string[]>(BROWSER_TRUTH);
@@ -276,7 +311,15 @@ describeBrowser("BottomSheet focus trap — real Chromium", () => {
 
     // The rule is checked against the platform, not against our own stubs.
     expect(stops).toEqual(reachable);
-    expect(stops).toEqual(["name", "before", "legend-btn", "after", "fixed", "save"]);
+    expect(stops).toEqual([
+      "name",
+      "before",
+      "legend-btn",
+      "deep-legend-btn",
+      "after",
+      "fixed",
+      "save",
+    ]);
   }, 60000);
 
   it("skips a visibility:hidden candidate instead of stalling on the control before it", async () => {
@@ -303,20 +346,103 @@ describeBrowser("BottomSheet focus trap — real Chromium", () => {
     expect(stops).toContain("legend-btn");
   }, 60000);
 
+  /*
+   * The nested-fieldset defect, against the platform rather than our reading
+   * of it. Both ids below sit in the first <legend> of *some* disabled
+   * fieldset, which is all the old rule looked for; Chromium disables one and
+   * not the other, purely on which fieldset reaches it.
+   */
+  it("skips a first-legend control an outer disabled fieldset still reaches", async () => {
+    await openSheet();
+    const stops = await page.evaluate<string[]>("window.apsaTrapStops()");
+
+    // Chromium's own verdict, stated before ours, so this test fails on the
+    // platform's terms if the DOM shape ever stops being the one described.
+    const platform = await page.evaluate<Record<string, boolean>>(`(() => {
+      const verdict = {};
+      for (const id of ['legend-btn', 'deep-legend-btn', 'deep-fs-input',
+                        'nested-legend-btn', 'nested-fs-input']) {
+        verdict[id] = document.getElementById(id).matches(':disabled');
+      }
+      return verdict;
+    })()`);
+    expect(platform).toEqual({
+      "legend-btn": false,
+      "deep-legend-btn": false,
+      "deep-fs-input": true,
+      "nested-legend-btn": true,
+      "nested-fs-input": true,
+    });
+
+    // The two the old nearest-fieldset rule wrongly cleared.
+    expect(stops).not.toContain("nested-legend-btn");
+    expect(stops).not.toContain("deep-fs-input");
+    // Neither carries a `disabled` attribute of its own, and both really do
+    // sit under a first <legend> of a disabled fieldset — the exact shape.
+    expect(
+      await page.evaluate<boolean>(
+        "document.getElementById('nested-legend-btn').hasAttribute('disabled')",
+      ),
+    ).toBe(false);
+    expect(
+      await page.evaluate<boolean>(
+        "!!document.getElementById('nested-legend-btn').closest('fieldset[disabled] > legend:first-of-type')",
+      ),
+    ).toBe(true);
+    // Over-excluding is the other way to strand a merchant: the genuinely
+    // enabled nested legend control stays in the cycle.
+    expect(stops).toContain("deep-legend-btn");
+    expect(stops).not.toContain("nested-fs-input");
+  }, 60000);
+
+  /*
+   * The consequence, as a merchant meets it. Tab must step from #legend-btn
+   * over every disabled nested control to #deep-legend-btn and on to #after,
+   * never repeating an id — a repeat is the stuck-focus signature.
+   */
+  it("tabs past nested disabled fieldsets instead of stalling on the control before them", async () => {
+    await openSheet();
+    await page.evaluate("document.getElementById('legend-btn').focus()");
+    expect(await page.tab()).toBe("deep-legend-btn");
+    expect(await page.tab()).toBe("after");
+    // …and back out again, so neither direction dead-ends in the fieldsets.
+    expect(await page.tab(true)).toBe("deep-legend-btn");
+    expect(await page.tab(true)).toBe("legend-btn");
+  }, 60000);
+
   it("advances Tab through every valid control and wraps, visiting each once", async () => {
     await openSheet();
     const visited: string[] = [];
-    for (let press = 0; press < 7; press++) visited.push(await page.tab());
-    expect(visited).toEqual(["name", "before", "legend-btn", "after", "fixed", "save", "name"]);
+    for (let press = 0; press < 8; press++) visited.push(await page.tab());
+    expect(visited).toEqual([
+      "name",
+      "before",
+      "legend-btn",
+      "deep-legend-btn",
+      "after",
+      "fixed",
+      "save",
+      "name",
+    ]);
     // The stuck-focus signature: the same id twice in a row.
-    expect(visited.slice(0, 6)).toEqual([...new Set(visited.slice(0, 6))]);
+    expect(visited.slice(0, 7)).toEqual([...new Set(visited.slice(0, 7))]);
   }, 60000);
 
   it("walks Shift+Tab back through the same controls without stalling", async () => {
     await openSheet();
     const visited: string[] = [];
-    for (let press = 0; press < 7; press++) visited.push(await page.tab(true));
-    expect(visited).toEqual(["save", "fixed", "after", "legend-btn", "before", "name", "save"]);
+    for (let press = 0; press < 8; press++) visited.push(await page.tab(true));
+    expect(visited).toEqual([
+      "save",
+      "fixed",
+      "after",
+      "deep-legend-btn",
+      "legend-btn",
+      "before",
+      "name",
+      "save",
+    ]);
+    expect(visited.slice(0, 7)).toEqual([...new Set(visited.slice(0, 7))]);
   }, 60000);
 
   it("never lets Tab reach the page behind the sheet", async () => {

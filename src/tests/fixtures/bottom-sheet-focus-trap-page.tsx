@@ -13,6 +13,16 @@
  *   #before      ordinary control; the one focus got stuck on
  *   #invisible   visibility: hidden — laid out, has client rects, unfocusable
  *   #legend-btn  in the first <legend> of a disabled fieldset — still focusable
+ *   #deep-legend-btn   first legend of a disabled fieldset that itself sits
+ *                inside the outer fieldset's first legend — reached by neither,
+ *                so still focusable
+ *   #deep-fs-input     inside that same nested fieldset but outside its legend
+ *                — disabled by it, even though the outer one cannot reach it
+ *   #nested-legend-btn first legend of a disabled fieldset nested *outside* the
+ *                outer legend — the outer fieldset still reaches it, so HTML
+ *                and Chromium both call it disabled. The old nearest-fieldset
+ *                rule cleared it and stranded focus on the control before it.
+ *   #nested-fs-input   likewise, by both fieldsets
  *   #fs-input    inside <fieldset disabled> — unfocusable, and carries no
  *                `disabled` attribute of its own
  *   #fs-btn      likewise
@@ -94,7 +104,31 @@ export function Fixture({ empty }: { empty: boolean }) {
                 <button id="legend-btn" type="button">
                   Legend
                 </button>
+                {/* Nested inside the outer fieldset's OWN first legend, so the
+                    outer fieldset does not reach it and its own first legend
+                    is enabled — while its other controls are not. */}
+                <fieldset disabled>
+                  <legend>
+                    <button id="deep-legend-btn" type="button">
+                      Deep legend
+                    </button>
+                  </legend>
+                  <input id="deep-fs-input" type="text" />
+                </fieldset>
               </legend>
+              {/* The P2 defect. #nested-legend-btn is the first legend of this
+                  inner disabled fieldset, so the old "is there a first legend
+                  above me?" rule cleared it — but it is also an ordinary
+                  descendant of the OUTER disabled fieldset, which still
+                  reaches it. Chromium reports it :disabled and refuses focus. */}
+              <fieldset disabled>
+                <legend>
+                  <button id="nested-legend-btn" type="button">
+                    Nested legend
+                  </button>
+                </legend>
+                <input id="nested-fs-input" type="text" />
+              </fieldset>
               <input id="fs-input" type="text" />
               <button id="fs-btn" type="button">
                 Fieldset

@@ -17,7 +17,13 @@
  */
 export interface TrapCandidate {
   readonly tagName: string;
-  hasAttribute(name: string): boolean;
+  /**
+   * The platform's own selector match. The trap asks it exactly one question —
+   * `:disabled` — because effective disabled state is a whole-ancestry
+   * computation the browser already performs, and re-deriving it is what
+   * shipped a wrong answer. See `isDisabledControl`.
+   */
+  matches(selectors: string): boolean;
   getAttribute(name: string): string | null;
   closest(selectors: string): unknown;
   getClientRects(): { readonly length: number };
@@ -71,22 +77,40 @@ export const TRAP_FOCUSABLE_SELECTOR = [
 const DISABLEABLE = /^(BUTTON|INPUT|SELECT|TEXTAREA|FIELDSET|OPTGROUP|OPTION)$/;
 
 /**
- * Whether a form control is disabled — by its own attribute or by an ancestor.
+ * Whether a form control is *effectively* disabled — by its own attribute, or
+ * by any ancestor `<fieldset disabled>` that reaches it.
  *
- * `<fieldset disabled>` disables every form control inside it without writing
- * `disabled` on any of them, so an attribute-only check called those controls
- * focusable. The exception HTML carves out is the fieldset's first `<legend>`:
- * controls in there stay enabled (the "switch this section on" pattern), so
- * they must stay in the cycle.
+ * Delegated to `:disabled` rather than derived, because deriving it is exactly
+ * where this trap got it wrong. HTML's rule is not "the nearest disabled
+ * fieldset decides": a control is disabled if *any* ancestor
+ * `<fieldset disabled>` reaches it, and a fieldset fails to reach only the
+ * descendants of its own first `<legend>` child. Reading that off `closest()`
+ * — nearest disabled fieldset, then "is a first legend anywhere above me?" —
+ * cleared controls an *outer* fieldset still disables:
  *
- * `closest` returns the *nearest* match, so `fieldset` below is the innermost
- * disabled fieldset and the legend test is resolved against that same one.
+ *     <fieldset disabled>              // outer: reaches everything below
+ *       <fieldset disabled>
+ *         <legend><button></legend>    // shielded from the inner fieldset
+ *                                      // only — the outer one still applies
+ *
+ * Chromium reports that button as `:disabled` and refuses to focus it, so the
+ * old rule nominated a tab stop `.focus()` cannot move to. Tab is prevented
+ * unconditionally while the sheet is open, so that is not a harmless extra
+ * entry: focus stayed on the control before it however many times a merchant
+ * pressed Tab. The same shape strands focus the other way round, on a control
+ * inside a disabled fieldset nested *within* an outer fieldset's first legend.
+ *
+ * `:disabled` is the browser's own answer to that whole computation — nesting
+ * and the legend exception included — so the trap's verdict cannot drift from
+ * what `.focus()` will actually do.
+ *
+ * The tag guard stays in front of it: `:disabled` is asked only of elements
+ * HTML can genuinely disable, so a decorative `disabled` attribute on a
+ * `<div>` or an `<a href>` never removes a control a merchant can still reach.
  */
 function isDisabledControl(element: TrapCandidate): boolean {
   if (!DISABLEABLE.test(element.tagName)) return false;
-  if (element.hasAttribute("disabled")) return true;
-  if (element.closest("fieldset[disabled]") === null) return false;
-  return element.closest("fieldset[disabled] > legend:first-of-type") === null;
+  return element.matches(":disabled");
 }
 
 /**
@@ -119,8 +143,9 @@ function isVisible(element: TrapCandidate): boolean {
  * is why the checks below track the platform's own rules rather than a
  * shorthand for them.
  *
- * Rejects, in order: controls disabled directly or by an ancestor
- * `<fieldset disabled>`, anything opted out with a negative tabindex, hidden
+ * Rejects, in order: controls the browser itself reports as `:disabled` (their
+ * own attribute, or any ancestor `<fieldset disabled>` — however deeply nested
+ * — that reaches them), anything opted out with a negative tabindex, hidden
  * inputs, subtrees hidden from assistive tech or made inert, anything the
  * browser is not laying out (`display: none`, a collapsed `<details>`), and
  * anything laid out but not painted (`visibility: hidden`). An element scrolled
