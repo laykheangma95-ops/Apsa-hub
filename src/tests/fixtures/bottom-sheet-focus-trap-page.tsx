@@ -46,7 +46,10 @@ window.apsaTrapStops = () => {
   return panel ? collectTrapFocusables(panel).map((element) => element.id) : [];
 };
 
-function Fixture({ empty }: { empty: boolean }) {
+// Exported so this fixture is a module with a component export rather than a
+// component-only side-effect script; the mount below is still what the
+// browser test loads.
+export function Fixture({ empty }: { empty: boolean }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
 
