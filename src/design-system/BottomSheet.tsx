@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { collectTrapFocusables, nextTrapFocus } from "@/design-system/focus-trap";
 import { cn } from "@/lib/utils";
 
 export type SheetSnap = "peek" | "half" | "full";
@@ -51,62 +52,111 @@ export function BottomSheet({
 }: BottomSheetProps) {
   const { t } = useTranslation();
   const panelRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
   const reduceMotion = useReducedMotion();
   const titleId = useId();
   const descriptionId = useId();
 
+  /*
+   * The sheet's open/close work runs once per open, not once per render.
+   *
+   * Consumers routinely pass an inline `onOpenChange` (CreateProductSheet wraps
+   * it to reset the form), so the callback is a new identity on every keystroke
+   * in a controlled field. With it in the dependency array this effect tore
+   * down and re-ran between characters: the teardown restored focus to the
+   * trigger and the re-run stole it to the panel, so a merchant could not type
+   * a product name, and `restoreRef` was overwritten with whatever the churn
+   * had just focused. Latest-callback refs keep the effect keyed to `open`
+   * alone while still calling through to the current props.
+   */
+  const onOpenChangeRef = useRef(onOpenChange);
+  const reduceMotionRef = useRef(reduceMotion);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+    reduceMotionRef.current = reduceMotion;
+  }, [onOpenChange, reduceMotion]);
+
   useEffect(() => {
     if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+
     restoreRef.current = document.activeElement as HTMLElement | null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    panelRef.current?.focus();
+    // The dialog container itself, not its first field: opening a sheet must
+    // not pop the phone keyboard before the merchant has asked for it.
+    panel.focus();
 
-    /*
-     * Keyboard-safe fields. A sheet is fixed to the viewport, so on iOS the
-     * opening keyboard can cover the very input the merchant just tapped —
-     * the discount field, the cash-received field, an invite form. When a
-     * field takes focus, bring it back inside the sheet's own scroll pane
-     * once the keyboard has had a beat to settle. The pane scrolls, not the
-     * page, so the sheet itself never jumps.
-     */
     let focusTimer: ReturnType<typeof setTimeout> | undefined;
+
     const onFocusIn = (event: FocusEvent) => {
       const field = event.target;
       if (!(field instanceof HTMLElement)) return;
+
+      /*
+       * Backstop for focus that arrives without a Tab we could intercept — the
+       * browser's own chrome-to-page cycle (F6, or tabbing out of the address
+       * bar) hands focus to the first focusable in the document, which the
+       * keydown trap never sees. `aria-modal` is a promise to assistive tech;
+       * keep it true by pulling focus back inside.
+       *
+       * Scoped to the whole overlay, not just the panel, so the scrim is left
+       * alone. The one thing this cannot allow for is a consumer that portals
+       * focusable content out of the sheet (a Radix Select or Popover inside a
+       * BottomSheet); no sheet does that today, and one that needs to should
+       * render its menu inline rather than defeat the trap.
+       */
+      if (!overlayRef.current?.contains(field)) {
+        panel.focus();
+        return;
+      }
+
+      /*
+       * Keyboard-safe fields. A sheet is fixed to the viewport, so on iOS the
+       * opening keyboard can cover the very input the merchant just tapped —
+       * the discount field, the cash-received field, an invite form. When a
+       * field takes focus, bring it back inside the sheet's own scroll pane
+       * once the keyboard has had a beat to settle. The pane scrolls, not the
+       * page, so the sheet itself never jumps.
+       */
       if (!/^(INPUT|TEXTAREA|SELECT)$/.test(field.tagName)) return;
-      // Only fields inside this sheet — never chase focus elsewhere.
-      if (!panelRef.current?.contains(field)) return;
       focusTimer = setTimeout(() => {
         field.scrollIntoView({
           block: "center",
-          behavior: reduceMotion ? "auto" : "smooth",
+          behavior: reduceMotionRef.current ? "auto" : "smooth",
         });
       }, 300);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
         return;
       }
-      if (event.key !== "Tab" || !panelRef.current) return;
-      const focusables = Array.from(
-        panelRef.current.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((node) => !node.hasAttribute("disabled"));
-      if (focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      if (event.key !== "Tab") return;
+
+      /*
+       * Recomputed per keystroke, never cached: a sheet's tab stops change as
+       * the merchant types (a validation error appears, the save button
+       * enables, a category list loads).
+       */
+      const focusables = collectTrapFocusables(panel);
+      const next = nextTrapFocus(
+        focusables,
+        document.activeElement as HTMLElement | null,
+        event.shiftKey,
+      );
+
+      /*
+       * Tab is always ours while the sheet is open. Handing any case back to
+       * the browser is what let focus walk out through the scrim and onto the
+       * page behind; a sheet with no tab stops at all swallows the key and
+       * keeps focus on the container.
+       */
+      event.preventDefault();
+      (next ?? panel).focus();
     };
 
     document.addEventListener("keydown", onKeyDown);
@@ -118,7 +168,7 @@ export function BottomSheet({
       document.body.style.overflow = previousOverflow;
       restoreRef.current?.focus?.();
     };
-  }, [open, onOpenChange, reduceMotion]);
+  }, [open]);
 
   return (
     <AnimatePresence>
@@ -126,9 +176,17 @@ export function BottomSheet({
         // z-[60]: above BottomNav's mobile bar (z-50), regardless of which one
         // mounts later in a given route's JSX — an open sheet must always sit
         // over the persistent nav, never under it.
-        <div className="fixed inset-0 z-[60] flex items-end justify-center">
+        <div ref={overlayRef} className="fixed inset-0 z-[60] flex items-end justify-center">
+          {/*
+            Pointer-only close affordance. It sits outside the dialog panel, so
+            leaving it in the tab order both broke containment (it was the stop
+            Shift+Tab escaped through) and put a keyboard focus ring on an
+            invisible full-viewport element. Escape and the sheet's own actions
+            are the keyboard paths out.
+          */}
           <motion.button
             type="button"
+            tabIndex={-1}
             aria-label={t("common.close")}
             className="absolute inset-0 h-full w-full"
             style={{ backgroundColor: "var(--surface-scrim)" }}
