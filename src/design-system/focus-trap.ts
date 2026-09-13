@@ -21,6 +21,20 @@ export interface TrapCandidate {
   getAttribute(name: string): string | null;
   closest(selectors: string): unknown;
   getClientRects(): { readonly length: number };
+  /**
+   * The element's own window, used for one thing only: its computed
+   * `visibility`. Read through the element rather than a global so the trap
+   * stays testable without a DOM and keeps working inside an iframe or a
+   * popout window, where the global `getComputedStyle` is the wrong one.
+   *
+   * Optional because a stub may not supply it. When it is missing the element
+   * is treated as visible — the trap never guesses a control away.
+   */
+  readonly ownerDocument?: {
+    readonly defaultView?: {
+      getComputedStyle(element: TrapCandidate): { readonly visibility: string };
+    } | null;
+  } | null;
 }
 
 /**
@@ -50,17 +64,72 @@ export const TRAP_FOCUSABLE_SELECTOR = [
 ].join(", ");
 
 /**
+ * Elements the `disabled` attribute actually disables, per HTML. Nothing else
+ * is disableable: `disabled` on a `<div>` or an `<a>` is decoration, the
+ * browser still focuses it, and excluding it would strand a reachable control.
+ */
+const DISABLEABLE = /^(BUTTON|INPUT|SELECT|TEXTAREA|FIELDSET|OPTGROUP|OPTION)$/;
+
+/**
+ * Whether a form control is disabled — by its own attribute or by an ancestor.
+ *
+ * `<fieldset disabled>` disables every form control inside it without writing
+ * `disabled` on any of them, so an attribute-only check called those controls
+ * focusable. The exception HTML carves out is the fieldset's first `<legend>`:
+ * controls in there stay enabled (the "switch this section on" pattern), so
+ * they must stay in the cycle.
+ *
+ * `closest` returns the *nearest* match, so `fieldset` below is the innermost
+ * disabled fieldset and the legend test is resolved against that same one.
+ */
+function isDisabledControl(element: TrapCandidate): boolean {
+  if (!DISABLEABLE.test(element.tagName)) return false;
+  if (element.hasAttribute("disabled")) return true;
+  if (element.closest("fieldset[disabled]") === null) return false;
+  return element.closest("fieldset[disabled] > legend:first-of-type") === null;
+}
+
+/**
+ * Whether the element is painted, as opposed to merely laid out.
+ *
+ * `visibility: hidden` (and `collapse`) leaves the box in the layout tree, so
+ * `getClientRects()` still reports a rect and the element still matched the
+ * selector — but `.focus()` on it does nothing. Computed style is read rather
+ * than inferred: it already accounts for inheritance (a hidden container hides
+ * its children, and a `visibility: visible` child of one is visible again), and
+ * it does not misjudge the things a heuristic would. `offsetParent === null`,
+ * the usual shortcut, is true of every `position: fixed` control — which is
+ * what a sheet's pinned footer is.
+ */
+function isVisible(element: TrapCandidate): boolean {
+  const view = element.ownerDocument?.defaultView;
+  if (!view?.getComputedStyle) return true;
+  const { visibility } = view.getComputedStyle(element);
+  return visibility !== "hidden" && visibility !== "collapse";
+}
+
+/**
  * Whether `element` is a tab stop the trap should cycle through.
  *
- * Rejects, in order: disabled controls, anything opted out with a negative
- * tabindex, hidden inputs, subtrees hidden from assistive tech or made inert,
- * and anything the browser is not currently rendering (`display: none`,
- * `visibility: hidden`, a collapsed `<details>`). An element scrolled out of
- * view inside the sheet's own scroll pane is still rendered, so it stays in the
- * cycle — which is what we want: the merchant tabs to it and the pane scrolls.
+ * The governing rule is one question: will `.focus()` on this element actually
+ * move focus? Tab is unconditionally prevented while the sheet is open, so a
+ * candidate the browser refuses to focus is not a harmless extra entry — focus
+ * stays where it was and the merchant is stuck on the previous control, unable
+ * to reach the next one. That is the bug this filter exists to prevent, and it
+ * is why the checks below track the platform's own rules rather than a
+ * shorthand for them.
+ *
+ * Rejects, in order: controls disabled directly or by an ancestor
+ * `<fieldset disabled>`, anything opted out with a negative tabindex, hidden
+ * inputs, subtrees hidden from assistive tech or made inert, anything the
+ * browser is not laying out (`display: none`, a collapsed `<details>`), and
+ * anything laid out but not painted (`visibility: hidden`). An element scrolled
+ * out of view inside the sheet's own scroll pane is still rendered and still
+ * focusable, so it stays in the cycle — which is what we want: the merchant
+ * tabs to it and the pane scrolls.
  */
 export function isTrapFocusable(element: TrapCandidate): boolean {
-  if (element.hasAttribute("disabled")) return false;
+  if (isDisabledControl(element)) return false;
 
   const tabindex = element.getAttribute("tabindex");
   if (tabindex !== null) {
@@ -72,7 +141,9 @@ export function isTrapFocusable(element: TrapCandidate): boolean {
 
   if (element.closest('[aria-hidden="true"], [inert]') !== null) return false;
 
-  return element.getClientRects().length > 0;
+  if (element.getClientRects().length === 0) return false;
+
+  return isVisible(element);
 }
 
 /**
