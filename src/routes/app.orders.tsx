@@ -1,12 +1,13 @@
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
-import { useState } from "react";
+import { Plus, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AppHeader,
   BottomNav,
   ChannelBadge,
+  Chip,
   ListSkeleton,
   ScreenBleed,
   StatusChip,
@@ -21,7 +22,34 @@ import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import type { Order } from "@/types";
 
+/**
+ * The one order filter that is worth a URL.
+ *
+ * "Unpaid" is what Home's attention card, the Sales hub and Apsi all point at,
+ * so it has to survive being linked to, bookmarked and sent to a colleague.
+ * Everything else about this list stays unfiltered — this is not the beginning
+ * of a filter system, it is the destination the rest of the app already names.
+ */
+export type OrderPaymentFilter = "unpaid";
+
+const ORDER_PAYMENT_FILTERS: readonly OrderPaymentFilter[] = ["unpaid"];
+
+/** Both vocabularies of "money still owed" — the production axis and the legacy mock one. */
+const UNPAID_STATUSES = new Set(["unpaid", "pending_payment", "partially_paid", "pending"]);
+
 export const Route = createFileRoute("/app/orders")({
+  /*
+   * Dropped unless it names a filter this screen actually has. The value only
+   * chooses which of the member's own already-authorized orders are shown —
+   * listOrders is org-scoped and permission-checked server-side either way.
+   */
+  validateSearch: (search: Record<string, unknown>): { payment?: OrderPaymentFilter } => {
+    const raw = search["payment"];
+    return typeof raw === "string" && ORDER_PAYMENT_FILTERS.includes(raw as OrderPaymentFilter)
+      ? { payment: raw as OrderPaymentFilter }
+      : {};
+  },
+
   head: () => ({
     meta: [
       { title: "Orders — APSA" },
@@ -86,8 +114,10 @@ function OrderRow({ order }: { order: Order }) {
 
 function OrderListScreen() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const capabilities = useCapabilities();
+  const { payment } = Route.useSearch();
   const [createOpen, setCreateOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const detailOpen = pathname !== "/app/orders" && pathname.startsWith("/app/orders/");
@@ -103,7 +133,20 @@ function OrderListScreen() {
     queryFn: listRealOrders,
     enabled: !detailOpen && canReadOrders,
   });
-  const orders = ordersQuery.data ?? [];
+  const allOrders = useMemo(() => ordersQuery.data ?? [], [ordersQuery.data]);
+  /*
+   * Filtered here rather than on the server: this list is already loaded whole
+   * for this member, so narrowing it costs nothing and — more importantly —
+   * clearing the filter is instant, with no second round trip and no spinner
+   * between the merchant and the orders they were just looking at.
+   */
+  const orders = useMemo(
+    () =>
+      payment === "unpaid"
+        ? allOrders.filter((order) => UNPAID_STATUSES.has(order.paymentStatus))
+        : allOrders,
+    [allOrders, payment],
+  );
 
   /*
    * /app/orders/$id is a child of this route, so without an Outlet the detail
@@ -142,6 +185,19 @@ function OrderListScreen() {
       <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 lg:max-w-[var(--screen-max-wide)]">
         {!canReadOrders ? <CapabilityDeniedState capabilities={capabilities} /> : null}
 
+        {canReadOrders && payment === "unpaid" ? (
+          <div className="pb-3">
+            <Chip
+              selected
+              icon={<X className="size-4" aria-hidden />}
+              ariaLabel={t("orderList.filters.clearUnpaid")}
+              onClick={() => void navigate({ to: "/app/orders", search: {}, replace: true })}
+            >
+              {t("orderList.filters.unpaid")}
+            </Chip>
+          </div>
+        ) : null}
+
         {canReadOrders ? (
           <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
             {ordersQuery.isLoading ? <ListSkeleton rows={6} /> : null}
@@ -158,8 +214,12 @@ function OrderListScreen() {
 
             {ordersQuery.isSuccess && orders.length === 0 ? (
               <OperationalState
-                title={t("orderList.empty.title")}
-                body={t("orderList.empty.body")}
+                title={t(
+                  payment === "unpaid" ? "orderList.filters.emptyTitle" : "orderList.empty.title",
+                )}
+                body={t(
+                  payment === "unpaid" ? "orderList.filters.emptyBody" : "orderList.empty.body",
+                )}
                 className="rounded-none border-0"
               />
             ) : null}

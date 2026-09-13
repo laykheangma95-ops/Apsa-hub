@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
-export type SheetSnap = "peek" | "half" | "full";
+export type SheetSnap = "peek" | "half" | "tall" | "full";
 
 /*
  * dvh, not vh. On iOS Safari `vh` is measured against the tallest possible
@@ -13,6 +13,9 @@ export type SheetSnap = "peek" | "half" | "full";
 const SNAP_HEIGHT: Record<SheetSnap, string> = {
   peek: "42dvh",
   half: "68dvh",
+  /* Apsi's height: tall enough to hold a keyboard and a list of results, short
+     enough that the screen behind stays visible and "back" still reads as back. */
+  tall: "85dvh",
   full: "92dvh",
 };
 

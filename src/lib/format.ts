@@ -33,6 +33,22 @@ export function localName<T extends { nameKm: string; nameEn: string }>(
   return lang === "km" ? entity.nameKm : entity.nameEn;
 }
 
+/**
+ * Today's date, in the merchant's own locale.
+ *
+ * Rendered from the browser's clock, so it must only ever be shown after
+ * mount: the server's timezone is not the merchant's, and a date string
+ * rendered during SSR is a hydration mismatch waiting for a midnight in
+ * Phnom Penh to find it.
+ */
+export function todayLabel(lang: Language): string {
+  return new Date().toLocaleDateString(lang === "km" ? "km-KH" : "en-GB", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
+}
+
 export function percent(value: number): string {
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(1)}%`;

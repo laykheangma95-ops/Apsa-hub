@@ -1,4 +1,4 @@
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Check, Search, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -23,10 +23,29 @@ import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { usePullToRefresh } from "@/hooks/use-pull-to-refresh";
+import { useTabScrollMemory, useTabState } from "@/hooks/use-tab-memory";
 import { cn } from "@/lib/utils";
 import type { Channel, ConversationStatus } from "@/types";
 
 export const Route = createFileRoute("/app/inbox")({
+  /*
+   * The status filter lives in the URL because it is the one piece of Inbox
+   * state somebody else needs to be able to point at: Apsi links to it, the
+   * Inbox tab's hold-shortcut links to it, and a merchant can send "look at
+   * the unread ones" to a colleague. Channel and search text stay in tab
+   * memory — they are a merchant's own place, not a shareable view.
+   *
+   * Anything unrecognised is dropped rather than trusted: this value selects a
+   * filter chip, and the server re-scopes every conversation read to the
+   * caller's own organization regardless of what it receives.
+   */
+  validateSearch: (search: Record<string, unknown>): { status?: StatusFilter } => {
+    const raw = search["status"];
+    return typeof raw === "string" && STATUS_FILTERS.includes(raw as StatusFilter)
+      ? { status: raw as StatusFilter }
+      : {};
+  },
+
   head: () => ({
     meta: [
       { title: "Unified Inbox — APSA" },
@@ -65,13 +84,27 @@ const CHANNEL_FILTERS: ChannelFilter[] = ["all", "facebook", "instagram", "teleg
 function InboxLayout() {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const threadOpen = pathname.startsWith("/app/inbox/");
 
-  const [tab, setTab] = useState<InboxTab>("messages");
-  const [status, setStatus] = useState<StatusFilter>("all");
-  const [channel, setChannel] = useState<ChannelFilter>("all");
-  const [query, setQuery] = useState("");
+  const { status = "all" } = Route.useSearch();
+  /*
+   * `replace`, not push: a merchant flicking through filter chips should not
+   * have to press back six times to leave the Inbox.
+   */
+  const setStatus = (next: StatusFilter) => {
+    void navigate({
+      to: "/app/inbox",
+      search: next === "all" ? {} : { status: next },
+      replace: true,
+    });
+  };
+
+  // Survives a trip to another tab and back — see src/lib/tab-memory.ts.
+  const [tab, setTab] = useTabState<InboxTab>("inbox", "tab", "messages");
+  const [channel, setChannel] = useTabState<ChannelFilter>("inbox", "channel", "all");
+  const [query, setQuery] = useTabState("inbox", "query", "");
   const [channelSheetOpen, setChannelSheetOpen] = useState(false);
 
   const conversationsQuery = useInfiniteQuery({
@@ -93,6 +126,13 @@ function InboxLayout() {
   }, [conversationsQuery, countsQuery]);
 
   const { containerRef, pull, refreshing, threshold } = usePullToRefresh(refresh);
+
+  /*
+   * How far down the queue they had read, restored when they come back from
+   * another tab. Gated on the first page having arrived — restoring a scroll
+   * offset onto a skeleton just scrolls past the content that follows.
+   */
+  useTabScrollMemory("inbox", containerRef, !conversationsQuery.isPending);
 
   const loadMore = useCallback(() => {
     void conversationsQuery.fetchNextPage();

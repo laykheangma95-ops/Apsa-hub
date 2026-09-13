@@ -476,7 +476,7 @@ function deriveCustomerCompanion(customerId: string): Customer["companion"] {
  * OrderCustomerOption's own comment — so they are zeroed/emptied rather than
  * guessed; nothing in the POS UI reads them for a production customer.
  */
-function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
+export function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
   return {
     id: row.id,
     nameKm: row.nameKm,

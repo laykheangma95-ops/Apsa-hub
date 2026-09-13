@@ -20,9 +20,11 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { checkAppGuardFn } from "@/api/app-guard";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
-import { AppShell } from "@/design-system";
+import { AppShell, NavCoachMarks } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
+import { NavSignalsProvider } from "@/hooks/use-nav-signals";
 import { enforceHomeCachePrincipal } from "@/lib/home-query";
+import { enforceTabMemoryPrincipal } from "@/lib/tab-memory";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -80,6 +82,13 @@ function AppLayout() {
    * only to partition the cache — they authorize nothing.
    */
   enforceHomeCachePrincipal(queryClient, session.userId, organizationId);
+  /*
+   * Same rule, same reason, for the navigation's own memory: it holds the last
+   * path and the last filters of whoever was signed in, and a merchant's place
+   * in their order queue is not something the next account to use this tab
+   * should inherit.
+   */
+  enforceTabMemoryPrincipal(session.userId, organizationId);
 
   return (
     <CapabilityProvider
@@ -87,9 +96,12 @@ function AppLayout() {
       organizationId={organizationId}
       initialResult={capabilities ?? undefined}
     >
-      <AppShell>
-        <Outlet />
-      </AppShell>
+      <NavSignalsProvider userId={session.userId} organizationId={organizationId}>
+        <AppShell>
+          <Outlet />
+          <NavCoachMarks />
+        </AppShell>
+      </NavSignalsProvider>
     </CapabilityProvider>
   );
 }

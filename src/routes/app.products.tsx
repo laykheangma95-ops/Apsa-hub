@@ -23,6 +23,7 @@ import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState
 import { CreateProductSheet } from "@/components/products/CreateProductSheet";
 import { CategorySheet } from "@/components/products/CategorySheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { useTabState } from "@/hooks/use-tab-memory";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
 import {
@@ -41,6 +42,18 @@ import {
 } from "@/lib/catalog";
 
 export const Route = createFileRoute("/app/products")({
+  /*
+   * A search term in the URL so Apsi can hand a merchant a catalogue already
+   * narrowed to what they asked for, instead of dropping them on the full list
+   * with the word still in their head. It seeds the box; the box remains the
+   * authority, and the search itself still only matches rows the server
+   * already returned for this member.
+   */
+  validateSearch: (search: Record<string, unknown>): { q?: string } => {
+    const raw = search["q"];
+    return typeof raw === "string" && raw.trim() !== "" ? { q: raw.slice(0, 120) } : {};
+  },
+
   head: () => ({
     meta: [
       { title: "Products — APSA" },
@@ -153,9 +166,24 @@ function ProductListScreen() {
   // every render; it is a no-op unless the principal actually changed.
   enforceCatalogCachePrincipal(queryClient, userId, routeOrganizationId);
 
-  const [status, setStatus] = useState<CatalogListStatus>("ACTIVE");
-  const [categoryId, setCategoryId] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const { q: seededSearch } = Route.useSearch();
+  const [status, setStatus] = useTabState<CatalogListStatus>(
+    "business",
+    "catalog-status",
+    "ACTIVE",
+  );
+  const [categoryId, setCategoryId] = useTabState<string | null>(
+    "business",
+    "catalog-category",
+    null,
+  );
+  /*
+   * Seeded from ?q= on first mount, then owned by the box. Deliberately not
+   * two-way bound to the URL: retyping a search term should not push a history
+   * entry per keystroke, and a merchant editing the term is no longer looking
+   * at the link they arrived from.
+   */
+  const [search, setSearch] = useState(seededSearch ?? "");
   const [createOpen, setCreateOpen] = useState(false);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
 

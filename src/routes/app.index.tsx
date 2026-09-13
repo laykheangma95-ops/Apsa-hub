@@ -1,10 +1,10 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getHomeSummary } from "@/lib/api";
 import { homeQueryKey } from "@/lib/home-query";
-import { attentionNoticeKey } from "@/lib/home-attention";
+import { attentionNoticeKey, homeAttentionItems } from "@/lib/home-attention";
 import { formatMoney } from "@/lib/money";
 import {
   AppHeader,
@@ -22,6 +22,9 @@ import {
   type Segment,
 } from "@/design-system";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { useTabScrollMemory, useTabState } from "@/hooks/use-tab-memory";
+import { todayLabel } from "@/lib/format";
+import { useLanguage } from "@/lib/i18n";
 import type { UiPermissionKey } from "@/lib/capabilities";
 import type { AttentionItem, HomeSummary, Metric, MetricRange } from "@/types";
 
@@ -69,51 +72,6 @@ const ATTENTION_PERMISSION: Record<
   "/app/orders": "orders.read",
   "/app/deliveries": "orders.read",
 };
-
-function attentionItems(summary: HomeSummary): AttentionItem[] {
-  const items: AttentionItem[] = [];
-  if (summary.orders.status === "available") {
-    if (summary.orders.data.awaitingPaymentCount > 0) {
-      items.push({
-        id: "awaiting_payment",
-        count: summary.orders.data.awaitingPaymentCount,
-        tone: "warning",
-      });
-    }
-    if (summary.orders.data.actionNeededCount > 0) {
-      items.push({
-        id: "orders_needing_action",
-        count: summary.orders.data.actionNeededCount,
-        tone: "warning",
-      });
-    }
-  }
-  if (summary.payments.status === "available" && summary.payments.data.needsReviewCount > 0) {
-    items.push({
-      id: "payments_needing_review",
-      count: summary.payments.data.needsReviewCount,
-      tone: "danger",
-    });
-  }
-  if (
-    summary.inventory.status === "available" &&
-    summary.inventory.data.outOfStockVariantCount > 0
-  ) {
-    items.push({
-      id: "low_stock",
-      count: summary.inventory.data.outOfStockVariantCount,
-      tone: "danger",
-    });
-  }
-  if (summary.delivery.status === "available" && summary.delivery.data.actionCount > 0) {
-    items.push({
-      id: "awaiting_delivery",
-      count: summary.delivery.data.actionCount,
-      tone: "info",
-    });
-  }
-  return items;
-}
 
 function metricItems(summary: HomeSummary): Metric[] {
   const metrics: Metric[] = [];
@@ -164,9 +122,22 @@ function BusinessHome() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const capabilities = useCapabilities();
+  const { language } = useLanguage();
   const { session, organizationId } = Route.useRouteContext();
-  const [range, setRange] = useState<MetricRange>("today");
+  /* The chosen period survives a trip to another tab — see src/lib/tab-memory.ts. */
+  const [range, setRange] = useTabState<MetricRange>("home", "range", "today");
   const [createOpen, setCreateOpen] = useState(false);
+
+  useTabScrollMemory("home");
+
+  /*
+   * The date comes from the merchant's own clock, so it is rendered after
+   * mount rather than during SSR — the server sits in a different timezone,
+   * and a date is exactly the kind of string that would hydrate wrong on the
+   * one night of the year it matters.
+   */
+  const [today, setToday] = useState<string | null>(null);
+  useEffect(() => setToday(todayLabel(language)), [language]);
 
   const homeQuery = useQuery({
     queryKey: homeQueryKey(session.userId, organizationId, range),
@@ -174,7 +145,7 @@ function BusinessHome() {
   });
 
   const summary = homeQuery.data;
-  const attention = summary ? attentionItems(summary) : [];
+  const attention = summary ? homeAttentionItems(summary) : [];
   const metrics = summary ? metricItems(summary) : [];
   // An empty attention list is only reassuring when Home actually knows the
   // list is empty. Anything less says so rather than implying a settled zero.
@@ -216,7 +187,10 @@ function BusinessHome() {
       <AppHeader title={t("brand.name")} action={null}>
         <div className="pb-1">
           <h1 className="text-h1 text-text-primary">{t("home.greeting")}</h1>
-          <p className="text-body-sm text-text-secondary">{t("home.subtitle")}</p>
+          <p className="text-body-sm text-text-secondary">
+            {today ? `${today} · ` : ""}
+            {t("home.subtitle")}
+          </p>
         </div>
       </AppHeader>
 

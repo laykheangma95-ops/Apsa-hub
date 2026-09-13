@@ -36,6 +36,32 @@ export { FeedbackToaster } from "./Feedback";
 export { ActionRow } from "./ActionRow";
 export { AttentionCard } from "./AttentionCard";
 export { BottomNav, SELLER_TABS, type NavTab } from "./BottomNav";
+export { AppNavBar } from "./AppNavBar";
+export { ApsiSheet, type ApsiSearchState } from "./ApsiSheet";
+export { ApsiMark, type ApsiMarkExpression } from "./mascot/ApsiMark";
+export { CountBadge, DotBadge, type BadgeTone } from "./Badge";
+export { ServiceGrid } from "./ServiceGrid";
+export { NavCoachMarks } from "./NavCoachMarks";
+export {
+  APP_NAV_TABS,
+  APP_NAV_TAB_ORDER,
+  BUSINESS_GROUPS,
+  SALES_TILES,
+  defaultSalesTileOrder,
+  hubRootForPath,
+  isHubEntryAvailable,
+  resolveAppNavActiveTab,
+  resolveHubDeepLink,
+  visibleHubGroups,
+  visibleHubTiles,
+  type AppNavRoute,
+  type AppNavTabConfig,
+  type AppNavTabId,
+  type HubGroupConfig,
+  type HubTileConfig,
+  type HubTilePreference,
+  type NavBadgeKind,
+} from "./app-nav-config";
 export { ResolveSheet } from "./ResolveSheet";
 export { BottomSheet, type SheetSnap } from "./BottomSheet";
 export { ChannelBadge } from "./ChannelBadge";

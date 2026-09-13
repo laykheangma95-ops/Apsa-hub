@@ -32,7 +32,7 @@
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronRight } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
@@ -61,6 +61,20 @@ import {
 } from "@/lib/payments";
 
 export const Route = createFileRoute("/app/payments")({
+  /*
+   * The active filter lives in the URL so Home's "payments to review" card,
+   * the Sales hub and Apsi can all link straight at it rather than dropping a
+   * merchant on an unfiltered list and asking them to find it again. Unknown
+   * values are dropped; the filter narrows a list the server has already
+   * scoped and authorized (payments.read), so it grants nothing.
+   */
+  validateSearch: (search: Record<string, unknown>): { filter?: PaymentFilterId } => {
+    const raw = search["filter"];
+    return typeof raw === "string" && PAYMENT_FILTERS.some((entry) => entry.id === raw)
+      ? { filter: raw as PaymentFilterId }
+      : {};
+  },
+
   head: () => ({
     meta: [
       { title: "Payments — APSA" },
@@ -255,8 +269,16 @@ function PaymentsListScreen() {
   // confirmed (see CapabilityView.canSensitive).
   const canReconcile = identityOk && capabilities.canSensitive("payments.reconcile");
 
-  const [filterId, setFilterId] = useState<PaymentFilterId>("all");
+  const { filter: filterId = "all" } = Route.useSearch();
   const activeFilter = findPaymentFilter(filterId);
+  /* `replace`: flicking through filter chips must not build a back stack. */
+  const setFilterId = (next: PaymentFilterId) => {
+    void navigate({
+      to: "/app/payments",
+      search: next === "all" ? {} : { filter: next },
+      replace: true,
+    });
+  };
 
   const paymentsQuery = useInfiniteQuery({
     queryKey: [

@@ -6,10 +6,12 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { LucideIcon } from "lucide-react";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { useFeatureFlag } from "@/hooks/use-feature-flag";
 import { getOrders } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import type { Order, Workspace } from "@/types";
+import { AppNavBar } from "./AppNavBar";
 import { BottomSheet } from "./BottomSheet";
 import { ResolveSheet } from "./ResolveSheet";
 import {
@@ -111,7 +113,26 @@ function TabItem({ tab }: { tab: NavTab }) {
   );
 }
 
-export function BottomNav({
+/**
+ * The signed-in bottom bar.
+ *
+ * Two shells live behind this one name. NEW_NAV_BAR selects the five-slot
+ * Home / Inbox / Apsi / Sales / Business bar; turning the flag off restores
+ * the previous Home / Inbox / Resolve / Sales / More shell exactly as it was.
+ * The old shell stays in the file rather than being deleted for precisely that
+ * reason — a rollback lever with nothing behind it is not a rollback lever.
+ *
+ * Every screen keeps calling <BottomNav />; which shell they get is a
+ * deployment decision, not a per-screen one.
+ */
+export function BottomNav(props: BottomNavProps) {
+  const newNav = useFeatureFlag("NEW_NAV_BAR");
+  if (props.workspace !== undefined && props.workspace !== "business") return null;
+  if (newNav) return <AppNavBar {...(props.className ? { className: props.className } : {})} />;
+  return <LegacyBottomNav {...props} />;
+}
+
+function LegacyBottomNav({
   workspace = "business",
   tabs = SELLER_TABS,
   className,

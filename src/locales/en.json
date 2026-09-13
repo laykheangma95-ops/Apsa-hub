@@ -940,7 +940,13 @@
       "body": "Check your connection and try again."
     },
     "hasCustomer": "Linked customer",
-    "noCustomer": "No customer"
+    "noCustomer": "No customer",
+    "filters": {
+      "unpaid": "Unpaid only",
+      "clearUnpaid": "Clear the unpaid filter",
+      "emptyTitle": "No unpaid orders",
+      "emptyBody": "Every order here has been paid for."
+    }
   },
   "orderCreate": {
     "title": "New order",
@@ -1669,6 +1675,131 @@
       "conflict": "This payment changed while you had it open. Reload and try again.",
       "invalid": "That could not be accepted. Check the amount and the reason.",
       "server_error": "Something went wrong. Nothing was changed."
+    }
+  },
+  "appNav": {
+    "primary": "Primary navigation",
+    "tabs": {
+      "home": "Home",
+      "inbox": "Inbox",
+      "apsi": "Apsi",
+      "sales": "Sales",
+      "business": "Business"
+    },
+    "tabWithCount": "{{tab}}, {{count}} waiting",
+    "tabWithAttention": "{{tab}}, needs attention",
+    "notBuiltYet": "Not in the app yet",
+    "planned": {
+      "stock": "Stock movements are recorded, but a stock workspace is not in the app yet.",
+      "customers": "Open a customer from an order or from Apsi. A customer list is not in the app yet.",
+      "analytics": "A business analytics screen is not in the app yet.",
+      "integrations": "An integrations screen is not in the app yet.",
+      "locations": "Locations are managed in Settings for now."
+    },
+    "shortcuts": {
+      "inboxUnread": "Showing unread conversations",
+      "homeRefreshed": "Checking what needs attention"
+    },
+    "tiles": {
+      "pos": "POS",
+      "orders": "Orders",
+      "payments": "Payments",
+      "delivery": "Delivery",
+      "products": "Products",
+      "stock": "Stock",
+      "customers": "Customers",
+      "team": "Team",
+      "analytics": "Analytics",
+      "integrations": "Integrations",
+      "settings": "Settings",
+      "locations": "Locations"
+    },
+    "groups": {
+      "catalogue": "Catalogue",
+      "people": "People",
+      "insights": "Insights",
+      "system": "System"
+    },
+    "sales": {
+      "title": "Sales",
+      "subtitleSelling": "Take a sale, then keep the queue moving.",
+      "subtitleQueue": "Everything waiting on you today.",
+      "subtitleLimited": "The parts of selling you work on.",
+      "recent": "Recent orders",
+      "recentEmpty": "Orders you take will appear here.",
+      "recentRetry": "Recent orders did not load. Tap to try again.",
+      "nothingAvailable": "Nothing here is open to you yet. Ask the owner for access."
+    },
+    "business": {
+      "title": "Business",
+      "subtitle": "Catalogue, people, insights and settings.",
+      "nothingAvailable": "Nothing here is open to you yet. Ask the owner for access."
+    },
+    "arrange": {
+      "open": "Arrange tiles",
+      "title": "Arrange Sales",
+      "lead": "Put what you use most first. This only changes your own view.",
+      "moveUp": "Move {{tile}} earlier",
+      "moveDown": "Move {{tile}} later",
+      "hide": "Hide {{tile}}",
+      "show": "Show {{tile}}"
+    },
+    "coach": {
+      "title": "What moved",
+      "next": "Next",
+      "done": "Got it",
+      "skip": "Skip",
+      "progress": "{{step}} of {{total}}",
+      "sales": {
+        "title": "Orders and POS now live in Sales",
+        "body": "Everything that moves money today is behind one tab."
+      },
+      "business": {
+        "title": "Everything else is in Business",
+        "body": "Products, team, settings and reports, grouped by what you came to do."
+      },
+      "apsi": {
+        "title": "Tap Apsi to search anything",
+        "body": "An order number, a customer, a product — Apsi takes you straight there."
+      }
+    }
+  },
+  "apsi": {
+    "title": "Apsi",
+    "lead": "Find anything in your business.",
+    "placeholder": "Search or ask Apsi…",
+    "suggestions": "Try",
+    "noSuggestions": "Once you have orders and customers, Apsi will suggest them here.",
+    "foundOne": "Found it",
+    "foundMany": "{{count}} matches",
+    "empty": {
+      "title": "Nothing matched",
+      "body": "Try an order number, a customer name, or a product."
+    },
+    "offline": {
+      "title": "Apsi cannot reach your data",
+      "body": "You may be offline. Nothing is lost — try again when you have a connection.",
+      "retry": "Try again"
+    },
+    "kind": {
+      "order": "Order",
+      "customer": "Customer",
+      "product": "Product",
+      "payment": "Payment"
+    },
+    "commands": {
+      "unpaidOrders": "Show unpaid orders",
+      "whereIsOrder": "Where is order {{code}}?",
+      "lowStock": "Low stock items",
+      "paymentsToReview": "Payments to review",
+      "customer": "Customer {{name}}"
+    },
+    "keywords": {
+      "unpaidOrders": "unpaid,owed,not paid,outstanding",
+      "whereIsOrder": "order,where,track,status",
+      "lowStock": "stock,low stock,out of stock,inventory",
+      "paymentsToReview": "payment,review,verify,unverified",
+      "customer": "customer,contact,buyer"
     }
   }
 }
