@@ -152,12 +152,21 @@ describe("mapOrderSummaryToUi", () => {
     expect(ui.subtotal).toEqual({ amount: 1000, currency: "USD" });
   });
 
-  it("MANUAL source maps to source:'manual' and a channel-badge-safe fallback channel", () => {
+  it("MANUAL source maps to source:'manual' and the honest 'other' fallback channel", () => {
     const ui = mapOrderSummaryToUi({ ...BASE_SUMMARY, source: "MANUAL" });
     expect(ui.source).toBe("manual");
-    // `channel` is never read for a manual order (callers branch on `source`),
-    // but it must still be a valid Channel so the type stays sound.
-    expect(["pos", "facebook", "instagram", "telegram"]).toContain(ui.channel);
+    // A manual order is not the POS platform: `channel` must never claim it
+    // is. "other" is the generic Channel; callers that branch on `source`
+    // still render the "Entered by hand" caption for these.
+    expect(ui.channel).toBe("other");
+  });
+
+  it("an unmapped/legacy DB source never becomes a false platform", () => {
+    // A raw value outside OrderSourceDb survives as undefined `source`;
+    // `channel` must be the generic "other", never "pos" or a social channel.
+    const ui = mapOrderSummaryToUi({ ...BASE_SUMMARY, source: "WHATSAPP" as never });
+    expect(ui.source).toBeUndefined();
+    expect(ui.channel).toBe("other");
   });
 
   it("a social source maps identically to both `source` and `channel`", () => {

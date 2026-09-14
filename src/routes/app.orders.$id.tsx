@@ -275,6 +275,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           eyebrow={
             order.source && isChannelSource(order.source) ? (
               <ChannelBadge channel={order.source} withLabel />
+            ) : order.source && order.source !== "manual" ? (
+              <ChannelBadge channel="other" withLabel />
             ) : (
               t("order.sourceManual")
             )

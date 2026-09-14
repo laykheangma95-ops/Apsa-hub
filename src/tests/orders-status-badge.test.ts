@@ -97,4 +97,16 @@ describe("Orders list — presentation contract (structural)", () => {
     const rowSource = route.slice(rowStart, rowEnd);
     expect(rowSource).not.toMatch(/can\("|hasRole|isAdmin|permissions\./);
   });
+
+  it("a rejected-but-present source renders the generic 'other' badge, not a false label", () => {
+    // Both order surfaces must send unknown/legacy sources to ChannelBadge
+    // "other" — never the "Entered by hand" caption (that would falsely call
+    // an unknown source manual) and never straight into the icon lookup.
+    for (const rel of [ORDER_LIST_ROUTE, "src/routes/app.orders.$id.tsx"]) {
+      const src = readSource(rel);
+      expect(src).toMatch(/isChannelSource\(order\.source\)\s*\?\s*\(/);
+      expect(src).toMatch(/order\.source !== "manual"\s*\?\s*\(/);
+      expect(src).toMatch(/<ChannelBadge channel="other" withLabel \/>/);
+    }
+  });
 });

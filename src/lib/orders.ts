@@ -75,9 +75,11 @@ export function mapOrderSummaryToUi(row: ServerOrderSummary): Order {
     id: row.id,
     code: row.orderNumber,
     customerId: row.customerId,
-    // Vestigial for real orders — real rendering reads `source`, never `channel`,
-    // because Channel has no "manual" member. Kept only so `Order` stays one type.
-    channel: isChannelSource(source) ? source : "pos",
+    // Derived display channel for surfaces that badge a Channel directly.
+    // A source that is not a renderable channel ("manual", or an unmapped /
+    // legacy DB value that became undefined) is "other" — never "pos", which
+    // would falsely identify an unknown source as the POS platform.
+    channel: isChannelSource(source) ? source : "other",
     items: [],
     subtotal: row.subtotal,
     discount: row.discount,

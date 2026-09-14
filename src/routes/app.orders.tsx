@@ -63,8 +63,16 @@ function OrderRow({ order }: { order: Order }) {
       </div>
 
       <div className="flex min-w-0 items-center gap-2">
+        {/*
+         * Known channel → its badge. A present source the guard rejects
+         * (legacy/unknown value that escaped the mapper) → the generic
+         * "other" badge — never a false platform, never a crash. Only a
+         * genuinely manual or absent source reads "Entered by hand".
+         */}
         {order.source && isChannelSource(order.source) ? (
           <ChannelBadge channel={order.source} withLabel />
+        ) : order.source && order.source !== "manual" ? (
+          <ChannelBadge channel="other" withLabel />
         ) : (
           <span className="text-caption text-text-secondary">{t("order.sourceManual")}</span>
         )}
