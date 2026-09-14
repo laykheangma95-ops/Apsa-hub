@@ -76,6 +76,102 @@ interface Session {
   close(): Promise<void>;
 }
 
+/** Bounded tail of a stream's text, kept for diagnostics only — never grows past `maxChars`. */
+function tailDrain(stream: ReadableStream<Uint8Array> | null, maxChars: number): () => string {
+  let tail = "";
+  if (!stream) return () => tail;
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        tail = (tail + decoder.decode(value, { stream: true })).slice(-maxChars);
+      }
+    } catch {
+      // Reader aborted (process killed, stream closed) — nothing more to capture.
+    }
+  })();
+  return () => tail;
+}
+
+/**
+ * Waits for Chromium to announce its own DevTools endpoint on stderr —
+ * `DevTools listening on ws://host:port/devtools/browser/<uuid>` — rather
+ * than polling for the `DevToolsActivePort` file the browser writes into its
+ * profile directory.
+ *
+ * That file-based check is what this replaces, and why: on a GitHub-hosted
+ * Linux runner the browser process itself launches and keeps running (CI logs
+ * show it still alive, needing to be force-killed as an orphan, well after
+ * this repo's own 10-second poll gave up) — it simply had not finished
+ * writing that file within the window, which is a filesystem-timing question
+ * a CI runner's shared/throttled CPU can lose in a way a dev machine does
+ * not. The `DevTools listening on` line is the browser's own explicit,
+ * synchronous readiness signal — the same one Puppeteer/Playwright treat as
+ * authoritative internally — so waiting on it removes the filesystem entirely
+ * from this readiness check.
+ *
+ * Races three outcomes so a genuine startup failure is reported immediately
+ * instead of only after the full timeout: the announcement itself, the
+ * process exiting before announcing anything, and the timeout. Whichever
+ * wins, the thrown error carries everything read from stderr so far — for
+ * diagnostics, not because it can contain anything sensitive; a bare
+ * `--headless=new` launch with no application configuration has nothing
+ * secret to print.
+ *
+ * Owns the ONE reader `child.stderr` can have at a time — a second,
+ * independent tail-drain on the same stream (as this once had) throws
+ * "ReadableStream is locked" the instant both try to read it.
+ */
+async function waitForDevToolsEndpoint(
+  child: ReturnType<typeof Bun.spawn>,
+  timeoutMs: number,
+): Promise<string> {
+  const stderr = child.stderr;
+  let buffered = "";
+
+  const announcement =
+    stderr instanceof ReadableStream
+      ? (async (): Promise<string> => {
+          const decoder = new TextDecoder();
+          const reader = stderr.getReader();
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done)
+              throw new Error("Chromium's stderr closed before it announced a DevTools endpoint");
+            buffered += decoder.decode(value, { stream: true });
+            const match = /DevTools listening on (ws:\S+)/.exec(buffered);
+            if (match) return match[1]!;
+          }
+        })()
+      : Promise.reject(new Error("Chromium's stderr was not captured"));
+
+  const exited = child.exited.then((code): never => {
+    throw new Error(
+      `Chromium exited (code ${code}, signal ${child.signalCode ?? "none"}) before announcing a DevTools endpoint`,
+    );
+  });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Timed out after ${timeoutMs}ms waiting for a DevTools endpoint`)),
+      timeoutMs,
+    );
+  });
+
+  try {
+    return await Promise.race([announcement, exited, timedOut]);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${reason}\nLast stderr:\n${buffered.slice(-4000) || "(empty)"}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function startSession(browser: string): Promise<Session> {
   const build = await Bun.build({
     entrypoints: [path.resolve("src/tests/fixtures/bottom-sheet-focus-trap-page.tsx")],
@@ -108,6 +204,9 @@ async function startSession(browser: string): Promise<Session> {
       "--remote-debugging-port=0",
       `--user-data-dir=${profile}`,
       "--no-sandbox",
+      // Standard companion to --no-sandbox on Linux CI containers; a no-op
+      // flag Chromium ignores on platforms where it does not apply.
+      "--disable-setuid-sandbox",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-gpu",
@@ -115,19 +214,32 @@ async function startSession(browser: string): Promise<Session> {
       "--disable-extensions",
       "--mute-audio",
     ],
-    { stdout: "ignore", stderr: "ignore" },
+    // Piped, not ignored: readiness now comes from stderr itself (see
+    // waitForDevToolsEndpoint). stdout is kept as a bounded tail purely for
+    // diagnostics — only ever surfaced on failure, never logged on the happy
+    // path. stderr's own tail is captured inside waitForDevToolsEndpoint,
+    // which is the stream's only reader.
+    { stdout: "pipe", stderr: "pipe" },
   );
+  const stdoutTail = tailDrain(child.stdout instanceof ReadableStream ? child.stdout : null, 4000);
 
-  // Chromium writes the port it actually took into the profile directory.
-  const portFile = path.join(profile, "DevToolsActivePort");
-  let endpoint = "";
-  for (let attempt = 0; attempt < 200 && !endpoint; attempt++) {
-    await Bun.sleep(50);
-    if (!fs.existsSync(portFile)) continue;
-    const port = fs.readFileSync(portFile, "utf8").split("\n")[0]?.trim();
-    if (port) endpoint = `http://127.0.0.1:${port}`;
+  // Cleans up the process/profile on ANY failure from here on, so a startup
+  // problem never leaves an orphaned Chromium process for the CI runner to
+  // force-kill after the fact (as seen in an actual failed run's own log).
+  let endpoint: string;
+  try {
+    const wsUrl = await waitForDevToolsEndpoint(child, 30_000);
+    endpoint = `http://${new URL(wsUrl.replace(/^ws:/, "http:")).host}`;
+  } catch (error) {
+    child.kill();
+    await child.exited;
+    server.stop(true);
+    fs.rmSync(profile, { recursive: true, force: true });
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Chromium failed to start (executable: ${browser}).\n${reason}\nLast stdout:\n${stdoutTail() || "(empty)"}`,
+    );
   }
-  if (!endpoint) throw new Error("Chromium never reported a DevTools port");
 
   const target = (await (
     await fetch(`${endpoint}/json/new?about:blank`, { method: "PUT" })
