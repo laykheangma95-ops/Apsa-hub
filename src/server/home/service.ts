@@ -69,6 +69,20 @@ export function rangeBounds(range: HomeRange, now = new Date()): { from: string;
   return { from: localMidnightIso(start), until: localMidnightIso(until) };
 }
 
+/**
+ * THE financial visibility boundary for merchant-facing money.
+ *
+ * Reading an order cohort's money requires both the ability to read orders and
+ * the ability to reconcile payments — `payments.read` alone (a clerk who can
+ * see that a payment exists) is deliberately not enough to see collected /
+ * refunded / outstanding totals. Exported so every domain that surfaces money
+ * enforces the same boundary instead of restating the expression; Analytics
+ * imports this rather than defining its own.
+ */
+export function canReadFinancials(ctx: AuthorizationContext): boolean {
+  return ctx.can("orders.read") && ctx.can("payments.reconcile");
+}
+
 export interface HomeDependencies {
   getOrderSummary: typeof repo.getHomeOrderSummary;
   getNetCollected: typeof repo.getNetCollectedForCreatedOrders;
@@ -119,7 +133,7 @@ export async function getHomeSummary(
     section(canReadPayments, async () => ({
       needsReviewCount: await dependencies.getPaymentAttention(ctx),
     })),
-    section(canReadOrders && ctx.can("payments.reconcile"), async () => ({
+    section(canReadFinancials(ctx), async () => ({
       netCollectedForCreatedOrders: (await dependencies.getNetCollected(
         ctx.organizationId,
         bounds,
