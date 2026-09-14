@@ -11,9 +11,9 @@
  * products.view_cost the field is absent from the response and this screen
  * says so rather than inferring, defaulting, or back-calculating it.
  */
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Package, Pencil, Plus, RotateCcw } from "lucide-react";
+import { Archive, Boxes, Package, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -72,6 +72,7 @@ function VariantRow({
   canViewCost,
   canEdit,
   canArchive,
+  canReadStock,
   busy,
   onEdit,
   onToggleStatus,
@@ -86,6 +87,12 @@ function VariantRow({
   canViewCost: boolean;
   canEdit: boolean;
   canArchive: boolean;
+  /**
+   * inventory.read — the key listOrganizationStock/getVariantStock require. A
+   * separate grant from every products.* key on this row, so it is checked
+   * separately rather than folded into "can edit this variant".
+   */
+  canReadStock: boolean;
   busy: boolean;
   onEdit: () => void;
   onToggleStatus: () => void;
@@ -140,8 +147,26 @@ function VariantRow({
         ) : null}
       </div>
 
-      {canEdit || canArchive ? (
+      {canEdit || canArchive || canReadStock ? (
         <div className="flex flex-wrap items-center gap-2 pt-1">
+          {/*
+           * Product -> Inventory. This screen answers "what do we sell and for
+           * how much"; how many are on hand, where they are, and what moved is
+           * the Inventory domain's, one tap away per variant. Deliberately a
+           * link rather than a stock number rendered here: quoting a quantity
+           * on this screen would mean a second, unauthorized stock read behind
+           * a products.read gate.
+           */}
+          {canReadStock ? (
+            <Link
+              to="/app/inventory/$variantId"
+              params={{ variantId: variant.id }}
+              className="press tap-target text-label inline-flex h-10 items-center gap-1.5 rounded-full border border-border-default px-3 text-text-primary"
+            >
+              <Boxes className="size-4" aria-hidden />
+              {t("catalog.detail.viewStock")}
+            </Link>
+          ) : null}
           {canEdit ? (
             <Button variant="outline" className="tap-target h-10" onClick={onEdit} disabled={busy}>
               <Pencil className="size-4" aria-hidden />
@@ -216,6 +241,9 @@ function ProductDetailScreen() {
   const canViewCost = identityOk && capabilities.canSensitive("products.view_cost");
   const canCreateProduct = identityOk && capabilities.can("products.create");
   const canArchiveProduct = identityOk && capabilities.can("products.archive");
+  // Inventory is its own domain with its own grant; holding products.read says
+  // nothing about being allowed to read stock.
+  const canReadStock = identityOk && capabilities.can("inventory.read");
 
   const organizationId = routeOrganizationId;
 
@@ -523,6 +551,7 @@ function ProductDetailScreen() {
                         // permissions that can unlock a field on their own.
                         canEdit={canUpdateBasic || canUpdatePrice}
                         canArchive={canUpdateBasic}
+                        canReadStock={canReadStock}
                         busy={variantBusyId === variant.id}
                         onEdit={() => {
                           setEditingVariant(variant);

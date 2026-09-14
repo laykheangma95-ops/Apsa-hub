@@ -1321,6 +1321,48 @@ export async function listRealPayments(
   };
 }
 
+/**
+ * Record one payment claim against a production order.
+ *
+ * This is the only way a merchant tells APSA that money arrived, and it is
+ * deliberately NOT a settlement. record_payment_v1 (migration 035) writes the
+ * row as status `pending` / verification `unverified` — including for cash —
+ * and moving to `paid` happens only through verifyPaymentFn's authoritative
+ * state machine. Nothing on this path may present the result as paid.
+ *
+ * `amountMinor` is an integer minor unit in the ORDER'S OWN currency. There is
+ * no currency parameter: the payment inherits the order's currency server-side,
+ * so this path cannot express a conversion.
+ *
+ * `idempotencyKey` is what makes a retry safe. The RPC treats a repeat of the
+ * same key against the same order as a replay and returns the original payment
+ * instead of writing a second one — so a double tap, a lost response, or a
+ * user-driven retry can never charge a customer twice.
+ */
+export interface RecordRealPaymentInput {
+  orderId: string;
+  method: PaymentMethod;
+  amountMinor: number;
+  reference?: string | undefined;
+  idempotencyKey: string;
+  note?: string | undefined;
+}
+
+export async function recordRealPayment(input: RecordRealPaymentInput): Promise<UiPaymentDetail> {
+  const { recordPaymentFn } = await import("@/api/payments");
+  const detail = await recordPaymentFn({
+    data: {
+      orderId: input.orderId,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      ...(input.reference ? { reference: input.reference } : {}),
+      idempotencyKey: input.idempotencyKey,
+      ...(input.note ? { note: input.note } : {}),
+    },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
 /** Production Payment detail with its immutable event ledger — src/routes/app.payments.$id.tsx. */
 export async function getRealPaymentDetail(paymentId: string): Promise<UiPaymentDetail> {
   const { getPaymentByIdFn } = await import("@/api/payments");

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getHomeSummary } from "@/lib/api";
 import { homeQueryKey } from "@/lib/home-query";
-import { attentionNoticeKey } from "@/lib/home-attention";
+import { attentionDestination, attentionNoticeKey } from "@/lib/home-attention";
 import { formatMoney } from "@/lib/money";
 import {
   AppHeader,
@@ -22,7 +22,6 @@ import {
   type Segment,
 } from "@/design-system";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import type { UiPermissionKey } from "@/lib/capabilities";
 import type { AttentionItem, HomeSummary, Metric, MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
@@ -45,30 +44,8 @@ export const Route = createFileRoute("/app/")({
 
 const RANGES: MetricRange[] = ["today", "week", "month"];
 
-const ATTENTION_ROUTE: Partial<
-  Record<AttentionItem["id"], "/app/inbox" | "/app/orders" | "/app/deliveries">
-> = {
-  unread_conversations: "/app/inbox",
-  awaiting_payment: "/app/orders",
-  payments_needing_review: "/app/orders",
-  awaiting_delivery: "/app/deliveries",
-  orders_needing_action: "/app/orders",
-};
-
-/**
- * The permission each attention destination needs — the same key its screen
- * and its server functions require. A member without it still sees the count
- * (it is their own organization's work), but the row stops pretending to be a
- * link to somewhere they cannot go.
- */
-const ATTENTION_PERMISSION: Record<
-  "/app/inbox" | "/app/orders" | "/app/deliveries",
-  UiPermissionKey
-> = {
-  "/app/inbox": "messages.read",
-  "/app/orders": "orders.read",
-  "/app/deliveries": "orders.read",
-};
+/** Every destination the Home "create" sheet may point at. */
+type CreateActionRoute = "/app/pos" | "/app/orders" | "/app/products";
 
 function attentionItems(summary: HomeSummary): AttentionItem[] {
   const items: AttentionItem[] = [];
@@ -208,8 +185,43 @@ function BusinessHome() {
       void navigate({ to: "/app/pos" });
       return;
     }
+    if (id === "addProduct") {
+      // The catalogue screen owns creating a product (its own "+" opens
+      // CreateProductSheet behind the same products.create grant). Sending the
+      // merchant there completes the action rather than opening a sheet that
+      // had no handler for it.
+      void navigate({ to: "/app/products" });
+      return;
+    }
+    // sendInvoice only — no backend exists for it, so it opens the sheet
+    // below, which says so rather than pretending.
     setCreateOpen(true);
   }
+
+  /*
+   * The "create" sheet's rows, each pointing at the screen that actually
+   * performs the work. Every row here previously just closed the sheet: four
+   * buttons that looked like starting points and did nothing at all.
+   *
+   * A row is offered only with the permission its destination's server
+   * functions require, and a row with no destination is stated as not built —
+   * never rendered as a silent no-op.
+   */
+  interface CreateAction {
+    key: string;
+    /** null means no destination exists yet — rendered as such, never as a link. */
+    to: CreateActionRoute | null;
+  }
+  const createActions: readonly CreateAction[] = (
+    [
+      { key: "newSale", to: "/app/pos", available: capabilities.can("orders.create") },
+      { key: "newOrder", to: "/app/orders", available: capabilities.can("orders.read") },
+      { key: "addProduct", to: "/app/products", available: capabilities.can("products.create") },
+      { key: "scanBarcode", to: null, available: true },
+    ] as const
+  )
+    .filter((action) => action.available)
+    .map(({ key, to }) => ({ key, to }));
 
   return (
     <ScreenBleed bottom="nav">
@@ -241,9 +253,13 @@ function BusinessHome() {
               {attention.length > 0 ? (
                 <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
                   {attention.map((item) => {
-                    const route = ATTENTION_ROUTE[item.id];
-                    const to =
-                      route && capabilities.can(ATTENTION_PERMISSION[route]) ? route : undefined;
+                    /*
+                     * A row is a link only when something owns that work AND
+                     * this member may enter the screen that does. capabilities
+                     * .can is fail-closed, so an unresolved snapshot renders a
+                     * plain card rather than a link into a refusal.
+                     */
+                    const to = attentionDestination(item.id, (key) => capabilities.can(key));
                     return (
                       <AttentionCard
                         key={item.id}
@@ -349,15 +365,31 @@ function BusinessHome() {
         snap="peek"
       >
         <ul className="space-y-2">
-          {(["newSale", "newOrder", "addProduct", "scanBarcode"] as const).map((key) => (
-            <li key={key}>
-              <button
-                type="button"
-                onClick={() => setCreateOpen(false)}
-                className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
-              >
-                {t(`nav.${key}`)}
-              </button>
+          {createActions.map((action) => (
+            <li key={action.key}>
+              {action.to ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const to = action.to;
+                    if (!to) return;
+                    setCreateOpen(false);
+                    void navigate({ to });
+                  }}
+                  className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
+                >
+                  {t(`nav.${action.key}`)}
+                </button>
+              ) : (
+                /*
+                 * No barcode scanner exists yet. A disabled row that says so is
+                 * an honest answer; a tappable one that closes the sheet is not.
+                 */
+                <div className="flex w-full flex-col items-start rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-left">
+                  <span className="text-body text-text-secondary">{t(`nav.${action.key}`)}</span>
+                  <span className="text-caption text-text-muted">{t("nav.comingSoon")}</span>
+                </div>
+              )}
             </li>
           ))}
         </ul>

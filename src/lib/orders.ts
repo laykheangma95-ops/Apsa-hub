@@ -71,6 +71,11 @@ export function mapOrderSummaryToUi(row: ServerOrderSummary): Order {
     paymentStatus: row.paymentStatus,
     fulfillmentStatus: row.fulfillmentStatus,
     lifecycleStatus: row.lifecycleStatus,
+    // The refund axis is carried through, never merged into paymentStatus:
+    // a refunded order stays `paid` and says `partial`/`full` separately
+    // (CORRECTIONS.md, "Approved financial semantics"). Dropping it here left
+    // the production Order UI unable to show that a refund had happened at all.
+    refundStatus: row.refundStatus,
     createdAt: row.createdAt,
     source,
     locationId: row.locationId,

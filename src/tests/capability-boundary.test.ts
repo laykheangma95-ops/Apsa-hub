@@ -227,7 +227,17 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
         "src/server/orders/state-machine.ts",
         ["LIFECYCLE_TRANSITION_PERMISSIONS", "FULFILLMENT_TRANSITION_PERMISSIONS"],
       ],
-      ["src/server/payments/state-machine.ts", ["VERIFICATION_TRANSITION_PERMISSIONS"]],
+      /*
+       * RECORD_METHOD_PERMISSIONS is the same shape: recordPayment() looks the
+       * payment method up in it and passes the result straight to ctx.require,
+       * so payments.mark_cod (COD's own grant, seeded by migration 036) is
+       * genuinely enforced without ever appearing as a literal inside a
+       * require() call.
+       */
+      [
+        "src/server/payments/state-machine.ts",
+        ["VERIFICATION_TRANSITION_PERMISSIONS", "RECORD_METHOD_PERMISSIONS"],
+      ],
     ];
 
     for (const [file, mapNames] of permissionMaps) {
@@ -279,6 +289,8 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     // Only reachable through the Payment state machine's permission map.
     expect(enforced.has("payments.manual_confirm")).toBe(true);
     expect(enforced.has("payments.verify")).toBe(true);
+    // Only reachable through the Payment record-method permission map.
+    expect(enforced.has("payments.mark_cod")).toBe(true);
     // Reached only through the Inventory movement-type map, so this also
     // guards that the extra scan above still finds anything at all.
     expect(enforced.has("inventory.receive_stock")).toBe(true);

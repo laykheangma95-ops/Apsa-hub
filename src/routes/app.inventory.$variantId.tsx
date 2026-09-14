@@ -21,9 +21,9 @@
  * Every quantity here comes from the ledger. There is no setStock path, and a
  * negative on-hand figure is rendered as itself.
  */
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MapPin, PackagePlus, SlidersHorizontal, TriangleAlert } from "lucide-react";
+import { ChevronRight, MapPin, PackagePlus, SlidersHorizontal, TriangleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -318,6 +318,26 @@ function InventoryDetailScreen() {
                   <p className="text-caption text-text-secondary" role="status">
                     {t("inventoryDetail.noCatalogAccess")}
                   </p>
+                ) : null}
+
+                {/*
+                 * Inventory -> Product. This screen answers "how much do we
+                 * have"; price, cost, category and archiving live one domain
+                 * over, and until now there was no way across — the merchant
+                 * had to leave for the catalogue and find the product again by
+                 * hand. The productId comes from the stock record the server
+                 * already returned, and the destination re-checks products.read
+                 * on its own.
+                 */}
+                {canReadProducts && stock.productId ? (
+                  <Link
+                    to="/app/products/$id"
+                    params={{ id: stock.productId }}
+                    className="press tap-target text-label flex w-full items-center justify-between gap-2 py-1 text-action-primary"
+                  >
+                    <span className="min-w-0">{t("inventoryDetail.viewProduct")}</span>
+                    <ChevronRight className="size-4 shrink-0" aria-hidden />
+                  </Link>
                 ) : null}
               </div>
             </Section>
