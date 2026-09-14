@@ -1,5 +1,6 @@
 /**
- * Organization creation contract — shared by the API boundary and the server service.
+ * Organization creation + profile-update contracts — shared by the API
+ * boundary and the server service.
  *
  * This module is client-safe on purpose: it holds only zod schemas and types, so
  * the API boundary (src/api/org.ts) and the onboarding form can both use it
@@ -9,6 +10,12 @@
  *   CHECK (slug ~ '^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$')
  * It is a format check only — availability is decided exclusively by the DB
  * unique constraint organizations_slug_unique.
+ *
+ * UpdateOrganizationProfileInputSchema is the allowlist for Settings'
+ * Business → Edit (Phase 1). It is `.strict()` so an unknown field throws
+ * at the validator instead of being silently dropped or mass-assigned —
+ * legal_name, slug, default_currency and country are deliberately absent
+ * (read-only this phase; see src/server/org/update-organization-profile.ts).
  */
 import { z } from "zod";
 
@@ -46,3 +53,19 @@ export type CreateOrganizationResult =
   | { ok: false; code: "invalid_slug" }
   | { ok: false; code: "invalid_input"; detail: string }
   | { ok: false; code: "internal_error"; message: string };
+
+// ── Business profile update (Settings → Business → Edit, Phase 1) ──────────
+
+export const UpdateOrganizationProfileInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(255),
+    businessType: z
+      .string()
+      .trim()
+      .max(100)
+      .nullable()
+      .transform((value) => (value === "" ? null : value)),
+  })
+  .strict();
+
+export type UpdateOrganizationProfileInput = z.infer<typeof UpdateOrganizationProfileInputSchema>;

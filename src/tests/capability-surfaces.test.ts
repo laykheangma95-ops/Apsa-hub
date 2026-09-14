@@ -150,6 +150,12 @@ const SURFACES: Array<{
     serverFile: "src/server/org/get-organization-profile.ts",
   },
   {
+    name: "Settings — Business profile edit",
+    uiFile: "src/routes/app.settings.tsx",
+    key: "organization.update",
+    serverFile: "src/server/org/update-organization-profile.ts",
+  },
+  {
     name: "Settings — Team entry",
     uiFile: "src/routes/app.settings.tsx",
     key: "team.read",

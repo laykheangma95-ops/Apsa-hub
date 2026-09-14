@@ -1286,7 +1286,19 @@
       "currency": "Currency",
       "country": "Country",
       "errorTitle": "Could not load business details",
-      "errorBody": "Check your connection and try again."
+      "errorBody": "Check your connection and try again.",
+      "edit": "Edit",
+      "editForm": {
+        "title": "Edit business details",
+        "save": "Save",
+        "saving": "Saving…",
+        "success": "Business details updated.",
+        "nameRequired": "Business name is required.",
+        "nameTooLong": "Business name is too long.",
+        "typeTooLong": "Business type is too long.",
+        "errorDenied": "You no longer have permission to edit business details.",
+        "errorServer": "Could not save changes. Check your connection and try again."
+      }
     },
     "account": {
       "email": "Email",

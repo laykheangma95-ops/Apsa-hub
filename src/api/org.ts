@@ -17,16 +17,24 @@
  */
 import { createServerFn } from "@tanstack/react-start";
 import { getSessionFn } from "@/api/auth";
-import { CreateOrganizationInputSchema } from "@/lib/org-schema";
+import {
+  CreateOrganizationInputSchema,
+  UpdateOrganizationProfileInputSchema,
+} from "@/lib/org-schema";
 import type { CreateOrganizationResult } from "@/lib/org-schema";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import type { OrganizationProfile } from "@/server/org/get-organization-profile";
 
-export { slugSchema, CreateOrganizationInputSchema } from "@/lib/org-schema";
+export {
+  slugSchema,
+  CreateOrganizationInputSchema,
+  UpdateOrganizationProfileInputSchema,
+} from "@/lib/org-schema";
 export type {
   CreateOrganizationInput,
   CreateOrganizationResult,
   CreateOrganizationSuccess,
+  UpdateOrganizationProfileInput,
 } from "@/lib/org-schema";
 export type { OrganizationProfile } from "@/server/org/get-organization-profile";
 
@@ -89,3 +97,19 @@ export const getOrganizationProfileFn = createServerFn().handler(
     return getOrganizationProfile(authCtx);
   },
 );
+
+// ── updateOrganizationProfileFn — Settings "Business" → Edit (Phase 1) ─────
+//
+// Same resolveAuthContext() as the read above: organizationId is always the
+// caller's own active membership, never accepted from the client. The
+// validator's `.strict()` schema rejects any field outside the allowlist
+// before the handler body even runs — see UpdateOrganizationProfileInputSchema
+// in src/lib/org-schema.ts for exactly which fields those are and why.
+
+export const updateOrganizationProfileFn = createServerFn()
+  .validator((data: unknown) => UpdateOrganizationProfileInputSchema.parse(data))
+  .handler(async ({ data }): Promise<OrganizationProfile> => {
+    const authCtx = await resolveAuthContext();
+    const { updateOrganizationProfile } = await import("@/server/org/update-organization-profile");
+    return updateOrganizationProfile(authCtx, data);
+  });
