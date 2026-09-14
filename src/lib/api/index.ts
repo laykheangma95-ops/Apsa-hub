@@ -1334,10 +1334,18 @@ export async function listRealPayments(
  * no currency parameter: the payment inherits the order's currency server-side,
  * so this path cannot express a conversion.
  *
- * `idempotencyKey` is what makes a retry safe. The RPC treats a repeat of the
- * same key against the same order as a replay and returns the original payment
- * instead of writing a second one — so a double tap, a lost response, or a
- * user-driven retry can never charge a customer twice.
+ * `idempotencyKey` is what makes a retry safe. Retries of the same
+ * record-payment attempt reuse the same idempotency key and replay the existing
+ * claim: uniqueness is enforced per ORGANIZATION, on
+ * (organization_id, idempotency_key) — migration 034's partial unique index,
+ * which record_payment_v1 targets with ON CONFLICT ... DO NOTHING — not per
+ * order, so a repeat returns the original payment instead of writing a second
+ * row. A double tap or a lost response therefore records one claim, not two.
+ *
+ * Recording charges nobody: the row is written `pending`/`unverified` and
+ * contributes nothing to received settlement until it is verified. A deliberate
+ * second payment against the same order (a split or later instalment) is a
+ * separate claim and correctly carries its own key.
  */
 export interface RecordRealPaymentInput {
   orderId: string;

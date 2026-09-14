@@ -421,3 +421,187 @@ describe("W7: payment caches on the order screen cannot leak across principals",
     expect(fn).not.toContain("queryClient.clear()");
   });
 });
+
+/*
+ * ── 6. SENSITIVE FINANCIAL DATA FAILS CLOSED ON CAPABILITY LOSS ─────────────
+ *
+ * Independent review found Order detail rendering cached settlement figures
+ * after the member's payments.reconcile was revoked — or, far more commonly,
+ * after a failed capability refresh made the snapshot unconfirmed. Disabling
+ * the query was not enough: a disabled TanStack query keeps serving whatever
+ * is already in its cache, and the render gated only on `settlement !== null`.
+ *
+ * Both halves are proven here: that the cache hazard is real (a live
+ * QueryObserver, not a description of one), and that the screen's own gate
+ * now closes it. This runner has no DOM, so the presentation decision is
+ * pinned at its source — the binding that decides whether any settlement row
+ * can exist — the same way the BottomSheet focus-trap suite pins wiring it
+ * cannot render.
+ */
+describe("6. Settlement figures are never drawn from an unconfirmed capability", () => {
+  it("HAZARD: a disabled TanStack query still serves its cached data", async () => {
+    const { QueryClient, QueryObserver } = await import("@tanstack/react-query");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const queryKey = ["payments", "user-1", "org-1", "settlement", "order-1"];
+    const figures = { received: { amount: 250000, currency: "KHR" } };
+
+    // 1. The member holds payments.reconcile, so the query runs and caches.
+    const observer = new QueryObserver(client, {
+      queryKey,
+      queryFn: async () => figures,
+      enabled: true,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    await observer.refetch();
+    expect(observer.getCurrentResult().data).toEqual(figures);
+
+    // 2. Capability is lost: revoked, or the snapshot could not be confirmed.
+    observer.setOptions({ queryKey, queryFn: async () => figures, enabled: false });
+
+    // 3. `enabled: false` stops the next FETCH and nothing more — the figures
+    //    are still there to be rendered. This is why the screen must gate on
+    //    the capability itself rather than on the presence of data.
+    expect(observer.getCurrentResult().data).toEqual(figures);
+    expect(client.getQueryData(queryKey)).toEqual(figures);
+    unsubscribe();
+
+    // Guarding the cache entry itself is deliberately NOT the fix: evicting
+    // here would reach across a shared, principal-partitioned cache.
+    client.clear();
+  });
+
+  it("the settlement binding fails closed on canReconcile, not on data presence", () => {
+    const stripped = stripComments(read("src/routes/app.orders.$id.tsx"));
+
+    // The one binding every settlement row is drawn from.
+    expect(stripped).toContain(
+      "const settlement = canReconcile ? (settlementQuery.data ?? null) : null;",
+    );
+    // The pre-fix form must not come back.
+    expect(stripped).not.toContain("const settlement = settlementQuery.data ?? null;");
+
+    // canReconcile rides canSensitive, so an unconfirmed/stale snapshot is
+    // false too — stale fails closed for free, not only outright revocation.
+    expect(stripped).toContain('capabilities.canSensitive("payments.reconcile")');
+
+    // Denied is absent, never a settled amount of nothing.
+    expect(stripped).not.toMatch(/settlementQuery\.data\s*\?\?\s*\{/);
+    expect(stripped).not.toMatch(/settlement\s*\?\?\s*0/);
+  });
+
+  it("no settlement figure is rendered from the query result directly", () => {
+    const stripped = stripComments(read("src/routes/app.orders.$id.tsx"));
+
+    // Every protected figure must reach the DOM through the gated binding, so
+    // the raw query result may be read in exactly ONE place: that binding.
+    // Any second read is a path around the gate.
+    const reads = [...stripped.matchAll(/settlementQuery\.data/g)].length;
+    expect(`settlementQuery.data read ${reads} time(s)`).toBe(
+      "settlementQuery.data read 1 time(s)",
+    );
+    expect(stripped).toContain(
+      "const settlement = canReconcile ? (settlementQuery.data ?? null) : null;",
+    );
+
+    // And none of the protected figures is reached off the query result.
+    for (const figure of ["received", "refunded", "net", "overpaid", "overpaidAmount"]) {
+      expect(stripped).not.toContain(`settlementQuery.data?.${figure}`);
+      expect(stripped).not.toContain(`settlementQuery.data.${figure}`);
+    }
+
+    // The rows themselves are reached only via the gated value.
+    expect(stripped).toContain(
+      "{settlement ? <OrderSettlementRows settlement={settlement} /> : null}",
+    );
+  });
+
+  it("matches the gate the sibling Payments screens already apply", () => {
+    // The pattern this screen regressed from; if those screens ever drop it,
+    // this expectation says so rather than silently diverging.
+    expect(stripComments(read("src/routes/app.payments.$id.tsx"))).toContain("canReconcile ?");
+    expect(stripComments(read("src/routes/app.payments.tsx"))).toContain("canReconcile &&");
+  });
+});
+
+/*
+ * ── 7. REFUND-AXIS HISTORY IS TRANSLATED IN BOTH LOCALES ────────────────────
+ *
+ * Order detail renders a status-history row as
+ * t("order.historyEntry", { axis: t(`order.axis.${axis}`), status: t(`status.${toStatus}`) }).
+ *
+ * Migration 040's sync_order_payment_state writes a refund-axis row whose
+ * to_status is the order's refund_status — none | partial | full. Those three
+ * keys existed in NEITHER locale, so the first refund on an order showed the
+ * merchant a raw key ("Refund: status.partial").
+ *
+ * The en↔km parity suite cannot catch this: a key missing from BOTH locales is
+ * perfectly symmetric and passes. So this enumerates the values the SERVER can
+ * actually write and requires each to resolve to real copy in each locale.
+ */
+describe("7. Every refund-axis history value resolves in both locales", () => {
+  const en = JSON.parse(read("src/locales/en.json")) as Record<string, unknown>;
+  const km = JSON.parse(read("src/locales/km.json")) as Record<string, unknown>;
+
+  const lookup = (bundle: Record<string, unknown>, key: string): unknown =>
+    key
+      .split(".")
+      .reduce<unknown>(
+        (node, part) =>
+          node && typeof node === "object" ? (node as Record<string, unknown>)[part] : undefined,
+        bundle,
+      );
+
+  /**
+   * Read from the server's own vocabulary rather than restated here, so a new
+   * refund status cannot be added server-side without this test demanding copy
+   * for it.
+   */
+  const refundStatuses = (() => {
+    const source = read("src/server/orders/state-machine.ts");
+    const declaration = source.slice(source.indexOf("export const ORDER_REFUND_STATUSES"));
+    const values = [...declaration.slice(0, declaration.indexOf("]")).matchAll(/"([a-z_]+)"/g)].map(
+      (match) => match[1]!,
+    );
+    return values;
+  })();
+
+  it("reads the refund vocabulary from the server state machine", () => {
+    expect(refundStatuses).toEqual(["none", "partial", "full"]);
+  });
+
+  it("every axis label the history can render exists in both locales", () => {
+    for (const axis of ["lifecycle", "payment", "fulfillment", "refund"]) {
+      expect(`${axis}:en=${typeof lookup(en, `order.axis.${axis}`)}`).toBe(`${axis}:en=string`);
+      expect(`${axis}:km=${typeof lookup(km, `order.axis.${axis}`)}`).toBe(`${axis}:km=string`);
+    }
+  });
+
+  it("every refund status the server can write has English and Khmer copy", () => {
+    for (const status of refundStatuses) {
+      const key = `status.${status}`;
+      expect(`${key}:en=${typeof lookup(en, key)}`).toBe(`${key}:en=string`);
+      expect(`${key}:km=${typeof lookup(km, key)}`).toBe(`${key}:km=string`);
+      // A key echoed as its own value would render a raw key just as badly.
+      expect(lookup(en, key)).not.toBe(key);
+      expect(lookup(km, key)).not.toBe(key);
+      expect(String(lookup(km, key)).trim()).not.toBe("");
+    }
+  });
+
+  it("a rendered refund history row contains no raw translation key", () => {
+    for (const [bundle, label] of [
+      [en, "en"],
+      [km, "km"],
+    ] as const) {
+      const template = String(lookup(bundle, "order.historyEntry"));
+      for (const status of refundStatuses) {
+        const rendered = template
+          .replace("{{axis}}", String(lookup(bundle, "order.axis.refund")))
+          .replace("{{status}}", String(lookup(bundle, `status.${status}`)));
+        expect(`${label}/${status}: ${rendered}`).not.toContain("status.");
+        expect(`${label}/${status}: ${rendered}`).not.toContain("order.axis");
+        expect(`${label}/${status}: ${rendered}`).not.toContain("{{");
+      }
+    }
+  });
+});

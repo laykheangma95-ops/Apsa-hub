@@ -198,6 +198,64 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   }
 
+  /**
+   * A permission map is credited as enforcement only if the service it belongs
+   * to actually feeds it into ctx.require(). Declaring a table is not enforcing
+   * it: without this proof an unused permission map, a leftover from deleted
+   * code, or a map whose require() call was removed would all still read as
+   * "enforced" — exactly the UI-only gate this whole describe block exists to
+   * catch. Comments are stripped first, so naming the map in prose proves
+   * nothing either.
+   *
+   * Both real shapes count, and nothing else:
+   *   direct    ctx.require(MAP[key])
+   *   via local const permission = MAP[key]; ... ctx.require(permission)
+   */
+  function mapReachesRequire(serviceSource: string, mapName: string): boolean {
+    const code = stripComments(serviceSource);
+    const escaped = mapName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    if (new RegExp(String.raw`ctx\.require\(\s*${escaped}\s*\[`).test(code)) return true;
+
+    for (const match of code.matchAll(
+      new RegExp(String.raw`(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*${escaped}\s*\[`, "g"),
+    )) {
+      const local = match[1]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(String.raw`ctx\.require\(\s*${local}\s*[),]`).test(code)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Each permission table, the module that declares it, and the service that
+   * must be shown to enforce it. Adding a map here without a service that
+   * requires it fails `mapReachesRequire`, so the allowlist can no longer be
+   * used to vouch for a table nobody checks.
+   */
+  const PERMISSION_MAPS: ReadonlyArray<{
+    readonly declaredIn: string;
+    readonly maps: readonly string[];
+    readonly enforcedIn: string;
+  }> = [
+    {
+      declaredIn: "src/server/orders/state-machine.ts",
+      maps: ["LIFECYCLE_TRANSITION_PERMISSIONS", "FULFILLMENT_TRANSITION_PERMISSIONS"],
+      enforcedIn: "src/server/orders/service.ts",
+    },
+    /*
+     * RECORD_METHOD_PERMISSIONS is the same shape: recordPayment() looks the
+     * payment method up in it and passes the result straight to ctx.require,
+     * so payments.mark_cod (COD's own grant, seeded by migration 036) is
+     * genuinely enforced without ever appearing as a literal inside a
+     * require() call.
+     */
+    {
+      declaredIn: "src/server/payments/state-machine.ts",
+      maps: ["VERIFICATION_TRANSITION_PERMISSIONS", "RECORD_METHOD_PERMISSIONS"],
+      enforcedIn: "src/server/payments/service.ts",
+    },
+  ];
+
   function enforcedPermissionKeys(): Set<string> {
     const sources = findFiles("src/server", [".ts"]).concat(findFiles("src/api", [".ts"]));
     const keys = new Set<string>();
@@ -222,27 +280,12 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
      * src/server/payments/service.ts#verifyPayment reads
      * VERIFICATION_TRANSITION_PERMISSIONS[to] and calls ctx.require(permission).
      */
-    const permissionMaps: Array<[string, readonly string[]]> = [
-      [
-        "src/server/orders/state-machine.ts",
-        ["LIFECYCLE_TRANSITION_PERMISSIONS", "FULFILLMENT_TRANSITION_PERMISSIONS"],
-      ],
-      /*
-       * RECORD_METHOD_PERMISSIONS is the same shape: recordPayment() looks the
-       * payment method up in it and passes the result straight to ctx.require,
-       * so payments.mark_cod (COD's own grant, seeded by migration 036) is
-       * genuinely enforced without ever appearing as a literal inside a
-       * require() call.
-       */
-      [
-        "src/server/payments/state-machine.ts",
-        ["VERIFICATION_TRANSITION_PERMISSIONS", "RECORD_METHOD_PERMISSIONS"],
-      ],
-    ];
-
-    for (const [file, mapNames] of permissionMaps) {
-      const stateMachine = read(file);
-      for (const mapName of mapNames) {
+    for (const { declaredIn, maps, enforcedIn } of PERMISSION_MAPS) {
+      const stateMachine = read(declaredIn);
+      const service = read(enforcedIn);
+      for (const mapName of maps) {
+        // No proof that the service requires it, no credit for its values.
+        if (!mapReachesRequire(service, mapName)) continue;
         const start = stateMachine.indexOf(`export const ${mapName}`);
         if (start < 0) continue;
         const block = stripComments(stateMachine.slice(start, stateMachine.indexOf("};", start)));
@@ -261,7 +304,12 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
      */
     const inventoryService = read("src/server/inventory/service.ts");
     const permFnStart = inventoryService.indexOf("function requiredPermissionFor");
-    if (permFnStart >= 0) {
+    // Same proof the maps above need: the switch only counts as enforcement
+    // while recordMovement actually hands its result to ctx.require.
+    const inventoryEnforced = /ctx\.require\(\s*requiredPermissionFor\(/.test(
+      stripComments(inventoryService),
+    );
+    if (permFnStart >= 0 && inventoryEnforced) {
       const permFnEnd = inventoryService.indexOf("\n}", permFnStart);
       const block = stripComments(inventoryService.slice(permFnStart, permFnEnd));
       for (const match of block.matchAll(/return\s+["']([a-z_]+\.[a-z_]+)["']/g)) {
@@ -278,6 +326,65 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     const block = source.slice(start, source.indexOf("] as const;", start));
     return [...block.matchAll(/"([a-z_]+\.[a-z_]+)"/g)].map((match) => match[1]!);
   }
+
+  /*
+   * Guards the guard. The scan credits a permission table's values only
+   * because a service was shown to pass that table into ctx.require — so if
+   * the enforcement call is ever deleted, the map must stop counting and the
+   * keys reachable only through it must disappear from the enforced set.
+   *
+   * Without this, the allowlist above would be a standing human attestation:
+   * removing ctx.require(RECORD_METHOD_PERMISSIONS[input.method]) from
+   * recordPayment() left every assertion in this file passing.
+   */
+  it("a declared permission map counts only while its service really requires it", () => {
+    for (const { maps, enforcedIn } of PERMISSION_MAPS) {
+      const service = read(enforcedIn);
+      for (const mapName of maps) {
+        expect(`${mapName} enforced in ${enforcedIn}: ${mapReachesRequire(service, mapName)}`).toBe(
+          `${mapName} enforced in ${enforcedIn}: true`,
+        );
+      }
+    }
+
+    // Inventory's movement-type switch is credited on the same condition.
+    expect(
+      /ctx\.require\(\s*requiredPermissionFor\(/.test(read("src/server/inventory/service.ts")),
+    ).toBe(true);
+  });
+
+  it("removing a map's real ctx.require stops crediting that map's keys", () => {
+    // The probe an independent reviewer runs by hand, run in-memory instead:
+    // strip the enforcement call and the map must stop reading as enforced.
+    const service = read("src/server/payments/service.ts");
+    expect(mapReachesRequire(service, "RECORD_METHOD_PERMISSIONS")).toBe(true);
+
+    const withoutEnforcement = service.replace(
+      /ctx\.require\(RECORD_METHOD_PERMISSIONS\[input\.method\]\);/,
+      "/* enforcement removed */",
+    );
+    expect(withoutEnforcement).not.toBe(service); // the probe actually cut something
+    expect(mapReachesRequire(withoutEnforcement, "RECORD_METHOD_PERMISSIONS")).toBe(false);
+
+    // Naming the map in a comment or an import must never substitute for it.
+    expect(
+      mapReachesRequire(
+        `import { RECORD_METHOD_PERMISSIONS } from "./state-machine";
+         // ctx.require(RECORD_METHOD_PERMISSIONS[input.method]);
+         /* see RECORD_METHOD_PERMISSIONS */`,
+        "RECORD_METHOD_PERMISSIONS",
+      ),
+    ).toBe(false);
+
+    // A table declared and read but never required is not enforcement either.
+    expect(
+      mapReachesRequire(
+        `const permission = RECORD_METHOD_PERMISSIONS[input.method];
+         logger.debug(permission);`,
+        "RECORD_METHOD_PERMISSIONS",
+      ),
+    ).toBe(false);
+  });
 
   it("the enforced-key scan finds the keys it is supposed to find", () => {
     // Guards the test itself: if the scan silently matched nothing, every

@@ -432,7 +432,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const isReplacementDelivery = canCreateDelivery && latestDelivery !== null;
 
   const payments = paymentsQuery.data?.items ?? [];
-  const settlement = settlementQuery.data ?? null;
+  /*
+   * Fail closed on the CAPABILITY, not just on the query.
+   *
+   * `enabled: canReconcile` stops the next fetch, but a disabled TanStack query
+   * keeps serving whatever is already in its cache — so a snapshot loaded while
+   * the member still held payments.reconcile would go on rendering after the
+   * grant was revoked, or after a failed refresh made the snapshot unconfirmed
+   * (canSensitive is false for BOTH; see CapabilityView.canSensitive). Reading
+   * the capability here is what makes the figures disappear rather than linger.
+   *
+   * Denied is null, never zero: a withheld figure must not be presented as a
+   * settled amount of nothing. The cache entry itself is left alone — this is a
+   * presentation gate, not a cache eviction, so no other principal's entries
+   * are touched and the partitioned keys keep doing their own job.
+   *
+   * Same gate the sibling Payments screens already apply to these figures
+   * (app.payments.tsx, app.payments.$id.tsx).
+   */
+  const settlement = canReconcile ? (settlementQuery.data ?? null) : null;
   /*
    * Recording money against a cancelled order is not a thing the merchant can
    * usefully do, and a draft order is not yet an agreement to pay. Both are
