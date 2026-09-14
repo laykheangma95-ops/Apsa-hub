@@ -43,6 +43,7 @@ import {
   collectTrapFocusables,
   isTrapFocusable,
   nextTrapFocus,
+  resolveTrapFocus,
   type TrapCandidate,
 } from "@/design-system/focus-trap";
 
@@ -57,8 +58,6 @@ const stop = (name: string) => ({ name });
 const HIDDEN_ANCESTOR = '[aria-hidden="true"], [inert]';
 const DISABLED_FIELDSET = "fieldset[disabled]";
 const FIRST_LEGEND = "fieldset[disabled] > legend:first-of-type";
-const CLOSED_DETAILS = "details:not([open])";
-const CLOSED_DETAILS_ELIGIBLE_SUMMARY = "details:not([open]) > summary:first-of-type";
 
 interface CandidateOpts {
   rects?: number;
@@ -81,11 +80,20 @@ interface CandidateOpts {
    * that DOM shape, taken from the fixture the browser suite drives.
    */
   platformDisabled?: boolean;
+  /** This element's real parent, for building a <details> ancestry chain. */
+  parent?: TrapCandidate | null;
+  /**
+   * What the browser answers for `:first-of-type` on this element — only
+   * meaningful for a <summary>, where it is how `isControllingSummary`
+   * distinguishes the disclosure widget from a later sibling <summary>.
+   */
+  firstOfType?: boolean;
 }
 
 /**
  * A stubbed element exposing exactly the slice `isTrapFocusable` reads.
- * Rendered, visible, enabled and attribute-free unless the test says otherwise.
+ * Rendered, visible, enabled, parentless and attribute-free unless the test
+ * says otherwise.
  */
 function candidate(
   tagName: string,
@@ -96,10 +104,13 @@ function candidate(
   if (opts.hiddenAncestor) ancestors.add(HIDDEN_ANCESTOR);
   return {
     tagName,
-    matches: (selectors) => selectors === ":disabled" && (opts.platformDisabled ?? false),
+    matches: (selectors) =>
+      (selectors === ":disabled" && (opts.platformDisabled ?? false)) ||
+      (selectors === ":first-of-type" && (opts.firstOfType ?? false)),
     getAttribute: (name) => attrs[name] ?? null,
     closest: (selectors) => (ancestors.has(selectors) ? {} : null),
     getClientRects: () => ({ length: opts.rects ?? 1 }),
+    parentElement: opts.parent ?? null,
     ...(opts.visibility === undefined
       ? {}
       : {
@@ -402,56 +413,221 @@ describe("isTrapFocusable — nested disabled fieldsets", () => {
 });
 
 /*
- * The closed-<details> defect this file was reopened for. Chromium can report
- * a client rect and `visibility: visible` for a control collapsed inside a
- * closed <details> — the trap accepted it, BottomSheet's Tab handler focused
- * it, `.focus()` silently no-opped, and Tab stalled: three Tabs stayed on the
- * <summary>, three Shift+Tabs stayed on the control before the details.
- *
- * `isHiddenByClosedDetails` (private; exercised only through `isTrapFocusable`,
- * same as `isDisabledControl` and `isVisible` above) asks two ancestor
- * questions instead of trusting geometry. Real Chromium behavior for each
- * shape below is proven in bottom-sheet-focus-trap.browser.ts.
+ * The closed-<details> defect this file was reopened for, twice. Round one
+ * (P2) fixed the simple case: a control collapsed inside a closed <details>
+ * can report a client rect and `visibility: visible` in Chromium even though
+ * `.focus()` refuses to move there. Round two (P2-1) fixed round one's own
+ * gap — checking only the NEAREST closed <details> ancestor missed a closed
+ * inner <details> whose own controlling <summary> is still hidden by a
+ * further closed OUTER <details> above it. `isHiddenByClosedDetails` (private;
+ * exercised only through `isTrapFocusable`) now walks every <details>
+ * ancestor via `parentElement` and judges each independently. Real Chromium
+ * behavior for each shape below is proven in bottom-sheet-focus-trap.browser.ts.
  */
-describe("isTrapFocusable — closed <details> collapsed content", () => {
-  it("rejects a control collapsed inside a closed details, rects and visibility notwithstanding", () => {
-    const collapsed = {
-      ancestors: [CLOSED_DETAILS],
-      rects: 1,
-      visibility: "visible",
-    };
-    expect(isTrapFocusable(candidate("INPUT", { type: "text" }, collapsed))).toBe(false);
-    expect(isTrapFocusable(candidate("BUTTON", {}, collapsed))).toBe(false);
+describe("isTrapFocusable — closed <details> ancestry (nested)", () => {
+  it("A: both closed — only the outer's own controlling summary is reachable", () => {
+    const outer = candidate("DETAILS", {});
+    const inner = candidate("DETAILS", {}, { parent: outer });
+    const outerSummary = candidate("SUMMARY", {}, { parent: outer, firstOfType: true });
+    const innerSummary = candidate("SUMMARY", {}, { parent: inner, firstOfType: true });
+    const innerInput = candidate("INPUT", { type: "text" }, { parent: inner });
+
+    expect(isTrapFocusable(outerSummary)).toBe(true);
+    // The P2-1 regression: innerSummary IS inner's own controlling summary,
+    // but inner itself sits inside outer's collapsed content.
+    expect(isTrapFocusable(innerSummary)).toBe(false);
+    expect(isTrapFocusable(innerInput)).toBe(false);
   });
 
-  it("keeps a closed details' own eligible summary focusable", () => {
-    expect(
-      isTrapFocusable(
-        candidate("SUMMARY", {}, { ancestors: [CLOSED_DETAILS, CLOSED_DETAILS_ELIGIBLE_SUMMARY] }),
-      ),
-    ).toBe(true);
+  it("B: outer open, inner closed — inner's controlling summary participates, its collapsed content does not", () => {
+    const outer = candidate("DETAILS", { open: "" });
+    const inner = candidate("DETAILS", {}, { parent: outer });
+    const outerSummary = candidate("SUMMARY", {}, { parent: outer, firstOfType: true });
+    const innerSummary = candidate("SUMMARY", {}, { parent: inner, firstOfType: true });
+    const innerInput = candidate("INPUT", { type: "text" }, { parent: inner });
+
+    expect(isTrapFocusable(outerSummary)).toBe(true);
+    expect(isTrapFocusable(innerSummary)).toBe(true);
+    expect(isTrapFocusable(innerInput)).toBe(false);
   });
 
-  it("keeps normal focusability once the details is open", () => {
-    // No closed-details ancestor at all — neither selector matches.
+  it("C: both open — normal focusability restored throughout", () => {
+    const outer = candidate("DETAILS", { open: "" });
+    const inner = candidate("DETAILS", { open: "" }, { parent: outer });
+    const innerInput = candidate("INPUT", { type: "text" }, { parent: inner });
+    expect(isTrapFocusable(innerInput)).toBe(true);
+  });
+
+  it("keeps a control nested a level deeper inside the eligible summary itself", () => {
+    const details = candidate("DETAILS", {});
+    const summary = candidate("SUMMARY", {}, { parent: details, firstOfType: true });
+    const buttonInSummary = candidate("BUTTON", {}, { parent: summary });
+    expect(isTrapFocusable(buttonInSummary)).toBe(true);
+  });
+
+  it("three levels deep: a closed grandparent still hides a summary shielded only from its immediate parent", () => {
+    const grand = candidate("DETAILS", {});
+    const outer = candidate("DETAILS", {}, { parent: grand });
+    const outerSummary = candidate("SUMMARY", {}, { parent: outer, firstOfType: true });
+    expect(isTrapFocusable(outerSummary)).toBe(false);
+  });
+
+  it("stays reachable when nested inside a grandparent's OWN summary, regardless of the grandparent's state", () => {
+    const grand = candidate("DETAILS", {});
+    const grandSummary = candidate("SUMMARY", {}, { parent: grand, firstOfType: true });
+    const outer = candidate("DETAILS", {}, { parent: grandSummary });
+    const outerSummary = candidate("SUMMARY", {}, { parent: outer, firstOfType: true });
+    // A closed details' collapsed-content rule only ever applies to its own
+    // non-summary children — content inside its own summary is never hidden.
+    expect(isTrapFocusable(outerSummary)).toBe(true);
+  });
+
+  it("keeps normal focusability with no <details> ancestor at all", () => {
     expect(isTrapFocusable(candidate("INPUT", { type: "text" }))).toBe(true);
   });
+});
 
-  it("rejects a second <summary> in the same closed details — only the first is the disclosure widget", () => {
-    // Matches CLOSED_DETAILS (a closed details is above it) but not the
-    // eligible-summary selector (:first-of-type fails for a second summary).
-    expect(isTrapFocusable(candidate("SUMMARY", {}, { ancestors: [CLOSED_DETAILS] }))).toBe(false);
+/*
+ * The controlling-summary defect (also P2): only the FIRST <summary> child of
+ * a <details> is the disclosure widget HTML gives implicit focus behavior to.
+ * The old rule matched any element with tag `summary`, so a second <summary>
+ * in the same (open) details looked identical to the real one — Chromium
+ * refuses `.focus()` on it, and because Tab is always prevented, that created
+ * a persistent failed target exactly like the closed-details bug.
+ */
+describe("isTrapFocusable — controlling vs non-controlling <summary>", () => {
+  it("accepts the first summary child of an open details", () => {
+    const details = candidate("DETAILS", { open: "" });
+    const summary = candidate("SUMMARY", {}, { parent: details, firstOfType: true });
+    expect(isTrapFocusable(summary)).toBe(true);
   });
 
-  it("rejects a nested open details' own summary when its outer details is closed", () => {
-    // The nested case: an inner <details open> sits inside an outer closed
-    // one. The inner summary's real parent is the open inner details, so it
-    // can never match `details:not([open]) > summary:first-of-type` — only
-    // CLOSED_DETAILS matches, via the outer ancestor. Hidden, exactly like any
-    // other content the outer closed details swallows.
-    expect(
-      isTrapFocusable(candidate("SUMMARY", { type: "text" }, { ancestors: [CLOSED_DETAILS] })),
-    ).toBe(false);
+  it("rejects a second summary in the same open details", () => {
+    const details = candidate("DETAILS", { open: "" });
+    const secondSummary = candidate("SUMMARY", {}, { parent: details, firstOfType: false });
+    expect(isTrapFocusable(secondSummary)).toBe(false);
+  });
+
+  it("rejects a summary that is not a details' direct child at all", () => {
+    const wrapper = candidate("DIV", {}, { parent: null });
+    const strandedSummary = candidate("SUMMARY", {}, { parent: wrapper, firstOfType: true });
+    expect(isTrapFocusable(strandedSummary)).toBe(false);
+  });
+
+  it("rejects a summary with no parent to be controlling of", () => {
+    expect(isTrapFocusable(candidate("SUMMARY", {}, { firstOfType: true }))).toBe(false);
+  });
+
+  it("keeps a non-controlling summary the browser genuinely honors via an explicit tabindex", () => {
+    const details = candidate("DETAILS", { open: "" });
+    const secondSummary = candidate(
+      "SUMMARY",
+      { tabindex: "0" },
+      { parent: details, firstOfType: false },
+    );
+    expect(isTrapFocusable(secondSummary)).toBe(true);
+  });
+
+  it("still rejects a non-controlling summary opted out with a negative tabindex", () => {
+    const details = candidate("DETAILS", { open: "" });
+    const secondSummary = candidate(
+      "SUMMARY",
+      { tabindex: "-1" },
+      { parent: details, firstOfType: false },
+    );
+    expect(isTrapFocusable(secondSummary)).toBe(false);
+  });
+
+  it("does not blanket-ban the tag — the selector still matches every summary; the function decides", () => {
+    expect(TRAP_FOCUSABLE_SELECTOR).toContain("summary");
+  });
+});
+
+/*
+ * P2-2: the failed-focus fallback used to reset straight to the panel on any
+ * candidate whose `.focus()` did not actually move `activeElement`. That is
+ * safe for containment but can starve traversal: the next Tab recomputes the
+ * SAME bad candidate from the panel and resets again, so a merchant can never
+ * reach a later valid control. `resolveTrapFocus` (exported, pure —
+ * `attemptFocus` is injected rather than touching `document` itself) is the
+ * directional recovery: on a failure, keep walking the SAME direction past
+ * the bad candidate, bounded to the list's own length so a sheet where every
+ * candidate fails still terminates.
+ */
+describe("resolveTrapFocus — directional recovery past a candidate that refuses focus", () => {
+  const [a, bad, b, c] = [stop("a"), stop("bad"), stop("b"), stop("c")];
+  const stops = [a, bad, b, c];
+
+  it("E: skips a single failing candidate and lands on the next one forward", () => {
+    const attempts: string[] = [];
+    const result = resolveTrapFocus(stops, a, false, (candidate) => {
+      attempts.push(candidate.name);
+      return candidate !== bad;
+    });
+    expect(result).toBe(b);
+    expect(attempts).toEqual(["bad", "b"]);
+  });
+
+  it("E: skips the same failing candidate in reverse and reaches the control before it", () => {
+    const result = resolveTrapFocus(stops, b, true, (candidate) => candidate !== bad);
+    expect(result).toBe(a);
+  });
+
+  it("F: returns null — the caller's own panel fallback — when every candidate refuses focus", () => {
+    let attempts = 0;
+    const result = resolveTrapFocus(stops, a, false, () => {
+      attempts += 1;
+      return false;
+    });
+    expect(result).toBeNull();
+    // Bounded to exactly the list length: proof this cannot loop forever.
+    expect(attempts).toBe(stops.length);
+  });
+
+  it("returns null immediately for an empty list, matching nextTrapFocus", () => {
+    expect(resolveTrapFocus([], null, false, () => true)).toBeNull();
+  });
+
+  it("wraps past a failing candidate at the boundary instead of giving up at the edge", () => {
+    const failing = c;
+    const withFailingLast = [a, b, failing];
+    const result = resolveTrapFocus(
+      withFailingLast,
+      b,
+      false,
+      (candidate) => candidate !== failing,
+    );
+    expect(result).toBe(a);
+  });
+
+  it("succeeds on the first attempt and calls attemptFocus exactly once when the primary candidate works", () => {
+    let attempts = 0;
+    const result = resolveTrapFocus(stops, a, false, () => {
+      attempts += 1;
+      return true;
+    });
+    expect(result).toBe(bad); // nextTrapFocus(stops, a, false) is `bad` here — the point is it is tried once.
+    expect(attempts).toBe(1);
+  });
+
+  it("terminates on a single-candidate list even when that candidate always fails", () => {
+    const only = [a];
+    let attempts = 0;
+    const result = resolveTrapFocus(only, a, false, () => {
+      attempts += 1;
+      return false;
+    });
+    expect(result).toBeNull();
+    expect(attempts).toBe(1);
+  });
+
+  it("never calls attemptFocus more than the list length even across a full wrap", () => {
+    let attempts = 0;
+    resolveTrapFocus(stops, null, false, () => {
+      attempts += 1;
+      return false;
+    });
+    expect(attempts).toBeLessThanOrEqual(stops.length);
   });
 });
 
@@ -516,7 +692,7 @@ describe("collectTrapFocusables — nested and empty sheet content", () => {
 describe("BottomSheet wiring", () => {
   it("routes Tab through the shared trap instead of the old first/last check", () => {
     expect(bottomSheet).toContain("collectTrapFocusables");
-    expect(bottomSheet).toContain("nextTrapFocus");
+    expect(bottomSheet).toContain("resolveTrapFocus");
     // The escape hatch: a Tab branch that only acted on the boundary stops.
     expect(bottomSheet).not.toMatch(/document\.activeElement === first/);
     expect(bottomSheet).not.toMatch(/document\.activeElement === last/);
@@ -536,13 +712,10 @@ describe("BottomSheet wiring", () => {
     // the browser gets the keystroke back and focus leaves the sheet.
     const beforePrevent = body.slice(0, body.indexOf("event.preventDefault()"));
     expect(beforePrevent).not.toMatch(/\breturn\b/);
-    // An empty sheet keeps focus on the dialog container rather than escaping.
-    expect(body).toContain("const target = next ?? panel;");
-    expect(body).toContain("target.focus()");
-    // Defensive verification: a candidate .focus() did not actually move
-    // focus to falls back to the panel instead of stranding Tab on the
-    // control the merchant was already on.
-    expect(body).toContain("if (document.activeElement !== target) panel.focus();");
+    // An empty sheet, and a sheet where every candidate refuses focus, both
+    // keep focus on the dialog container rather than escaping or stalling.
+    expect(body).toContain("resolveTrapFocus(");
+    expect(body).toContain("if (!landed) panel.focus();");
   });
 
   it("keeps the scrim out of the tab order", () => {
@@ -651,6 +824,13 @@ describe("browser regression coverage exists for this exact bug", () => {
       "opening the details lets its inner control participate normally",
       "a closed outer details hides an open inner details entirely, summary included",
       "repeated Tab and Shift+Tab keep moving without ever stalling on one control",
+      "shows exactly where it diverges from what Chromium will actually focus",
+      "outer's own controlling summary is reachable, the inner pair is not",
+      "outer open, inner closed — inner's controlling summary participates",
+      "both open — inner controls participate normally",
+      "a second <summary> is skipped — Chromium refuses it no less than any other non-stop",
+      "recovers past a candidate that refuses focus at runtime, forward and reverse, with no stuck panel cycle",
+      "advances the full effective cycle at least twice, forward and reverse",
     ]) {
       expect(browserSuite).toContain(proof);
     }

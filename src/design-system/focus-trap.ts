@@ -41,6 +41,19 @@ export interface TrapCandidate {
       getComputedStyle(element: TrapCandidate): { readonly visibility: string };
     } | null;
   } | null;
+  /**
+   * The element's real parent. Used only to walk the `<details>` ancestor
+   * chain — see `isHiddenByClosedDetails` / `isControllingSummary`. A single
+   * `closest()` call cannot distinguish two different `<details>` ancestors
+   * from each other, and that distinction is exactly what a closed `<details>`
+   * nested inside another one needs: being the controlling summary of the
+   * inner one says nothing about whether the outer one still hides it.
+   *
+   * Optional because most stubs never exercise `<details>` nesting; when
+   * absent, the walk has nowhere to go and both functions behave exactly as
+   * they did before this property existed.
+   */
+  readonly parentElement?: TrapCandidate | null;
 }
 
 /**
@@ -51,6 +64,11 @@ export interface TrapCandidate {
  *
  * `[tabindex]` is matched unfiltered here and narrowed in `isTrapFocusable`,
  * because a negative tabindex must be excluded by *value*, not by selector.
+ * `summary` is matched unfiltered for the same reason: whether a given
+ * `<summary>` is the one HTML actually makes interactive depends on its real
+ * parent and its position among siblings, which a selector cannot express
+ * without knowing the live DOM shape the trap does not assume here — see
+ * `isControllingSummary`.
  */
 export const TRAP_FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -113,46 +131,67 @@ function isDisabledControl(element: TrapCandidate): boolean {
   return element.matches(":disabled");
 }
 
-/** The two ancestor questions `isHiddenByClosedDetails` asks, and nothing else. */
-const CLOSED_DETAILS = "details:not([open])";
-const CLOSED_DETAILS_ELIGIBLE_SUMMARY = "details:not([open]) > summary:first-of-type";
+/**
+ * Whether `element` is the one `<summary>` that gives its immediate parent
+ * `<details>` its disclosure behavior.
+ *
+ * HTML picks exactly one: the first `<summary>` element child. Any other
+ * `<summary>` — a later sibling, or one that is not a `<details>`'s direct
+ * child at all — gets none of that behavior. It is not natively interactive,
+ * carries no implicit tab stop, and Chromium will not move focus to it no
+ * matter what `getClientRects()`/`visibility` say, which is exactly the shape
+ * of bug this whole module exists to catch — so `summary` is matched broadly
+ * by the selector (see `TRAP_FOCUSABLE_SELECTOR`) and narrowed here, the same
+ * way `[tabindex]` is narrowed by value rather than by selector.
+ *
+ * `:first-of-type` is evaluated by the real DOM against `element`'s actual
+ * siblings under its actual parent, so this reads the platform's own answer
+ * rather than re-deriving sibling order from anything the trap tracks itself.
+ */
+function isControllingSummary(element: TrapCandidate): boolean {
+  if (element.tagName !== "SUMMARY") return false;
+  const parent = element.parentElement;
+  return !!parent && parent.tagName === "DETAILS" && element.matches(":first-of-type");
+}
 
 /**
- * Whether `element` sits inside a closed `<details>`'s collapsed content.
+ * Whether `element` sits inside collapsed `<details>` content it cannot
+ * reach.
  *
- * Same shape as the fieldset/legend exception above, one level simpler: a
- * closed `<details>` hides everything below it except its own first
- * `<summary>` child — the disclosure widget, which stays focusable and is how
- * a merchant opens it. Nothing else inside a closed details is in the tab
- * order, however deeply nested, and regardless of what `getClientRects()` or
- * computed `visibility` report for it: collapsed-details content is hidden by
- * a UA-stylesheet `display: none` on the details' non-summary children, and
- * Chromium can still surface a client rect and `visibility: visible` for a
- * descendant of that hidden subtree even though `.focus()` refuses to move
- * there — geometry and computed style are not reliable signals for this case,
- * so it is asked for explicitly rather than folded into `isVisible`.
+ * A closed `<details>` hides everything below it except its own controlling
+ * `<summary>` (see `isControllingSummary`) — but a candidate can sit under
+ * several `<details>` ancestors nested inside one another, and being the
+ * controlling summary of ONE of them says nothing about the others further
+ * up. Asking only the nearest closed ancestor — the most a single
+ * `closest("details:not([open])")` call can answer — missed exactly that: a
+ * closed inner `<details>`'s own controlling summary is still hidden when
+ * that whole inner `<details>` sits, as ordinary collapsed content, inside a
+ * further closed OUTER `<details>`. The inner summary is the inner details'
+ * disclosure widget, not the outer's, so the outer's collapsed body still
+ * swallows it, open-inner-details or not.
  *
- * Two `closest()` questions, mirroring the fieldset check's two-question
- * shape:
+ * So every `<details>` ancestor is walked and judged independently. `child`
+ * is the node the walk arrived from at each step; it must be that specific
+ * `<details>`'s own controlling summary to be shielded from it. Anything
+ * else — a plain descendant, or even another `<details>`'s controlling
+ * summary — is hidden the moment one closed ancestor fails to shield it, and
+ * the walk can stop there: a `display: none` part-way up already hides
+ * everything below it regardless of what sits further above.
  *
- * 1. `details:not([open])` — is there a closed `<details>` anywhere above
- *    `element` at all? If not, this rule does not apply, open or no
- *    `<details>` in the ancestry.
- * 2. `details:not([open]) > summary:first-of-type` — is `element` itself the
- *    eligible summary of a specific closed `<details>`? Because `matches()`
- *    (which `closest()` calls at each step) checks the *real* parent of the
- *    candidate element, this only answers yes for a `<summary>` that is a
- *    closed `<details>`'s own first `<summary>` child — never a second
- *    `<summary>` in the same details, and never a `<summary>` belonging to a
- *    different, open `<details>` nested inside the closed one's collapsed
- *    content (that summary's real parent is the open inner details, which
- *    fails `:not([open])`, so it cannot match). A closed outer `<details>`
- *    therefore still hides an open inner `<details>` and everything in it,
- *    summary included — exactly what the browser does.
+ * Geometry and computed style are never consulted here: collapsed content can
+ * still report a client rect and `visibility: visible` in Chromium even
+ * though `.focus()` refuses to move there.
  */
 function isHiddenByClosedDetails(element: TrapCandidate): boolean {
-  if (element.closest(CLOSED_DETAILS) === null) return false;
-  return element.closest(CLOSED_DETAILS_ELIGIBLE_SUMMARY) === null;
+  let child: TrapCandidate = element;
+  let parent = element.parentElement;
+  while (parent) {
+    const isClosedDetails = parent.tagName === "DETAILS" && parent.getAttribute("open") === null;
+    if (isClosedDetails && !isControllingSummary(child)) return true;
+    child = parent;
+    parent = parent.parentElement;
+  }
+  return false;
 }
 
 /**
@@ -188,14 +227,17 @@ function isVisible(element: TrapCandidate): boolean {
  * Rejects, in order: controls the browser itself reports as `:disabled` (their
  * own attribute, or any ancestor `<fieldset disabled>` — however deeply nested
  * — that reaches them), anything opted out with a negative tabindex, hidden
- * inputs, subtrees hidden from assistive tech or made inert, anything inside a
- * closed `<details>` other than its own eligible `<summary>` (see
- * `isHiddenByClosedDetails` — asked explicitly, before geometry, because a
- * collapsed details' content can still report a client rect), anything the
- * browser is not laying out (`display: none`), and anything laid out but not
- * painted (`visibility: hidden`). An element scrolled out of view inside the
- * sheet's own scroll pane is still rendered and still focusable, so it stays
- * in the cycle — which is what we want: the merchant tabs to it and the pane
+ * inputs, subtrees hidden from assistive tech or made inert, a `<summary>`
+ * that is not the one HTML actually makes interactive and carries no explicit
+ * tabindex of its own (see `isControllingSummary`), anything inside a closed
+ * `<details>` other than the controlling `<summary>` of every closed
+ * `<details>` ancestor between it and the document (see
+ * `isHiddenByClosedDetails` — asked explicitly, before geometry, because
+ * collapsed content can still report a client rect), anything the browser is
+ * not laying out (`display: none`), and anything laid out but not painted
+ * (`visibility: hidden`). An element scrolled out of view inside the sheet's
+ * own scroll pane is still rendered and still focusable, so it stays in the
+ * cycle — which is what we want: the merchant tabs to it and the pane
  * scrolls.
  */
 export function isTrapFocusable(element: TrapCandidate): boolean {
@@ -210,6 +252,13 @@ export function isTrapFocusable(element: TrapCandidate): boolean {
   if (element.tagName === "INPUT" && element.getAttribute("type") === "hidden") return false;
 
   if (element.closest('[aria-hidden="true"], [inert]') !== null) return false;
+
+  // `tabindex === null` here means no *valid* explicit tabindex either — a
+  // negative one already returned false above, so anything left is either
+  // absent or a genuine non-negative value the browser itself will honor.
+  if (element.tagName === "SUMMARY" && tabindex === null && !isControllingSummary(element)) {
+    return false;
+  }
 
   if (isHiddenByClosedDetails(element)) return false;
 
@@ -261,4 +310,51 @@ export function nextTrapFocus<T>(
 
   if (shiftKey) return index === 0 ? last : focusables[index - 1]!;
   return index === focusables.length - 1 ? first : focusables[index + 1]!;
+}
+
+/**
+ * Directional recovery for a candidate `nextTrapFocus` names that turns out
+ * not to actually accept focus.
+ *
+ * `isTrapFocusable` is the primary defense — correct candidate filtering
+ * should mean this never has to do anything. It exists for whatever that
+ * filter cannot see: a candidate a browser quirk still fools it on, or one
+ * whose own `.focus()` handler declines or redirects. Falling back straight
+ * to a safe target (the panel) on a single failure is not enough by itself:
+ * the very next Tab starts from that safe target and can compute the SAME
+ * bad candidate as next, refocus the panel, and repeat forever — never
+ * advancing to a later valid control. So on a failure this keeps walking in
+ * the SAME direction, past the bad candidate, until something actually
+ * accepts focus.
+ *
+ * Kept separate from `nextTrapFocus` on purpose: that function stays a pure
+ * calculation with no notion of whether focus "worked", reusable anywhere
+ * ordering alone is needed. `attemptFocus` is injected here — a side effect,
+ * but an explicit parameter rather than a global `document` reference — so
+ * this stays unit-testable without a DOM, the same discipline the rest of
+ * this module follows.
+ *
+ * Bounded to at most `focusables.length` attempts: `nextTrapFocus` steps
+ * through a fixed list as a single cycle in either direction, so that many
+ * steps starting anywhere visits every candidate exactly once. That is
+ * enough to either land somewhere or prove nothing in the list will ever
+ * accept focus — never more, so a list where every candidate fails cannot
+ * loop forever.
+ *
+ * Returns `null` when no candidate accepted focus (including an empty list);
+ * the caller's own safe fallback (the panel) is what handles that case, the
+ * same way it already does when `nextTrapFocus` itself returns `null`.
+ */
+export function resolveTrapFocus<T>(
+  focusables: readonly T[],
+  active: T | null | undefined,
+  shiftKey: boolean,
+  attemptFocus: (candidate: T) => boolean,
+): T | null {
+  let candidate = nextTrapFocus(focusables, active, shiftKey);
+  for (let attempts = 0; candidate !== null && attempts < focusables.length; attempts++) {
+    if (attemptFocus(candidate)) return candidate;
+    candidate = nextTrapFocus(focusables, candidate, shiftKey);
+  }
+  return null;
 }

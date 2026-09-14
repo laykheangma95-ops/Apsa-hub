@@ -1,7 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { collectTrapFocusables, nextTrapFocus } from "@/design-system/focus-trap";
+import { collectTrapFocusables, resolveTrapFocus } from "@/design-system/focus-trap";
 import { cn } from "@/lib/utils";
 
 export type SheetSnap = "peek" | "half" | "full";
@@ -143,11 +143,6 @@ export function BottomSheet({
        * enables, a category list loads).
        */
       const focusables = collectTrapFocusables(panel);
-      const next = nextTrapFocus(
-        focusables,
-        document.activeElement as HTMLElement | null,
-        event.shiftKey,
-      );
 
       /*
        * Tab is always ours while the sheet is open. Handing any case back to
@@ -156,24 +151,32 @@ export function BottomSheet({
        * keeps focus on the container.
        */
       event.preventDefault();
-      const target = next ?? panel;
-      target.focus();
 
       /*
-       * Defense in depth, not the fix itself. `isTrapFocusable` (focus-trap.ts)
-       * is where "will .focus() actually land here" is decided; this only
-       * confirms the browser agreed. If some future DOM shape still fools that
-       * candidate list, `target.focus()` above is a no-op and Tab must not
-       * stall on the control the merchant was already on — that is exactly how
-       * a closed-<details> descendant stranded focus before the candidate list
-       * itself was fixed to exclude it. Falling back to the panel rather than
-       * cycling to another candidate keeps this narrow and keeps the failure
-       * mode identical to the already-covered empty-sheet case:
-       * `nextTrapFocus` treats the container as "not yet inside" (see its own
-       * doc comment), so the very next Tab still makes normal progress instead
-       * of being swallowed indefinitely on one control.
+       * `isTrapFocusable` (focus-trap.ts) is the primary defense — correct
+       * candidate filtering should mean every attempt below succeeds on the
+       * first try. `resolveTrapFocus` is the narrow backstop for whatever
+       * that filter cannot see (a browser quirk it does not yet know about,
+       * or a candidate whose own focus handler declines or redirects): it
+       * keeps walking in the SAME direction past a candidate that does not
+       * actually accept focus, bounded to the length of the list, so Tab
+       * makes forward or reverse progress instead of repeatedly bouncing
+       * back to the panel and re-computing the same bad candidate forever.
        */
-      if (document.activeElement !== target) panel.focus();
+      const landed = resolveTrapFocus(
+        focusables,
+        document.activeElement as HTMLElement | null,
+        event.shiftKey,
+        (candidate) => {
+          try {
+            candidate.focus();
+          } catch {
+            return false;
+          }
+          return document.activeElement === candidate;
+        },
+      );
+      if (!landed) panel.focus();
     };
 
     document.addEventListener("keydown", onKeyDown);

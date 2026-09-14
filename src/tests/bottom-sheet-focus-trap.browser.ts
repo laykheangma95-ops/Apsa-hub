@@ -534,6 +534,167 @@ describeBrowser("BottomSheet focus trap — real Chromium", () => {
     }, 60000);
   });
 
+  /*
+   * P2-1/P2-2, the final independent re-review's two remaining defects.
+   *
+   * P2-1: the round-1 fix checked only the NEAREST closed <details> ancestor,
+   * which missed a closed inner <details> whose own controlling <summary> is
+   * still hidden by a further closed OUTER <details> above it — and also
+   * missed that only the FIRST <summary> child of a details is the real
+   * disclosure widget, not every element with that tag name.
+   *
+   * P2-2: falling straight back to the panel on a single failed `.focus()`
+   * can starve traversal — the next Tab recomputes the same bad candidate
+   * from the panel and resets again, never reaching a later valid control.
+   * `#n-persistent-fail` reproduces a candidate that passes every structural
+   * check yet genuinely refuses focus at runtime (it blurs itself the
+   * instant it is focused — see the fixture), so this drives real Chromium
+   * through `resolveTrapFocus`'s recovery, not just its stub-level logic.
+   *
+   * Uses the separate `?details-nested=1` fixture, kept apart from the
+   * simpler `?details=1` one above for the same reason that one is separate
+   * from the main fixture: its own exact tab order should not have to be
+   * threaded through unrelated assertions.
+   */
+  describe("closed <details> ancestry and failed-focus recovery (P2-1/P2-2)", () => {
+    // What a merchant actually experiences Tabbing through the sheet:
+    // #n-persistent-fail is real HTML, a real trap candidate, and completely
+    // invisible to this sequence — resolveTrapFocus skips it within the same
+    // keystroke that would have landed there.
+    const EFFECTIVE_STOPS = [
+      "n-before",
+      "n-both-closed-outer-summary",
+      "n-mid1",
+      "n-ooic-outer-summary",
+      "n-ooic-inner-summary",
+      "n-mid2",
+      "n-both-open-outer-summary",
+      "n-both-open-inner-summary",
+      "n-both-open-inner-input",
+      "n-mid3",
+      "n-second-summary-first",
+      "n-second-summary-input",
+      "n-mid4",
+      "n-after",
+    ];
+
+    it("counts the structural candidate list, and shows exactly where it diverges from what Chromium will actually focus", async () => {
+      await openSheet("?details-nested=1");
+      const stops = await page.evaluate<string[]>("window.apsaTrapStops()");
+      const reachable = await page.evaluate<string[]>(BROWSER_TRUTH);
+
+      // isTrapFocusable has no way to know #n-persistent-fail blurs itself —
+      // it is structurally and geometrically an ordinary button, so the
+      // candidate list legitimately includes it.
+      expect(stops).toEqual([...EFFECTIVE_STOPS.slice(0, 13), "n-persistent-fail", "n-after"]);
+      // Chromium's own focus-and-check, exactly the same test the browser
+      // suite already trusts elsewhere, excludes it — this is the one
+      // legitimate structural/runtime divergence resolveTrapFocus exists for.
+      expect(reachable).toEqual(EFFECTIVE_STOPS);
+      expect(stops).not.toEqual(reachable);
+    }, 60000);
+
+    it("A: both closed — outer's own controlling summary is reachable, the inner pair is not, however it is IS its own controlling summary", async () => {
+      await openSheet("?details-nested=1");
+      await page.evaluate("document.getElementById('n-before').focus()");
+      expect(await page.tab()).toBe("n-both-closed-outer-summary");
+      expect(await page.tab()).toBe("n-mid1");
+      // The regression itself, stated as the platform's own verdict: inner's
+      // controlling summary really is a <summary> whose real parent is a
+      // closed <details> — it is just the WRONG closed details.
+      expect(
+        await page.evaluate<boolean>(
+          "!!document.getElementById('n-both-closed-inner-summary').closest('details:not([open])')",
+        ),
+      ).toBe(true);
+    }, 60000);
+
+    it("B: outer open, inner closed — inner's controlling summary participates, its collapsed input does not", async () => {
+      await openSheet("?details-nested=1");
+      await page.evaluate("document.getElementById('n-ooic-outer-summary').focus()");
+      expect(await page.tab()).toBe("n-ooic-inner-summary");
+      expect(await page.tab()).toBe("n-mid2");
+    }, 60000);
+
+    it("C: both open — inner controls participate normally", async () => {
+      await openSheet("?details-nested=1");
+      await page.evaluate("document.getElementById('n-both-open-outer-summary').focus()");
+      expect(await page.tab()).toBe("n-both-open-inner-summary");
+      expect(await page.tab()).toBe("n-both-open-inner-input");
+      expect(await page.tab()).toBe("n-mid3");
+    }, 60000);
+
+    it("D: a second <summary> is skipped — Chromium refuses it no less than any other non-stop", async () => {
+      await openSheet("?details-nested=1");
+      // Proven against the platform first: the second summary really is
+      // there, and Chromium really will not focus it.
+      expect(
+        await page.evaluate<boolean>(
+          "document.getElementById('n-second-summary-second').focus(); document.activeElement.id === 'n-second-summary-second'",
+        ),
+      ).toBe(false);
+      await page.evaluate("document.getElementById('n-second-summary-first').focus()");
+      expect(await page.tab()).toBe("n-second-summary-input");
+      expect(await page.tab()).toBe("n-mid4");
+    }, 60000);
+
+    it("E: recovers past a candidate that refuses focus at runtime, forward and reverse, with no stuck panel cycle", async () => {
+      await openSheet("?details-nested=1");
+      await page.evaluate("document.getElementById('n-mid4').focus()");
+      // Forward: lands on #n-after directly. #n-persistent-fail never shows
+      // up as an intermediate activeElement — recovery happens inside the
+      // same keystroke.
+      expect(await page.tab()).toBe("n-after");
+      // Reverse: the same recovery the other direction.
+      expect(await page.tab(true)).toBe("n-mid4");
+
+      // The stuck-cycle signature P2-2 named: repeated presses parked on the
+      // dialog container (or on the same id) instead of ever reaching
+      // #n-after. Prove several consecutive presses instead of one.
+      for (let repeat = 0; repeat < 5; repeat++) {
+        await page.evaluate("document.getElementById('n-mid4').focus()");
+        const landed = await page.tab();
+        expect(landed).toBe("n-after");
+        expect(landed).not.toBe("dialog");
+      }
+    }, 60000);
+
+    it("advances the full effective cycle at least twice, forward and reverse, never landing on hidden or non-controlling content", async () => {
+      await openSheet("?details-nested=1");
+      const forward: string[] = [];
+      for (let press = 0; press < EFFECTIVE_STOPS.length * 2; press++)
+        forward.push(await page.tab());
+      expect(forward.slice(0, EFFECTIVE_STOPS.length)).toEqual(EFFECTIVE_STOPS);
+      expect(forward.slice(0, EFFECTIVE_STOPS.length)).toEqual(
+        forward.slice(EFFECTIVE_STOPS.length),
+      );
+
+      // Reopened fresh rather than reusing the forward loop's end state: the
+      // forward loop's final Tab leaves focus already ON the last stop, so a
+      // Shift+Tab from there steps to the second-to-last one — correct, but
+      // not the "not yet inside" state a reverse walk is meant to start from.
+      await openSheet("?details-nested=1");
+      const backward: string[] = [];
+      for (let press = 0; press < EFFECTIVE_STOPS.length * 2; press++) {
+        backward.push(await page.tab(true));
+      }
+      expect(backward.slice(0, EFFECTIVE_STOPS.length)).toEqual([...EFFECTIVE_STOPS].reverse());
+      expect(backward.slice(0, EFFECTIVE_STOPS.length)).toEqual(
+        backward.slice(EFFECTIVE_STOPS.length),
+      );
+
+      for (const visited of [...forward, ...backward]) {
+        expect(visited).not.toBe("n-persistent-fail");
+        expect([
+          "n-both-closed-inner-summary",
+          "n-both-closed-inner-input",
+          "n-ooic-inner-input",
+          "n-second-summary-second",
+        ]).not.toContain(visited);
+      }
+    }, 60000);
+  });
+
   it("never lets Tab reach the page behind the sheet", async () => {
     await openSheet();
     const outside = ["background", "trigger"];

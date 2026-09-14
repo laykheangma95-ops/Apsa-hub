@@ -51,6 +51,50 @@
  *       #d-nested-inner-summary  an open details changes nothing: the outer
  *       #d-nested-inner-input    closed details still hides this whole subtree
  *   #d-end                     ordinary control after everything
+ *
+ * `?details-nested=1` covers the P2-1/P2-2 re-review: ancestry that requires
+ * walking EVERY closed <details> ancestor (not just the nearest), the
+ * controlling-vs-second-<summary> distinction, and recovery past a candidate
+ * that structurally looks focusable but loses focus at runtime.
+ *
+ *   #n-before
+ *   #n-both-closed-outer (closed)
+ *     #n-both-closed-outer-summary   reachable — outer's own controlling summary
+ *     #n-both-closed-inner (closed)
+ *       #n-both-closed-inner-summary NOT reachable — it IS inner's own
+ *                                     controlling summary, but inner itself
+ *                                     sits inside outer's collapsed body
+ *                                     (the exact P2-1 regression)
+ *       #n-both-closed-inner-input   NOT reachable
+ *   #n-mid1
+ *   #n-ooic-outer (OPEN)
+ *     #n-ooic-outer-summary
+ *     #n-ooic-inner (closed)
+ *       #n-ooic-inner-summary        reachable — outer is open, so inner's own
+ *                                     closed-details rule is all that applies
+ *       #n-ooic-inner-input          NOT reachable — inner is still closed
+ *   #n-mid2
+ *   #n-both-open-outer (open)
+ *     #n-both-open-outer-summary
+ *     #n-both-open-inner (open)
+ *       #n-both-open-inner-summary   all reachable — nothing closed anywhere
+ *       #n-both-open-inner-input
+ *   #n-mid3
+ *   #n-second-summary (open)
+ *     #n-second-summary-first        reachable — the controlling summary
+ *     #n-second-summary-second       NOT reachable — a second <summary> has
+ *                                     no native tab stop, controlling or not
+ *     #n-second-summary-input        reachable — ordinary open-details content
+ *   #n-mid4
+ *   #n-persistent-fail                looks like an ordinary focusable button
+ *                                     to every structural/geometric check, but
+ *                                     blurs itself the instant it receives
+ *                                     focus (test-only — see its onFocus).
+ *                                     Proves recovery past a candidate that
+ *                                     is not caught by candidate filtering at
+ *                                     all, only by verifying focus actually
+ *                                     landed.
+ *   #n-after
  */
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -74,7 +118,7 @@ window.apsaTrapStops = () => {
   return panel ? collectTrapFocusables(panel).map((element) => element.id) : [];
 };
 
-export type FixtureVariant = "default" | "empty" | "details";
+export type FixtureVariant = "default" | "empty" | "details" | "details-nested";
 
 // Exported so this fixture is a module with a component export rather than a
 // component-only side-effect script; the mount below is still what the
@@ -139,6 +183,81 @@ export function Fixture({ variant }: { variant: FixtureVariant }) {
               End
             </button>
           </>
+        ) : variant === "details-nested" ? (
+          <>
+            <button id="n-before" type="button">
+              Before
+            </button>
+
+            {/* A: both closed. Only n-both-closed-outer-summary is reachable —
+                the P2-1 regression is n-both-closed-inner-summary, which IS
+                the inner's own controlling summary but still sits inside the
+                outer's collapsed body. */}
+            <details id="n-both-closed-outer">
+              <summary id="n-both-closed-outer-summary">Outer closed</summary>
+              <details id="n-both-closed-inner">
+                <summary id="n-both-closed-inner-summary">Inner closed</summary>
+                <input id="n-both-closed-inner-input" type="text" />
+              </details>
+            </details>
+            <button id="n-mid1" type="button">
+              Mid 1
+            </button>
+
+            {/* B: outer open, inner closed. */}
+            <details id="n-ooic-outer" open>
+              <summary id="n-ooic-outer-summary">Outer open</summary>
+              <details id="n-ooic-inner">
+                <summary id="n-ooic-inner-summary">Inner closed</summary>
+                <input id="n-ooic-inner-input" type="text" />
+              </details>
+            </details>
+            <button id="n-mid2" type="button">
+              Mid 2
+            </button>
+
+            {/* C: both open — normal focusability throughout. */}
+            <details id="n-both-open-outer" open>
+              <summary id="n-both-open-outer-summary">Outer open</summary>
+              <details open id="n-both-open-inner">
+                <summary id="n-both-open-inner-summary">Inner open</summary>
+                <input id="n-both-open-inner-input" type="text" />
+              </details>
+            </details>
+            <button id="n-mid3" type="button">
+              Mid 3
+            </button>
+
+            {/* D: second <summary>. Only the first is the disclosure widget;
+                the second gets no native tab stop, controlling or not. */}
+            <details id="n-second-summary" open>
+              <summary id="n-second-summary-first">First</summary>
+              <summary id="n-second-summary-second">Second</summary>
+              <input id="n-second-summary-input" type="text" />
+            </details>
+            <button id="n-mid4" type="button">
+              Mid 4
+            </button>
+
+            {/* E: persistent focus failure, test-only. Every structural and
+                geometric check the trap runs says this is an ordinary
+                focusable button — it is one. What it does at runtime is blur
+                itself the instant it is focused, exactly reproducing "looks
+                eligible, .focus() never actually lands" without any
+                production hack. Proves resolveTrapFocus's recovery, which
+                candidate filtering alone cannot cover. */}
+            <button
+              id="n-persistent-fail"
+              type="button"
+              onFocus={(event) => event.currentTarget.blur()}
+            >
+              Refuses focus
+            </button>
+
+            <button id="n-after" type="button">
+              After
+            </button>
+          </>
         ) : (
           <>
             <input id="name" type="text" value={name} onChange={(e) => setName(e.target.value)} />
@@ -199,6 +318,7 @@ export function Fixture({ variant }: { variant: FixtureVariant }) {
 function variantFromQuery(): FixtureVariant {
   const params = new URLSearchParams(window.location.search);
   if (params.get("empty") === "1") return "empty";
+  if (params.get("details-nested") === "1") return "details-nested";
   if (params.get("details") === "1") return "details";
   return "default";
 }
