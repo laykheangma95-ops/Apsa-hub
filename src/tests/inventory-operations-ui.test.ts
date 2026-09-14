@@ -131,16 +131,34 @@ type FakeRow = Record<string, unknown>;
 interface FakeDb {
   from: (table: string) => unknown;
   writes: string[];
+  /** One entry per SELECT that actually hit a table, e.g. "select:inventory_stock". */
+  reads: string[];
 }
 
-function makeOrgScopedDb(tables: Record<string, FakeRow[]>): FakeDb {
+/**
+ * Options that make the fake behave like a real hosted PostgREST.
+ *
+ * `maxRows` models the project's `db.max_rows`: the server silently truncates
+ * EVERY response to at most this many rows, whatever the request asked for,
+ * with no error and no flag. This is the condition the org-wide stock read has
+ * to stay correct under, so the harness has to be able to produce it.
+ */
+interface FakeDbOptions {
+  maxRows?: number;
+}
+
+function makeOrgScopedDb(tables: Record<string, FakeRow[]>, options: FakeDbOptions = {}): FakeDb {
   const writes: string[] = [];
+  const reads: string[] = [];
 
   function from(table: string) {
     const eqFilters: Array<[string, unknown]> = [];
     const inFilters: Array<[string, readonly unknown[]]> = [];
+    const orderKeys: Array<[string, boolean]> = [];
     let pendingInsert: FakeRow | null = null;
     let limit: number | null = null;
+    let rangeFrom: number | null = null;
+    let rangeTo: number | null = null;
 
     const matched = (): FakeRow[] => {
       let rows = (tables[table] ?? []).filter((row) =>
@@ -149,7 +167,37 @@ function makeOrgScopedDb(tables: Record<string, FakeRow[]>): FakeDb {
       for (const [col, values] of inFilters) {
         rows = rows.filter((row) => values.includes(row[col]));
       }
-      return limit === null ? rows : rows.slice(0, limit);
+
+      // ORDER BY, so offset paging is over a deterministic total order.
+      // NULLs sort last ascending, matching Postgres' default.
+      if (orderKeys.length > 0) {
+        rows = [...rows].sort((a, b) => {
+          for (const [col, ascending] of orderKeys) {
+            const av = a[col];
+            const bv = b[col];
+            if (av === bv) continue;
+            if (av === null || av === undefined) return 1;
+            if (bv === null || bv === undefined) return -1;
+            const cmp = String(av) < String(bv) ? -1 : 1;
+            return ascending ? cmp : -cmp;
+          }
+          return 0;
+        });
+      }
+
+      // OFFSET/LIMIT — .range() wins when both were set, as in postgrest-js.
+      if (rangeFrom !== null && rangeTo !== null) {
+        rows = rows.slice(rangeFrom, rangeTo + 1);
+      } else if (limit !== null) {
+        rows = rows.slice(0, limit);
+      }
+
+      // The server's own ceiling, applied LAST and silently — exactly like
+      // db.max_rows. The caller is never told this happened.
+      if (options.maxRows !== undefined && rows.length > options.maxRows) {
+        rows = rows.slice(0, options.maxRows);
+      }
+      return rows;
     };
 
     const settle = () => {
@@ -159,18 +207,26 @@ function makeOrgScopedDb(tables: Record<string, FakeRow[]>): FakeDb {
         writes.push(`insert:${table}`);
         return { data: inserted, error: null };
       }
+      reads.push(`select:${table}`);
       return { data: matched(), error: null };
     };
 
     const query: Record<string, unknown> = {};
     Object.assign(query, {
       select: () => query,
-      order: () => query,
+      order: (column: string, opts?: { ascending?: boolean }) => {
+        orderKeys.push([column, opts?.ascending !== false]);
+        return query;
+      },
       limit: (value: number) => {
         limit = value;
         return query;
       },
-      range: () => query,
+      range: (fromRow: number, toRow: number) => {
+        rangeFrom = fromRow;
+        rangeTo = toRow;
+        return query;
+      },
       in: (col: string, values: readonly unknown[]) => {
         inFilters.push([col, values]);
         return query;
@@ -208,7 +264,7 @@ function makeOrgScopedDb(tables: Record<string, FakeRow[]>): FakeDb {
     return query;
   }
 
-  return { from, writes };
+  return { from, writes, reads };
 }
 
 async function withDb<T>(db: FakeDb, fn: () => Promise<T>): Promise<T> {
@@ -417,6 +473,258 @@ describe("A. the org-wide stock read answers with the ledger, honestly", () => {
     expect(body).toContain("repo.listActiveVariantsForOrg");
     expect(body).toContain("repo.listStockRowsForVariants");
     expect(body).not.toContain("getVariantStockRows");
+  });
+});
+
+// ── A2. A capped server response never becomes a confident wrong total ───────
+//
+// Regression cover for the P1 found in independent review of 253cf05.
+//
+// PostgREST silently truncates every response to the project's `db.max_rows`.
+// The previous implementation asked for 5000 rows and called the result
+// truncated only when it got >= 5000 back, so a project capped at 1000 could
+// never trip it: 1100 real rows arrived as 1000 and were reported COMPLETE.
+// The merchant then saw understated stock, and a variant whose rows fell off
+// the end of the cap showed a confident 0.
+//
+// Every test below runs against a fake whose `maxRows` is SMALLER than the
+// page size the repository asks for, which is precisely the condition the old
+// heuristic could not see.
+
+/** `variantCount` active variants, each held at `locationsPer` locations. */
+function stockAtScale(
+  variantCount: number,
+  locationsPer: number,
+  quantityFor: (variantIndex: number, locationIndex: number) => number = () => 1,
+): Record<string, FakeRow[]> {
+  const product_variants: FakeRow[] = [];
+  const inventory_stock: FakeRow[] = [];
+
+  for (let v = 0; v < variantCount; v += 1) {
+    const variantId = `v-${String(v).padStart(5, "0")}`;
+    product_variants.push({
+      id: variantId,
+      organization_id: ORG_A,
+      product_id: PRODUCT_A,
+      status: "ACTIVE",
+      created_at: `2026-01-01T00:00:00Z`,
+    });
+    for (let l = 0; l < locationsPer; l += 1) {
+      inventory_stock.push({
+        organization_id: ORG_A,
+        product_id: PRODUCT_A,
+        variant_id: variantId,
+        location_id: `loc-${String(l).padStart(5, "0")}`,
+        quantity_on_hand: quantityFor(v, l),
+        last_movement_at: "2026-02-01T00:00:00Z",
+      });
+    }
+  }
+  return { product_variants, inventory_stock, locations: [], audit_logs: [] };
+}
+
+describe("A2. a server row cap below the requested page size never understates stock", () => {
+  it("the reported case: 1100 rows behind a 1000-row cap reads complete and correct", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 100 variants x 11 locations = 1100 stock rows, one variant chunk.
+    const db = makeOrgScopedDb(stockAtScale(100, 11), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    // Option A of the requirement: fetch all 1100 and return correct totals.
+    expect(result.truncated).toBe(false);
+    expect(result.entries).toHaveLength(100);
+    // Every variant holds 11 units. Not one of them may be short.
+    const wrong = result.entries.filter((entry) => entry.quantityOnHand !== 11);
+    expect(wrong).toEqual([]);
+    // And the grand total proves all 1100 rows were consumed, not 1000.
+    const total = result.entries.reduce((sum, entry) => sum + entry.quantityOnHand, 0);
+    expect(total).toBe(1100);
+  });
+
+  it("a variant whose rows straddle the cap boundary is not understated", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    const db = makeOrgScopedDb(stockAtScale(100, 11), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    // Ordered by (variant_id, location_id), row 1000 lands inside v-00090:
+    // its rows occupy 990..1000, so the first capped page cuts it in half.
+    const straddling = result.entries.find((entry) => entry.variantId === "v-00090");
+    expect(straddling).toBeDefined();
+    expect(straddling!.quantityOnHand).toBe(11);
+  });
+
+  it("a variant whose rows fall ENTIRELY past the cap is never a false zero", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    const db = makeOrgScopedDb(stockAtScale(100, 11), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    // v-00092 onwards begin after row 1000 — under the old heuristic every one
+    // of these came back as a confident 0.
+    for (const variantId of ["v-00092", "v-00095", "v-00099"]) {
+      const entry = result.entries.find((row) => row.variantId === variantId);
+      expect(entry).toBeDefined();
+      expect(entry!.quantityOnHand).toBe(11);
+      expect(entry!.quantityOnHand).not.toBe(0);
+    }
+    expect(result.entries.filter((entry) => entry.quantityOnHand === 0)).toEqual([]);
+  });
+
+  it("walks as many pages as the cap forces, and proves the end with an empty page", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // A deliberately mean cap: 300 rows per response for 1100 rows of data.
+    const db = makeOrgScopedDb(stockAtScale(100, 11), { maxRows: 300 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(false);
+    expect(result.entries.reduce((sum, entry) => sum + entry.quantityOnHand, 0)).toBe(1100);
+
+    // 1100 rows at 300 per response = 4 data pages, then one empty page that
+    // proves exhaustion. The empty page is the terminal condition and is not
+    // optional: a short page proves nothing under an unknown cap.
+    const stockReads = db.reads.filter((entry) => entry === "select:inventory_stock");
+    expect(stockReads).toHaveLength(5);
+  });
+
+  it("a cap exactly equal to the requested page size still terminates on an empty page", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // Exactly 1000 rows, cap 1000, page size 1000 — the boundary where a
+    // "short page means the end" rule would be indistinguishable from a cap.
+    const db = makeOrgScopedDb(stockAtScale(100, 10), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(false);
+    expect(result.entries.reduce((sum, entry) => sum + entry.quantityOnHand, 0)).toBe(1000);
+    // One full page, then the empty page that proves there is no more.
+    expect(db.reads.filter((entry) => entry === "select:inventory_stock")).toHaveLength(2);
+  });
+
+  it("exact negative quantities survive paging, and are never clamped", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // Every third location is oversold; one variant nets negative overall.
+    const db = makeOrgScopedDb(
+      stockAtScale(100, 11, (variantIndex, locationIndex) =>
+        variantIndex === 97 ? -3 : locationIndex % 3 === 0 ? -1 : 2,
+      ),
+      { maxRows: 1000 },
+    );
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(false);
+    // v-00097 sits past the cap boundary AND is negative: -3 x 11 locations.
+    const oversold = result.entries.find((entry) => entry.variantId === "v-00097");
+    expect(oversold!.quantityOnHand).toBe(-33);
+    // Ordinary variants: 4 locations at -1, 7 at +2 = 10.
+    const ordinary = result.entries.find((entry) => entry.variantId === "v-00050");
+    expect(ordinary!.quantityOnHand).toBe(10);
+    expect(result.entries.some((entry) => entry.quantityOnHand < 0)).toBe(true);
+  });
+
+  it("tenant isolation holds across every page — Org B rows are never drained in", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    const tables = stockAtScale(100, 11);
+    // Org B holds a large amount of its own stock, interleaved by id so a
+    // filter that leaked would surface it on the very first page.
+    tables.product_variants!.push({
+      id: "v-00000-orgb",
+      organization_id: ORG_B,
+      product_id: "b-product",
+      status: "ACTIVE",
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    for (let l = 0; l < 50; l += 1) {
+      tables.inventory_stock!.push({
+        organization_id: ORG_B,
+        product_id: "b-product",
+        variant_id: "v-00000-orgb",
+        location_id: `loc-${String(l).padStart(5, "0")}`,
+        quantity_on_hand: 999,
+        last_movement_at: "2026-02-01T00:00:00Z",
+      });
+    }
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.entries.some((entry) => entry.variantId === "v-00000-orgb")).toBe(false);
+    // Org A's total is exactly its own 1100 rows — no Org B quantity bled in.
+    expect(result.entries.reduce((sum, entry) => sum + entry.quantityOnHand, 0)).toBe(1100);
+    expect(result.entries).toHaveLength(100);
+  });
+
+  it("stays chunked: reads scale with pages, never one query per variant", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 300 variants at one location each = 300 rows across 3 variant chunks.
+    const db = makeOrgScopedDb(stockAtScale(300, 1), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.entries).toHaveLength(300);
+    const stockReads = db.reads.filter((entry) => entry === "select:inventory_stock");
+    // 3 chunks x (1 data page + 1 empty terminal page) = 6. An N+1 shape would
+    // be 300. The count tracks chunks and pages, never variant count.
+    expect(stockReads).toHaveLength(6);
+    expect(stockReads.length).toBeLessThan(300);
+  });
+
+  it("when the safety budget stops the walk it says INCOMPLETE, never a total", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 100 variants x 201 locations = 20_100 rows, past the 20_000 per-chunk
+    // budget. The budget is a runaway guard, not a completeness signal — so
+    // tripping it must surface as truncated rather than as a confident sum.
+    const db = makeOrgScopedDb(stockAtScale(100, 201), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(true);
+  });
+
+  it("the single-variant read fails closed rather than reporting a partial total", async () => {
+    const { getVariantStock } = await import("../server/inventory/service");
+    // One variant across 5_100 locations, past the 5_000 per-variant budget.
+    const tables = stockAtScale(1, 5_100);
+    const onlyVariant = tables.product_variants![0]!.id as string;
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    // It must refuse outright. Returning the 5_000 rows it did read would put a
+    // confidently wrong on-hand number on the variant detail screen.
+    await withDb(db, async () => {
+      await expect(getVariantStock(ctxWith(["inventory.read"]), onlyVariant)).rejects.toThrow(
+        /could not be read completely/i,
+      );
+    });
+  });
+
+  it("the single-variant read drains every page when it can", async () => {
+    const { getVariantStock } = await import("../server/inventory/service");
+    // 1_100 location rows for one variant, behind a 1000-row cap.
+    const tables = stockAtScale(1, 1_100);
+    const onlyVariant = tables.product_variants![0]!.id as string;
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const stock = await withDb(db, () => getVariantStock(ctxWith(["inventory.read"]), onlyVariant));
+
+    expect(stock.byLocation).toHaveLength(1_100);
+    expect(stock.quantityOnHand).toBe(1_100);
+  });
+
+  it("no completeness decision is made from a requested page size", () => {
+    // The defect was a row-count comparison against a self-chosen constant.
+    // Guard the shape, not just the behaviour: nothing may compare a result
+    // length against the page size to decide truncation.
+    const repo = readCode("src/server/inventory/repository.ts");
+    expect(repo).not.toMatch(/length\s*>=\s*STOCK_PAGE_SIZE/);
+    expect(repo).not.toMatch(/length\s*===\s*STOCK_PAGE_SIZE/);
+    expect(repo).not.toMatch(/STOCK_ROWS_PER_CHUNK/);
+    // The terminal condition is an empty page.
+    expect(repo).toContain("page.length === 0");
+    // And the offset advances by rows actually returned.
+    expect(repo).toContain("offset += page.length");
   });
 });
 

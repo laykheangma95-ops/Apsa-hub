@@ -121,36 +121,161 @@ export async function findMovementByReference(
 
 // ── Derived stock (live view — never a mutable cache) ─────────────────────────
 
-/** Per-location stock rows for a variant. Empty array means zero movements recorded. */
+/**
+ * Rows asked for in one page of a stock read.
+ *
+ * This is a REQUEST size and nothing more. It is never read back as evidence
+ * of completeness — see `drainStockRows` for why that would be unsound.
+ */
+const STOCK_PAGE_SIZE = 1000;
+
+/**
+ * Safety valves: the most rows one stock read will consume before giving up.
+ *
+ * These are NOT completeness signals either. Reaching one is reported as an
+ * explicitly INCOMPLETE read, never as a total. They exist only so that a
+ * pathological dataset cannot make a single request walk without bound.
+ */
+const STOCK_ROW_BUDGET_PER_CHUNK = 20_000;
+const STOCK_ROW_BUDGET_PER_VARIANT = 5_000;
+
+/**
+ * Identity of one `inventory_stock` row.
+ *
+ * The view GROUPs BY (organization_id, product_id, variant_id, location_id)
+ * and every read here is already scoped to one organization, so
+ * (variant_id, location_id) is unique within a result. A UUID contains
+ * neither a NUL byte nor the empty string, so no two distinct rows collide.
+ */
+function stockRowKey(row: InventoryStockRow): string {
+  return `${row.variant_id}\u0000${row.location_id ?? ""}`;
+}
+
+/** The shape `drainStockRows` needs from a PostgREST query builder. */
+interface RangeableQuery {
+  range: (from: number, to: number) => PromiseLike<{ data: unknown; error: unknown }>;
+}
+
+/**
+ * Read one filtered `inventory_stock` query to exhaustion, page by page.
+ *
+ * WHY THIS TERMINAL CONDITION, AND NOT A SIMPLER ONE:
+ *
+ * PostgREST silently caps every response at the project's `db.max_rows`. A
+ * request for 5000 rows against a project capped at 1000 comes back with 1000
+ * rows and NO error and NO warning. So:
+ *
+ *   - "I got fewer rows than I asked for" does NOT prove the data ran out; and
+ *   - "I got exactly as many as I asked for" does NOT prove it did not.
+ *
+ * Any completeness test written against the REQUESTED page size is therefore
+ * wrong under a cap that this code cannot see and must not guess. That is the
+ * defect this function exists to remove: the previous implementation inferred
+ * truncation from `rows.length >= 5000`, which a 1000-row cap makes
+ * permanently false — 1100 real rows came back as 1000 rows reported complete,
+ * understating stock and inventing zeroes for variants whose rows fell off the
+ * end.
+ *
+ * The only thing that proves a range is exhausted is a page that comes back
+ * EMPTY, and that is the terminal condition used here. The offset advances by
+ * the number of rows the server ACTUALLY returned rather than the number
+ * requested, so a cap of any size >= 1 is absorbed as extra round trips
+ * instead of being mistaken for the end of the data. Nothing in this loop
+ * depends on `db.max_rows`, on `STOCK_PAGE_SIZE`, or on the two being equal.
+ *
+ * (An exact `count` plus paged reads would also be deterministic, but the
+ * count and the reads are separate statements: rows can change between them.
+ * An empty page is self-proving and needs no second source of truth.)
+ *
+ * Rows are collected into a map keyed by the view's own grouping key, so a row
+ * seen on two pages — possible when the ledger is written to mid-read — is
+ * counted once instead of doubling a merchant's stock.
+ *
+ * `complete` is false ONLY when the budget stopped the walk. A caller must
+ * never present a total built from an incomplete read as fact.
+ */
+async function drainStockRows(
+  label: string,
+  buildQuery: () => RangeableQuery,
+  budget: number,
+): Promise<{ rows: InventoryStockRow[]; complete: boolean }> {
+  const byKey = new Map<string, InventoryStockRow>();
+  let offset = 0;
+
+  for (;;) {
+    const { data, error } = await buildQuery().range(offset, offset + STOCK_PAGE_SIZE - 1);
+    if (error) {
+      throw new Error(`${label}: ${(error as { message?: string }).message ?? "unknown error"}`);
+    }
+
+    const page = (data ?? []) as InventoryStockRow[];
+    // An empty page is the only proof that the range is exhausted.
+    if (page.length === 0) return { rows: [...byKey.values()], complete: true };
+
+    for (const row of page) byKey.set(stockRowKey(row), row);
+
+    // Advance by what the server actually returned, never by what was asked for.
+    offset += page.length;
+
+    if (offset >= budget) return { rows: [...byKey.values()], complete: false };
+  }
+}
+
+/**
+ * Per-location stock rows for a variant. Empty array means zero movements recorded.
+ *
+ * Paged to exhaustion like every other stock read. A variant held across more
+ * locations than the project's row cap would otherwise come back short and the
+ * caller would sum a partial ledger into a confident, wrong on-hand total.
+ *
+ * If the read cannot be completed this THROWS rather than returning rows that
+ * understate real stock: this shape has no way to say "partial", and a silent
+ * undercount on the variant detail screen is exactly the failure that makes a
+ * merchant restock the wrong item.
+ */
 export async function getVariantStockRows(
   organizationId: string,
   variantId: string,
 ): Promise<InventoryStockRow[]> {
-  const { data, error } = await db
-    .from("inventory_stock")
-    .select("*")
-    .eq("organization_id", organizationId)
-    .eq("variant_id", variantId);
+  const { rows, complete } = await drainStockRows(
+    "getVariantStockRows",
+    () =>
+      db
+        .from("inventory_stock")
+        .select("*")
+        .eq("organization_id", organizationId)
+        .eq("variant_id", variantId)
+        .order("variant_id", { ascending: true })
+        .order("location_id", { ascending: true }) as RangeableQuery,
+    STOCK_ROW_BUDGET_PER_VARIANT,
+  );
 
-  if (error) throw new Error(`getVariantStockRows: ${(error as { message: string }).message}`);
-  return (data ?? []) as InventoryStockRow[];
+  if (!complete) {
+    throw new Error(
+      `getVariantStockRows: this variant has more than ${STOCK_ROW_BUDGET_PER_VARIANT} ` +
+        `location rows and could not be read completely; refusing to report a partial on-hand total`,
+    );
+  }
+  return rows;
 }
 
 /**
- * Per-location stock rows for a batch of variants, in ONE query per chunk.
+ * Per-location stock rows for a batch of variants — chunked by variant, and
+ * each chunk paged to exhaustion.
  *
  * Chunked rather than one query per variant: the org-wide list would otherwise
- * be a textbook N+1. `IN_CHUNK_SIZE` bounds both the request URL length and the
- * row count of any single response, so a merchant with many variants across
- * many locations cannot silently run into PostgREST's own row ceiling.
+ * be a textbook N+1. `IN_CHUNK_SIZE` bounds the request URL length; it says
+ * nothing about how many ROWS a chunk can produce, because that depends on how
+ * many locations each variant is held across — which is why every chunk is
+ * drained page by page instead of read in one shot.
  *
- * A chunk that comes back exactly full is reported through `truncated` rather
- * than quietly dropping rows — a stock figure computed from a truncated ledger
- * read would be wrong, and wrong stock must never be presented as fact.
+ * Completeness is proven by `drainStockRows` (an empty terminal page), never
+ * inferred from a row count against a requested page size. `truncated` is true
+ * only when a chunk hit its safety budget, and a caller must then not present
+ * the totals as fact — a stock figure computed from a partial ledger read is
+ * wrong, and wrong stock must never be shown to a merchant as certain.
  */
 const IN_CHUNK_SIZE = 100;
-/** Per-chunk row ceiling. 100 variants would need >50 locations each to reach it. */
-const STOCK_ROWS_PER_CHUNK = 5000;
 
 export async function listStockRowsForVariants(
   organizationId: string,
@@ -163,18 +288,20 @@ export async function listStockRowsForVariants(
 
   for (let start = 0; start < variantIds.length; start += IN_CHUNK_SIZE) {
     const chunk = variantIds.slice(start, start + IN_CHUNK_SIZE);
-    const { data, error } = await db
-      .from("inventory_stock")
-      .select("*")
-      .eq("organization_id", organizationId)
-      .in("variant_id", chunk)
-      .limit(STOCK_ROWS_PER_CHUNK);
+    const { rows: chunkRows, complete } = await drainStockRows(
+      "listStockRowsForVariants",
+      () =>
+        db
+          .from("inventory_stock")
+          .select("*")
+          .eq("organization_id", organizationId)
+          .in("variant_id", chunk)
+          .order("variant_id", { ascending: true })
+          .order("location_id", { ascending: true }) as RangeableQuery,
+      STOCK_ROW_BUDGET_PER_CHUNK,
+    );
 
-    if (error) {
-      throw new Error(`listStockRowsForVariants: ${(error as { message: string }).message}`);
-    }
-    const chunkRows = (data ?? []) as InventoryStockRow[];
-    if (chunkRows.length >= STOCK_ROWS_PER_CHUNK) truncated = true;
+    if (!complete) truncated = true;
     rows.push(...chunkRows);
   }
 
