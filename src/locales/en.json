@@ -565,6 +565,7 @@
     "customer": {
       "recentOrders": "Recent orders",
       "noOrders": "No orders yet",
+      "ordersUnavailable": "Order history is not available for this customer.",
       "timeline": "Timeline",
       "notes": "Notes",
       "identities": "Channels"

@@ -414,7 +414,9 @@ describe("W7: payment caches on the order screen cannot leak across principals",
     // Order, payments (this principal's whole root), orders list, Home.
     expect(fn).toContain("queryKey");
     expect(fn).toContain('["payments", userId, routeOrganizationId]');
-    expect(fn).toContain('["orders", "real"]');
+    // The Orders list key is principal-partitioned too, so this stays scoped
+    // to the acting user+organization instead of the shared ["orders","real"].
+    expect(fn).toContain("ordersKeys.list(userId, routeOrganizationId)");
     expect(fn).toContain("HOME_QUERY_PREFIX");
     // A blanket clear would drop other principals' entries too and is reserved
     // for sign-out.

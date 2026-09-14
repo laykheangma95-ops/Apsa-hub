@@ -28,6 +28,11 @@ import { useLanguage } from "@/lib/i18n";
 import { notifyError, notifySuccess } from "@/lib/feedback";
 import { ORGANIZATION_PROFILE_QUERY_KEY, resolveBusinessSectionView } from "@/lib/settings-view";
 import { clearHomeQueries } from "@/lib/home-query";
+import { clearCustomerQueries } from "@/lib/customers-query";
+import { clearConversationQueries } from "@/lib/inbox-query";
+import { clearOrderQueries } from "@/lib/orders-query";
+import { clearTeamQueries } from "@/lib/team-query";
+import { clearCatalogQueries } from "@/lib/catalog";
 
 export const Route = createFileRoute("/app/settings")({
   head: () => ({
@@ -274,10 +279,18 @@ function SettingsScreen() {
       // this can't trigger a visible unauthenticated refetch/error flash
       // on this screen first.
       //
-      // Home's tenant data is purged through its own central helper first:
-      // that call cannot throw, so the most sensitive cache is gone even if
-      // the blanket clear() below fails.
+      // The tenant caches are purged through their own central helpers first:
+      // none of those calls can throw, so the most sensitive data is gone even
+      // if the blanket clear below fails partway. Customer PII, conversation
+      // bodies, order money, the staff roster and the catalog each have a
+      // dedicated purge for exactly that reason — the blanket clear is the
+      // backstop here, never the primary isolation mechanism.
       clearHomeQueries(queryClient);
+      clearCustomerQueries(queryClient);
+      clearConversationQueries(queryClient);
+      clearOrderQueries(queryClient);
+      clearTeamQueries(queryClient);
+      clearCatalogQueries(queryClient);
       queryClient.clear();
       setSigningOut(false);
     }

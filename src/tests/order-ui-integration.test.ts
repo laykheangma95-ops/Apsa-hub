@@ -333,7 +333,14 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
 
   it("creating an order invalidates the order list query so the new order appears", () => {
     const route = readSource(ORDER_LIST_ROUTE);
-    expect(route).toMatch(/invalidateQueries\(\{ queryKey: \["orders", "real"\] \}\)/);
+    // The list key is now principal-partitioned (src/lib/orders-query.ts), so
+    // the invalidation targets THIS user+organization's list — never the bare
+    // ["orders","real"] root every principal in the tab used to share.
+    expect(route).toMatch(
+      /const listKey = ordersKeys\.list\(session\.userId, routeOrganizationId\)/,
+    );
+    expect(route).toMatch(/invalidateQueries\(\{ queryKey: listKey \}\)/);
+    expect(route).not.toContain('["orders", "real"]');
   });
 });
 

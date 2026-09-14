@@ -248,9 +248,14 @@ describe("Cancellation drives order fulfillment via the server only, never reset
 
   it("cancelling invalidates the linked order's query so the authoritative unfulfilled state is re-read", () => {
     const route = readSource(DELIVERY_DETAIL_ROUTE);
+    // The Order domain's cache is principal-partitioned (src/lib/orders-query.ts).
+    // This screen writes into an ORDER entry, so it must build the key with
+    // the Order domain's own helper and the server-derived principal —
+    // otherwise the invalidation would target an entry no Order screen reads.
     expect(route).toMatch(
-      /invalidateQueries\(\{ queryKey: \["order", "real", detail\?\.orderId\] \}\)/,
+      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(userId, routeOrganizationId, detail\?\.orderId \?\? "none"\),\s*\}\)/,
     );
+    expect(route).not.toContain('["order", "real"');
   });
 
   it("the Order screen lists deliveries by order id so a cancelled+replaced delivery both stay visible in history", () => {

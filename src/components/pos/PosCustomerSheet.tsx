@@ -6,7 +6,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BottomSheet, ErrorState, ListSkeleton } from "@/design-system";
 import { PosNotice } from "@/components/pos/PosNotice";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { createQuickCustomer, searchCustomers } from "@/lib/api";
+import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import type { Customer } from "@/types";
@@ -15,24 +17,58 @@ interface PosCustomerSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (customer: Customer) => void;
+  /**
+   * The signed-in principal, from the /app route guard's server-derived
+   * context. Cache identity only — searchCustomers() sends no organization id,
+   * and the server scopes the read to the membership it resolved itself.
+   */
+  userId: string;
+  organizationId: string;
 }
 
-export function PosCustomerSheet({ open, onOpenChange, onSelect }: PosCustomerSheetProps) {
+export function PosCustomerSheet({
+  open,
+  onOpenChange,
+  onSelect,
+  userId,
+  organizationId,
+}: PosCustomerSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const capabilities = useCapabilities();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [saving, setSaving] = useState(false);
 
+  /*
+   * Customer search results carry a phone number when the member holds
+   * customers.view_sensitive. Keyed on the search term alone, the results a
+   * member with that grant typed were readable by the next member to open POS
+   * in the same tab — including one without it. The principal now leads the
+   * key, and the whole set is dropped by clearCustomerQueries.
+   */
   const customersQuery = useQuery({
-    queryKey: ["pos-customers", query],
+    queryKey: customerKeys.search(userId, organizationId, query),
     queryFn: () => searchCustomers(query),
     enabled: open,
   });
 
-  const results = customersQuery.data ?? [];
+  /*
+   * Masked against the CURRENT grant, not against what the cached search
+   * result carries: results fetched while customers.view_sensitive held stay
+   * in the cache after it is revoked, and nothing refetches them on their own.
+   *
+   * The masking happens HERE, before both the display and `onSelect`, so the
+   * customer object the cart and checkout screens go on to render inherits it
+   * rather than each of them needing its own check.
+   */
+  const canSensitive = capabilities.canSensitive("customers.view_sensitive");
+  const results = (customersQuery.data ?? []).map((customer) => ({
+    ...customer,
+    phone: visibleCustomerPhone(customer, canSensitive),
+  }));
 
   async function quickCreate() {
     if (!name.trim() || !phone.trim()) return;

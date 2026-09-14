@@ -23,6 +23,10 @@ import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
 import { enforceHomeCachePrincipal } from "@/lib/home-query";
+import { enforceCustomerCachePrincipal } from "@/lib/customers-query";
+import { enforceConversationCachePrincipal } from "@/lib/inbox-query";
+import { enforceOrderCachePrincipal } from "@/lib/orders-query";
+import { enforceTeamCachePrincipal } from "@/lib/team-query";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -80,6 +84,27 @@ function AppLayout() {
    * only to partition the cache — they authorize nothing.
    */
   enforceHomeCachePrincipal(queryClient, session.userId, organizationId);
+
+  /*
+   * The same guarantee, for the four domains migrated in the launch-safety
+   * phase. They live here rather than on each route because their data is not
+   * confined to one screen: an order list feeds the bottom nav, a customer
+   * profile is opened from the Inbox, from Orders and from POS, and the Team
+   * roster is read by more than /app/team. Enforcing once at the layout means
+   * no child route can render a previous principal's payload even for a frame,
+   * whichever of them the merchant lands on first.
+   *
+   * Catalog and Inventory keep their existing per-route calls (see
+   * src/routes/app.products.tsx, app.inventory.tsx) — this phase does not
+   * restructure reviewed, merged code.
+   *
+   * Every call is a no-op while the principal is unchanged, so ordinary
+   * caching within one member's session is untouched.
+   */
+  enforceOrderCachePrincipal(queryClient, session.userId, organizationId);
+  enforceConversationCachePrincipal(queryClient, session.userId, organizationId);
+  enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
+  enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
 
   return (
     <CapabilityProvider

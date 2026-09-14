@@ -76,6 +76,7 @@ import {
   type UiOrderSettlement,
 } from "@/lib/payments";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { ordersKeys } from "@/lib/orders-query";
 import { fullTimestamp, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { addMoney, formatMoney, subtractMoney, usd } from "@/lib/money";
@@ -267,10 +268,16 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const canMarkCod = identityOk && capabilities.can("payments.mark_cod");
   const canReadCustomers = identityOk && capabilities.can("customers.read");
 
-  const queryKey = ["order", "real", id];
+  /*
+   * Order detail and its deliveries sub-entry are partitioned by the same
+   * server-derived principal as the Payment keys below — a UUID in the URL is
+   * not an identity, and two members of one organization can be served
+   * different payloads for the same order id.
+   */
+  const queryKey = ordersKeys.detail(userId, routeOrganizationId, id);
   const query = useQuery({ queryKey, queryFn: () => getRealOrderDetail(id) });
 
-  const deliveriesQueryKey = ["order", "real", id, "deliveries"];
+  const deliveriesQueryKey = ordersKeys.detailDeliveries(userId, routeOrganizationId, id);
   const deliveriesQuery = useQuery({
     queryKey: deliveriesQueryKey,
     queryFn: () => listRealDeliveriesForOrder(id),
@@ -354,7 +361,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     void queryClient.invalidateQueries({
       queryKey: ["payments", userId, routeOrganizationId],
     });
-    void queryClient.invalidateQueries({ queryKey: ["orders", "real"] });
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.list(userId, routeOrganizationId),
+    });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
   }
 
