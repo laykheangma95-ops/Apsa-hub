@@ -85,7 +85,13 @@ export interface OrgStockEntry {
 
 export interface OrgStockList {
   entries: OrgStockEntry[];
-  /** The server covered fewer variants than the organization holds. */
+  /**
+   * The server did not return a proven-complete total for every active variant
+   * — either it covered fewer variants than the organization holds, or a stock
+   * read hit its safety budget and those variants were omitted rather than
+   * given a partial total. Either way, a variant missing from `entries` is
+   * unknown, never zero.
+   */
   truncated: boolean;
 }
 

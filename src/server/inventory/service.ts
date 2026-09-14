@@ -337,6 +337,13 @@ export const INVENTORY_STOCK_MAX_LIMIT = 1000;
  * a negative on-hand figure to zero would hide a real operational problem
  * (oversold stock) behind a number that looks fine.
  *
+ * The one case where an active variant is NOT returned is when the repository
+ * could not prove it read that variant's rows completely (a chunk hit its
+ * safety budget). Such variants are omitted and `truncated` is true, so the
+ * client shows them as unknown. That is deliberate: the alternative is a
+ * partial sum or a false zero presented as fact, and silently understating
+ * stock is worse than admitting a row could not be read.
+ *
  * organizationId comes from the AuthorizationContext only — never from input.
  */
 export async function listOrganizationStock(
@@ -356,10 +363,17 @@ export async function listOrganizationStock(
   if (page.length === 0) return { entries: [], truncated: false };
 
   const variantIds = page.map((variant) => variant.id);
-  const { rows, truncated: stockTruncated } = await repo.listStockRowsForVariants(
-    ctx.organizationId,
-    variantIds,
-  );
+  const {
+    rows,
+    truncated: stockTruncated,
+    incompleteVariantIds,
+  } = await repo.listStockRowsForVariants(ctx.organizationId, variantIds);
+
+  // Variants the repository could not prove it read completely. They are
+  // OMITTED from entries below rather than given a number, so the client
+  // renders them as unknown ("not loaded") instead of as a quantity that is
+  // quietly too low — or as a false zero, which reads as "nothing on hand".
+  const incomplete = new Set(incompleteVariantIds);
 
   // Sum the per-location rows down to one total per variant. The view already
   // nets each (variant, location) pair; this nets across locations.
@@ -377,16 +391,24 @@ export async function listOrganizationStock(
   }
 
   return {
-    entries: page.map((variant) => {
-      const total = totals.get(variant.id);
-      return {
-        variantId: variant.id,
-        productId: variant.product_id,
-        // No ledger rows at all -> 0, stated rather than implied.
-        quantityOnHand: total?.quantity ?? 0,
-        lastMovementAt: total?.lastMovementAt ?? null,
-      };
-    }),
+    // An entry is a CLAIM that this quantity is the variant's true on-hand
+    // total. It is therefore only made for variants whose read was proven
+    // complete: `rows` already excludes incomplete chunks, so a variant left in
+    // here with no rows genuinely has no movements. Variants we could not prove
+    // are dropped, and `truncated` tells the client to show them as unknown.
+    entries: page
+      .filter((variant) => !incomplete.has(variant.id))
+      .map((variant) => {
+        const total = totals.get(variant.id);
+        return {
+          variantId: variant.id,
+          productId: variant.product_id,
+          // No ledger rows at all -> 0, stated rather than implied. Safe here
+          // precisely because unproven variants never reach this branch.
+          quantityOnHand: total?.quantity ?? 0,
+          lastMovementAt: total?.lastMovementAt ?? null,
+        };
+      }),
     truncated: overLimit || stockTruncated,
   };
 }

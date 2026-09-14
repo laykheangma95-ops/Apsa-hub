@@ -270,21 +270,45 @@ export async function getVariantStockRows(
  * drained page by page instead of read in one shot.
  *
  * Completeness is proven by `drainStockRows` (an empty terminal page), never
- * inferred from a row count against a requested page size. `truncated` is true
- * only when a chunk hit its safety budget, and a caller must then not present
- * the totals as fact — a stock figure computed from a partial ledger read is
- * wrong, and wrong stock must never be shown to a merchant as certain.
+ * inferred from a row count against a requested page size.
+ *
+ * THE RETURN CONTRACT IS FAIL-CLOSED, AND THAT IS THE POINT:
+ *
+ * `rows` contains rows for PROVENLY COMPLETE variants only. When a chunk hits
+ * its safety budget the walk stopped mid-range, so every variant in that chunk
+ * may be missing locations that were never read — the ones it did return are
+ * not a total, they are a prefix. Summing a prefix produces an understated
+ * quantity, and a variant whose rows lay entirely past the cutoff produces a
+ * confident ZERO. Both are wrong stock presented as fact, which is exactly the
+ * failure this whole read path exists to prevent.
+ *
+ * So an incomplete chunk contributes NO rows at all. Its variant ids come back
+ * in `incompleteVariantIds` instead, and the caller must render those as
+ * unknown rather than as a number. Reporting "I could not read this" is always
+ * safe; reporting a number that is quietly too low is not — a merchant who
+ * sees 0 restocks the wrong item, and one who sees an understated total
+ * oversells the right one.
+ *
+ * Chunks are independent reads, so a chunk that DID drain to an empty terminal
+ * page keeps its exact totals. One oversized chunk never poisons the rest.
+ *
+ * `truncated` is true only when some chunk hit its budget; it always agrees
+ * with `incompleteVariantIds` being non-empty.
  */
 const IN_CHUNK_SIZE = 100;
 
 export async function listStockRowsForVariants(
   organizationId: string,
   variantIds: readonly string[],
-): Promise<{ rows: InventoryStockRow[]; truncated: boolean }> {
-  if (variantIds.length === 0) return { rows: [], truncated: false };
+): Promise<{
+  rows: InventoryStockRow[];
+  truncated: boolean;
+  incompleteVariantIds: string[];
+}> {
+  if (variantIds.length === 0) return { rows: [], truncated: false, incompleteVariantIds: [] };
 
   const rows: InventoryStockRow[] = [];
-  let truncated = false;
+  const incompleteVariantIds = new Set<string>();
 
   for (let start = 0; start < variantIds.length; start += IN_CHUNK_SIZE) {
     const chunk = variantIds.slice(start, start + IN_CHUNK_SIZE);
@@ -301,11 +325,20 @@ export async function listStockRowsForVariants(
       STOCK_ROW_BUDGET_PER_CHUNK,
     );
 
-    if (!complete) truncated = true;
+    if (!complete) {
+      // Drop the rows on the floor deliberately. Keeping them would let a
+      // caller sum a partial ledger read into a confident, wrong total.
+      for (const variantId of chunk) incompleteVariantIds.add(variantId);
+      continue;
+    }
     rows.push(...chunkRows);
   }
 
-  return { rows, truncated };
+  return {
+    rows,
+    truncated: incompleteVariantIds.size > 0,
+    incompleteVariantIds: [...incompleteVariantIds],
+  };
 }
 
 /**

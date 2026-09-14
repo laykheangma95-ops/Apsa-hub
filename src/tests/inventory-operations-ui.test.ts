@@ -682,6 +682,10 @@ describe("A2. a server row cap below the requested page size never understates s
     const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
 
     expect(result.truncated).toBe(true);
+    // "Never a total" has to mean the entries too, not just the flag. The
+    // budget cut this single chunk mid-walk, so not one of its 100 variants
+    // can be proven complete and not one may carry a number.
+    expect(result.entries).toEqual([]);
   });
 
   it("the single-variant read fails closed rather than reporting a partial total", async () => {
@@ -725,6 +729,209 @@ describe("A2. a server row cap below the requested page size never understates s
     expect(repo).toContain("page.length === 0");
     // And the offset advances by rows actually returned.
     expect(repo).toContain("offset += page.length");
+  });
+});
+
+// ── A3. Budget exhaustion must fail closed, not produce confident wrong stock ──
+//
+// The deterministic paging fix removed the row-cap defect, but left a second
+// way to the SAME user-visible harm. When a chunk hit STOCK_ROW_BUDGET_PER_CHUNK
+// the read reported `truncated: true` — and then still built an entry for every
+// variant in the page using "partial total OR 0". So:
+//
+//   - a variant straddling the cutoff showed a confident UNDERSTATED number; and
+//   - a variant lying entirely past the cutoff showed a confident FALSE ZERO,
+//     which a merchant reads as "nothing on hand" and restocks against.
+//
+// Reproduced at 100 variants x 250 locations against a 20_000-row budget:
+// truncated was true, yet 20 variants carried wrong values including zeros, and
+// the UI marked NOTHING as unknown because every variant had an entry.
+//
+// Fix: an incomplete chunk contributes no rows and its variant ids come back in
+// `incompleteVariantIds`; the service omits those variants from `entries`, so
+// the existing `truncated ? null : 0` presentation path renders them unknown.
+
+describe("A3. an exhausted row budget never yields a confident total or a false zero", () => {
+  /** True on-hand for every variant built by `stockAtScale(_, locationsPer)`. */
+  const TRUE_QTY = (locationsPer: number) => locationsPer;
+
+  it("100 variants x 250 locations vs a 20_000 budget: unknown, never wrong", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 25_000 rows in ONE chunk. The walk stops at 20_000, so the last ~20
+    // variants were never reached at all and the straddling one is a prefix.
+    const db = makeOrgScopedDb(stockAtScale(100, 250), { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(true);
+
+    // The precise regression: no entry may carry a wrong number, and the old
+    // bug's signature — a confident 0 for a variant that really holds 250 —
+    // must not appear at all.
+    const wrong = result.entries.filter((e) => e.quantityOnHand !== TRUE_QTY(250));
+    expect(wrong).toEqual([]);
+    const falseZeros = result.entries.filter((e) => e.quantityOnHand === 0);
+    expect(falseZeros).toEqual([]);
+  });
+
+  it("the unproven variants reach the UI as unknown, not as a quantity", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    const tables = stockAtScale(100, 250);
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    // Join against the catalogue exactly as the screen does.
+    const products = [
+      {
+        id: PRODUCT_A,
+        nameKm: "ផលិតផល",
+        nameEn: "Product",
+        status: "ACTIVE",
+        variants: (tables.product_variants ?? []).map((v) => ({
+          id: v.id as string,
+          name: "V",
+          sku: null,
+          status: "ACTIVE",
+        })),
+      },
+    ];
+    const rows = buildInventoryRows(products as never, result as never);
+
+    expect(rows).toHaveLength(100);
+    // Every variant the read could not prove renders as unknown (null), which
+    // the screen shows as "Not loaded". None renders as a number.
+    const unknown = rows.filter((r) => r.quantityOnHand === null);
+    expect(unknown).toHaveLength(100);
+    expect(rows.filter((r) => r.quantityOnHand === 0)).toEqual([]);
+  });
+
+  it("a boundary-straddling variant is unknown, never its partial 101", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 100 x 201 = 20_100 rows. The 100th variant truly holds 201 but only 101
+    // of its rows sit inside the 20_000 budget. 101 must never be reported.
+    const tables = stockAtScale(100, 201);
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(true);
+    const straddler = (tables.product_variants ?? [])[99]!.id as string;
+    const entry = result.entries.find((e) => e.variantId === straddler);
+    expect(entry).toBeUndefined();
+    // The specific understated value the old code produced.
+    expect(result.entries.some((e) => e.quantityOnHand === 101)).toBe(false);
+  });
+
+  it("a variant entirely past the cutoff is unknown, never a confident 0", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    const tables = stockAtScale(100, 250);
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    // 80 x 250 = 20_000 exactly, so variants 80..99 were never read at all
+    // while genuinely holding 250 each.
+    const beyond = (tables.product_variants ?? [])[99]!.id as string;
+    expect(result.entries.find((e) => e.variantId === beyond)).toBeUndefined();
+    expect(result.entries.every((e) => e.quantityOnHand !== 0)).toBe(true);
+  });
+
+  it("a fully drained chunk keeps its exact totals when another chunk is cut", async () => {
+    const { listStockRowsForVariants } = await import("../server/inventory/repository");
+    // Chunk 1: 100 variants x 5 locations = 500 rows, drains cleanly.
+    // Chunk 2: 100 variants x 250 locations = 25_000 rows, hits the budget.
+    const small = stockAtScale(100, 5);
+    const big = stockAtScale(100, 250);
+    const rename = (rows: FakeRow[], prefix: string) =>
+      rows.map((r) => ({ ...r, variant_id: `${prefix}${r.variant_id as string}` }));
+    const tables: Record<string, FakeRow[]> = {
+      inventory_stock: [
+        ...rename(small.inventory_stock ?? [], "a-"),
+        ...rename(big.inventory_stock ?? [], "b-"),
+      ],
+    };
+    const smallIds = (small.product_variants ?? []).map((v) => `a-${v.id as string}`);
+    const bigIds = (big.product_variants ?? []).map((v) => `b-${v.id as string}`);
+
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+    const result = await withDb(db, () =>
+      listStockRowsForVariants(ORG_A, [...smallIds, ...bigIds]),
+    );
+
+    expect(result.truncated).toBe(true);
+    // One oversized chunk must not poison an independent, complete one.
+    expect(result.incompleteVariantIds.sort()).toEqual([...bigIds].sort());
+    expect(result.rows).toHaveLength(500);
+    expect(result.rows.every((r) => r.variant_id.startsWith("a-"))).toBe(true);
+  });
+
+  it("negative quantities stay exact for variants that were proven complete", async () => {
+    const { listOrganizationStock } = await import("../server/inventory/service");
+    // 11 locations per variant: +1 x 10 and -33 on the last -> -23 exactly.
+    const db = makeOrgScopedDb(
+      stockAtScale(100, 11, (_v, l) => (l === 10 ? -33 : 1)),
+      { maxRows: 1000 },
+    );
+
+    const result = await withDb(db, () => listOrganizationStock(ctxWith(["inventory.read"]), {}));
+
+    expect(result.truncated).toBe(false);
+    expect(result.entries).toHaveLength(100);
+    // Nothing clamped to zero, and the sign preserved.
+    expect(result.entries.filter((e) => e.quantityOnHand !== -23)).toEqual([]);
+  });
+
+  it("an exhausted budget still never leaks another tenant's rows", async () => {
+    const { listStockRowsForVariants } = await import("../server/inventory/repository");
+    const mine = stockAtScale(100, 250);
+    // Org B holds the SAME variant ids at the same locations, with loud
+    // quantities. Neither the drained rows nor the incomplete-id list may
+    // acquire anything of Org B's, budget or no budget.
+    const theirs = (mine.inventory_stock ?? []).map((r) => ({
+      ...r,
+      organization_id: ORG_B,
+      quantity_on_hand: 9999,
+    }));
+    const interleaved: FakeRow[] = [];
+    for (let i = 0; i < (mine.inventory_stock ?? []).length; i += 1) {
+      interleaved.push(mine.inventory_stock![i]!, theirs[i]!);
+    }
+    const ids = (mine.product_variants ?? []).map((v) => v.id as string);
+
+    const db = makeOrgScopedDb({ inventory_stock: interleaved }, { maxRows: 1000 });
+    const result = await withDb(db, () => listStockRowsForVariants(ORG_A, ids));
+
+    expect(result.truncated).toBe(true);
+    expect(result.rows.every((r) => r.organization_id === ORG_A)).toBe(true);
+    expect(result.rows.some((r) => r.quantity_on_hand === 9999)).toBe(false);
+  });
+
+  it("exactly at the budget it stays conservative rather than guessing complete", async () => {
+    const { listStockRowsForVariants } = await import("../server/inventory/repository");
+    // 100 x 200 = 20_000 rows, exactly the budget. The walk stops without ever
+    // seeing an empty terminal page, so completeness was never PROVEN. Calling
+    // that complete would be the same class of guess the paging fix removed.
+    const tables = stockAtScale(100, 200);
+    const ids = (tables.product_variants ?? []).map((v) => v.id as string);
+    const db = makeOrgScopedDb(tables, { maxRows: 1000 });
+
+    const result = await withDb(db, () => listStockRowsForVariants(ORG_A, ids));
+
+    expect(result.truncated).toBe(true);
+    expect(result.incompleteVariantIds).toHaveLength(100);
+    expect(result.rows).toEqual([]);
+  });
+
+  it("the service never turns an unproven variant into a number", async () => {
+    // Structural guard: entries are built from a list filtered by the
+    // incomplete set, so a future edit cannot quietly reintroduce
+    // "partial total OR 0" for every variant in the page.
+    const svc = await Bun.file(
+      new URL("../server/inventory/service.ts", import.meta.url).pathname,
+    ).text();
+    expect(svc).toContain("incompleteVariantIds");
+    expect(svc).toMatch(/filter\(\s*\(variant\)\s*=>\s*!incomplete\.has\(variant\.id\)\s*\)/);
   });
 });
 
