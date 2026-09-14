@@ -135,17 +135,33 @@ function readMigration021(): string {
 type QueryResult = { data: unknown; error: { code?: string; message: string } | null };
 
 function fakeQuery(result: QueryResult) {
+  // `.range()` has to slice the canned rows rather than be a no-op: the stock
+  // reads page until a page comes back EMPTY, so a fake that keeps handing back
+  // the same full array would never let them terminate.
+  let rangeFrom: number | null = null;
+  let rangeTo: number | null = null;
+
+  const settle = (): QueryResult => {
+    if (rangeFrom === null || rangeTo === null) return result;
+    if (!Array.isArray(result.data)) return result;
+    return { data: result.data.slice(rangeFrom, rangeTo + 1), error: result.error };
+  };
+
   const q = {
     select: () => q,
     eq: () => q,
     order: () => q,
     limit: () => q,
-    range: () => q,
+    range: (from: number, to: number) => {
+      rangeFrom = from;
+      rangeTo = to;
+      return q;
+    },
     insert: () => q,
     single: async () => result,
     maybeSingle: async () => result,
     then: (resolve: (v: QueryResult) => void, reject?: (e: unknown) => void) =>
-      Promise.resolve(result).then(resolve, reject),
+      Promise.resolve(settle()).then(resolve, reject),
   };
   return q;
 }

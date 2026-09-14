@@ -184,11 +184,14 @@ describe("U5: sign-out keeps its hardened behaviour", () => {
 describe("U6: the UI consults only server-enforced permission keys", () => {
   /**
    * A key counts as enforced when the server either requires/checks it
-   * directly, or lists it in one of the Order state machine's transition
-   * permission maps (which src/server/orders/service.ts feeds straight into
-   * ctx.require). An incidental mention — an audit action name, a doc comment
-   * — is deliberately NOT enough: that is exactly how a UI-only gate would
-   * sneak in pretending to be authorization.
+   * directly, lists it in one of the Order or Payment state machines'
+   * transition permission maps (which src/server/orders/service.ts and
+   * src/server/payments/service.ts feed straight into ctx.require), or
+   * returns it from the Inventory service's requiredPermissionFor()
+   * movement-type map (which recordMovement feeds straight into ctx.require
+   * the same way). An incidental mention — an audit action name, a doc
+   * comment — is deliberately NOT enough: that is exactly how a UI-only gate
+   * would sneak in pretending to be authorization.
    */
   /** Comments document intent; only real code enforces anything. */
   function stripComments(source: string): string {
@@ -239,6 +242,23 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
       }
     }
 
+    /*
+     * Inventory's movement-type -> permission map. Structurally identical to
+     * the Order transition maps above: recordMovement() calls
+     * ctx.require(requiredPermissionFor(input.movementType)), so every literal
+     * this function can return IS a required key — the indirection is a switch
+     * rather than an object, which is the only reason the direct scan misses it.
+     */
+    const inventoryService = read("src/server/inventory/service.ts");
+    const permFnStart = inventoryService.indexOf("function requiredPermissionFor");
+    if (permFnStart >= 0) {
+      const permFnEnd = inventoryService.indexOf("\n}", permFnStart);
+      const block = stripComments(inventoryService.slice(permFnStart, permFnEnd));
+      for (const match of block.matchAll(/return\s+["']([a-z_]+\.[a-z_]+)["']/g)) {
+        keys.add(match[1]!);
+      }
+    }
+
     return keys;
   }
 
@@ -259,6 +279,9 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     // Only reachable through the Payment state machine's permission map.
     expect(enforced.has("payments.manual_confirm")).toBe(true);
     expect(enforced.has("payments.verify")).toBe(true);
+    // Reached only through the Inventory movement-type map, so this also
+    // guards that the extra scan above still finds anything at all.
+    expect(enforced.has("inventory.receive_stock")).toBe(true);
     // An audit action name that no handler requires must NOT read as enforced.
     expect(enforced.has("orders.refund")).toBe(false);
   });

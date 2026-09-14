@@ -21,6 +21,7 @@ import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
+import { Route as AppInventoryRouteImport } from './routes/app.inventory'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
 import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppPosRouteImport } from './routes/app.pos'
@@ -31,6 +32,7 @@ import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
+import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventory.$variantId'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
 import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
 import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
@@ -95,6 +97,11 @@ const AppInboxRoute = AppInboxRouteImport.update({
   path: '/inbox',
   getParentRoute: () => AppRoute,
 } as any)
+const AppInventoryRoute = AppInventoryRouteImport.update({
+  id: '/inventory',
+  path: '/inventory',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppOrdersRoute = AppOrdersRouteImport.update({
   id: '/orders',
   path: '/orders',
@@ -145,6 +152,11 @@ const AppInboxIdRoute = AppInboxIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppInboxRoute,
 } as any)
+const AppInventoryVariantIdRoute = AppInventoryVariantIdRouteImport.update({
+  id: '/$variantId',
+  path: '/$variantId',
+  getParentRoute: () => AppInventoryRoute,
+} as any)
 const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -173,6 +185,7 @@ export interface FileRoutesByFullPath {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -184,6 +197,7 @@ export interface FileRoutesByFullPath {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
@@ -199,6 +213,7 @@ export interface FileRoutesByTo {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -210,6 +225,7 @@ export interface FileRoutesByTo {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
@@ -227,6 +243,7 @@ export interface FileRoutesById {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
@@ -238,6 +255,7 @@ export interface FileRoutesById {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
@@ -256,6 +274,7 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
     | '/app/payments'
     | '/app/pos'
@@ -267,6 +286,7 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
     | '/app/payments/$id'
     | '/app/products/$id'
@@ -282,6 +302,7 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
     | '/app/payments'
     | '/app/pos'
@@ -293,6 +314,7 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
     | '/app/payments/$id'
     | '/app/products/$id'
@@ -309,6 +331,7 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
     | '/app/payments'
     | '/app/pos'
@@ -320,6 +343,7 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
     | '/app/payments/$id'
     | '/app/products/$id'
@@ -424,6 +448,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/inventory': {
+      id: '/app/inventory'
+      path: '/inventory'
+      fullPath: '/app/inventory'
+      preLoaderRoute: typeof AppInventoryRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/orders': {
       id: '/app/orders'
       path: '/orders'
@@ -494,6 +525,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxIdRouteImport
       parentRoute: typeof AppInboxRoute
     }
+    '/app/inventory/$variantId': {
+      id: '/app/inventory/$variantId'
+      path: '/$variantId'
+      fullPath: '/app/inventory/$variantId'
+      preLoaderRoute: typeof AppInventoryVariantIdRouteImport
+      parentRoute: typeof AppInventoryRoute
+    }
     '/app/orders/$id': {
       id: '/app/orders/$id'
       path: '/$id'
@@ -542,6 +580,18 @@ const AppInboxRouteWithChildren = AppInboxRoute._addFileChildren(
   AppInboxRouteChildren,
 )
 
+interface AppInventoryRouteChildren {
+  AppInventoryVariantIdRoute: typeof AppInventoryVariantIdRoute
+}
+
+const AppInventoryRouteChildren: AppInventoryRouteChildren = {
+  AppInventoryVariantIdRoute: AppInventoryVariantIdRoute,
+}
+
+const AppInventoryRouteWithChildren = AppInventoryRoute._addFileChildren(
+  AppInventoryRouteChildren,
+)
+
 interface AppOrdersRouteChildren {
   AppOrdersIdRoute: typeof AppOrdersIdRoute
 }
@@ -581,6 +631,7 @@ const AppProductsRouteWithChildren = AppProductsRoute._addFileChildren(
 interface AppRouteChildren {
   AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
   AppInboxRoute: typeof AppInboxRouteWithChildren
+  AppInventoryRoute: typeof AppInventoryRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
   AppPaymentsRoute: typeof AppPaymentsRouteWithChildren
   AppPosRoute: typeof AppPosRoute
@@ -594,6 +645,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDeliveriesRoute: AppDeliveriesRouteWithChildren,
   AppInboxRoute: AppInboxRouteWithChildren,
+  AppInventoryRoute: AppInventoryRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
   AppPaymentsRoute: AppPaymentsRouteWithChildren,
   AppPosRoute: AppPosRoute,

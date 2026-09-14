@@ -60,6 +60,7 @@ export type MobileNavRoute =
   | "/app/team"
   | "/app/orders"
   | "/app/products"
+  | "/app/inventory"
   | "/app/deliveries"
   | "/app/payments"
   | "/app/settings";
@@ -225,9 +226,11 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
       actions: [
         {
           /*
-           * The catalogue is live; a dedicated stock workspace still is not,
-           * so the two stay separate entries rather than one entry that
-           * over-promises. Gated on the same key getProductCatalog requires.
+           * The catalogue and the stock workspace stay SEPARATE entries: one
+           * answers "what do we sell and for how much", the other "how much do
+           * we have". Collapsing them would put a Product-domain gate over an
+           * Inventory-domain screen. Each is gated on the key its own server
+           * function requires.
            */
           id: "product-catalog",
           labelKey: "nav.moreActions.productCatalog.label",
@@ -238,11 +241,14 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           requiresAll: ["products.read"],
         },
         {
+          // Gated on inventory.read — the key listOrganizationStock requires.
           id: "products-stock",
           labelKey: "nav.moreActions.productsStock.label",
           descriptionKey: "nav.moreActions.productsStock.description",
           icon: Boxes,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/inventory",
+          requiresAll: ["inventory.read"],
         },
         {
           id: "customers",
@@ -359,6 +365,7 @@ export function resolveMobileNavActiveTab(
     if (
       pathname.startsWith("/app/team") ||
       pathname.startsWith("/app/products") ||
+      pathname.startsWith("/app/inventory") ||
       pathname.startsWith("/app/customers")
     ) {
       return "more";
@@ -379,6 +386,7 @@ export function resolveMobileNavActiveTab(
   if (
     pathname.startsWith("/app/team") ||
     pathname.startsWith("/app/products") ||
+    pathname.startsWith("/app/inventory") ||
     pathname.startsWith("/app/customers")
   ) {
     return "more";
