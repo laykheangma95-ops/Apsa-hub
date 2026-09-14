@@ -20,7 +20,78 @@ describe("mobile nav config", () => {
       "track-delivery",
     ]);
     expect(actions.find((action) => action.id === "find-customer")?.availability).toBe("assistive");
-    expect(actions.filter((action) => action.availability === "coming-soon").length).toBe(4);
+
+    /*
+     * The only remaining "coming soon" here is the barcode scanner, which
+     * genuinely does not exist. find-order, check-payment and track-delivery
+     * were coming-soon while /app/orders, /app/payments and /app/deliveries
+     * were already live, so the Resolve sheet dead-ended a merchant looking
+     * for a record the app could in fact show them.
+     */
+    expect(
+      actions.filter((action) => action.availability === "coming-soon").map((a) => a.id),
+    ).toEqual(["scan-barcode"]);
+  });
+
+  /*
+   * The rule, rather than a count that silently rots: an entry may only claim
+   * "coming soon" when it has no destination at all. The moment a route is
+   * attached, the label has to stop saying the workflow does not exist.
+   */
+  it("never marks an action coming-soon when it already points at a live route", () => {
+    for (const variant of ["online-seller", "mart"] as const) {
+      const config = getBusinessNavConfig(variant);
+      const actions = [
+        ...config.resolveGroups,
+        ...config.salesGroups,
+        ...config.moreGroups,
+      ].flatMap((group) => group.actions);
+
+      for (const action of actions) {
+        if (action.availability === "coming-soon") {
+          expect({ id: action.id, to: action.to }).toEqual({ id: action.id, to: undefined });
+        } else {
+          // Conversely, anything not marked coming-soon must actually go
+          // somewhere — an enabled row with no route is a silent no-op.
+          expect({ id: action.id, hasRoute: Boolean(action.to) }).toEqual({
+            id: action.id,
+            hasRoute: true,
+          });
+        }
+      }
+    }
+  });
+
+  /*
+   * Every gated destination must be keyed to the permission its own server
+   * functions require. A row gated on the wrong key either hides work the
+   * member can do or offers work the server will refuse.
+   */
+  it("gates each live destination on the permission that destination requires", () => {
+    const config = getBusinessNavConfig("online-seller");
+    const actions = [...config.resolveGroups, ...config.salesGroups, ...config.moreGroups].flatMap(
+      (group) => group.actions,
+    );
+
+    const expected: Record<string, readonly string[]> = {
+      "/app/orders": ["orders.read"],
+      "/app/payments": ["payments.read"],
+      "/app/deliveries": ["delivery.read"],
+      "/app/products": ["products.read"],
+      "/app/inventory": ["inventory.read"],
+      "/app/team": ["team.read"],
+    };
+
+    for (const action of actions) {
+      const required = action.to ? expected[action.to] : undefined;
+      if (!required) continue;
+      for (const key of required) {
+        expect({ id: action.id, has: action.requiresAll?.includes(key) ?? false }).toEqual({
+          id: action.id,
+          has: true,
+        });
+      }
+    }
   });
 
   it("maps signed-in routes to the correct active mobile tab", () => {

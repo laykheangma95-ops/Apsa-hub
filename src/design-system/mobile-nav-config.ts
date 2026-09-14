@@ -129,26 +129,43 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           to: "/app/inbox",
           requiresAll: ["messages.read"],
         },
+        /*
+         * These three said "coming soon" while the screens that answer them
+         * were already live, which sent a merchant looking for one order,
+         * payment or shipment to a dead row instead of the workspace that has
+         * it. They are "assistive", not "live", for the same reason
+         * find-customer is: each opens the screen that OWNS the record rather
+         * than a dedicated global finder, and its description says exactly
+         * what the merchant gets there — Deliveries really does search by
+         * order, customer or courier server-side; Orders and Payments browse
+         * and filter instead. Overstating that would be the other failure.
+         */
         {
           id: "find-order",
           labelKey: "nav.resolveActions.findOrder.label",
           descriptionKey: "nav.resolveActions.findOrder.description",
           icon: Package,
-          availability: "coming-soon",
+          availability: "assistive",
+          to: "/app/orders",
+          requiresAll: ["orders.read"],
         },
         {
           id: "check-payment",
           labelKey: "nav.resolveActions.checkPayment.label",
           descriptionKey: "nav.resolveActions.checkPayment.description",
           icon: CreditCard,
-          availability: "coming-soon",
+          availability: "assistive",
+          to: "/app/payments",
+          requiresAll: ["payments.read"],
         },
         {
           id: "track-delivery",
           labelKey: "nav.resolveActions.trackDelivery.label",
           descriptionKey: "nav.resolveActions.trackDelivery.description",
           icon: Truck,
-          availability: "coming-soon",
+          availability: "assistive",
+          to: "/app/deliveries",
+          requiresAll: ["delivery.read"],
         },
       ],
     },

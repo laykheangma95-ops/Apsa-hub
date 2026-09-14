@@ -50,6 +50,7 @@ import {
   isTerminalPaymentStatus,
   resultingPaymentStatus,
   VERIFICATION_TRANSITION_PERMISSIONS,
+  RECORD_METHOD_PERMISSIONS,
   PAYMENT_METHODS,
   PAYMENT_EVIDENCE_TYPES,
   type PaymentStatus,
@@ -490,11 +491,18 @@ export async function recordPayment(
   ctx: AuthorizationContext,
   input: RecordPaymentServiceInput,
 ): Promise<PaymentDetail> {
-  ctx.require(input.method === "cod" ? "payments.mark_cod" : "payments.record");
-
+  /*
+   * Validate the method BEFORE deriving its permission: an unknown method must
+   * be rejected as a bad request, never used to index the permission table
+   * (which would yield undefined and hand ctx.require nothing to check).
+   */
   if (!PAYMENT_METHODS.includes(input.method)) {
     throw badRequest(`Invalid payment method: ${String(input.method)}`);
   }
+
+  // COD carries its own grant — see RECORD_METHOD_PERMISSIONS.
+  ctx.require(RECORD_METHOD_PERMISSIONS[input.method]);
+
   if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
     throw badRequest("Amount must be a positive integer minor amount");
   }

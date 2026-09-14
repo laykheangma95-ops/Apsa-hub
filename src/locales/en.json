@@ -94,15 +94,15 @@
       },
       "findOrder": {
         "label": "Find order",
-        "description": "A global order finder is not in the app yet."
+        "description": "Open Orders and browse every order, newest first."
       },
       "checkPayment": {
         "label": "Check payment",
-        "description": "A payment lookup hub is not in the app yet."
+        "description": "Open Payments and filter by settlement or verification state."
       },
       "trackDelivery": {
         "label": "Track delivery / shipment",
-        "description": "A shipment finder is not in the app yet."
+        "description": "Open Deliveries and search by order, customer or courier."
       }
     },
     "salesActions": {
@@ -437,6 +437,9 @@
     "out_of_stock": "Out of stock",
     "partially_paid": "Partly paid",
     "partially_refunded": "Partly refunded",
+    "none": "No refunds",
+    "partial": "Partly refunded",
+    "full": "Fully refunded",
     "requested": "Requested",
     "accepted": "Courier accepted",
     "picked_up": "Picked up",
@@ -899,7 +902,8 @@
     "axis": {
       "lifecycle": "Order",
       "payment": "Payment",
-      "fulfillment": "Fulfilment"
+      "fulfillment": "Fulfilment",
+      "refund": "Refund"
     },
     "historyEntry": "{{axis}}: {{status}}",
     "confirmOrder": "Confirm order",
@@ -925,7 +929,37 @@
         "body": "This order can't move to that status from where it is."
       }
     },
-    "balanceDue": "{{amount}} still to collect."
+    "balanceDue": "{{amount}} still to collect.",
+    "noCustomerBody": "This order has no customer attached.",
+    "customerRestricted": "You cannot open customer records.",
+    "paymentsRestricted": "You cannot see payments for this order.",
+    "paymentsLoading": "Loading payments…",
+    "paymentsError": {
+      "title": "Payments could not be loaded",
+      "body": "The payments for this order are not available right now."
+    },
+    "paymentsTruncated": "More payments exist than shown here. Open Payments to see them all.",
+    "openPayments": "Open Payments",
+    "paymentRecordedNotice": "Payment recorded. It still needs to be confirmed before it counts as paid.",
+    "settlement": {
+      "received": "Received",
+      "refunded": "Refunded",
+      "net": "Net",
+      "overpaid": "Overpaid by {{amount}} — check this with the customer."
+    },
+    "recordPaymentSheet": {
+      "title": "Record payment",
+      "body": "Write down money the customer has handed over. Confirming it as received is a separate step.",
+      "methodLabel": "How was it paid",
+      "amountLabel": "Amount ({{currency}})",
+      "amountHint": "Order total {{amount}}. Record only what was handed over this time.",
+      "referenceLabel": "Reference (optional)",
+      "referenceHint": "A transfer number or receipt number, if there is one.",
+      "pendingNote": "This is recorded as a claim. It is not counted as paid until someone confirms the money arrived.",
+      "codNote": "Cash on delivery — the courier still holds this money. It is not counted as paid.",
+      "submit": "Record payment",
+      "working": "Recording…"
+    }
   },
   "orderList": {
     "title": "Orders",
@@ -1404,7 +1438,8 @@
         "body": "It stops being offered for sale and stays in your records. Nothing is deleted.",
         "confirm": "Archive",
         "done": "Product archived"
-      }
+      },
+      "viewStock": "View stock"
     },
     "variant": {
       "create": "Add variant",
@@ -1532,7 +1567,8 @@
     "error": {
       "title": "Stock didn't load",
       "body": "Check your connection and try again."
-    }
+    },
+    "viewProduct": "View product"
   },
   "receiveStock": {
     "action": "Receive stock",

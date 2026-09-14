@@ -1321,6 +1321,56 @@ export async function listRealPayments(
   };
 }
 
+/**
+ * Record one payment claim against a production order.
+ *
+ * This is the only way a merchant tells APSA that money arrived, and it is
+ * deliberately NOT a settlement. record_payment_v1 (migration 035) writes the
+ * row as status `pending` / verification `unverified` — including for cash —
+ * and moving to `paid` happens only through verifyPaymentFn's authoritative
+ * state machine. Nothing on this path may present the result as paid.
+ *
+ * `amountMinor` is an integer minor unit in the ORDER'S OWN currency. There is
+ * no currency parameter: the payment inherits the order's currency server-side,
+ * so this path cannot express a conversion.
+ *
+ * `idempotencyKey` is what makes a retry safe. Retries of the same
+ * record-payment attempt reuse the same idempotency key and replay the existing
+ * claim: uniqueness is enforced per ORGANIZATION, on
+ * (organization_id, idempotency_key) — migration 034's partial unique index,
+ * which record_payment_v1 targets with ON CONFLICT ... DO NOTHING — not per
+ * order, so a repeat returns the original payment instead of writing a second
+ * row. A double tap or a lost response therefore records one claim, not two.
+ *
+ * Recording charges nobody: the row is written `pending`/`unverified` and
+ * contributes nothing to received settlement until it is verified. A deliberate
+ * second payment against the same order (a split or later instalment) is a
+ * separate claim and correctly carries its own key.
+ */
+export interface RecordRealPaymentInput {
+  orderId: string;
+  method: PaymentMethod;
+  amountMinor: number;
+  reference?: string | undefined;
+  idempotencyKey: string;
+  note?: string | undefined;
+}
+
+export async function recordRealPayment(input: RecordRealPaymentInput): Promise<UiPaymentDetail> {
+  const { recordPaymentFn } = await import("@/api/payments");
+  const detail = await recordPaymentFn({
+    data: {
+      orderId: input.orderId,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      ...(input.reference ? { reference: input.reference } : {}),
+      idempotencyKey: input.idempotencyKey,
+      ...(input.note ? { note: input.note } : {}),
+    },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
 /** Production Payment detail with its immutable event ledger — src/routes/app.payments.$id.tsx. */
 export async function getRealPaymentDetail(paymentId: string): Promise<UiPaymentDetail> {
   const { getPaymentByIdFn } = await import("@/api/payments");

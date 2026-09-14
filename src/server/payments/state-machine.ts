@@ -150,6 +150,26 @@ export function resultingPaymentStatus(to: PaymentVerificationState): PaymentSta
  * with no bank integration at all (the core APSA payment principle). Every
  * other target is an escalation or a correction and requires payments.verify.
  */
+/**
+ * RECORDING
+ *
+ * Which permission recording a payment requires, by method. COD is the one
+ * method with its own grant: migration 036 seeds payments.mark_cod to SALES as
+ * well as Owner/Manager/Cashier, because noting that the courier will collect
+ * cash is not the same authority as taking money over the counter.
+ *
+ * Exhaustive over PAYMENT_METHODS, and a map rather than a ternary inside
+ * recordPayment() for the same reason VERIFICATION_TRANSITION_PERMISSIONS is
+ * one: the permission a value implies belongs in a single declared table that
+ * can be read, reviewed and scanned, not buried in a call argument.
+ */
+export const RECORD_METHOD_PERMISSIONS: Readonly<Record<PaymentMethod, string>> = {
+  cash: "payments.record",
+  khqr: "payments.record",
+  bank_transfer: "payments.record",
+  cod: "payments.mark_cod",
+};
+
 export const VERIFICATION_TRANSITION_PERMISSIONS: Readonly<
   Record<PaymentVerificationState, string>
 > = {

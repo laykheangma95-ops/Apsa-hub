@@ -51,6 +51,22 @@ export const UI_PERMISSION_KEYS = [
   // payments.view_provider_reference is deliberately NOT here: the server
   // withholds the reference value itself rather than trusting the browser to
   // hide it, so the UI has nothing to decide and needs no bit for it.
+  //
+  // payments.record and payments.mark_cod gate the "Record payment" affordance
+  // on Order detail. They are two separate grants because migration 036 seeds
+  // them to different roles (mark_cod reaches SALES, record does not), and
+  // recordPayment() derives the required grant from exactly that distinction
+  // before touching data, by looking the method up in a declared table:
+  //   ctx.require(RECORD_METHOD_PERMISSIONS[input.method])
+  // in src/server/payments/service.ts, where RECORD_METHOD_PERMISSIONS maps
+  // cod -> payments.mark_cod and every other method -> payments.record
+  // (src/server/payments/state-machine.ts). The method is validated first, so
+  // an unknown one is rejected rather than indexing the table to `undefined`.
+  // Recording never marks anything paid —
+  // record_payment_v1 writes status 'pending' and leaves settlement to
+  // verification — so neither key here implies any authority over money.
+  "payments.record",
+  "payments.mark_cod",
   "payments.read",
   "payments.manual_confirm",
   "payments.verify",
