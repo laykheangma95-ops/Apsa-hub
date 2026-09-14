@@ -12,6 +12,8 @@
  * Run: bun test src/tests/orders-ui.test.ts
  */
 import { describe, it, expect } from "bun:test";
+import * as fs from "fs";
+import * as path from "path";
 import {
   canCancelOrder,
   canConfirmOrder,
@@ -24,6 +26,10 @@ import {
   sourceDbToOrderSource,
   totalStockUnits,
 } from "@/lib/orders";
+
+function readSource(relPath: string): string {
+  return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
+}
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -84,7 +90,31 @@ describe("source <-> channel mapping", () => {
     expect(isChannelSource("facebook")).toBe(true);
     expect(isChannelSource("instagram")).toBe(true);
     expect(isChannelSource("telegram")).toBe(true);
+    expect(isChannelSource("other")).toBe(true);
     expect(isChannelSource("manual")).toBe(false);
+  });
+
+  /*
+   * Regression: the guard used to be `source !== "manual"`, so any string
+   * ("POS", "", a future API value) passed and crashed ChannelBadge's ICONS
+   * lookup with an undefined component. Every accepted value must be a
+   * canonical Channel key that ChannelBadge can index; anything else must be
+   * rejected here so the UI falls back to the manual caption.
+   */
+  it("rejects values outside the Channel union instead of crashing ChannelBadge", () => {
+    for (const garbage of ["POS", "Facebook", "", "sms", "telegram ", " point_of_sale"]) {
+      expect(isChannelSource(garbage as never)).toBe(false);
+    }
+  });
+
+  it("every accepted source exists in ChannelBadge's icon lookup (structural)", () => {
+    const badgeSource = readSource("src/design-system/ChannelBadge.tsx");
+    const iconKeys = Array.from(badgeSource.matchAll(/^\s{2}(\w+):/gm)).map((m) => m[1]);
+    for (const channel of ["facebook", "instagram", "telegram", "pos", "other"] as const) {
+      expect(isChannelSource(channel)).toBe(true);
+      expect(iconKeys).toContain(channel);
+    }
+    expect(iconKeys).not.toContain("manual");
   });
 });
 

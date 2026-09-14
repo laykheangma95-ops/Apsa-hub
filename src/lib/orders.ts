@@ -46,9 +46,24 @@ export function channelToSourceDb(channel: Channel): OrderSourceDb {
   return CHANNEL_TO_SOURCE_DB[channel];
 }
 
-/** True when a source maps to a renderable ChannelBadge Channel (i.e. not "manual"). */
-export function isChannelSource(source: OrderSource): source is Exclude<Channel, "other"> {
-  return source !== "manual";
+/**
+ * True when a source is a Channel that ChannelBadge can render (every Channel
+ * except "manual", which is not a Channel at all). The check is an explicit
+ * membership test — not `source !== "manual"` — so untyped data that slips
+ * past the OrderSource union (legacy rows, future API values, "POS"-style DB
+ * casing) is rejected here instead of crashing ChannelBadge's icon lookup
+ * later. A value this accepts is guaranteed to exist in ChannelBadge's ICONS.
+ */
+const RENDERABLE_CHANNELS: readonly Channel[] = [
+  "facebook",
+  "instagram",
+  "telegram",
+  "pos",
+  "other",
+];
+
+export function isChannelSource(source: OrderSource): source is Channel {
+  return (RENDERABLE_CHANNELS as readonly string[]).includes(source);
 }
 
 // ── Server → UI mapping ───────────────────────────────────────────────────────

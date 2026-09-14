@@ -9,6 +9,7 @@ import {
   ChannelBadge,
   ListSkeleton,
   ScreenBleed,
+  StatusBadge,
   StatusChip,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -76,7 +77,13 @@ function OrderRow({ order }: { order: Order }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        {order.lifecycleStatus ? <StatusChip status={order.lifecycleStatus} /> : null}
+        {/*
+         * The lifecycle axis gets the liquid-glass StatusBadge; payment and
+         * fulfilment remain their own StatusChip facts — three axes, never
+         * merged. All four OrderLifecycleStatus values are direct members of
+         * the StatusBadge vocabulary, so the mapping is the identity.
+         */}
+        {order.lifecycleStatus ? <StatusBadge status={order.lifecycleStatus} size="sm" /> : null}
         <StatusChip status={order.paymentStatus} />
         <StatusChip status={order.fulfillmentStatus} />
       </div>
