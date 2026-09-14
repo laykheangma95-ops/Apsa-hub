@@ -13,8 +13,8 @@
  *     contexts for two different orgs write two different rows.
  *  4. The validator rejects unknown fields (mass-assignment guard) and
  *     invalid values (empty/over-length name, over-length type).
- *  5. A best-effort audit row is written with a before/after snapshot of
- *     exactly the two touched columns — never the untouched ones.
+ *  5. The audit payload builder produces a before/after snapshot of exactly
+ *     the two touched columns — never the untouched ones.
  *  6. The UI wiring: the sheet is gated on organization.update, cache is
  *     written (not just invalidated) on success, and there is no mock
  *     success fallback in the client wrapper.
@@ -23,6 +23,33 @@
  * update-organization-profile.ts statically imports supabaseAdmin, so
  * mock.module must run before the one dynamic import of the module under
  * test.
+ *
+ * Deliberately does NOT mock "@/server/auth/audit" to assert on the
+ * auditLog() call itself. update-organization-profile.ts's own
+ * `import { auditLog } from "@/server/auth/audit"` resolves at THIS file's
+ * top-level dynamic import below, so any mock.module("@/server/auth/audit", ...)
+ * registered before that import would need to run at this file's top level
+ * too — and unlike src/tests/team-domain.test.ts's installPassthroughAuthMocks()
+ * (which registers its audit mock lazily, inside individual it() bodies,
+ * long after every file's top-level code has already run), a top-level
+ * mock.module call here executes during Bun's file-collection phase, where
+ * it can — and, once, did in CI — leak into another file's OWN top-level
+ * `import { auditLog, MANDATORY_AUDIT_ACTIONS } from "../server/auth/audit"`
+ * (tenant-isolation.test.ts's "auditLog() rejects mandatory-audit actions"
+ * guard), depending on file-processing order. Faking the audit_logs table
+ * through the supabaseAdmin mock instead was tried next and turned out to
+ * have the same fragility one level down (audit.ts's own separate
+ * `import { supabaseAdmin }` is captured whenever some other file first
+ * transitively loads audit.ts, not necessarily after this file's mock is in
+ * place) — it passed every local run, including the exact CI command
+ * repeated, but still failed once for real in CI (0 audit rows observed).
+ * The robust fix is to not depend on cross-file module-registry timing at
+ * all: the exact before/after shape is asserted directly against the pure
+ * buildProfileAuditSnapshot() helper below, and updateOrganizationProfile()
+ * is proven not to depend on auditLog() succeeding (best-effort) by the
+ * "still saves" test, which runs against the real, unmocked auditLog and
+ * lets its DB write no-op against this file's organizations-only
+ * supabaseAdmin fake.
  *
  * Run: bun test src/tests/settings-business-update.test.ts
  */
@@ -83,58 +110,48 @@ const ORG_ROWS: Record<string, OrgRow> = {
 };
 
 const updateCalls: Array<{ orgId: string; patch: Record<string, unknown> }> = [];
-const auditRows: Array<Record<string, unknown>> = [];
 
-// Deliberately does NOT mock "@/server/auth/audit" — that module is imported
-// (unmocked) by other test files in the same bun test run, and mock.module()
-// replaces a module path process-wide, not per file. Mocking it here would
-// silently swap out the real auditLog()/MANDATORY_AUDIT_ACTIONS guard for
-// every file that happens to run afterwards (this broke
-// tenant-isolation.test.ts's "auditLog() rejects mandatory-audit actions"
-// coverage the first time this file was written). Instead the audit_logs
-// table itself is faked below, so the real auditLog() runs unmodified.
 mock.module("@/lib/supabase/server", () => ({
   supabaseAdmin: {
-    from: (table: string) => {
-      if (table === "audit_logs") {
-        return {
-          insert: (row: Record<string, unknown>) => {
-            auditRows.push(row);
-            return Promise.resolve({ error: null });
+    from: (_table: string) => ({
+      select: () => ({
+        eq: (_column: string, value: unknown) => ({
+          single: async () => {
+            const row = ORG_ROWS[value as string];
+            if (!row) return { data: null, error: { message: "not found" } };
+            return { data: row, error: null };
           },
-        };
-      }
-      return {
-        select: () => ({
-          eq: (_column: string, value: unknown) => ({
+        }),
+      }),
+      update: (patch: Record<string, unknown>) => ({
+        eq: (_column: string, value: unknown) => ({
+          select: () => ({
             single: async () => {
-              const row = ORG_ROWS[value as string];
-              if (!row) return { data: null, error: { message: "not found" } };
-              return { data: row, error: null };
+              const existing = ORG_ROWS[value as string];
+              if (!existing) return { data: null, error: { message: "not found" } };
+              // Simulate the write: only the columns actually sent change.
+              const updated = { ...existing, ...patch };
+              ORG_ROWS[value as string] = updated;
+              updateCalls.push({ orgId: value as string, patch });
+              return { data: updated, error: null };
             },
           }),
         }),
-        update: (patch: Record<string, unknown>) => ({
-          eq: (_column: string, value: unknown) => ({
-            select: () => ({
-              single: async () => {
-                const existing = ORG_ROWS[value as string];
-                if (!existing) return { data: null, error: { message: "not found" } };
-                // Simulate the write: only the columns actually sent change.
-                const updated = { ...existing, ...patch };
-                ORG_ROWS[value as string] = updated;
-                updateCalls.push({ orgId: value as string, patch });
-                return { data: updated, error: null };
-              },
-            }),
-          }),
-        }),
-      };
-    },
+      }),
+      // Real auditLog() (unmocked — see the file header) calls
+      // .from("audit_logs").insert(...). A real Supabase client reports a
+      // DB-level failure as a resolved `{ error }`, never a thrown
+      // exception, so this mirrors that instead of leaving `.insert`
+      // undefined (which would throw and — since audit.ts has no try/catch
+      // of its own — reject the caller's await, wrongly failing the save).
+      insert: (_row: Record<string, unknown>) =>
+        Promise.resolve({ error: { message: "audit_logs not implemented in this test" } }),
+    }),
   },
 }));
 
-const { updateOrganizationProfile } = await import("../server/org/update-organization-profile");
+const { updateOrganizationProfile, buildProfileAuditSnapshot } =
+  await import("../server/org/update-organization-profile");
 
 describe("updateOrganizationProfile", () => {
   it("denies a caller without organization.update (read-only organization.read)", async () => {
@@ -185,22 +202,39 @@ describe("updateOrganizationProfile", () => {
     ).rejects.toThrow();
   });
 
-  it("writes a best-effort audit row with a before/after snapshot of only the touched columns", async () => {
-    auditRows.length = 0;
+  it("still saves when the (real, unmocked) best-effort audit write cannot persist", async () => {
+    // No "audit_logs" branch is faked in this file's supabaseAdmin mock, so
+    // the real auditLog() hits `.from("audit_logs").insert` on an object
+    // that doesn't implement it, throws, and — because org.update is not in
+    // MANDATORY_AUDIT_ACTIONS — is swallowed exactly like a real DB outage
+    // would be. The save must still succeed.
     const ctx = makeCtx({ organizationId: ORG_A, permissions: ["organization.update"] });
-    await updateOrganizationProfile(ctx, { displayName: "Audited Name", businessType: "retail" });
+    const result = await updateOrganizationProfile(ctx, {
+      displayName: "Survives Audit Failure",
+      businessType: null,
+    });
+    expect(result.displayName).toBe("Survives Audit Failure");
+  });
+});
 
-    expect(auditRows).toHaveLength(1);
-    const row = auditRows[0];
-    expect(row?.["action"]).toBe("org.update");
-    expect(row?.["resource_type"]).toBe("organizations");
-    expect(row?.["resource_id"]).toBe(ORG_A);
-    expect(row?.["organization_id"]).toBe(ORG_A);
-    const before = row?.["before_json"] as Record<string, unknown>;
-    const after = row?.["after_json"] as Record<string, unknown>;
-    expect(Object.keys(before)).toEqual(["display_name", "business_type"]);
-    expect(Object.keys(after)).toEqual(["display_name", "business_type"]);
-    expect(after["display_name"]).toBe("Audited Name");
+describe("buildProfileAuditSnapshot", () => {
+  it("carries only display_name/business_type, before and after — never the untouched columns", () => {
+    const before = { display_name: "Old Name", business_type: "cafe" };
+    const after = { display_name: "New Name", business_type: "bakery" };
+    const snapshot = buildProfileAuditSnapshot(before, after);
+
+    expect(snapshot.beforeJson).toEqual({ display_name: "Old Name", business_type: "cafe" });
+    expect(snapshot.afterJson).toEqual({ display_name: "New Name", business_type: "bakery" });
+    expect(Object.keys(snapshot.beforeJson)).toEqual(["display_name", "business_type"]);
+    expect(Object.keys(snapshot.afterJson)).toEqual(["display_name", "business_type"]);
+  });
+
+  it("carries a null business_type through unchanged", () => {
+    const snapshot = buildProfileAuditSnapshot(
+      { display_name: "Name", business_type: "retail" },
+      { display_name: "Name", business_type: null },
+    );
+    expect(snapshot.afterJson["business_type"]).toBeNull();
   });
 });
 

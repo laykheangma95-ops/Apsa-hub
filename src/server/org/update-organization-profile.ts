@@ -64,6 +64,29 @@ function toProfile(row: OrganizationProfileRow): OrganizationProfile {
   };
 }
 
+/**
+ * Pure — no I/O, no mocking required to test. Kept separate from the
+ * auditLog() call site so the exact before/after shape (only the two
+ * touched columns, never legal_name/slug/default_currency/country) is
+ * directly unit-testable without mocking the shared "@/server/auth/audit"
+ * or "@/lib/supabase/server" modules, both of which every other test file
+ * in the suite also imports — see src/tests/settings-business-update.test.ts
+ * for why that cross-file module-registry sharing makes asserting through a
+ * mocked auditLog() call unreliable across the full suite.
+ */
+export function buildProfileAuditSnapshot(
+  before: Pick<OrganizationProfileRow, "display_name" | "business_type">,
+  after: Pick<OrganizationProfileRow, "display_name" | "business_type">,
+): {
+  beforeJson: Record<string, unknown>;
+  afterJson: Record<string, unknown>;
+} {
+  return {
+    beforeJson: { display_name: before.display_name, business_type: before.business_type },
+    afterJson: { display_name: after.display_name, business_type: after.business_type },
+  };
+}
+
 export async function updateOrganizationProfile(
   ctx: AuthorizationContext,
   input: UpdateOrganizationProfileInput,
@@ -101,12 +124,13 @@ export async function updateOrganizationProfile(
   // Best-effort: org.update is not in MANDATORY_AUDIT_ACTIONS, so a logging
   // failure never blocks the merchant's save (mirrors products.price_change
   // in src/server/products/service.ts).
+  const { beforeJson, afterJson } = buildProfileAuditSnapshot(before, after);
   await auditLog(ctx, {
     action: "org.update",
     resourceType: "organizations",
     resourceId: ctx.organizationId,
-    beforeJson: { display_name: before.display_name, business_type: before.business_type },
-    afterJson: { display_name: after.display_name, business_type: after.business_type },
+    beforeJson,
+    afterJson,
   });
 
   return toProfile(after);
