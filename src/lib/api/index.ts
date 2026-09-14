@@ -13,6 +13,18 @@ import {
   type RealDeliveryDetail,
   type RealDeliveryListPage,
 } from "@/lib/deliveries";
+import {
+  mapOrderSettlementToUi,
+  mapPaymentDetailToUi,
+  mapPaymentReconciliationToUi,
+  mapPaymentSummaryToUi,
+  type PaymentStatus,
+  type PaymentVerificationState,
+  type UiOrderSettlement,
+  type UiPayment,
+  type UiPaymentDetail,
+  type UiPaymentReconciliation,
+} from "@/lib/payments";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -1240,4 +1252,142 @@ export async function cancelInvite(id: string): Promise<string> {
     teamMembers = teamMembers.filter((m) => m.id !== id);
     return resolve(id, 200);
   }
+}
+
+/* ---------- Payment UI Production Integration (production Payment domain) ----
+ *
+ * These functions are the ONLY way UI code reaches the production Payment
+ * domain (src/server/payments/service.ts via src/api/payments.ts). Each is a
+ * thin wrapper: call the TanStack server function, map the result with
+ * src/lib/payments.ts, return it.
+ *
+ * NO MOCK FALLBACK, and no `isDemoModeError` branch. The Payments screens are
+ * a production financial surface: a failure here must surface as a failure.
+ * Inventing a payment row would be inventing money — the exact opposite of
+ * what this domain exists to guarantee. Contrast getProducts()/searchCustomers()
+ * above, whose fallbacks exist only for the pre-production POS/mock path.
+ *
+ * organizationId/userId are never parameters — the server functions derive
+ * both from the validated session and the caller's own active DB membership
+ * (src/api/payments.ts#resolveAuthContext), so a caller has no way to name a
+ * tenant. Nothing here computes, adjusts or re-derives a settlement fact:
+ * every amount, status and verification state comes back already decided by
+ * the Payment domain.
+ */
+
+export interface ListRealPaymentsOptions {
+  /** Applied in SQL by the server, never as a client-side narrowing of a page. */
+  status?: PaymentStatus | undefined;
+  verificationState?: PaymentVerificationState | undefined;
+  orderId?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+/**
+ * One page of the production Payments list — src/routes/app.payments.tsx.
+ *
+ * The server returns a bare array with no total and no "is there more" flag,
+ * so the screen asks for one row beyond the page it intends to show and this
+ * function reports whether that extra row existed. That is pagination
+ * bookkeeping, not a business derivation: the extra row is dropped rather
+ * than displayed, and no count is ever presented to the merchant as a total.
+ */
+export interface RealPaymentListPage {
+  items: UiPayment[];
+  hasMore: boolean;
+}
+
+export async function listRealPayments(
+  options: ListRealPaymentsOptions = {},
+): Promise<RealPaymentListPage> {
+  const { listPaymentsFn } = await import("@/api/payments");
+  const pageSize = options.limit ?? 30;
+  const rows = await listPaymentsFn({
+    data: {
+      ...(options.status ? { status: options.status } : {}),
+      ...(options.verificationState ? { verificationState: options.verificationState } : {}),
+      ...(options.orderId ? { orderId: options.orderId } : {}),
+      // One beyond the page, so "load more" is offered only when a next row
+      // genuinely exists — never as a guess from a full-looking page.
+      limit: pageSize + 1,
+      ...(options.offset !== undefined ? { offset: options.offset } : {}),
+    },
+  });
+  const hasMore = rows.length > pageSize;
+  return {
+    items: rows.slice(0, pageSize).map(mapPaymentSummaryToUi),
+    hasMore,
+  };
+}
+
+/** Production Payment detail with its immutable event ledger — src/routes/app.payments.$id.tsx. */
+export async function getRealPaymentDetail(paymentId: string): Promise<UiPaymentDetail> {
+  const { getPaymentByIdFn } = await import("@/api/payments");
+  return mapPaymentDetailToUi(await getPaymentByIdFn({ data: { paymentId } }));
+}
+
+/**
+ * Move a payment's verification state through the authoritative state machine.
+ *
+ * `to` is the only thing sent. The resulting payment `status` is the server's
+ * own derived consequence (state-machine.ts#resultingPaymentStatus) and is
+ * never proposed from here — there is deliberately no way for this function
+ * to ask for a status directly.
+ */
+export async function verifyRealPayment(
+  paymentId: string,
+  to: PaymentVerificationState,
+  reason?: string,
+): Promise<UiPaymentDetail> {
+  const { verifyPaymentFn } = await import("@/api/payments");
+  const detail = await verifyPaymentFn({
+    data: { paymentId, to, ...(reason ? { reason } : {}) },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
+/**
+ * Refund, in full or in part. The refunded total is derived by SQL from the
+ * immutable refund event ledger; `amountMinor` is this one refund only, in the
+ * payment's own currency, as an integer minor unit.
+ */
+export async function refundRealPayment(
+  paymentId: string,
+  amountMinor: number,
+  reason: string,
+): Promise<UiPaymentDetail> {
+  const { refundPaymentFn } = await import("@/api/payments");
+  const detail = await refundPaymentFn({ data: { paymentId, amountMinor, reason } });
+  return mapPaymentDetailToUi(detail);
+}
+
+/** Reverse a claimed or settled payment. Appends an event; never deletes the record. */
+export async function reverseRealPayment(
+  paymentId: string,
+  reason: string,
+): Promise<UiPaymentDetail> {
+  const { reversePaymentFn } = await import("@/api/payments");
+  return mapPaymentDetailToUi(await reversePaymentFn({ data: { paymentId, reason } }));
+}
+
+/**
+ * One order's ledger-derived settlement snapshot (order_payment_totals,
+ * migration 040) — the authoritative none/partial/full refund verdict and the
+ * received/refunded/net figures. Requires payments.reconcile server-side.
+ */
+export async function getRealOrderSettlement(orderId: string): Promise<UiOrderSettlement> {
+  const { getOrderSettlementFn } = await import("@/api/payments");
+  return mapOrderSettlementToUi(await getOrderSettlementFn({ data: { orderId } }));
+}
+
+/**
+ * Per-currency reconciliation aggregates for the caller's organization.
+ * Requires payments.reconcile server-side. USD and KHR come back as separate
+ * entries and are never blended — there is no implicit exchange rate anywhere
+ * in this path.
+ */
+export async function getRealPaymentReconciliation(): Promise<UiPaymentReconciliation[]> {
+  const { getPaymentReconciliationFn } = await import("@/api/payments");
+  return mapPaymentReconciliationToUi(await getPaymentReconciliationFn());
 }

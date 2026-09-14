@@ -47,13 +47,13 @@ export interface MobileNavTabConfig extends MobileNavRequirement {
 }
 
 /**
- * Every signed-in destination a nav entry may point at.
+ * Every destination a nav entry may point at.
  *
- * Declared once and consumed by BottomNav's own handlers, so adding a
- * destination here cannot leave a navigation callback typed against a stale
- * copy of the list.
+ * Declared once and reused by BottomNav's own handlers, which previously
+ * repeated this union by hand in four places — so adding a hub meant editing
+ * five lists and the build only caught it because they disagreed.
  */
-export type MobileNavDestination =
+export type MobileNavRoute =
   | "/app"
   | "/app/inbox"
   | "/app/pos"
@@ -62,6 +62,7 @@ export type MobileNavDestination =
   | "/app/products"
   | "/app/inventory"
   | "/app/deliveries"
+  | "/app/payments"
   | "/app/settings";
 
 export interface MobileNavActionConfig extends MobileNavRequirement {
@@ -70,7 +71,7 @@ export interface MobileNavActionConfig extends MobileNavRequirement {
   descriptionKey: string;
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
-  to?: MobileNavDestination;
+  to?: MobileNavRoute;
 }
 
 export interface MobileNavSheetGroup {
@@ -103,7 +104,7 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
       labelKey: "nav.sales",
       icon: ShoppingBag,
       kind: "sheet",
-      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+      requiresAny: ["orders.read", "orders.create", "delivery.read", "payments.read"],
     },
     { id: "more", labelKey: "nav.more", icon: Menu, kind: "sheet" },
   ],
@@ -195,7 +196,9 @@ const ONLINE_SELLER_CONFIG: BusinessNavVariantConfig = {
           labelKey: "nav.salesActions.payments.label",
           descriptionKey: "nav.salesActions.payments.description",
           icon: CreditCard,
-          availability: "coming-soon",
+          availability: "live",
+          to: "/app/payments",
+          requiresAll: ["payments.read"],
         },
         {
           id: "delivery",
@@ -325,7 +328,7 @@ const MART_CONFIG: BusinessNavVariantConfig = {
       labelKey: "nav.sales",
       icon: ShoppingBag,
       kind: "sheet",
-      requiresAny: ["orders.read", "orders.create", "delivery.read"],
+      requiresAny: ["orders.read", "orders.create", "delivery.read", "payments.read"],
     },
     { id: "resolve", labelKey: "nav.resolve", icon: Search, kind: "sheet" },
     { id: "stock", labelKey: "nav.stock", icon: Boxes, kind: "sheet" },
@@ -354,6 +357,7 @@ export function resolveMobileNavActiveTab(
     if (
       pathname.startsWith("/app/pos") ||
       pathname.startsWith("/app/orders") ||
+      pathname.startsWith("/app/payments") ||
       pathname.startsWith("/app/deliveries")
     ) {
       return "sales";
@@ -374,6 +378,7 @@ export function resolveMobileNavActiveTab(
   if (
     pathname.startsWith("/app/pos") ||
     pathname.startsWith("/app/orders") ||
+    pathname.startsWith("/app/payments") ||
     pathname.startsWith("/app/deliveries")
   ) {
     return "sales";

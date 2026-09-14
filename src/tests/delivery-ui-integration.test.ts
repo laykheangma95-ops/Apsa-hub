@@ -386,9 +386,21 @@ describe("Successful transitions refresh the on-screen delivery", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Scope discipline: no Payment-domain, Conversation, or POS code touched", () => {
-  it("no new file in this phase imports a Payment-domain module", () => {
+  /*
+   * API_INDEX is deliberately NOT in this list any more.
+   *
+   * src/lib/api/index.ts is the shared client boundary for every domain — it
+   * already reaches Orders, Customers, Products, Team and Deliveries — and the
+   * Payments Operations UI phase added its own Payment-domain wrappers there,
+   * which is exactly where they belong. What this guard is actually protecting
+   * is narrower and still fully enforced below: no DELIVERY file may reach into
+   * the Payment domain, so a courier flow can never decide whether money
+   * arrived. The COD-is-not-payment invariant that motivated it is also
+   * asserted directly elsewhere (see src/lib/deliveries.ts's codAmount and
+   * delivery-list-ui.test.ts's "never fabricates a payment field").
+   */
+  it("no Delivery file imports a Payment-domain module", () => {
     for (const file of [
-      API_INDEX,
       DELIVERIES_LIB,
       DELIVERY_DETAIL_ROUTE,
       ORDER_DETAIL_ROUTE,

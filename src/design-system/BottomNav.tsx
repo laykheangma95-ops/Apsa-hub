@@ -21,7 +21,7 @@ import {
   type MobileNavRequirement,
   type MobileNavActionAvailability,
   type MobileNavActionConfig,
-  type MobileNavDestination,
+  type MobileNavRoute,
   type MobileNavSheetGroup,
   type MobileNavTabConfig,
   type MobileNavTabId,
@@ -159,7 +159,7 @@ export function BottomNav({
     setMoreOpen(false);
   }
 
-  function goTo(to: MobileNavDestination) {
+  function goTo(to: MobileNavRoute) {
     closeAllSheets();
     void navigate({ to });
   }
@@ -302,7 +302,7 @@ interface MobileTabProps {
   resolveOpen: boolean;
   salesOpen: boolean;
   moreOpen: boolean;
-  onRoute: (to: MobileNavDestination) => void;
+  onRoute: (to: MobileNavRoute) => void;
   onOpenResolve: () => void;
   onOpenSales: () => void;
   onOpenMore: () => void;
@@ -437,7 +437,7 @@ function SheetGroupList({
   onRoute,
 }: {
   groups: readonly MobileNavSheetGroup[];
-  onRoute: (to: MobileNavDestination) => void;
+  onRoute: (to: MobileNavRoute) => void;
 }) {
   const { t } = useTranslation();
 
@@ -462,7 +462,7 @@ function SheetAction({
   onRoute,
 }: {
   action: MobileNavActionConfig;
-  onRoute: (to: MobileNavDestination) => void;
+  onRoute: (to: MobileNavRoute) => void;
 }) {
   const { t } = useTranslation();
   const disabled = action.availability === "coming-soon";

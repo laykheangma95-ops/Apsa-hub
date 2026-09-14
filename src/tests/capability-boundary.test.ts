@@ -184,13 +184,14 @@ describe("U5: sign-out keeps its hardened behaviour", () => {
 describe("U6: the UI consults only server-enforced permission keys", () => {
   /**
    * A key counts as enforced when the server either requires/checks it
-   * directly, lists it in one of the Order state machine's transition
-   * permission maps (which src/server/orders/service.ts feeds straight into
-   * ctx.require), or returns it from the Inventory service's
-   * requiredPermissionFor() movement-type map (which recordMovement feeds
-   * straight into ctx.require the same way). An incidental mention — an audit
-   * action name, a doc comment — is deliberately NOT enough: that is exactly
-   * how a UI-only gate would sneak in pretending to be authorization.
+   * directly, lists it in one of the Order or Payment state machines'
+   * transition permission maps (which src/server/orders/service.ts and
+   * src/server/payments/service.ts feed straight into ctx.require), or
+   * returns it from the Inventory service's requiredPermissionFor()
+   * movement-type map (which recordMovement feeds straight into ctx.require
+   * the same way). An incidental mention — an audit action name, a doc
+   * comment — is deliberately NOT enough: that is exactly how a UI-only gate
+   * would sneak in pretending to be authorization.
    */
   /** Comments document intent; only real code enforces anything. */
   function stripComments(source: string): string {
@@ -210,17 +211,34 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
       }
     }
 
-    // Transition permission maps: `confirmed: "orders.confirm",` etc.
-    const stateMachine = read("src/server/orders/state-machine.ts");
-    for (const mapName of [
-      "LIFECYCLE_TRANSITION_PERMISSIONS",
-      "FULFILLMENT_TRANSITION_PERMISSIONS",
-    ]) {
-      const start = stateMachine.indexOf(`export const ${mapName}`);
-      if (start < 0) continue;
-      const block = stripComments(stateMachine.slice(start, stateMachine.indexOf("};", start)));
-      for (const match of block.matchAll(/:\s*["']([a-z_]+\.[a-z_]+)["']/g)) {
-        keys.add(match[1]!);
+    /*
+     * Transition permission maps: `confirmed: "orders.confirm",` etc. A key
+     * that only ever appears in one of these is still genuinely enforced —
+     * the service looks the target up in the map and passes the result
+     * straight to ctx.require, so the literal never appears inside a
+     * require() call for the regex above to find.
+     *
+     * The Payment domain does exactly the same thing:
+     * src/server/payments/service.ts#verifyPayment reads
+     * VERIFICATION_TRANSITION_PERMISSIONS[to] and calls ctx.require(permission).
+     */
+    const permissionMaps: Array<[string, readonly string[]]> = [
+      [
+        "src/server/orders/state-machine.ts",
+        ["LIFECYCLE_TRANSITION_PERMISSIONS", "FULFILLMENT_TRANSITION_PERMISSIONS"],
+      ],
+      ["src/server/payments/state-machine.ts", ["VERIFICATION_TRANSITION_PERMISSIONS"]],
+    ];
+
+    for (const [file, mapNames] of permissionMaps) {
+      const stateMachine = read(file);
+      for (const mapName of mapNames) {
+        const start = stateMachine.indexOf(`export const ${mapName}`);
+        if (start < 0) continue;
+        const block = stripComments(stateMachine.slice(start, stateMachine.indexOf("};", start)));
+        for (const match of block.matchAll(/:\s*["']([a-z_]+\.[a-z_]+)["']/g)) {
+          keys.add(match[1]!);
+        }
       }
     }
 
@@ -258,6 +276,9 @@ describe("U6: the UI consults only server-enforced permission keys", () => {
     expect(enforced.size).toBeGreaterThan(20);
     expect(enforced.has("team.read")).toBe(true);
     expect(enforced.has("orders.confirm")).toBe(true);
+    // Only reachable through the Payment state machine's permission map.
+    expect(enforced.has("payments.manual_confirm")).toBe(true);
+    expect(enforced.has("payments.verify")).toBe(true);
     // Reached only through the Inventory movement-type map, so this also
     // guards that the extra scan above still finds anything at all.
     expect(enforced.has("inventory.receive_stock")).toBe(true);

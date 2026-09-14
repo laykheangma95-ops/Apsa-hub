@@ -8,6 +8,7 @@ import {
   AppHeader,
   BottomNav,
   BottomSheet,
+  InlineAction,
   ScreenBleed,
   Section,
   SectionRow,
@@ -18,12 +19,14 @@ import {
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
+import { EditBusinessProfileSheet } from "@/components/settings/EditBusinessProfileSheet";
 import { getOrganizationProfileFn } from "@/api/org";
+import type { OrganizationProfile } from "@/api/org";
 import { getAccountProfileFn, signOutFn } from "@/api/auth";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useLanguage } from "@/lib/i18n";
-import { notifyError } from "@/lib/feedback";
-import { resolveBusinessSectionView } from "@/lib/settings-view";
+import { notifyError, notifySuccess } from "@/lib/feedback";
+import { ORGANIZATION_PROFILE_QUERY_KEY, resolveBusinessSectionView } from "@/lib/settings-view";
 import { clearHomeQueries } from "@/lib/home-query";
 
 export const Route = createFileRoute("/app/settings")({
@@ -49,13 +52,19 @@ export const Route = createFileRoute("/app/settings")({
 function BusinessSection() {
   const { t } = useTranslation();
   const capabilities = useCapabilities();
+  const queryClient = useQueryClient();
+  const [editOpen, setEditOpen] = useState(false);
   // The profile read requires organization.read server-side. Without it the
   // whole section is hidden rather than fetched-and-denied — a merchant should
   // not watch a section load only to tell them it is not theirs.
   const canRead = capabilities.can("organization.read");
+  // "Edit" is a courtesy hide, not the authorization boundary — the server
+  // re-checks organization.update on every save regardless (see
+  // src/server/org/update-organization-profile.ts).
+  const canEdit = capabilities.can("organization.update");
 
   const query = useQuery({
-    queryKey: ["settings", "organization-profile"],
+    queryKey: ORGANIZATION_PROFILE_QUERY_KEY,
     queryFn: () => getOrganizationProfileFn(),
     retry: false,
     enabled: canRead,
@@ -95,7 +104,16 @@ function BusinessSection() {
   const profile = view.profile;
 
   return (
-    <Section title={t("settings.section.business")}>
+    <Section
+      title={t("settings.section.business")}
+      action={
+        canEdit ? (
+          <InlineAction onClick={() => setEditOpen(true)}>
+            {t("settings.business.edit")}
+          </InlineAction>
+        ) : null
+      }
+    >
       <SectionRows>
         <SectionRow label={t("settings.business.name")} value={profile.displayName} />
         <SectionRow label={t("settings.business.slug")} value={profile.slug} />
@@ -105,6 +123,20 @@ function BusinessSection() {
         <SectionRow label={t("settings.business.currency")} value={profile.defaultCurrency} />
         <SectionRow label={t("settings.business.country")} value={profile.country} />
       </SectionRows>
+
+      {canEdit ? (
+        <EditBusinessProfileSheet
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          profile={profile}
+          onSaved={(updated: OrganizationProfile) => {
+            // Written directly into the cache, not just invalidated — no
+            // stale business name is visible while a refetch is in flight.
+            queryClient.setQueryData(ORGANIZATION_PROFILE_QUERY_KEY, updated);
+            notifySuccess(t("settings.business.editForm.success"));
+          }}
+        />
+      ) : null}
     </Section>
   );
 }

@@ -13,6 +13,9 @@
     "format": "prettier --write .",
     "test": "bun test src/tests/",
     "verify:supabase": "bun run scripts/verify-supabase-connection.ts",
+    "verify:staging": "bun run scripts/verify-staging.ts",
+    "check:migration-safety": "bun run scripts/check-migration-safety.ts",
+    "check:staging-readiness": "bun run scripts/check-staging-readiness.ts",
     "typecheck": "tsc --noEmit"
   },
   "overrides": {
