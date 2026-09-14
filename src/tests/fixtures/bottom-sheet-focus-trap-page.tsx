@@ -33,6 +33,24 @@
  *
  * `?empty=1` renders the same sheet with no focusable content at all, for the
  * case where Tab has nowhere to go and must still be swallowed.
+ *
+ * `?details=1` renders a separate, minimal sheet for the closed-<details>
+ * regression (kept apart from the fixture above so its own exact tab order
+ * does not have to be threaded through every existing ordered assertion):
+ *
+ *   #d-before                  ordinary control before the details
+ *   #d-details (closed)
+ *     #d-summary                the disclosure widget — always focusable
+ *     #d-collapsed               inside the collapsed body — NOT focusable
+ *                                 until the details is opened
+ *   #d-after                   ordinary control after the details
+ *   #d-nested-outer (closed)
+ *     #d-nested-outer-summary   the OUTER details' own eligible summary —
+ *                                 focusable regardless of its own children
+ *     #d-nested-inner (open)     nested inside the outer's collapsed body;
+ *       #d-nested-inner-summary  an open details changes nothing: the outer
+ *       #d-nested-inner-input    closed details still hides this whole subtree
+ *   #d-end                     ordinary control after everything
  */
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -56,10 +74,12 @@ window.apsaTrapStops = () => {
   return panel ? collectTrapFocusables(panel).map((element) => element.id) : [];
 };
 
+export type FixtureVariant = "default" | "empty" | "details";
+
 // Exported so this fixture is a module with a component export rather than a
 // component-only side-effect script; the mount below is still what the
 // browser test loads.
-export function Fixture({ empty }: { empty: boolean }) {
+export function Fixture({ variant }: { variant: FixtureVariant }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
 
@@ -78,18 +98,47 @@ export function Fixture({ empty }: { empty: boolean }) {
         // to the panel between keystrokes.
         onOpenChange={(next) => setOpen(next)}
         title="Focus trap fixture"
-        {...(empty
-          ? {}
-          : {
+        {...(variant === "default"
+          ? {
               footer: (
                 <button id="save" type="button">
                   Save
                 </button>
               ),
-            })}
+            }
+          : {})}
       >
-        {empty ? (
+        {variant === "empty" ? (
           <p id="empty-copy">Nothing focusable in here.</p>
+        ) : variant === "details" ? (
+          <>
+            <button id="d-before" type="button">
+              Before
+            </button>
+            <details id="d-details">
+              <summary id="d-summary">Toggle</summary>
+              <div>
+                <input id="d-collapsed" type="text" />
+              </div>
+            </details>
+            <button id="d-after" type="button">
+              After
+            </button>
+            {/* Nested case: the outer details is closed, so its collapsed body
+                hides the entire inner <details> — summary included — even
+                though the inner one is itself open. Only the outer details'
+                OWN eligible summary is exempt. */}
+            <details id="d-nested-outer">
+              <summary id="d-nested-outer-summary">Outer</summary>
+              <details open id="d-nested-inner">
+                <summary id="d-nested-inner-summary">Inner</summary>
+                <input id="d-nested-inner-input" type="text" />
+              </details>
+            </details>
+            <button id="d-end" type="button">
+              End
+            </button>
+          </>
         ) : (
           <>
             <input id="name" type="text" value={name} onChange={(e) => setName(e.target.value)} />
@@ -147,11 +196,18 @@ export function Fixture({ empty }: { empty: boolean }) {
   );
 }
 
+function variantFromQuery(): FixtureVariant {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("empty") === "1") return "empty";
+  if (params.get("details") === "1") return "details";
+  return "default";
+}
+
 const host = document.getElementById("root");
 if (host) {
   createRoot(host).render(
     <StrictMode>
-      <Fixture empty={new URLSearchParams(window.location.search).get("empty") === "1"} />
+      <Fixture variant={variantFromQuery()} />
     </StrictMode>,
   );
 }

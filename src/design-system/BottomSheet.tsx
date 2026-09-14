@@ -156,7 +156,24 @@ export function BottomSheet({
        * keeps focus on the container.
        */
       event.preventDefault();
-      (next ?? panel).focus();
+      const target = next ?? panel;
+      target.focus();
+
+      /*
+       * Defense in depth, not the fix itself. `isTrapFocusable` (focus-trap.ts)
+       * is where "will .focus() actually land here" is decided; this only
+       * confirms the browser agreed. If some future DOM shape still fools that
+       * candidate list, `target.focus()` above is a no-op and Tab must not
+       * stall on the control the merchant was already on — that is exactly how
+       * a closed-<details> descendant stranded focus before the candidate list
+       * itself was fixed to exclude it. Falling back to the panel rather than
+       * cycling to another candidate keeps this narrow and keeps the failure
+       * mode identical to the already-covered empty-sheet case:
+       * `nextTrapFocus` treats the container as "not yet inside" (see its own
+       * doc comment), so the very next Tab still makes normal progress instead
+       * of being swallowed indefinitely on one control.
+       */
+      if (document.activeElement !== target) panel.focus();
     };
 
     document.addEventListener("keydown", onKeyDown);

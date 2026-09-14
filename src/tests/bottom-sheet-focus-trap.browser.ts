@@ -445,6 +445,95 @@ describeBrowser("BottomSheet focus trap — real Chromium", () => {
     expect(visited.slice(0, 7)).toEqual([...new Set(visited.slice(0, 7))]);
   }, 60000);
 
+  /*
+   * The closed-<details> defect this file was reopened for. Reproduced before
+   * the fix as three Tabs stuck on the <summary> and three Shift+Tabs stuck on
+   * the control before the details — a collapsed control that reports a real
+   * client rect and `visibility: visible` in Chromium, so the trap accepted it
+   * and BottomSheet's Tab handler focused it, but `.focus()` silently no-oped.
+   * Uses the separate `?details=1` fixture so its own exact tab order does not
+   * have to be threaded through the assertions above.
+   */
+  describe("closed <details> collapsed content", () => {
+    it("counts exactly the controls Chromium will actually focus while closed", async () => {
+      await openSheet("?details=1");
+      const reachable = await page.evaluate<string[]>(BROWSER_TRUTH);
+      const stops = await page.evaluate<string[]>("window.apsaTrapStops()");
+      expect(stops).toEqual(reachable);
+      expect(stops).toEqual([
+        "d-before",
+        "d-summary",
+        "d-after",
+        "d-nested-outer-summary",
+        "d-end",
+      ]);
+    }, 60000);
+
+    it("A: forward Tab goes before -> summary -> after, never landing on the collapsed input", async () => {
+      await openSheet("?details=1");
+      await page.evaluate("document.getElementById('d-before').focus()");
+      expect(await page.tab()).toBe("d-summary");
+      expect(await page.tab()).toBe("d-after");
+    }, 60000);
+
+    it("B: reverse Shift+Tab goes after -> summary -> before, never landing on the collapsed input", async () => {
+      await openSheet("?details=1");
+      await page.evaluate("document.getElementById('d-after').focus()");
+      expect(await page.tab(true)).toBe("d-summary");
+      expect(await page.tab(true)).toBe("d-before");
+    }, 60000);
+
+    it("C: opening the details lets its inner control participate normally", async () => {
+      await openSheet("?details=1");
+      await page.evaluate("document.getElementById('d-details').open = true;");
+      expect(await page.evaluate<string[]>("window.apsaTrapStops()")).toEqual([
+        "d-before",
+        "d-summary",
+        "d-collapsed",
+        "d-after",
+        "d-nested-outer-summary",
+        "d-end",
+      ]);
+      await page.evaluate("document.getElementById('d-summary').focus()");
+      expect(await page.tab()).toBe("d-collapsed");
+      expect(await page.tab()).toBe("d-after");
+    }, 60000);
+
+    it("D: a closed outer details hides an open inner details entirely, summary included", async () => {
+      await openSheet("?details=1");
+      // The inner details really is open — this is not "nothing to hide".
+      expect(await page.evaluate<boolean>("document.getElementById('d-nested-inner').open")).toBe(
+        true,
+      );
+      const stops = await page.evaluate<string[]>("window.apsaTrapStops()");
+      expect(stops).not.toContain("d-nested-inner-summary");
+      expect(stops).not.toContain("d-nested-inner-input");
+      // The outer details' own eligible summary is unaffected by its child's state.
+      expect(stops).toContain("d-nested-outer-summary");
+    }, 60000);
+
+    it("E: repeated Tab and Shift+Tab keep moving without ever stalling on one control", async () => {
+      await openSheet("?details=1");
+      const forward: string[] = [];
+      for (let press = 0; press < 10; press++) forward.push(await page.tab());
+      // 5 stops; two full laps with no immediate repeat anywhere in the run.
+      for (let index = 1; index < forward.length; index++) {
+        expect(forward[index]).not.toBe(forward[index - 1]);
+      }
+      expect(forward.slice(0, 5)).toEqual(forward.slice(5, 10));
+      expect(forward).not.toContain("d-collapsed");
+      expect(forward).not.toContain("d-nested-inner-summary");
+
+      const backward: string[] = [];
+      for (let press = 0; press < 10; press++) backward.push(await page.tab(true));
+      for (let index = 1; index < backward.length; index++) {
+        expect(backward[index]).not.toBe(backward[index - 1]);
+      }
+      expect(backward.slice(0, 5)).toEqual(backward.slice(5, 10));
+      expect(backward).not.toContain("d-collapsed");
+    }, 60000);
+  });
+
   it("never lets Tab reach the page behind the sheet", async () => {
     await openSheet();
     const outside = ["background", "trigger"];

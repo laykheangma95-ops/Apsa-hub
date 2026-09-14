@@ -113,6 +113,48 @@ function isDisabledControl(element: TrapCandidate): boolean {
   return element.matches(":disabled");
 }
 
+/** The two ancestor questions `isHiddenByClosedDetails` asks, and nothing else. */
+const CLOSED_DETAILS = "details:not([open])";
+const CLOSED_DETAILS_ELIGIBLE_SUMMARY = "details:not([open]) > summary:first-of-type";
+
+/**
+ * Whether `element` sits inside a closed `<details>`'s collapsed content.
+ *
+ * Same shape as the fieldset/legend exception above, one level simpler: a
+ * closed `<details>` hides everything below it except its own first
+ * `<summary>` child — the disclosure widget, which stays focusable and is how
+ * a merchant opens it. Nothing else inside a closed details is in the tab
+ * order, however deeply nested, and regardless of what `getClientRects()` or
+ * computed `visibility` report for it: collapsed-details content is hidden by
+ * a UA-stylesheet `display: none` on the details' non-summary children, and
+ * Chromium can still surface a client rect and `visibility: visible` for a
+ * descendant of that hidden subtree even though `.focus()` refuses to move
+ * there — geometry and computed style are not reliable signals for this case,
+ * so it is asked for explicitly rather than folded into `isVisible`.
+ *
+ * Two `closest()` questions, mirroring the fieldset check's two-question
+ * shape:
+ *
+ * 1. `details:not([open])` — is there a closed `<details>` anywhere above
+ *    `element` at all? If not, this rule does not apply, open or no
+ *    `<details>` in the ancestry.
+ * 2. `details:not([open]) > summary:first-of-type` — is `element` itself the
+ *    eligible summary of a specific closed `<details>`? Because `matches()`
+ *    (which `closest()` calls at each step) checks the *real* parent of the
+ *    candidate element, this only answers yes for a `<summary>` that is a
+ *    closed `<details>`'s own first `<summary>` child — never a second
+ *    `<summary>` in the same details, and never a `<summary>` belonging to a
+ *    different, open `<details>` nested inside the closed one's collapsed
+ *    content (that summary's real parent is the open inner details, which
+ *    fails `:not([open])`, so it cannot match). A closed outer `<details>`
+ *    therefore still hides an open inner `<details>` and everything in it,
+ *    summary included — exactly what the browser does.
+ */
+function isHiddenByClosedDetails(element: TrapCandidate): boolean {
+  if (element.closest(CLOSED_DETAILS) === null) return false;
+  return element.closest(CLOSED_DETAILS_ELIGIBLE_SUMMARY) === null;
+}
+
 /**
  * Whether the element is painted, as opposed to merely laid out.
  *
@@ -146,12 +188,15 @@ function isVisible(element: TrapCandidate): boolean {
  * Rejects, in order: controls the browser itself reports as `:disabled` (their
  * own attribute, or any ancestor `<fieldset disabled>` — however deeply nested
  * — that reaches them), anything opted out with a negative tabindex, hidden
- * inputs, subtrees hidden from assistive tech or made inert, anything the
- * browser is not laying out (`display: none`, a collapsed `<details>`), and
- * anything laid out but not painted (`visibility: hidden`). An element scrolled
- * out of view inside the sheet's own scroll pane is still rendered and still
- * focusable, so it stays in the cycle — which is what we want: the merchant
- * tabs to it and the pane scrolls.
+ * inputs, subtrees hidden from assistive tech or made inert, anything inside a
+ * closed `<details>` other than its own eligible `<summary>` (see
+ * `isHiddenByClosedDetails` — asked explicitly, before geometry, because a
+ * collapsed details' content can still report a client rect), anything the
+ * browser is not laying out (`display: none`), and anything laid out but not
+ * painted (`visibility: hidden`). An element scrolled out of view inside the
+ * sheet's own scroll pane is still rendered and still focusable, so it stays
+ * in the cycle — which is what we want: the merchant tabs to it and the pane
+ * scrolls.
  */
 export function isTrapFocusable(element: TrapCandidate): boolean {
   if (isDisabledControl(element)) return false;
@@ -165,6 +210,8 @@ export function isTrapFocusable(element: TrapCandidate): boolean {
   if (element.tagName === "INPUT" && element.getAttribute("type") === "hidden") return false;
 
   if (element.closest('[aria-hidden="true"], [inert]') !== null) return false;
+
+  if (isHiddenByClosedDetails(element)) return false;
 
   if (element.getClientRects().length === 0) return false;
 

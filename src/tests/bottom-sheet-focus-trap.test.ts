@@ -57,6 +57,8 @@ const stop = (name: string) => ({ name });
 const HIDDEN_ANCESTOR = '[aria-hidden="true"], [inert]';
 const DISABLED_FIELDSET = "fieldset[disabled]";
 const FIRST_LEGEND = "fieldset[disabled] > legend:first-of-type";
+const CLOSED_DETAILS = "details:not([open])";
+const CLOSED_DETAILS_ELIGIBLE_SUMMARY = "details:not([open]) > summary:first-of-type";
 
 interface CandidateOpts {
   rects?: number;
@@ -399,6 +401,60 @@ describe("isTrapFocusable — nested disabled fieldsets", () => {
   });
 });
 
+/*
+ * The closed-<details> defect this file was reopened for. Chromium can report
+ * a client rect and `visibility: visible` for a control collapsed inside a
+ * closed <details> — the trap accepted it, BottomSheet's Tab handler focused
+ * it, `.focus()` silently no-opped, and Tab stalled: three Tabs stayed on the
+ * <summary>, three Shift+Tabs stayed on the control before the details.
+ *
+ * `isHiddenByClosedDetails` (private; exercised only through `isTrapFocusable`,
+ * same as `isDisabledControl` and `isVisible` above) asks two ancestor
+ * questions instead of trusting geometry. Real Chromium behavior for each
+ * shape below is proven in bottom-sheet-focus-trap.browser.ts.
+ */
+describe("isTrapFocusable — closed <details> collapsed content", () => {
+  it("rejects a control collapsed inside a closed details, rects and visibility notwithstanding", () => {
+    const collapsed = {
+      ancestors: [CLOSED_DETAILS],
+      rects: 1,
+      visibility: "visible",
+    };
+    expect(isTrapFocusable(candidate("INPUT", { type: "text" }, collapsed))).toBe(false);
+    expect(isTrapFocusable(candidate("BUTTON", {}, collapsed))).toBe(false);
+  });
+
+  it("keeps a closed details' own eligible summary focusable", () => {
+    expect(
+      isTrapFocusable(
+        candidate("SUMMARY", {}, { ancestors: [CLOSED_DETAILS, CLOSED_DETAILS_ELIGIBLE_SUMMARY] }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps normal focusability once the details is open", () => {
+    // No closed-details ancestor at all — neither selector matches.
+    expect(isTrapFocusable(candidate("INPUT", { type: "text" }))).toBe(true);
+  });
+
+  it("rejects a second <summary> in the same closed details — only the first is the disclosure widget", () => {
+    // Matches CLOSED_DETAILS (a closed details is above it) but not the
+    // eligible-summary selector (:first-of-type fails for a second summary).
+    expect(isTrapFocusable(candidate("SUMMARY", {}, { ancestors: [CLOSED_DETAILS] }))).toBe(false);
+  });
+
+  it("rejects a nested open details' own summary when its outer details is closed", () => {
+    // The nested case: an inner <details open> sits inside an outer closed
+    // one. The inner summary's real parent is the open inner details, so it
+    // can never match `details:not([open]) > summary:first-of-type` — only
+    // CLOSED_DETAILS matches, via the outer ancestor. Hidden, exactly like any
+    // other content the outer closed details swallows.
+    expect(
+      isTrapFocusable(candidate("SUMMARY", { type: "text" }, { ancestors: [CLOSED_DETAILS] })),
+    ).toBe(false);
+  });
+});
+
 describe("collectTrapFocusables — nested and empty sheet content", () => {
   it("keeps document order for deeply nested content and drops non-stops", () => {
     const nameField = candidate("INPUT", { type: "text" });
@@ -481,7 +537,12 @@ describe("BottomSheet wiring", () => {
     const beforePrevent = body.slice(0, body.indexOf("event.preventDefault()"));
     expect(beforePrevent).not.toMatch(/\breturn\b/);
     // An empty sheet keeps focus on the dialog container rather than escaping.
-    expect(body).toContain("(next ?? panel).focus()");
+    expect(body).toContain("const target = next ?? panel;");
+    expect(body).toContain("target.focus()");
+    // Defensive verification: a candidate .focus() did not actually move
+    // focus to falls back to the panel instead of stranding Tab on the
+    // control the merchant was already on.
+    expect(body).toContain("if (document.activeElement !== target) panel.focus();");
   });
 
   it("keeps the scrim out of the tab order", () => {
@@ -585,6 +646,11 @@ describe("browser regression coverage exists for this exact bug", () => {
       "never lets Tab reach the page behind the sheet",
       "swallows Tab on a sheet with no tab stops at all",
       "keeps a controlled input focused across repeated keystrokes",
+      "forward Tab goes before -> summary -> after, never landing on the collapsed input",
+      "reverse Shift+Tab goes after -> summary -> before, never landing on the collapsed input",
+      "opening the details lets its inner control participate normally",
+      "a closed outer details hides an open inner details entirely, summary included",
+      "repeated Tab and Shift+Tab keep moving without ever stalling on one control",
     ]) {
       expect(browserSuite).toContain(proof);
     }
