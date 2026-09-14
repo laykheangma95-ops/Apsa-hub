@@ -82,8 +82,12 @@ export const UI_PERMISSION_KEYS = [
   "team.invite",
   "team.roles_assign",
   "team.remove",
-  // Organization — src/server/org/get-organization-profile.ts
+  // Organization — src/server/org/get-organization-profile.ts,
+  // src/server/org/update-organization-profile.ts. update gates only the
+  // Settings "Business" → Edit affordance; the two fields it can touch
+  // (display_name, business_type) are re-checked server-side regardless.
   "organization.read",
+  "organization.update",
 ] as const;
 
 export type UiPermissionKey = (typeof UI_PERMISSION_KEYS)[number];
