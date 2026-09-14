@@ -52,13 +52,16 @@ export const QUALIFYING_LIFECYCLE_STATUSES: readonly OrderLifecycleStatus[] = [
   "completed",
 ];
 
-export interface BusinessSummary {
-  range: AnalyticsRange;
-  from: string;
-  until: string;
-
-  /** Count of qualifying (confirmed/completed) orders created in the period. */
-  orderCount: number;
+/**
+ * Protected monetary totals for the qualifying order cohort.
+ *
+ * These are money, so they sit behind the Home domain's established financial
+ * visibility boundary (`orders.read` AND `payments.reconcile` — see
+ * `canReadFinancials` in src/server/home/service.ts), NOT behind
+ * `analytics.read` alone. `analytics.read` is granted to SALES (migration
+ * 003); SALES is outside that boundary and must not receive these figures.
+ */
+export interface AnalyticsFinancialTotals {
   /** Sum of orders.total_minor for qualifying orders, by currency. */
   orderedGross: Money[];
   /**
@@ -77,6 +80,23 @@ export interface BusinessSummary {
    * currency — the unpaid/pending balance still owed.
    */
   outstandingAmount: Money[];
+}
+
+export interface BusinessSummary {
+  range: AnalyticsRange;
+  from: string;
+  until: string;
+
+  /** Count of qualifying (confirmed/completed) orders created in the period. Non-financial. */
+  orderCount: number;
+
+  /**
+   * Every monetary total in this summary, or `permission_denied` for a caller
+   * outside the financial visibility boundary. Withheld as a section rather
+   * than zeroed: a fabricated 0 is indistinguishable from "no sales", which
+   * would be a lie to a SALES member reading the page.
+   */
+  finance: HomeSection<AnalyticsFinancialTotals>;
 
   /** Every order created in the period, by lifecycle status — not limited to the qualifying cohort. */
   lifecycleStatusCounts: Record<OrderLifecycleStatus, number>;
@@ -94,7 +114,19 @@ export interface BusinessSummary {
    */
   paymentMethodCounts: Record<PaymentMethod, number>;
 
-  /** Deliveries created in the period, by status. Withheld (not zero) without delivery.read. */
+  /**
+   * CURRENT delivery state, by status, for every order with at least one
+   * delivery attempt created in the period — one count per ORDER, never per
+   * raw attempt. An order that failed and was then delivered counts once, as
+   * `delivered`. "Current" is the Deliveries domain's own authoritative
+   * latest-attempt rule (newest `created_at DESC, id DESC` row per order, read
+   * via `listDeliveryAttemptRefsForOrders`); Analytics defines no competing
+   * delivery-state rule.
+   *
+   * `permission_denied` without `delivery.read`; `truncated` when some order's
+   * latest attempt could not be resolved (UNKNOWN is never reported as a
+   * certain count).
+   */
   delivery: HomeSection<{ statusCounts: Record<DeliveryStatus, number> }>;
 }
 
@@ -104,8 +136,16 @@ export interface TopSellingItem {
   currency: Currency;
   /** product_name_snapshot (+ variant_name_snapshot) as captured on the order line at sale time — never a live product lookup. */
   displayLabel: string;
+  /** Units sold. Non-financial, and the ONLY metric this list is ranked by. */
   quantitySold: number;
-  grossAmount: number;
+  /**
+   * Gross line revenue in minor units, denominated in `currency`. Money, so it
+   * follows the same financial visibility boundary as `AnalyticsFinancialTotals`:
+   * `null` — never 0 — for a caller outside it. Ranking never reads this field
+   * (see `compareTopSellingItems`), so the order of the list is identical with
+   * or without financial visibility.
+   */
+  grossAmount: number | null;
 }
 
 export interface CustomerSummary {

@@ -23,8 +23,18 @@ import {
 } from "@/server/orders/state-machine";
 import { PAYMENT_METHODS, type PaymentMethod } from "@/server/payments/state-machine";
 import { DELIVERY_STATUSES, type DeliveryStatus } from "@/server/deliveries/state-machine";
+// The Deliveries domain owns what "this order's current delivery attempt" means.
+// Analytics reuses that derivation and defines no competing rule of its own.
+import { listDeliveryAttemptRefsForOrders } from "@/server/deliveries/repository";
 import type { Currency, Money } from "@/types";
 import { QUALIFYING_LIFECYCLE_STATUSES, type AnalyticsBounds, type TopSellingItem } from "./types";
+
+/**
+ * A top-selling row as the repository computes it, with `grossAmount` always
+ * present. The service masks it to `null` for a caller outside the financial
+ * visibility boundary before it becomes a public `TopSellingItem`.
+ */
+export type TopSellingAggregate = Omit<TopSellingItem, "grossAmount"> & { grossAmount: number };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db = supabaseAdmin as any;
@@ -176,26 +186,129 @@ export async function getPaymentMethodCounts(
   return Object.fromEntries(entries) as Record<PaymentMethod, number>;
 }
 
+/** Orders per latest-attempt resolution round trip — mirrors LATEST_ATTEMPT_CHUNK in the Deliveries service. */
+const LATEST_ATTEMPT_CHUNK = 50;
+
+/**
+ * Every distinct order that had at least one delivery attempt created in the
+ * period — complete and count-verified, so a capped page can never shrink the
+ * cohort. This is only the COHORT; which attempt is current is decided by the
+ * Deliveries domain (see getLatestDeliveryStatusCounts).
+ */
+export async function listOrderIdsWithDeliveryInPeriod(
+  organizationId: string,
+  bounds: AnalyticsBounds,
+): Promise<string[]> {
+  const rows = await collectCompletePages<{ order_id: string }>(async (offset, requested) => {
+    const { data, error, count } = await db
+      .from("deliveries")
+      .select("order_id", { count: "exact" })
+      .eq("organization_id", organizationId)
+      .gte("created_at", bounds.from)
+      .lt("created_at", bounds.until)
+      .order("id", { ascending: true })
+      .range(offset, offset + requested - 1);
+    if (error) throw new Error(`listOrderIdsWithDeliveryInPeriod: ${errorMessage(error)}`);
+    if (count === null) {
+      throw new Error("listOrderIdsWithDeliveryInPeriod: exact count unavailable");
+    }
+    return { rows: (data ?? []) as { order_id: string }[], total: count };
+  });
+  return Array.from(new Set(rows.map((row) => row.order_id)));
+}
+
+export interface LatestDeliveryStatusCounts {
+  statusCounts: Record<DeliveryStatus, number>;
+  /**
+   * True when at least one order in the cohort returned no authoritative
+   * latest-attempt ref. That absence is UNKNOWN, never FALSE — the caller must
+   * surface the counts as incomplete rather than as a certain mix.
+   */
+  unresolved: boolean;
+}
+
+/** Status of specific delivery rows, org-scoped. One row per requested id, proven complete. */
+async function readDeliveryStatusesByIds(
+  organizationId: string,
+  ids: readonly string[],
+): Promise<Map<string, DeliveryStatus>> {
+  const byId = new Map<string, DeliveryStatus>();
+  for (const idChunk of chunkIds(ids)) {
+    const { data, error } = await db
+      .from("deliveries")
+      .select("id, status")
+      .eq("organization_id", organizationId)
+      .in("id", idChunk)
+      .order("id", { ascending: true });
+    if (error) throw new Error(`readDeliveryStatusesByIds: ${errorMessage(error)}`);
+    const rows = (data ?? []) as { id: string; status: DeliveryStatus }[];
+    // Exactly one row exists per requested id (they are primary keys we were
+    // just handed), so a short response is a capped read, not a real absence.
+    if (rows.length !== idChunk.length || new Set(rows.map((row) => row.id)).size !== rows.length) {
+      throw new Error("readDeliveryStatusesByIds: incomplete delivery status read");
+    }
+    for (const row of rows) byId.set(row.id, row.status);
+  }
+  return byId;
+}
+
+/**
+ * Delivery status mix counted ONE PER ORDER, on that order's CURRENT attempt.
+ *
+ * A raw per-attempt count double-reports retried deliveries: an order that
+ * failed and was then delivered would show `failed: 1, delivered: 1`, telling
+ * the merchant a delivery failed that in fact succeeded. This resolves each
+ * order's current attempt through the Deliveries domain's own authoritative
+ * derivation (`listDeliveryAttemptRefsForOrders` — newest
+ * `created_at DESC, id DESC` row per order, read one bounded `.limit(1)` query
+ * at a time so no PostgREST row ceiling can hide it) and counts only that.
+ * The same order therefore contributes exactly 1 to exactly one status.
+ *
+ * The current attempt is the order's latest overall, not its latest within the
+ * period — a delivery retried after the period boundary has genuinely
+ * superseded the in-period attempt, and reporting the stale one as current
+ * would be the very defect this fixes.
+ */
 export async function getDeliveryStatusCounts(
   organizationId: string,
   bounds: AnalyticsBounds,
-): Promise<Record<DeliveryStatus, number>> {
-  const entries = await Promise.all(
-    DELIVERY_STATUSES.map(async (status) => {
-      const count = await requireExactCount(
-        `getDeliveryStatusCounts(${status})`,
-        db
-          .from("deliveries")
-          .select("id", { count: "exact", head: true })
-          .eq("organization_id", organizationId)
-          .eq("status", status)
-          .gte("created_at", bounds.from)
-          .lt("created_at", bounds.until),
-      );
-      return [status, count] as const;
-    }),
-  );
-  return Object.fromEntries(entries) as Record<DeliveryStatus, number>;
+): Promise<LatestDeliveryStatusCounts> {
+  const statusCounts = Object.fromEntries(DELIVERY_STATUSES.map((status) => [status, 0])) as Record<
+    DeliveryStatus,
+    number
+  >;
+
+  const orderIds = await listOrderIdsWithDeliveryInPeriod(organizationId, bounds);
+  if (orderIds.length === 0) return { statusCounts, unresolved: false };
+
+  let unresolved = false;
+  const latestIds: string[] = [];
+  for (const chunk of chunkIds(orderIds, LATEST_ATTEMPT_CHUNK)) {
+    const refs = await listDeliveryAttemptRefsForOrders(organizationId, chunk);
+    const latestByOrder = new Map<string, string>();
+    for (const ref of refs) latestByOrder.set(ref.order_id, ref.id);
+    for (const orderId of chunk) {
+      const latestId = latestByOrder.get(orderId);
+      if (latestId === undefined) {
+        unresolved = true;
+        continue;
+      }
+      latestIds.push(latestId);
+    }
+  }
+
+  const statusById = await readDeliveryStatusesByIds(organizationId, latestIds);
+  for (const id of latestIds) {
+    const status = statusById.get(id);
+    // Belt-and-braces: readDeliveryStatusesByIds already proves completeness.
+    if (status === undefined) {
+      unresolved = true;
+      continue;
+    }
+    statusCounts[status] += 1;
+  }
+
+  return { statusCounts, unresolved };
 }
 
 // ── Settlement sums (order_payment_totals — the one authoritative view) ─────
@@ -312,6 +425,42 @@ async function listOrderItemsForOrders(
 }
 
 /**
+ * Code-point comparison, not `localeCompare`. A tie-break must be identical on
+ * every machine that runs it; `localeCompare` resolves against an ambient
+ * locale and would let two servers rank the same Khmer product names
+ * differently.
+ */
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Ranking order for top-selling items: quantity desc, then a deterministic
+ * NON-MONETARY tie-break.
+ *
+ * WHY NO MONEY IN THE TIE-BREAK. These rows are not partitioned by currency,
+ * and `grossAmount` is a minor-unit integer in each row's own currency. 20 000
+ * riel and 20 000 cents are not comparable quantities, so breaking a quantity
+ * tie by `grossAmount` ranked a KHR line above a USD line purely because riel
+ * has a smaller unit — an FX judgement made by accident, with no rate and no
+ * rate timestamp. Ranking stays currency-independent: snapshot name, then the
+ * stable product/variant/currency identifiers, all of which are total and
+ * order the list identically whatever the currencies involved.
+ *
+ * If a future phase wants revenue ranking, it must partition the metric by
+ * currency explicitly rather than reintroduce a cross-currency numeric compare.
+ */
+export function compareTopSellingItems(a: TopSellingAggregate, b: TopSellingAggregate): number {
+  return (
+    b.quantitySold - a.quantitySold ||
+    compareText(a.displayLabel, b.displayLabel) ||
+    compareText(a.productId, b.productId) ||
+    compareText(a.variantId, b.variantId) ||
+    compareText(a.currency, b.currency)
+  );
+}
+
+/**
  * Aggregates the COMPLETE authorized cohort of order lines before sorting —
  * `limit` only slices the finished aggregate, it never bounds what gets read.
  */
@@ -319,8 +468,8 @@ export function aggregateTopSellingItems(
   items: readonly AnalyticsOrderItemRow[],
   currencyByOrder: ReadonlyMap<string, Currency>,
   limit: number,
-): TopSellingItem[] {
-  const totals = new Map<string, TopSellingItem>();
+): TopSellingAggregate[] {
+  const totals = new Map<string, TopSellingAggregate>();
   for (const item of items) {
     const currency = currencyByOrder.get(item.order_id);
     if (!currency) continue;
@@ -344,20 +493,14 @@ export function aggregateTopSellingItems(
     }
   }
 
-  return Array.from(totals.values()).sort(
-    (a, b) =>
-      b.quantitySold - a.quantitySold ||
-      b.grossAmount - a.grossAmount ||
-      a.productId.localeCompare(b.productId) ||
-      a.variantId.localeCompare(b.variantId),
-  );
+  return Array.from(totals.values()).sort(compareTopSellingItems);
 }
 
 export async function listTopSellingItems(
   organizationId: string,
   orders: readonly AnalyticsOrderRow[],
   limit: number,
-): Promise<TopSellingItem[]> {
+): Promise<TopSellingAggregate[]> {
   if (orders.length === 0) return [];
   const currencyByOrder = new Map(orders.map((order) => [order.id, order.currency]));
   const items = await listOrderItemsForOrders(

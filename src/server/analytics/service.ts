@@ -10,12 +10,35 @@
  * inventing finer ones follows CLAUDE.md §6 ("do not silently add a new
  * permission"). CustomerSummary deliberately carries no PII (counts only), so
  * granting it to SALES does not leak anything customers.read itself would not.
+ *
+ * ── TWO LAYERS OF AUTHORIZATION, NOT ONE ─────────────────────────────────────
+ * `analytics.read` admits a caller to the Analytics domain. It does NOT admit
+ * them to money. Because `analytics.read` is granted to SALES, gating monetary
+ * totals on it alone would have handed every Sales member the org's collected,
+ * refunded and outstanding balances — strictly wider than what the same member
+ * can already see on Home, where money sits behind `orders.read` AND
+ * `payments.reconcile`. Analytics imports that boundary (`canReadFinancials`)
+ * from the Home domain rather than restating or re-deciding it, so there is
+ * exactly one definition of "may see money" in the codebase. No new permission
+ * and no migration is introduced (CLAUDE.md §6).
+ *
+ * Denied money is WITHHELD, not zeroed: the `finance` section reports
+ * `permission_denied` and `TopSellingItem.grossAmount` is `null`. Every
+ * non-financial metric — order counts, status mixes, delivery state mix,
+ * quantity ranking, customer cohort — is unaffected by the financial boundary
+ * and still answers for a caller holding only `analytics.read`.
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
-import { rangeBounds } from "@/server/home/service";
+import { canReadFinancials, rangeBounds } from "@/server/home/service";
 import type { HomeSection } from "@/types";
 import * as repo from "./repository";
-import type { AnalyticsRange, BusinessSummary, CustomerSummary, TopSellingItem } from "./types";
+import type {
+  AnalyticsFinancialTotals,
+  AnalyticsRange,
+  BusinessSummary,
+  CustomerSummary,
+  TopSellingItem,
+} from "./types";
 
 const DEFAULT_TOP_SELLING_LIMIT = 20;
 const MAX_TOP_SELLING_LIMIT = 100;
@@ -40,10 +63,12 @@ const defaultDependencies: AnalyticsDependencies = {
   getCustomerCohort: repo.getCustomerCohort,
 };
 
-async function deliverySection<T>(
-  allowed: boolean,
-  load: () => Promise<T>,
-): Promise<HomeSection<T>> {
+/**
+ * Resolves one independently-authorized section. Mirrors Home's `section()`:
+ * a denial or an outage in one section can never falsify another, and a denial
+ * is reported as a denial rather than as data.
+ */
+async function section<T>(allowed: boolean, load: () => Promise<T>): Promise<HomeSection<T>> {
   if (!allowed) return { status: "permission_denied" };
   try {
     return { status: "available", data: await load() };
@@ -77,24 +102,33 @@ export async function getBusinessSummary(
   const bounds = rangeBounds(range);
   const orders = await dependencies.listQualifyingOrders(ctx.organizationId, bounds);
 
-  const [statusCounts, settlement, paymentMethodCounts, delivery] = await Promise.all([
+  const [statusCounts, finance, paymentMethodCounts, deliveryResult] = await Promise.all([
     dependencies.getOrderStatusCounts(ctx.organizationId, bounds),
-    dependencies.getSettlementTotals(ctx.organizationId, orders),
+    // Not merely masked after the fact — the settlement read is never issued
+    // for an unauthorized caller, so protected money is not even loaded.
+    section<AnalyticsFinancialTotals>(canReadFinancials(ctx), () =>
+      dependencies.getSettlementTotals(ctx.organizationId, orders),
+    ),
     dependencies.getPaymentMethodCounts(ctx.organizationId, bounds),
-    deliverySection(ctx.can("delivery.read"), async () => ({
-      statusCounts: await dependencies.getDeliveryStatusCounts(ctx.organizationId, bounds),
-    })),
+    section(ctx.can("delivery.read"), () =>
+      dependencies.getDeliveryStatusCounts(ctx.organizationId, bounds),
+    ),
   ]);
+
+  // An unresolved latest attempt makes the mix incomplete, not wrong-but-certain.
+  const delivery: BusinessSummary["delivery"] =
+    deliveryResult.status === "available"
+      ? deliveryResult.data.unresolved
+        ? { status: "truncated" }
+        : { status: "available", data: { statusCounts: deliveryResult.data.statusCounts } }
+      : deliveryResult;
 
   return {
     range,
     from: bounds.from,
     until: bounds.until,
     orderCount: orders.length,
-    orderedGross: settlement.orderedGross,
-    collectedGross: settlement.collectedGross,
-    refundedAmount: settlement.refundedAmount,
-    outstandingAmount: settlement.outstandingAmount,
+    finance,
     lifecycleStatusCounts: statusCounts.lifecycleStatusCounts,
     paymentStatusCounts: statusCounts.paymentStatusCounts,
     fulfillmentStatusCounts: statusCounts.fulfillmentStatusCounts,
@@ -114,7 +148,12 @@ export async function getTopSellingItems(
   const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), MAX_TOP_SELLING_LIMIT);
   const bounds = rangeBounds(range);
   const orders = await dependencies.listQualifyingOrders(ctx.organizationId, bounds);
-  return dependencies.listTopSellingItems(ctx.organizationId, orders, boundedLimit);
+  const ranked = await dependencies.listTopSellingItems(ctx.organizationId, orders, boundedLimit);
+
+  // Ranking is quantity-only and currency-independent, so the list and its
+  // order are identical either way; only the money field is withheld.
+  const showMoney = canReadFinancials(ctx);
+  return ranked.map((item) => ({ ...item, grossAmount: showMoney ? item.grossAmount : null }));
 }
 
 export async function getCustomerSummary(
