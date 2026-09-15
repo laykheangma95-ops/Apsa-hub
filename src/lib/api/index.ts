@@ -25,6 +25,7 @@ import {
   type UiPaymentDetail,
   type UiPaymentReconciliation,
 } from "@/lib/payments";
+import { visibleCustomerPhone } from "@/lib/customers-query";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -228,8 +229,67 @@ export async function getOlderConversationMessages(id: string, beforeId: string)
   return listConversationMessagesFn({ data: { conversationId: id, beforeId } });
 }
 
-export async function getCustomers(): Promise<Customer[]> {
-  return resolve(customers);
+/**
+ * One page of the production customer list.
+ *
+ * 100, not the server's 200 maximum: the read below asks for `limit + 1` rows
+ * to learn whether more exist, and 201 would fail listCustomersFn's own
+ * `max(200)` validator.
+ */
+export const CUSTOMER_PAGE_LIMIT = 100;
+
+/**
+ * A page of customers, with the server's own answer about completeness.
+ *
+ * `hasMore` exists so a caller can never present one page as "every customer".
+ * It is derived by asking for one row more than the page shows and reporting
+ * whether that row came back — there is no count endpoint, and inventing one
+ * client-side would be a guess.
+ */
+export interface CustomerListPage {
+  customers: Customer[];
+  /** True when the server held at least one row beyond this page. */
+  hasMore: boolean;
+  /** How many rows this page can hold — what the caller actually saw. */
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Production customer list — the real, org-scoped, PII-gated Customer domain.
+ *
+ * This used to `return resolve(customers)`: the in-memory fixture array, in
+ * production, on the live Inbox. There is deliberately no mock fallback now,
+ * and no demo-mode branch either (contrast getProducts/getConversationPage,
+ * whose isDemoModeError fallbacks predate this phase): an org with zero
+ * customers must see an empty list, and a backend failure must surface as a
+ * failure. Fake customer rows are never an acceptable answer on this path.
+ *
+ * Tenant scope, permission and PII gating all live in the server function:
+ * listCustomersFn resolves the organization from the caller's active
+ * membership, listCustomers() requires `customers.read`, and `phone` comes
+ * back as "" for any caller without `customers.view_sensitive`. No
+ * organization id is passed from here, because none would be trusted.
+ */
+export async function getCustomers(
+  options: { offset?: number; limit?: number } = {},
+): Promise<CustomerListPage> {
+  const limit = Math.min(options.limit ?? CUSTOMER_PAGE_LIMIT, CUSTOMER_PAGE_LIMIT);
+  const offset = options.offset ?? 0;
+
+  const { listCustomersFn } = await import("@/api/customers");
+  // limit + 1: the extra row is the completeness probe, never displayed.
+  const rows = (await listCustomersFn({
+    data: { limit: limit + 1, offset, status: "active" },
+  })) as unknown as OrderCustomerOption[];
+
+  const hasMore = rows.length > limit;
+  return {
+    customers: rows.slice(0, limit).map(mapOrderCustomerOptionToUi),
+    hasMore,
+    limit,
+    offset,
+  };
 }
 
 export async function getCustomer(id: string): Promise<Customer> {
@@ -246,11 +306,38 @@ export async function getCustomer(id: string): Promise<Customer> {
   return (result as unknown as Customer360).customer as unknown as Customer;
 }
 
+/** How many of a customer's orders the history surfaces load at once. */
+export const CUSTOMER_ORDER_HISTORY_LIMIT = 20;
+
+/**
+ * One customer's order history, from the production Order domain.
+ *
+ * This used to filter the in-memory `orders` fixture. It now reuses the same
+ * production read every other order surface uses — listOrdersFn already
+ * accepts `customerId` and filters in SQL — so the history is tenant-scoped by
+ * the server, ordered newest-first by the server, and never reconstructed
+ * here. No parallel order-history endpoint was added.
+ *
+ * No mock fallback: a failure is an error the caller must show, and an empty
+ * result means the customer genuinely has no orders in this organization.
+ *
+ * A non-UUID id is refused before the request rather than sent: the server's
+ * zod validator would reject it anyway, and the mock ids that shape belongs to
+ * (`cus-1`) have no production meaning. Same contract as
+ * markRealConversationRead and friends above.
+ *
+ * `customerId` is not an authorization input. listOrders() scopes the query to
+ * the organization it resolved from the caller's membership, so a customer id
+ * guessed from another organization matches no row and comes back empty —
+ * exactly as it would for an id that does not exist at all.
+ */
 export async function getCustomerOrders(customerId: string): Promise<Order[]> {
-  const list = orders
-    .filter((o) => o.customerId === customerId)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return resolve(list);
+  if (!isProductionId(customerId)) throw new Error("invalid_reference");
+  const { listOrdersFn } = await import("@/api/orders");
+  const rows = await listOrdersFn({
+    data: { customerId, limit: CUSTOMER_ORDER_HISTORY_LIMIT },
+  });
+  return rows.map(mapOrderSummaryToUi);
 }
 
 /** Server product shape returned by listProductsFn / getProductDetailFn. */
@@ -500,33 +587,49 @@ function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
  * contexts (see isDemoModeError's own comment) — once a real backend is
  * reachable, an org with zero real customers sees an empty result, not mock
  * rows, same precedent as getProducts()/getPosProducts().
+ *
+ * `canViewSensitive` masks every phone through visibleCustomerPhone BEFORE
+ * the filter runs, and the phone predicate is skipped entirely once it does.
+ * Masking only the displayed value is not enough: the caller caches these
+ * results per search term, so a set matched against real phone numbers while
+ * `customers.view_sensitive` held stays readable after the grant is revoked.
+ * The numbers would be blanked on screen, but which customers came BACK for a
+ * typed fragment still answers "does a customer with this number exist here?"
+ * — which is precisely the disclosure that grant gates. Filtering on an
+ * already-blanked value cannot answer it.
+ *
+ * The parameter is required rather than defaulted so a new caller has to state
+ * an answer instead of silently inheriting the permissive one. Pass
+ * `capabilities.canSensitive("customers.view_sensitive")`, never `can(...)`.
  */
-export async function searchCustomers(query: string): Promise<Customer[]> {
+export async function searchCustomers(
+  query: string,
+  canViewSensitive: boolean,
+): Promise<Customer[]> {
   const q = query.trim().toLowerCase();
   const digits = q.replace(/\s/g, "");
+  // Masked first, so nothing below — display OR predicate — can read a phone
+  // this member may not see.
+  const mask = (c: Customer): Customer => ({
+    ...c,
+    phone: visibleCustomerPhone(c, canViewSensitive),
+  });
+  const matches = (c: Customer) =>
+    c.nameKm.toLowerCase().includes(q) ||
+    c.nameEn.toLowerCase().includes(q) ||
+    // A blanked phone is skipped rather than matched against an empty needle.
+    (c.phone !== "" && c.phone.replace(/\s/g, "").includes(digits));
   try {
     const rows = await listRealCustomers();
-    const mapped = rows.map(mapOrderCustomerOptionToUi);
+    const mapped = rows.map(mapOrderCustomerOptionToUi).map(mask);
     if (!q) return mapped.slice(0, 4);
-    return mapped.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    );
+    return mapped.filter(matches);
   } catch (err) {
     if (!isDemoModeError(err)) throw err;
   }
-  if (!q) return resolve(customers.slice(0, 4), 80);
-  return resolve(
-    customers.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    ),
-    80,
-  );
+  const mockMapped = customers.map(mask);
+  if (!q) return resolve(mockMapped.slice(0, 4), 80);
+  return resolve(mockMapped.filter(matches), 80);
 }
 
 export interface QuickCustomerInput {

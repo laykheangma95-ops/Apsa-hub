@@ -122,9 +122,25 @@ describe("Deliveries list search runs against complete server-side truth", () =>
   });
 
   it("the search term is part of the query key, so a new term refetches rather than reusing a page", () => {
+    /*
+     * The key is now built through deliveryKeys.list() rather than written as
+     * an inline array — the launch-safety phase put the principal in front of
+     * the filters so one tab cannot serve Organization A's deliveries to
+     * Organization B (src/lib/deliveries-query.ts). The property this test
+     * exists for is unchanged and still asserted: the debounced term is part
+     * of the identity, so a new term is a new entry rather than a reused page.
+     */
     const route = readSource(LIST_ROUTE);
-    const key = route.slice(route.indexOf("queryKey: ["), route.indexOf("queryKey: [") + 220);
+    const start = route.indexOf("queryKey: deliveryKeys.list(");
+    expect(start).toBeGreaterThan(-1);
+    const key = route.slice(start, start + 260);
     expect(key).toContain("debouncedSearch");
+    expect(key).toContain("activeFilter.scope");
+    expect(key).toContain("activeFilter.status");
+    // The principal leads the filters, and comes from the server-derived guard
+    // context rather than from client input.
+    expect(key).toContain("userId");
+    expect(key).toContain("routeOrganizationId");
   });
 
   it("listRealDeliveries forwards search, limit and offset to the server function", () => {

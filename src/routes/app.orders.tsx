@@ -17,6 +17,7 @@ import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealOrders } from "@/lib/api";
 import { isChannelSource } from "@/lib/orders";
+import { ordersKeys } from "@/lib/orders-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import type { Order } from "@/types";
@@ -88,6 +89,17 @@ function OrderListScreen() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const capabilities = useCapabilities();
+  /*
+   * Cache identity comes from the /app route guard's server-derived context
+   * (validated session + active membership row), never from the capability
+   * snapshot and never from the URL. It partitions this list so a previous
+   * principal's orders — customer names, codes, money — cannot be served back
+   * to whoever mounts this screen next in the same tab. It authorizes nothing:
+   * listOrders() re-checks orders.read against the membership the SERVER
+   * resolved, on every call.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const listKey = ordersKeys.list(session.userId, routeOrganizationId);
   const [createOpen, setCreateOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const detailOpen = pathname !== "/app/orders" && pathname.startsWith("/app/orders/");
@@ -99,7 +111,7 @@ function OrderListScreen() {
   const canCreateOrder = capabilities.can("orders.create");
 
   const ordersQuery = useQuery({
-    queryKey: ["orders", "real"],
+    queryKey: listKey,
     queryFn: listRealOrders,
     enabled: !detailOpen && canReadOrders,
   });
@@ -174,8 +186,10 @@ function OrderListScreen() {
       <CreateRealOrderSheet
         open={createOpen}
         onOpenChange={setCreateOpen}
+        userId={session.userId}
+        organizationId={routeOrganizationId}
         onCreated={() => {
-          void queryClient.invalidateQueries({ queryKey: ["orders", "real"] });
+          void queryClient.invalidateQueries({ queryKey: listKey });
         }}
       />
 

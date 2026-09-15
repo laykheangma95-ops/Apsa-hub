@@ -124,6 +124,25 @@ export const catalogKeys = {
     [CATALOG_QUERY_ROOT, userId, organizationId, "product", productId] as const,
   categories: (userId: string, organizationId: string) =>
     [CATALOG_QUERY_ROOT, userId, organizationId, "categories"] as const,
+  /**
+   * The same organization's ACTIVE catalog, in the operational UI's own
+   * `Product` shape (src/lib/api/index.ts#getPosProducts / #getProducts) —
+   * POS, the manual order-create picker, and the Conversation Smart Action
+   * variant resolver.
+   *
+   * A sibling key rather than a reuse of `products` above because the payload
+   * is a different shape (the mapped UI `Product`, not the server
+   * `CatalogProduct`), and `surface` keeps the three consumers from reading
+   * each other's mapped list back. Living under CATALOG_QUERY_ROOT is the
+   * point: these are organization catalog reads, so clearCatalogQueries and
+   * enforceCatalogCachePrincipal already cover them, and POS cannot flash
+   * another organization's catalog after an account switch.
+   */
+  uiProducts: (
+    userId: string,
+    organizationId: string,
+    surface: "pos" | "order-create" | "smart-action",
+  ) => [CATALOG_QUERY_ROOT, userId, organizationId, "ui-products", surface] as const,
 };
 
 /** Every catalog cache entry lives under this prefix, in any tab. */

@@ -35,7 +35,6 @@ import {
   markRealConversationRead,
   updateRealConversationStatus,
   getCustomer,
-  getCustomerOrders,
   getMostRecentRealOrderForCustomer,
   getProducts,
   isProductionId,
@@ -49,6 +48,9 @@ import {
   type SmartActionId,
 } from "@/lib/conversation/smart-actions";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { customerKeys } from "@/lib/customers-query";
+import { conversationKeys } from "@/lib/inbox-query";
+import { catalogKeys } from "@/lib/catalog";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -96,6 +98,17 @@ const SAVED_REPLY_KEYS = ["greeting", "price", "stock", "delivery"] as const;
 
 function ConversationScreen() {
   const { id } = Route.useParams();
+  /*
+   * Cache identity for this thread, its customer and the catalog it resolves
+   * Smart Actions against. Both values come from the /app route guard's
+   * server-derived context (validated session + active membership row), never
+   * from the URL or the capability snapshot. A conversation id in the URL is
+   * not an identity: without the principal in the key, the thread body,
+   * message previews and the customer profile behind it stayed readable to
+   * whoever mounted this route next in the same tab.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
   const activeIdRef = useRef(id);
   activeIdRef.current = id;
   const navigate = useNavigate();
@@ -132,15 +145,22 @@ function ConversationScreen() {
   const endRef = useRef<HTMLDivElement>(null);
 
   const conversationQuery = useQuery({
-    queryKey: ["conversation", id],
+    queryKey: conversationKeys.detail(userId, routeOrganizationId, id),
     queryFn: () => getConversation(id),
   });
   const conversation = conversationQuery.data;
 
   const customerQuery = useQuery({
-    queryKey: ["customer", conversation?.customerId],
+    /*
+     * The customer profile behind this thread — a phone number, social
+     * identities and an address, depending on what the server decided this
+     * member may see. It shares the Customer domain's partition with Customer
+     * 360 rather than holding a second, differently-keyed copy of the same
+     * payload, so one purge covers both.
+     */
+    queryKey: customerKeys.detail(userId, routeOrganizationId, conversation?.customerId ?? "none"),
     queryFn: () => getCustomer(conversation!.customerId),
-    enabled: Boolean(conversation?.customerId),
+    enabled: Boolean(conversation?.customerId) && canViewCustomer,
   });
   const customer = customerQuery.data;
   const displayName = customer
@@ -151,7 +171,7 @@ function ConversationScreen() {
   // RESOLUTION) and for the Prepare Order review step. Same production/mock
   // branching as everywhere else — see getProducts()'s own comment.
   const productsQuery = useQuery({
-    queryKey: ["conversation-smart-action-products"],
+    queryKey: catalogKeys.uiProducts(userId, routeOrganizationId, "smart-action"),
     queryFn: getProducts,
   });
   const products = productsQuery.data ?? [];
@@ -214,8 +234,9 @@ function ConversationScreen() {
     void markRealConversationRead(id, messageId)
       .then(() => {
         if (active) {
-          void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-          void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+          void queryClient.invalidateQueries({
+            queryKey: conversationKeys.principal(userId, routeOrganizationId),
+          });
         }
       })
       .catch(() => {
@@ -224,7 +245,10 @@ function ConversationScreen() {
     return () => {
       active = false;
     };
-  }, [id, conversation?.readThroughMessageId, queryClient]);
+    // The principal is in the deps because it is in the invalidation key: if
+    // the active membership changed under this screen, the mark-read that
+    // follows must refresh the NEW principal's Inbox, never the old one's.
+  }, [id, conversation?.readThroughMessageId, queryClient, userId, routeOrganizationId]);
 
   async function loadOlder() {
     const cursor = olderCursor === undefined ? conversation?.nextBeforeId : olderCursor;
@@ -237,8 +261,9 @@ function ConversationScreen() {
       setOlderCursor(page.nextBeforeId);
       if (page.readThroughMessageId) {
         await markRealConversationRead(id, page.readThroughMessageId);
-        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-        void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+        void queryClient.invalidateQueries({
+          queryKey: conversationKeys.principal(userId, routeOrganizationId),
+        });
       }
     } catch {
       setOperationError(true);
@@ -255,8 +280,9 @@ function ConversationScreen() {
       if (activeIdRef.current !== id) return;
       setStatus(value);
       setStatusOpen(false);
-      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      void queryClient.invalidateQueries({ queryKey: ["conversation-counts"] });
+      void queryClient.invalidateQueries({
+        queryKey: conversationKeys.principal(userId, routeOrganizationId),
+      });
     } catch {
       setOperationError(true);
     } finally {
@@ -322,9 +348,17 @@ function ConversationScreen() {
         // repeat-purchase detection upstream (src/lib/intent/detect.ts), so
         // reaching here means the engine is confident this is a product
         // repeat, not an address repeat.
+        /*
+         * Production order history only. The old else-branch read the
+         * in-memory `orders` fixture through getCustomerOrders(), so a
+         * "Repeat order" on a customer whose id was not a production UUID
+         * pre-filled the sheet with invented line items. There is no honest
+         * fallback for "what did this customer buy last time" — with no real
+         * previous order the sheet opens empty and the merchant chooses.
+         */
         const previous = isProductionId(customer.id)
           ? await getMostRecentRealOrderForCustomer(customer.id)
-          : ((await getCustomerOrders(customer.id))[0] ?? null);
+          : null;
         setPrepareItems(toRepeatOrderItems(previous?.items ?? [], products));
         setPrepareOpen(true);
         return;
@@ -703,6 +737,8 @@ function ConversationScreen() {
           onOpenChange={setCustomerOpen}
           customer={customer}
           displayName={displayName}
+          userId={userId}
+          organizationId={routeOrganizationId}
         />
       ) : null}
 

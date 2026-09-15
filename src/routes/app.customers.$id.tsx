@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,9 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
-import { addCustomerNote, getCustomer360 } from "@/lib/api";
+import { useCapabilities } from "@/hooks/use-capabilities";
+import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
+import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
 import { fullTimestamp, initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, usd } from "@/lib/money";
@@ -65,25 +67,93 @@ function Customer360Screen() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const queryClient = useQueryClient();
+  const capabilities = useCapabilities();
+
+  /*
+   * Cache identity from the /app route guard's server-derived context. This is
+   * the most sensitive payload the app caches — a phone number, a delivery
+   * address, lifetime spend — and it was keyed on the customer id alone, so it
+   * survived a sign-out in the same tab and could be read straight back by the
+   * next principal to open the same URL.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
 
   const [tab, setTab] = useState<Tab>("overview");
   const [noteDraft, setNoteDraft] = useState("");
   const [newNotes, setNewNotes] = useState<CustomerNote[]>([]);
 
-  const query = useQuery({ queryKey: ["customer360", id], queryFn: () => getCustomer360(id) });
+  const detailKey = customerKeys.detail(userId, routeOrganizationId, id);
+  const query = useQuery({ queryKey: detailKey, queryFn: () => getCustomer360(id) });
+
+  /*
+   * A production customer and a pre-production mock id are two different
+   * sources here, and conflating them is what made this screen lie.
+   *
+   * getCustomer360() answers a UUID from the server, which returns `orders: []`
+   * STRUCTURALLY — "Orders and events remain empty until their domains are
+   * productionized" (src/server/customers/service.ts) — not because the
+   * customer has none. Rendering that as "No orders yet" told the merchant
+   * something the screen had never asked the server. It also contradicted
+   * CustomerDetailSheet, which shows the same customer's real history.
+   *
+   * The real history comes from the same production read that sheet uses:
+   * getCustomerOrders() -> listOrdersFn, which filters by customerId in SQL
+   * and is scoped by the server to the organization it resolved from the
+   * caller's membership. No new backend, no parallel endpoint, and the key is
+   * this customer's own `orders` sub-key so a customer purge takes it along.
+   *
+   * A non-UUID mock id keeps its existing in-memory path untouched — that
+   * branch really does carry fixture orders, counts and spend.
+   */
+  const isRealCustomer = isProductionId(id);
+  // listOrders requires orders.read server-side; without it there is no
+  // honest version of this tab, so say so rather than imply "none".
+  const canReadOrders = capabilities.can("orders.read");
+
+  const ordersQuery = useQuery({
+    queryKey: customerKeys.orders(userId, routeOrganizationId, id),
+    queryFn: () => getCustomerOrders(id),
+    enabled: isRealCustomer && canReadOrders,
+  });
 
   const noteMutation = useMutation({
     mutationFn: (body: string) => addCustomerNote(id, body),
     onSuccess: (note) => {
       setNewNotes((n) => [note, ...n]);
       setNoteDraft("");
+      /*
+       * Refresh this customer's own cached profile — and only this principal's
+       * copy of it. The optimistic prepend above keeps the new note on screen
+       * meanwhile; the invalidation is what reconciles it with the server's
+       * authored/authored-by values.
+       */
+      void queryClient.invalidateQueries({ queryKey: detailKey });
     },
   });
 
-  // sensitiveVisible is server-authoritative: true = caller has customers.view_sensitive.
-  // undefined on the mock data path — treat as visible (mock data is development-only).
-  // Never use a hardcoded client-side role to decide this.
-  const sensitiveVisible = query.data?.customer.sensitiveVisible !== false;
+  /*
+   * Both answers must say yes, and this is why:
+   *
+   *   1. `customers.view_sensitive` as it stands RIGHT NOW. `canSensitive`,
+   *      not `can` — a phone number's mere display is the disclosure, so it
+   *      must not ride on a capability snapshot whose latest refresh failed.
+   *   2. What the SERVER decided when it built this payload
+   *      (`sensitiveVisible`), which is authoritative and is never overridden
+   *      by a client-side read.
+   *
+   * Reading (2) alone — which is what this screen did — is the same
+   * stale-cache class PR #59 found in Payments: a profile fetched while the
+   * grant held keeps saying `sensitiveVisible: true` forever, and nothing
+   * purges or refetches it when the grant is revoked mid-session, because
+   * capabilities and customer data are two independent queries. With (1) in
+   * front, the phone, address and spend disappear on the very next render.
+   */
+  const sensitiveVisible = customerSensitiveVisible(
+    query.data?.customer,
+    capabilities.canSensitive("customers.view_sensitive"),
+  );
 
   const back = () => navigate({ to: "/app/inbox" });
 
@@ -109,9 +179,31 @@ function Customer360Screen() {
     );
   }
 
-  const { customer, orders, events, activeConversationId } = query.data!;
+  const { customer, events, activeConversationId } = query.data!;
   const notes = [...newNotes, ...query.data!.notes];
   const displayName = localName(customer, language);
+
+  /*
+   * Real customers read their history from the Order domain above; the mock
+   * branch keeps the fixture list the payload carries.
+   */
+  const orders = isRealCustomer ? (ordersQuery.data ?? []) : query.data!.orders;
+  const ordersUnavailable = isRealCustomer && !canReadOrders;
+
+  /*
+   * `orderCount` and `lifetimeSpend` are hardcoded to zero by the server for
+   * every production customer, alongside the structural `orders: []`. They are
+   * placeholders, not measurements, so this screen must not print them as
+   * figures — "Orders 0" and "Spend $0.00" above a non-empty order list is the
+   * same false claim in a different place.
+   *
+   * They are also not derivable here: the history above is capped at
+   * CUSTOMER_ORDER_HISTORY_LIMIT rows, so counting or summing it would invent
+   * a lifetime total out of one page. Deriving a wrong number is not an
+   * improvement on withholding one, so these show an explicit "—" until the
+   * server computes them.
+   */
+  const metricsAuthoritative = !isRealCustomer;
   const average =
     customer.orderCount > 0
       ? usd(Math.round(customer.lifetimeSpend.amount / customer.orderCount))
@@ -171,12 +263,18 @@ function Customer360Screen() {
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
               <dd className="text-h2 tnum truncate text-text-primary">
-                {sensitiveVisible ? formatMoney(customer.lifetimeSpend) : t("customer360.hidden")}
+                {!metricsAuthoritative
+                  ? "—"
+                  : sensitiveVisible
+                    ? formatMoney(customer.lifetimeSpend)
+                    : t("customer360.hidden")}
               </dd>
             </div>
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.orders")}</dt>
-              <dd className="text-h2 tnum truncate text-text-primary">{customer.orderCount}</dd>
+              <dd className="text-h2 tnum truncate text-text-primary">
+                {metricsAuthoritative ? customer.orderCount : "—"}
+              </dd>
             </div>
           </dl>
         </section>
@@ -194,7 +292,13 @@ function Customer360Screen() {
             <SectionRows>
               <SectionRow
                 label={t("customer360.averageOrder")}
-                value={sensitiveVisible ? formatMoney(average) : t("customer360.hidden")}
+                value={
+                  !metricsAuthoritative
+                    ? "—"
+                    : sensitiveVisible
+                      ? formatMoney(average)
+                      : t("customer360.hidden")
+                }
               />
               <SectionRow
                 label={t("customer.lastPurchase")}
@@ -233,8 +337,29 @@ function Customer360Screen() {
           </Section>
         ) : null}
 
+        {/*
+         * Order of these branches is the whole point. "No orders yet" is an
+         * affirmative claim about this customer, so it may only render once
+         * the real query has actually SUCCEEDED and come back empty. Never
+         * asked (no orders.read), still loading, or failed each get their own
+         * honest state instead.
+         */}
         {tab === "orders" ? (
-          orders.length === 0 ? (
+          ordersUnavailable ? (
+            <OperationalState
+              title={t("customer360.ordersUnavailable")}
+              body={t("customer360.ordersUnavailableBody")}
+            />
+          ) : isRealCustomer && ordersQuery.isPending ? (
+            <DetailSkeleton />
+          ) : isRealCustomer && ordersQuery.isError ? (
+            <OperationalState
+              tone="danger"
+              title={t("customer360.ordersError")}
+              body={t("customer360.ordersErrorBody")}
+              onRetry={() => void ordersQuery.refetch()}
+            />
+          ) : orders.length === 0 ? (
             <OperationalState
               title={t("customer360.noOrders")}
               body={t("customer360.noOrdersBody")}
