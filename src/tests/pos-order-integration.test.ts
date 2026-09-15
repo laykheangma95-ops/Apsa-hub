@@ -349,13 +349,28 @@ describe("Mock/production routing never trusts a client id as authorization", ()
 describe("Customer search/quick-create try the production Customer domain first", () => {
   const source = readSource(API_INDEX);
 
-  it("searchCustomers calls listRealCustomers (listCustomersFn) before ever touching mock data", () => {
+  /*
+   * The customer-service search phase replaced searchCustomers (one bounded
+   * page of listRealCustomers, filtered in the browser, with a demo-mode
+   * fixture fallback) with searchRealCustomers: a real server search over the
+   * whole tenant, and NO fallback of any kind.
+   *
+   * Both halves of that were defects on this exact path. The bounded page
+   * meant a real customer past row 100 was reported to the cashier as "no
+   * customer found" with the caller standing at the counter; the fixture
+   * fallback meant a backend failure could put invented people in a picker
+   * used to attach a customer to a real sale.
+   */
+  it("searchRealCustomers reaches the Customer domain's own search, with no fixture path at all", () => {
     const fn = source.slice(
-      source.indexOf("export async function searchCustomers"),
+      source.indexOf("export async function searchRealCustomers"),
       source.indexOf("export interface QuickCustomerInput"),
     );
-    expect(fn).toMatch(/listRealCustomers\(\)/);
-    expect(fn).toMatch(/isDemoModeError/);
+    expect(fn).toMatch(/searchCustomersFn/);
+    expect(fn).toMatch(/await import\(["']@\/api\/customers["']\)/);
+    // No bounded local list, and nothing to fall back to.
+    expect(fn).not.toMatch(/listRealCustomers\(\)/);
+    expect(fn).not.toMatch(/isDemoModeError/);
   });
 
   it("createQuickCustomer calls createCustomerFn before ever falling back to an in-memory mock customer", () => {
@@ -368,12 +383,16 @@ describe("Customer search/quick-create try the production Customer domain first"
     expect(fn).toMatch(/isDemoModeError/);
   });
 
-  it("a genuine backend error (not demo-mode) propagates rather than being hidden behind mock data", () => {
+  it("a failing customer search propagates rather than being hidden behind mock data", () => {
     const searchFn = source.slice(
-      source.indexOf("export async function searchCustomers"),
+      source.indexOf("export async function searchRealCustomers"),
       source.indexOf("export interface QuickCustomerInput"),
     );
-    expect(searchFn).toMatch(/if \(!isDemoModeError\(err\)\) throw err;/);
+    // Nothing catches. The server call is awaited bare, so a failure reaches
+    // the caller as a failure and the picker shows an error, never an empty
+    // list that reads as "this person is not a customer".
+    expect(searchFn).not.toMatch(/catch/);
+    expect(searchFn).not.toMatch(/@\/lib\/mock/);
   });
 });
 

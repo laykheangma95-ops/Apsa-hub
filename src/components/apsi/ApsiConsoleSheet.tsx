@@ -30,15 +30,9 @@ import {
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useAppPrincipal } from "@/hooks/use-app-principal";
 import { apsiKeys } from "@/lib/apsi-query";
-import { APSI_QUERY_MAX_LENGTH, classifyApsiQuery } from "@/lib/apsi/input";
+import { APSI_QUERY_MAX_LENGTH, apsiEmptyScope, classifyApsiQuery } from "@/lib/apsi/input";
 import { apsiSurfaceForPath, orderApsiActionIds } from "@/lib/apsi/context";
-import {
-  APSI_PROBE_PERMISSION,
-  apsiResultRoute,
-  planApsiLookup,
-  runApsiLookup,
-  type ApsiResult,
-} from "@/lib/apsi/lookup";
+import { apsiResultRoute, planApsiLookup, runApsiLookup, type ApsiResult } from "@/lib/apsi/lookup";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import type {
@@ -79,14 +73,23 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
   const withheld = useMemo(() => planApsiLookup(plan, capabilities).skipped, [plan, capabilities]);
 
   /*
-   * Cache identity is the principal from the /app route guard plus the
-   * normalized query. Outside /app (the design gallery) there is no principal,
-   * so nothing is cached and nothing is fetched — the console there is the
-   * shortcut list only.
+   * `canSensitive`, not `can`: this value decides which cache entry the
+   * console reads AND is what stops a grant-era answer being served back after
+   * a revocation. A snapshot whose latest refresh failed must not keep the
+   * grant-era entry addressable, so the fail-closed reader is the only correct
+   * one here — see apsiKeys.lookup's own note.
+   */
+  const canSensitive = capabilities.canSensitive("customers.view_sensitive");
+
+  /*
+   * Cache identity is the principal from the /app route guard, the normalized
+   * query, and the sensitive grant. Outside /app (the design gallery) there is
+   * no principal, so nothing is cached and nothing is fetched — the console
+   * there is the shortcut list only.
    */
   const lookup = useQuery({
     queryKey: principal
-      ? apsiKeys.lookup(principal.userId, principal.organizationId, plan.normalized)
+      ? apsiKeys.lookup(principal.userId, principal.organizationId, plan.normalized, canSensitive)
       : [],
     queryFn: () => runApsiLookup(plan, capabilities),
     enabled: open && Boolean(principal) && !plan.empty,
@@ -125,6 +128,24 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
     outcome!.answered &&
     outcome!.results.length === 0 &&
     outcome!.failed.length === 0;
+
+  /*
+   * The not-found sentence is scoped to what was actually searched.
+   *
+   * An order code is looked up in Orders and nowhere else, so the only claim
+   * that probe earns is "no order carries this code" — not "nothing in APSA
+   * matches", which is what a staff member repeats to a customer as "we have
+   * no record of your order". Same for a phone number and a name: each names
+   * the domain that answered.
+   */
+  const emptyScopeKey = `apsi.empty.${apsiEmptyScope(plan)}`;
+
+  /*
+   * A page is not the whole answer. When a domain reported more matches than
+   * it returned, say so — five customer cards must never read as "these are
+   * all the people with that name".
+   */
+  const moreMayExist = Boolean(outcome) && outcome!.incomplete && outcome!.results.length > 0;
 
   return (
     <BottomSheet
@@ -185,31 +206,16 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
         <ShortcutGroups groups={orderedGroups} onRoute={onRoute} />
       ) : (
         <div className="space-y-4">
-          {plan.unsupported.length > 0 ? (
-            <ul className="space-y-2">
-              {plan.unsupported.map((item) => (
-                <li
-                  key={item}
-                  className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-3 text-text-secondary"
-                >
-                  {t(`apsi.unsupported.${item}`)}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
           {withheld.length > 0 ? (
             <ul className="space-y-2">
-              {[...new Set(withheld.map((probe) => APSI_PROBE_PERMISSION[probe.kind]))].map(
-                (permission) => (
-                  <li
-                    key={permission}
-                    className="text-body-sm rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-text-secondary"
-                  >
-                    {t("apsi.withheld", { permission })}
-                  </li>
-                ),
-              )}
+              {[...new Set(withheld.map((probe) => probe.permission))].map((permission) => (
+                <li
+                  key={permission}
+                  className="text-body-sm rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-text-secondary"
+                >
+                  {t("apsi.withheld", { permission })}
+                </li>
+              ))}
             </ul>
           ) : null}
 
@@ -247,12 +253,18 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
             </ul>
           ) : null}
 
+          {moreMayExist ? (
+            <p className="text-body-sm px-1 text-text-muted" aria-live="polite">
+              {t("apsi.moreResults")}
+            </p>
+          ) : null}
+
           {nothingFound ? (
             <p
               className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
               aria-live="polite"
             >
-              {t("apsi.noResults", { query: plan.normalized })}
+              {t(emptyScopeKey, { query: plan.normalized })}
             </p>
           ) : null}
 
@@ -470,9 +482,18 @@ function ResultBody({ result }: { result: ApsiResult }) {
               ? result.phone
               : t("apsi.card.customerPhoneWithheld")}
           </span>
-          <span className="text-caption tnum block text-text-muted">
-            {t("apsi.card.customerOrders", { count: result.orderCount })}
-          </span>
+          {/*
+           * Only when the domain actually reported one. A customer found
+           * through the search carries no order history, and printing "0
+           * orders recorded" for them would be a CRM claim Apsi never made a
+           * request for — read by a merchant as "this person never bought
+           * anything from us".
+           */}
+          {result.orderCount !== null ? (
+            <span className="text-caption tnum block text-text-muted">
+              {t("apsi.card.customerOrders", { count: result.orderCount })}
+            </span>
+          ) : null}
         </>
       );
 

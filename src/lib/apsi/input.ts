@@ -12,31 +12,54 @@
  * the server's own `ctx.require` after it), and it never decides what is true
  * (the domains do).
  *
- * Just as important is what it refuses to promise. APSA has no server-side
- * customer search by phone or by name today, so an input that looks like a
- * phone number produces an explicit `unsupported` note rather than a search
- * that quietly finds nothing and reads as "this customer does not exist".
+ * ── ROUTING: AUTHORITATIVE DOMAIN, BOUNDED FAN-OUT ───────────────────────────
  *
- * Safe to bundle for the browser: pure string work, no imports.
+ * Each shape goes to the domain that OWNS that kind of record, and does not
+ * get sprayed across every backend that might coincidentally match it:
+ *
+ *   order code       -> Orders        (never Delivery: an order with no
+ *                                      delivery row still exists, and finding
+ *                                      it through the delivery list was the
+ *                                      workaround this replaces)
+ *   customer phone   -> Customers     (and only when the member may search by
+ *                                      phone — see lookup.ts)
+ *   customer name    -> Customers, plus Delivery, because a delivery legitimately
+ *                      records a customer name and a courier name is also just
+ *                      letters; two targeted probes, not a broadcast
+ *   tracking number  -> Delivery
+ *   barcode / SKU    -> Catalog
+ *   UUID             -> the four id probes, one per domain that uses UUID keys
+ *
+ * The phone and name shapes were previously answered with an `unsupported`
+ * note, because APSA had no server-side customer search. It has one now
+ * (src/server/customers/service.ts), so the note is gone and the search is
+ * real — but the permission rule replacing it is stricter, not looser: a phone
+ * probe is withheld outright from a member without customers.view_sensitive,
+ * so no phone query is issued rather than issued and masked.
+ *
+ * Safe to bundle for the browser: pure string work over two pure modules.
  */
+import {
+  looksLikeCustomerPhoneQuery,
+  normalizeCustomerNameQuery,
+  toAsciiDigitScript,
+} from "@/lib/customer-search";
+import { looksLikeOrderCode, normalizeOrderCode } from "@/lib/order-code";
 
 /** One concrete lookup against one domain. */
 export type ApsiProbe =
   | { kind: "order-by-id"; id: string }
+  | { kind: "order-by-code"; value: string }
   | { kind: "payment-by-id"; id: string }
   | { kind: "delivery-by-id"; id: string }
   | { kind: "customer-by-id"; id: string }
+  | { kind: "customer-by-name"; value: string }
+  | { kind: "customer-by-phone"; value: string }
   | { kind: "product-by-barcode"; value: string }
   | { kind: "product-by-sku"; value: string }
   | { kind: "delivery-search"; value: string };
 
 export type ApsiProbeKind = ApsiProbe["kind"];
-
-/**
- * A capability APSA does not have a backend contract for yet. Surfaced to the
- * member verbatim — never silently swallowed, and never faked.
- */
-export type ApsiUnsupported = "customer-phone-search" | "customer-name-search";
 
 export interface ApsiQueryPlan {
   /** Exactly what the member typed, untouched. */
@@ -46,7 +69,6 @@ export interface ApsiQueryPlan {
   /** True when the input carries no searchable characters at all. */
   empty: boolean;
   probes: readonly ApsiProbe[];
-  unsupported: readonly ApsiUnsupported[];
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,42 +79,20 @@ export const APSI_QUERY_MAX_LENGTH = 100;
 /** Exact-match identifier lookups need a single token, not a phrase. */
 const SINGLE_TOKEN_RE = /^[\w.\-/]{2,}$/;
 
-/**
- * Cambodian mobile numbers as they are actually typed into a phone: local
- * (0XX XXX XXX / 0XX XXX XXXX) or international (+855 ...), with any mix of
- * spaces, dots and dashes. Khmer digits normalise first so ០១២ counts too.
- */
-const KHMER_DIGITS = "០១២៣៤៥៦៧៨៩";
-
-function toAsciiDigits(value: string): string {
-  let out = "";
-  for (const ch of value) {
-    const khmer = KHMER_DIGITS.indexOf(ch);
-    out += khmer >= 0 ? String(khmer) : ch;
-  }
-  return out;
-}
-
 export function normalizeApsiQuery(raw: string): string {
-  return toAsciiDigits(raw).replace(/\s+/g, " ").trim();
+  return toAsciiDigitScript(raw).replace(/\s+/g, " ").trim();
 }
 
 /**
  * Whether this reads as a phone number rather than a code.
  *
- * Deliberately narrow. A tracking number can also be a long digit string, so
- * this only claims "phone" for the shapes a Cambodian customer's number
- * actually takes — and being wrong here costs nothing but one extra honest
- * note, because the delivery search still runs either way.
+ * One definition, shared with the server that answers the query
+ * (src/lib/customer-search.ts). If the console and the Customer service
+ * disagreed about what a phone number looks like, the console would route a
+ * query one way and the server would answer it another.
  */
 export function looksLikePhoneNumber(normalized: string): boolean {
-  if (!/^\+?[\d\s.\-()]+$/.test(normalized)) return false;
-  const digits = normalized.replace(/\D/g, "");
-  if (normalized.startsWith("+855") || digits.startsWith("855")) {
-    return digits.length >= 10 && digits.length <= 12;
-  }
-  if (digits.startsWith("0")) return digits.length >= 8 && digits.length <= 10;
-  return false;
+  return looksLikeCustomerPhoneQuery(normalized);
 }
 
 /** Word characters and at least one letter — a name, not a code. */
@@ -112,11 +112,10 @@ export function classifyApsiQuery(raw: string): ApsiQueryPlan {
   const normalized = normalizeApsiQuery(raw).slice(0, APSI_QUERY_MAX_LENGTH);
 
   if (normalized.length === 0) {
-    return { raw, normalized: "", empty: true, probes: [], unsupported: [] };
+    return { raw, normalized: "", empty: true, probes: [] };
   }
 
   const probes: ApsiProbe[] = [];
-  const unsupported: ApsiUnsupported[] = [];
 
   if (UUID_RE.test(normalized)) {
     /*
@@ -131,7 +130,35 @@ export function classifyApsiQuery(raw: string): ApsiQueryPlan {
       { kind: "delivery-by-id", id },
       { kind: "customer-by-id", id },
     );
-    return { raw, normalized, empty: false, probes, unsupported };
+    return { raw, normalized, empty: false, probes };
+  }
+
+  /*
+   * An order code names exactly one order, and Orders is the domain that owns
+   * it. Nothing else runs: a code is not a SKU, not a barcode and not a
+   * tracking number, so every other probe could only ever answer "no" — and a
+   * "no" from a domain that was never going to know is what made the old
+   * delivery-search path read as "this order does not exist".
+   */
+  const orderCode = normalizeOrderCode(normalized);
+  if (looksLikeOrderCode(orderCode)) {
+    probes.push({ kind: "order-by-code", value: orderCode });
+    return { raw, normalized, empty: false, probes };
+  }
+
+  /*
+   * A phone number goes to Customers and nowhere else. It is not a tracking
+   * number, and running the delivery search for it as well would put a
+   * customer's phone number into a second domain's query for no answer it
+   * could give.
+   */
+  if (looksLikePhoneNumber(normalized)) {
+    probes.push({ kind: "customer-by-phone", value: normalized });
+    return { raw, normalized, empty: false, probes };
+  }
+
+  if (looksLikePersonName(normalized)) {
+    probes.push({ kind: "customer-by-name", value: normalizeCustomerNameQuery(normalized) });
   }
 
   /*
@@ -147,15 +174,33 @@ export function classifyApsiQuery(raw: string): ApsiQueryPlan {
   }
 
   /*
-   * The delivery search is the one genuine free-text search APSA has today:
-   * the server matches it against order code, courier name, tracking number
-   * and customer name across the complete latest-per-order set — not against
-   * the rows that happen to be on screen.
+   * The Delivery domain's own free-text search: order code, courier name,
+   * tracking number and customer name across the complete latest-per-order
+   * set. Still the right home for a tracking reference or a courier name.
    */
   probes.push({ kind: "delivery-search", value: normalized });
 
-  if (looksLikePhoneNumber(normalized)) unsupported.push("customer-phone-search");
-  else if (looksLikePersonName(normalized)) unsupported.push("customer-name-search");
+  return { raw, normalized, empty: false, probes };
+}
 
-  return { raw, normalized, empty: false, probes, unsupported };
+/**
+ * Which "nothing matched" sentence this query has earned.
+ *
+ * A not-found line is a claim about what APSA holds, and its scope must match
+ * the scope of what was actually searched. An order code was looked up in
+ * Orders and nowhere else, so the only honest thing to say is that no order
+ * carries that code — never that nothing in APSA matches it, which is a claim
+ * no single-domain probe is entitled to make.
+ *
+ * Returns an i18n key suffix; the console prefixes it with "apsi.empty.".
+ */
+export function apsiEmptyScope(
+  plan: ApsiQueryPlan,
+): "orderCode" | "customerPhone" | "customerName" | "identifier" | "search" {
+  const kinds = new Set(plan.probes.map((probe) => probe.kind));
+  if (kinds.has("order-by-code")) return "orderCode";
+  if (kinds.has("customer-by-phone")) return "customerPhone";
+  if (kinds.has("customer-by-name")) return "customerName";
+  if (kinds.has("order-by-id")) return "identifier";
+  return "search";
 }

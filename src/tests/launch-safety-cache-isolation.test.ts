@@ -66,6 +66,7 @@ import {
   teamKeys,
   TEAM_QUERY_ROOT,
 } from "@/lib/team-query";
+import { apsiKeys } from "@/lib/apsi-query";
 import { createQueryPartition, principalTag } from "@/lib/query-principal";
 
 const ROOT = process.cwd();
@@ -840,14 +841,34 @@ describe("F. the partitions are wired into the real routes", () => {
     expect(selectIdx).toBeGreaterThan(resultsIdx);
   });
 
-  it("the order-create picker masks BEFORE filtering, so search cannot probe a hidden number", () => {
+  /*
+   * This used to assert that the picker MASKED the phone before FILTERING on
+   * it in the browser. Both halves of that sentence are gone: the picker no
+   * longer filters at all, because the customer-service search phase moved the
+   * match into the Customer service, which refuses to read the phone column
+   * without customers.view_sensitive.
+   *
+   * The property being protected never changed — a member without the grant
+   * must not be able to use the picker to learn that a phone number belongs to
+   * someone here — so this now pins the stronger mechanism that replaced it.
+   */
+  it("the order-create picker searches on the server and never matches a phone itself", () => {
     const source = stripComments(readSource("src/components/orders/CreateRealOrderSheet.tsx"));
-    const maskIdx = source.indexOf("visibleCustomerPhone(");
-    const filterIdx = source.indexOf("c.phone.replace(");
-    expect(maskIdx).toBeGreaterThan(-1);
-    expect(filterIdx).toBeGreaterThan(maskIdx);
-    // A blanked value is skipped rather than matched against an empty needle.
-    expect(source).toContain('c.phone !== ""');
+
+    // The search is the server's. No local phone predicate survives.
+    expect(source).toContain("searchRealCustomers(customerQuery.trim(), canSensitive)");
+    expect(source).not.toContain("c.phone.replace(");
+    expect(source).not.toMatch(/phone.*\.includes\(/);
+
+    // The current grant decides both the request and the cache entry.
+    expect(source).toContain('capabilities.canSensitive("customers.view_sensitive")');
+    expect(source).toContain(
+      "customerKeys.search(userId, organizationId, customerQuery.trim(), canSensitive)",
+    );
+
+    // The displayed value is still masked against the CURRENT grant, so a
+    // revoked phone disappears on the next render rather than the next refetch.
+    expect(source).toContain("visibleCustomerPhone(c, canSensitive)");
   });
 
   it("the Inbox thread and Customer 360 share one Customer partition", () => {
@@ -1251,29 +1272,66 @@ describe("I. a hidden phone is not searchable", () => {
     expect(found).toHaveLength(0);
   });
 
-  it("the real searchCustomers masks before it filters, on both its paths", () => {
+  /*
+   * The browser-side "mask, then filter on the masked value" dance is gone,
+   * replaced by the search never reaching the phone column at all without the
+   * grant. What this asserts now is the two independent refusals that took its
+   * place: the client does not SEND a phone-shaped query without the grant,
+   * and there is no fixture to fall back to if the real search fails.
+   */
+  it("the real customer search refuses a phone query client-side and has no fixture fallback", () => {
     const src = stripComments(readSource("src/lib/api/index.ts"));
-    const fnIdx = src.indexOf("export async function searchCustomers");
+    const fnIdx = src.indexOf("export async function searchRealCustomers");
     expect(fnIdx).toBeGreaterThan(-1);
-    const body = src.slice(fnIdx, fnIdx + 1600);
+    const body = src.slice(fnIdx, src.indexOf("export interface QuickCustomerInput"));
+
     // The grant is a required parameter, so a new caller must state an answer.
     expect(body).toContain("canViewSensitive: boolean");
-    const maskIdx = body.indexOf("visibleCustomerPhone(c, canViewSensitive)");
-    const predicateIdx = body.indexOf("c.phone.replace(");
-    expect(maskIdx).toBeGreaterThan(-1);
-    expect(predicateIdx).toBeGreaterThan(maskIdx);
-    expect(body).toContain('c.phone !== ""');
-    // The demo-mode fallback path is masked too, not just the production one.
-    expect(body).toContain("customers.map(mask)");
+
+    // A phone-shaped query without the grant returns before any request is
+    // built — no server call carrying that number leaves the browser.
+    const gateIdx = body.indexOf("looksLikeCustomerPhoneQuery(trimmed) && !canViewSensitive");
+    const requestIdx = body.indexOf("searchCustomersFn");
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(requestIdx).toBeGreaterThan(gateIdx);
+
+    // Denial is its own field, never an empty result set masquerading as one.
+    expect(body).toContain("phoneSearchDenied");
+
+    // No mock customers on any path: a failed search is a failure, and an org
+    // with no match sees no match.
+    expect(body).not.toContain("isDemoModeError");
+    expect(body).not.toMatch(/customers\.map\(/);
   });
 
   it("the POS picker passes the current grant to the read AND into the cache key", () => {
     const src = stripComments(readSource("src/components/pos/PosCustomerSheet.tsx"));
     expect(src).toContain('capabilities.canSensitive("customers.view_sensitive")');
-    expect(src).toContain("searchCustomers(query, canSensitive)");
+    expect(src).toContain("searchRealCustomers(query, canSensitive)");
     // Without the grant in the key, the grant-era result set is served straight
     // back for the same term after revocation.
     expect(src).toContain("customerKeys.search(userId, organizationId, query, canSensitive)");
+  });
+
+  /*
+   * The Apsi console answers the same class of question as the pickers, from
+   * the same Customer domain, and caches it — so it needs the same
+   * discriminator, and did not have one.
+   */
+  it("an Apsi lookup under the grant is a different cache entry from one without it", () => {
+    expect(apsiKeys.lookup(USER_A, ORG_A, "012345678", true)).not.toEqual(
+      apsiKeys.lookup(USER_A, ORG_A, "012345678", false),
+    );
+
+    const console_ = stripComments(readSource("src/components/apsi/ApsiConsoleSheet.tsx"));
+    // canSensitive, not can: a snapshot whose refresh failed must not keep the
+    // grant-era entry addressable.
+    expect(console_).toContain('capabilities.canSensitive("customers.view_sensitive")');
+    // The grant reaches the KEY, not just the render. Matched without regard
+    // to line breaks so a formatting pass cannot silently retire this check.
+    const keyCall = console_.match(/apsiKeys\.lookup\([\s\S]*?\)/)?.[0] ?? "";
+    expect(keyCall).toContain("plan.normalized");
+    expect(keyCall).toContain("canSensitive");
   });
 
   it("an authorized and an unauthorized search of the same term are different cache entries", () => {

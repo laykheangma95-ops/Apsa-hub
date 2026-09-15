@@ -27,6 +27,7 @@ import {
   createRealOrder,
   getProducts,
   listRealCustomers,
+  searchRealCustomers,
   type OrderCustomerOption,
 } from "@/lib/api";
 import { classifyOrderError } from "@/lib/orders";
@@ -95,15 +96,43 @@ export function CreateRealOrderSheet({
    * opened by the next member to use this tab could be filled from the
    * previous one's cache. Each now lives in its own domain's partition.
    */
+  const canSensitive = capabilities.canSensitive("customers.view_sensitive");
+
   const productsQuery = useQuery({
     queryKey: catalogKeys.uiProducts(userId, organizationId, "order-create"),
     queryFn: getProducts,
     enabled: open,
   });
+  /*
+   * Two reads, because they answer two different questions.
+   *
+   * With no query typed, the picker offers a short recent list — one bounded
+   * page, presented as exactly that.
+   *
+   * The moment something is typed, the SERVER searches, across the whole
+   * tenant. This is the launch defect being fixed: the sheet used to filter
+   * that single bounded page in the browser, so a customer past it could not
+   * be picked and the sheet said "no customers" about someone who exists.
+   */
   const customersQuery = useQuery({
     queryKey: customerKeys.options(userId, organizationId),
     queryFn: listRealCustomers,
-    enabled: open,
+    enabled: open && customerQuery.trim().length === 0,
+  });
+
+  const customerSearch = useQuery({
+    queryKey: customerKeys.search(userId, organizationId, customerQuery.trim(), canSensitive),
+    /*
+     * `canSensitive` is not an access decision here — the server re-derives
+     * the grant from the caller's membership and would refuse regardless. It
+     * stops a phone-shaped query from a member without the grant being SENT at
+     * all. It is also in the cache key above, because a result set matched
+     * against real phone numbers is a different answer to the same term than
+     * one matched without them, and must never be served back after the grant
+     * is revoked.
+     */
+    queryFn: () => searchRealCustomers(customerQuery.trim(), canSensitive),
+    enabled: open && customerQuery.trim().length > 0,
   });
 
   const productList = useMemo(() => {
@@ -127,23 +156,41 @@ export function CreateRealOrderSheet({
    * "does a customer with this number exist here?" without ever displaying it.
    * With the value already blanked, the filter cannot answer that question.
    */
-  const canSensitive = capabilities.canSensitive("customers.view_sensitive");
+  const searching = customerQuery.trim().length > 0;
+  const searchPage = customerSearch.data;
+
+  /*
+   * Masked against the CURRENT grant before anything renders it. The search
+   * itself can no longer match on a hidden number — the server refuses to read
+   * the phone column without the grant — so this is defence in depth over the
+   * displayed value, and it is what makes a phone disappear on the very next
+   * render after a revocation rather than on the next refetch.
+   */
   const customerList = useMemo(() => {
-    const all = (customersQuery.data ?? []).map((c) => ({
-      ...c,
-      phone: visibleCustomerPhone(c, canSensitive),
-    }));
-    const q = customerQuery.trim().toLowerCase();
-    const matches = !q
-      ? all
-      : all.filter(
-          (c) =>
-            c.nameEn.toLowerCase().includes(q) ||
-            c.nameKm.toLowerCase().includes(q) ||
-            (c.phone !== "" && c.phone.replace(/\s/g, "").includes(q.replace(/\s/g, ""))),
-        );
-    return matches.slice(0, 20);
-  }, [customersQuery.data, customerQuery, canSensitive]);
+    const rows: OrderCustomerOption[] = searching
+      ? (searchPage?.customers ?? []).map((c) => ({
+          id: c.id,
+          nameKm: c.nameKm,
+          nameEn: c.nameEn,
+          phone: c.phone,
+          sensitiveVisible: c.sensitiveVisible ?? false,
+        }))
+      : (customersQuery.data ?? []);
+    return rows.map((c) => ({ ...c, phone: visibleCustomerPhone(c, canSensitive) }));
+  }, [searching, searchPage, customersQuery.data, canSensitive]);
+
+  /*
+   * Three negatives that must stay three sentences. "No customer matched" is a
+   * claim about the tenant; "you may not search by phone" is a claim about
+   * this member and says nothing at all about the tenant; "there are more"
+   * says the list on screen is not the answer. Merging any two of them is how
+   * a real customer gets reported as not existing.
+   */
+  const phoneDenied = searching && searchPage?.phoneSearchDenied === true;
+  const searchIncomplete = Boolean(searchPage && (searchPage.hasMore || searchPage.truncated));
+  const searchEmpty =
+    searching && !phoneDenied && customerSearch.isSuccess && customerList.length === 0;
+  const listEmpty = !searching && customersQuery.isSuccess && customerList.length === 0;
 
   const unitPrice = product?.price ?? usd(0);
   const subtotal = multiplyMoney(unitPrice, Math.max(1, quantity));
@@ -339,10 +386,21 @@ export function CreateRealOrderSheet({
                     className="h-11 pl-9"
                   />
                 </div>
-                {customersQuery.isSuccess && customerList.length === 0 ? (
+                {phoneDenied ? (
                   <p className="text-caption text-text-muted">
-                    {customerQuery ? t("orderCreate.noCustomers") : t("orderCreate.customerNone")}
+                    {t("orderCreate.phoneSearchDenied")}
                   </p>
+                ) : null}
+                {customerSearch.isError ? (
+                  <p className="text-caption text-status-danger-text">
+                    {t("orderCreate.customerSearchError")}
+                  </p>
+                ) : null}
+                {searchEmpty ? (
+                  <p className="text-caption text-text-muted">{t("orderCreate.noCustomers")}</p>
+                ) : null}
+                {listEmpty ? (
+                  <p className="text-caption text-text-muted">{t("orderCreate.customerNone")}</p>
                 ) : null}
                 {customerList.length > 0 ? (
                   <ul className="max-h-40 space-y-1.5 overflow-y-auto">
@@ -365,6 +423,19 @@ export function CreateRealOrderSheet({
                       </li>
                     ))}
                   </ul>
+                ) : null}
+                {/*
+                 * Never let a page read as the whole tenant. Without this the
+                 * merchant sees twenty names and concludes the twenty-first
+                 * does not exist.
+                 */}
+                {searching && searchIncomplete ? (
+                  <p className="text-caption text-text-muted">{t("orderCreate.moreCustomers")}</p>
+                ) : null}
+                {!searching && customerList.length > 0 ? (
+                  <p className="text-caption text-text-muted">
+                    {t("orderCreate.customerRecentHint")}
+                  </p>
                 ) : null}
               </div>
             )}

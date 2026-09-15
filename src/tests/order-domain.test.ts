@@ -1468,11 +1468,46 @@ describe("Test 20: Order number strategy", () => {
     expect(rpcMigration()).toMatch(/'APSA-' \|\| v_year::TEXT \|\| '-' \|\| lpad\(/);
   });
 
+  /*
+   * The order code became a LOOKUP key in the customer-service search phase:
+   * findOrderByNumber exists, and a merchant can find an order by the
+   * reference printed on its receipt.
+   *
+   * That does not make it a SECURITY identifier, and this test pins the
+   * difference rather than the old proxy for it ("no read filters on
+   * order_number", which simply forbade the feature). The property that
+   * actually matters is that holding a code grants nothing: every query
+   * carrying one is still scoped by organization_id, so the same string is a
+   * different order in every tenant and reaches none of them but the caller's
+   * own.
+   */
   it("is documented as a display reference, never a security identifier", () => {
     expect(ordersMigration()).toMatch(/never used as a security identifier/i);
-    // Reads are by UUID + org, not by order_number.
+
     const repoSrc = readSource("src/server/orders/repository.ts");
-    expect(repoSrc).not.toMatch(/\.eq\("order_number"/);
+    const byNumber = repoSrc.slice(
+      repoSrc.indexOf("export async function findOrderByNumber"),
+      repoSrc.indexOf("export async function listOrders"),
+    );
+
+    // A code lookup exists, and is scoped to the caller's own organization.
+    expect(byNumber).toContain('.eq("organization_id", organizationId)');
+    expect(byNumber).toContain('.eq("order_number", orderNumber)');
+    // A cross-tenant or unissued code is the same null — no 403, no detail.
+    expect(byNumber).toContain("return null");
+
+    // Authorization is never derived from the code. The service requires
+    // orders.read and takes the organization from the resolved membership.
+    const serviceSrc = readSource("src/server/orders/service.ts");
+    const findByCode = serviceSrc.slice(
+      serviceSrc.indexOf("export async function findOrderByCode"),
+      serviceSrc.indexOf("/** Orders newest first, org-scoped"),
+    );
+    expect(findByCode).toContain('ctx.require("orders.read")');
+    expect(findByCode).toContain("ctx.organizationId");
+    // No organization may be named by the caller, here or at the API boundary.
+    expect(findByCode).not.toMatch(/organizationId:\s*(?!ctx)/);
+    expect(readSource("src/api/orders.ts")).not.toMatch(/organizationId:\s*z\./);
   });
 });
 

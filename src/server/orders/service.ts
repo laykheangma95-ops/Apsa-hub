@@ -66,6 +66,7 @@ import {
   type OrderFulfillmentStatus,
   type OrderStatusAxis,
 } from "./state-machine";
+import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
 import { ORDER_SOURCES } from "./types";
 import type {
   OrderRow,
@@ -610,6 +611,50 @@ export async function getOrderById(
 ): Promise<OrderDetail> {
   ctx.require("orders.read");
   return requireDetail(ctx.organizationId, orderId);
+}
+
+/**
+ * Find one order by the code a merchant reads out loud ("APSA-2026-000123").
+ *
+ * This is the Orders domain answering about an Order. Before it existed the
+ * only way to reach an order from its code was the Delivery list's free-text
+ * search, which meant an order with no delivery row was unfindable by the
+ * reference printed on its own receipt — and a merchant reading "no results"
+ * off a delivery search had no way to know that.
+ *
+ * Authorization is identical to getOrderById: `orders.read`, and the query is
+ * scoped to the organization the server resolved from the caller's membership.
+ * Two consequences, both deliberate:
+ *
+ *   - A code belonging to another organization returns null, exactly as an
+ *     unissued code does. Order numbers are unique PER TENANT
+ *     (uniq_orders_number_per_org), so the same string is a real order in many
+ *     organizations at once and must not be a probe into any of them.
+ *   - Null is returned rather than thrown. "No order carries this code" is an
+ *     ordinary answer to a search, not a failed request, and the console layer
+ *     must be able to tell those two apart (a thrown error means the lookup did
+ *     not complete, which is a different sentence on screen).
+ *
+ * A summary, not a detail: the caller needs the real order id to route to, the
+ * code, the total and the three status axes — all of which mapOrder produces
+ * from the single row this already read. Loading lines and history for a
+ * search result would be two more round trips for data no result card shows.
+ * No status, total or payment fact is derived here; every one of them is the
+ * stored column, mapped by the same mapOrder every other Order read uses.
+ */
+export async function findOrderByCode(
+  ctx: AuthorizationContext,
+  code: string,
+): Promise<OrderSummary | null> {
+  ctx.require("orders.read");
+
+  const normalized = normalizeOrderCode(code);
+  // An empty needle would match nothing anyway; refusing it here keeps a
+  // pointless round trip off the database on every cleared search box.
+  if (normalized.length === 0 || normalized.length > ORDER_CODE_MAX_LENGTH) return null;
+
+  const row = await repo.findOrderByNumber(ctx.organizationId, normalized);
+  return row ? mapOrder(row) : null;
 }
 
 /** Orders newest first, org-scoped, optionally filtered. Summaries only — no line items. */

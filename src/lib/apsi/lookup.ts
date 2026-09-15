@@ -32,6 +32,8 @@ import {
   listRealDeliveries,
   lookupProductByBarcode,
   lookupProductBySku,
+  lookupRealOrderByCode,
+  searchRealCustomers,
 } from "@/lib/api";
 import { getVariantStock } from "@/lib/inventory";
 import type { UiPermissionKey } from "@/lib/capabilities";
@@ -40,19 +42,36 @@ import type { PaymentStatus, PaymentVerificationState } from "@/lib/payments";
 import type { RealDeliveryStatus } from "@/lib/deliveries";
 import type { ApsiProbe, ApsiProbeKind, ApsiQueryPlan } from "./input";
 
-/** The one capability key each probe's own server function requires. */
-export const APSI_PROBE_PERMISSION: Readonly<Record<ApsiProbeKind, UiPermissionKey>> = {
-  "order-by-id": "orders.read",
-  "payment-by-id": "payments.read",
-  "delivery-by-id": "delivery.read",
-  "customer-by-id": "customers.read",
-  "product-by-barcode": "products.read",
-  "product-by-sku": "products.read",
-  "delivery-search": "delivery.read",
+/**
+ * Every capability key a probe's own server function requires. ALL of them
+ * must hold, or the probe is not issued.
+ *
+ * A list rather than a single key because of one entry: the customer phone
+ * search needs `customers.read` AND `customers.view_sensitive`, and the second
+ * is not optional decoration on the first. WHICH CUSTOMERS COME BACK for a
+ * typed phone fragment is the disclosure that `customers.view_sensitive`
+ * gates — blanking the digits afterwards still leaves the console answering
+ * "does a customer with this number exist here?". So the grant is checked
+ * before the request exists, not applied to its result.
+ */
+export const APSI_PROBE_PERMISSIONS: Readonly<Record<ApsiProbeKind, readonly UiPermissionKey[]>> = {
+  "order-by-id": ["orders.read"],
+  "order-by-code": ["orders.read"],
+  "payment-by-id": ["payments.read"],
+  "delivery-by-id": ["delivery.read"],
+  "customer-by-id": ["customers.read"],
+  "customer-by-name": ["customers.read"],
+  "customer-by-phone": ["customers.read", "customers.view_sensitive"],
+  "product-by-barcode": ["products.read"],
+  "product-by-sku": ["products.read"],
+  "delivery-search": ["delivery.read"],
 };
 
 /** How many delivery matches one console answer shows before it says "open the hub". */
 export const APSI_DELIVERY_RESULT_LIMIT = 5;
+
+/** How many customer matches one console answer shows. Apsi is a finder, not a CRM list. */
+export const APSI_CUSTOMER_RESULT_LIMIT = 5;
 
 // ── Result cards ──────────────────────────────────────────────────────────────
 
@@ -96,7 +115,14 @@ export interface ApsiCustomerResult {
   phone: string;
   /** Server-authoritative: false means the payload was built with PII withheld. */
   sensitiveVisible: boolean;
-  orderCount: number;
+  /**
+   * null when this card came from the customer SEARCH, which is a finder read
+   * and returns no order history. Rendered only when non-null: printing "0
+   * orders" for a customer whose history was never loaded is a CRM fact Apsi
+   * does not have, and a merchant would read it as "this person never bought
+   * anything".
+   */
+  orderCount: number | null;
   lastPurchaseAt: string | null;
 }
 
@@ -138,6 +164,13 @@ export interface ApsiLookupOutcome {
   failed: readonly ApsiFailedProbe[];
   /** True when at least one probe actually reached its domain and answered. */
   answered: boolean;
+  /**
+   * True when a domain said there is more than it returned — another page of
+   * customer matches, or a scan that hit its bound. A PARTIAL answer is not a
+   * complete one, and the console must not let a merchant read five results as
+   * "these are all of them".
+   */
+  incomplete: boolean;
 }
 
 export interface ApsiGrants {
@@ -159,9 +192,15 @@ export function planApsiLookup(plan: ApsiQueryPlan, grants: ApsiGrants): ApsiLoo
   const skipped: ApsiSkippedProbe[] = [];
 
   for (const probe of plan.probes) {
-    const permission = APSI_PROBE_PERMISSION[probe.kind];
-    if (grants.can(permission)) runnable.push(probe);
-    else skipped.push({ kind: probe.kind, permission });
+    const required = APSI_PROBE_PERMISSIONS[probe.kind];
+    // EVERY key, not any: the phone search holds two, and satisfying only
+    // customers.read would issue exactly the query customers.view_sensitive
+    // exists to prevent.
+    const missing = required.find((key) => !grants.can(key));
+    if (missing === undefined) runnable.push(probe);
+    // The FIRST missing key is what the member is told about — the one they
+    // would need to be granted next, rather than a list they cannot act on.
+    else skipped.push({ kind: probe.kind, permission: missing });
   }
 
   return { runnable, skipped };
@@ -176,7 +215,7 @@ export function planApsiLookup(plan: ApsiQueryPlan, grants: ApsiGrants): ApsiLoo
  * them is how a console starts telling a merchant an order does not exist when
  * the truth is that the request did not complete.
  */
-type ProbeOutcome = { ok: true; results: ApsiResult[] } | { ok: false };
+type ProbeOutcome = { ok: true; results: ApsiResult[]; incomplete?: boolean } | { ok: false };
 
 async function runProbe(probe: ApsiProbe, grants: ApsiGrants): Promise<ProbeOutcome> {
   try {
@@ -194,6 +233,34 @@ async function runProbe(probe: ApsiProbe, grants: ApsiGrants): Promise<ProbeOutc
               lifecycleStatus: detail.order.lifecycleStatus ?? null,
               paymentStatus: detail.order.paymentStatus,
               fulfillmentStatus: detail.order.fulfillmentStatus,
+            },
+          ],
+        };
+      }
+
+      case "order-by-code": {
+        /*
+         * The Orders domain, asked about an order — not the Delivery list's
+         * free-text search, which was the only path to an order code before
+         * and could not see an order that had no delivery row.
+         *
+         * `null` is a real answer ("no order carries this code"), so it is an
+         * empty result set, not a failure. The id on the summary is the
+         * production order id, which is what the card routes with.
+         */
+        const order = await lookupRealOrderByCode(probe.value);
+        if (!order) return { ok: true, results: [] };
+        return {
+          ok: true,
+          results: [
+            {
+              kind: "order",
+              id: order.id,
+              code: order.code,
+              total: order.total,
+              lifecycleStatus: order.lifecycleStatus ?? null,
+              paymentStatus: order.paymentStatus,
+              fulfillmentStatus: order.fulfillmentStatus,
             },
           ],
         };
@@ -256,6 +323,45 @@ async function runProbe(probe: ApsiProbe, grants: ApsiGrants): Promise<ProbeOutc
         };
       }
 
+      case "customer-by-name":
+      case "customer-by-phone": {
+        /*
+         * One server contract for both, because the difference between them is
+         * the server's to decide: it reads the shape of the query and the
+         * caller's own grants, and answers which column it actually matched.
+         * A probe kind here is a ROUTING decision, never an instruction to the
+         * server about which column to search.
+         *
+         * `true` for canViewSensitive is not a claim of access — the phone
+         * probe only exists in `runnable` when planApsiLookup confirmed BOTH
+         * customers.read and customers.view_sensitive hold, and the name probe
+         * never sends a phone-shaped query (the classifier routed those to the
+         * phone probe). The server re-derives the grant from the membership
+         * regardless and would refuse.
+         *
+         * Every match is returned as its own card. Apsi never picks one of
+         * several customers who share a name — choosing for the merchant is
+         * how the wrong person gets told about someone else's order.
+         */
+        const page = await searchRealCustomers(probe.value, true, {
+          limit: APSI_CUSTOMER_RESULT_LIMIT,
+        });
+        return {
+          ok: true,
+          incomplete: page.hasMore || page.truncated,
+          results: page.customers.map((customer) => ({
+            kind: "customer" as const,
+            id: customer.id,
+            name: customer.nameKm || customer.nameEn,
+            phone: customer.phone,
+            sensitiveVisible: customer.sensitiveVisible !== false,
+            // A finder read carries no order history. null, never 0.
+            orderCount: null,
+            lastPurchaseAt: null,
+          })),
+        };
+      }
+
       case "product-by-barcode":
       case "product-by-sku": {
         const product =
@@ -276,6 +382,9 @@ async function runProbe(probe: ApsiProbe, grants: ApsiGrants): Promise<ProbeOutc
         });
         return {
           ok: true,
+          // The Delivery domain already reports both of these honestly; Apsi
+          // passes them through rather than presenting a page as the whole set.
+          incomplete: page.hasMore || page.truncated,
           results: page.items.map((item) => ({
             kind: "delivery" as const,
             id: item.id,
@@ -343,7 +452,7 @@ export async function runApsiLookup(
   const { runnable, skipped } = planApsiLookup(plan, grants);
 
   if (runnable.length === 0) {
-    return { results: [], skipped, failed: [], answered: false };
+    return { results: [], skipped, failed: [], answered: false, incomplete: false };
   }
 
   const outcomes = await Promise.all(runnable.map((probe) => runProbe(probe, grants)));
@@ -352,6 +461,7 @@ export async function runApsiLookup(
   const failed: ApsiFailedProbe[] = [];
   const seen = new Set<string>();
   let answered = false;
+  let incomplete = false;
 
   outcomes.forEach((outcome, index) => {
     const probe = runnable[index]!;
@@ -360,6 +470,7 @@ export async function runApsiLookup(
       return;
     }
     answered = true;
+    if (outcome.incomplete) incomplete = true;
     for (const result of outcome.results) {
       const identity = `${result.kind}:${result.id}`;
       if (seen.has(identity)) continue;
@@ -368,7 +479,7 @@ export async function runApsiLookup(
     }
   });
 
-  return { results, skipped, failed, answered };
+  return { results, skipped, failed, answered, incomplete };
 }
 
 /** Where a result card's primary action goes. The domain owns the workflow. */

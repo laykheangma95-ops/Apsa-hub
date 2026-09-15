@@ -20,6 +20,12 @@ const PAYMENT_ID = "22222222-2222-4222-8222-222222222222";
 const DELIVERY_ID = "33333333-3333-4333-8333-333333333333";
 const CUSTOMER_ID = "44444444-4444-4444-8444-444444444444";
 const VARIANT_ID = "55555555-5555-4555-8555-555555555555";
+const CUSTOMER_ID_2 = "66666666-6666-4666-8666-666666666666";
+
+/** The merchant-facing order code, in the format allocate_order_number emits. */
+const ORDER_CODE = "APSA-2026-000123";
+const CUSTOMER_NAME = "Sokha";
+const CUSTOMER_PHONE = "012 345 678";
 
 /**
  * A single token that every double answers with "nothing", so a lookup can
@@ -106,6 +112,72 @@ mock.module("@/lib/api", () => ({
     calls.push(`sku:${sku}`);
     return null;
   },
+  lookupRealOrderByCode: async (code: string) => {
+    calls.push(`order-by-code:${code}`);
+    if (code !== ORDER_CODE) return null;
+    return {
+      id: ORDER_ID,
+      code: ORDER_CODE,
+      total: usd(1980),
+      lifecycleStatus: "confirmed",
+      paymentStatus: "pending_payment",
+      fulfillmentStatus: "packing",
+    };
+  },
+  searchRealCustomers: async (query: string, canViewSensitive: boolean) => {
+    calls.push(`customer-search:${query}:${canViewSensitive}`);
+    const empty = {
+      customers: [],
+      field: null,
+      hasMore: false,
+      truncated: false,
+      phoneSearchDenied: false,
+      limit: 5,
+      offset: 0,
+    };
+    if (query === CUSTOMER_PHONE) {
+      return {
+        ...empty,
+        field: "phone",
+        customers: [
+          {
+            id: CUSTOMER_ID,
+            nameKm: "សុខា",
+            nameEn: "Sokha",
+            phone: CUSTOMER_PHONE,
+            sensitiveVisible: true,
+          },
+        ],
+      };
+    }
+    if (query === CUSTOMER_NAME) {
+      // TWO customers share this name. Apsi must show both rather than pick.
+      return {
+        ...empty,
+        field: "name",
+        // The server held more than it returned — the console must say so.
+        hasMore: true,
+        customers: [
+          {
+            id: CUSTOMER_ID,
+            nameKm: "សុខា",
+            nameEn: "Sokha",
+            // What the SERVER sends a caller without customers.view_sensitive.
+            phone: "",
+            sensitiveVisible: false,
+          },
+          {
+            id: CUSTOMER_ID_2,
+            nameKm: "សុខា",
+            nameEn: "Sokha",
+            phone: "",
+            sensitiveVisible: false,
+          },
+        ],
+      };
+    }
+    return empty;
+  },
   listRealDeliveries: async (options: { search?: string }) => {
     calls.push(`delivery-search:${options.search}`);
     // A real search that genuinely matches nothing — the case where the
@@ -139,7 +211,7 @@ mock.module("@/lib/inventory", () => ({
 }));
 
 const { classifyApsiQuery } = await import("@/lib/apsi/input");
-const { planApsiLookup, runApsiLookup, APSI_PROBE_PERMISSION } = await import("@/lib/apsi/lookup");
+const { planApsiLookup, runApsiLookup, APSI_PROBE_PERMISSIONS } = await import("@/lib/apsi/lookup");
 
 function grantsFor(keys: readonly UiPermissionKey[]) {
   const set = new Set<string>(keys);
@@ -151,6 +223,7 @@ const ALL: readonly UiPermissionKey[] = [
   "payments.read",
   "delivery.read",
   "customers.read",
+  "customers.view_sensitive",
   "products.read",
   "inventory.read",
 ];
@@ -212,7 +285,162 @@ describe("Apsi FIND — deterministic lookup", () => {
   });
 });
 
+describe("Apsi FIND — order code reaches the Orders domain", () => {
+  /*
+   * The headline gap this phase closes. Before it, "APSA-2026-000123" reached
+   * an order only if that order happened to have a delivery row, because the
+   * Delivery list's free-text search was the only free-text search APSA had.
+   * An order created at the counter and never shipped was unfindable by the
+   * reference printed on its own receipt, and the console said "nothing
+   * matched" — which a staff member repeats as "we have no record of it".
+   */
+  it("looks an order code up in Orders, not through the Delivery search", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(ORDER_CODE), grantsFor(ALL));
+
+    expect(calls).toContain(`order-by-code:${ORDER_CODE}`);
+    // Behavioural, not source-text: no delivery request was made at all.
+    expect(calls.some((call) => call.startsWith("delivery"))).toBe(false);
+    expect(calls.some((call) => call.startsWith("sku:"))).toBe(false);
+
+    const order = outcome.results.find((r) => r.kind === "order");
+    expect(order).toMatchObject({ id: ORDER_ID, code: ORDER_CODE });
+  });
+
+  it("routes the card to the REAL production order id", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(ORDER_CODE), grantsFor(ALL));
+    const order = outcome.results.find((r) => r.kind === "order")!;
+
+    const { apsiResultRoute } = await import("@/lib/apsi/lookup");
+    // The id, never the code: the code is a human reference and routes nowhere.
+    expect(apsiResultRoute(order)).toEqual({ to: "/app/orders/$id", id: ORDER_ID });
+  });
+
+  it("normalizes case and stray whitespace into one lookup", async () => {
+    await runApsiLookup(classifyApsiQuery("  apsa-2026-000123 "), grantsFor(ALL));
+    expect(calls).toContain(`order-by-code:${ORDER_CODE}`);
+  });
+
+  it("reports a code that matches nothing as answered-and-empty, never as a failure", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery("APSA-2026-999999"), grantsFor(ALL));
+
+    expect(calls).toContain("order-by-code:APSA-2026-999999");
+    expect(outcome.answered).toBe(true);
+    expect(outcome.results).toEqual([]);
+    // A real "no order carries this code" — not an error dressed as an answer.
+    expect(outcome.failed).toEqual([]);
+  });
+
+  it("issues no Order request at all for a member without orders.read", async () => {
+    const outcome = await runApsiLookup(
+      classifyApsiQuery(ORDER_CODE),
+      grantsFor(["delivery.read", "customers.read"]),
+    );
+
+    expect(calls).toEqual([]);
+    expect(outcome.answered).toBe(false);
+    expect(outcome.skipped.map((s) => s.permission)).toEqual(["orders.read"]);
+  });
+});
+
+describe("Apsi FIND — customer search reaches the Customers domain", () => {
+  it("sends a name to the Customer search and returns EVERY match", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(ALL));
+
+    expect(calls.some((call) => call.startsWith(`customer-search:${CUSTOMER_NAME}`))).toBe(true);
+
+    // Two customers share this name. Apsi shows both — silently picking one is
+    // how a staff member ends up telling the wrong person about an order.
+    const customers = outcome.results.filter((r) => r.kind === "customer");
+    expect(customers).toHaveLength(2);
+    expect(new Set(customers.map((c) => c.id))).toEqual(new Set([CUSTOMER_ID, CUSTOMER_ID_2]));
+  });
+
+  it("carries the server's 'there are more' answer through, never presenting a page as the set", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(ALL));
+    expect(outcome.incomplete).toBe(true);
+  });
+
+  it("reports no order history rather than inventing a zero", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(ALL));
+    const customer = outcome.results.find((r) => r.kind === "customer")!;
+    // null is "not asked". 0 would read to a merchant as "never bought anything".
+    expect(customer).toMatchObject({ orderCount: null, lastPurchaseAt: null });
+  });
+
+  it("passes a withheld phone through untouched, and never reconstructs one", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(ALL));
+    const customer = outcome.results.find((r) => r.kind === "customer")!;
+    expect(customer).toMatchObject({ phone: "", sensitiveVisible: false });
+  });
+
+  it("finds a customer by phone when BOTH grants hold", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(CUSTOMER_PHONE), grantsFor(ALL));
+
+    expect(calls.some((call) => call.startsWith("customer-search:"))).toBe(true);
+    expect(outcome.results.some((r) => r.kind === "customer" && r.id === CUSTOMER_ID)).toBe(true);
+  });
+});
+
 describe("Apsi permission model — withheld before the request, not after", () => {
+  /*
+   * THE LAUNCH-CRITICAL PROBE, asserted behaviourally.
+   *
+   * A member with customers.read but not customers.view_sensitive must not be
+   * able to use Apsi as a phone-number existence oracle. The recording double
+   * is what makes this a real proof: it records every call, so this asserts
+   * that NO REQUEST CARRYING THE NUMBER WAS EVER MADE — not merely that the
+   * digits were blanked on the card afterwards. Masking the result would leave
+   * "which customers came back" answering the question the grant gates.
+   */
+  it("never issues a customer phone search without customers.view_sensitive", async () => {
+    const outcome = await runApsiLookup(
+      classifyApsiQuery(CUSTOMER_PHONE),
+      grantsFor(["customers.read", "orders.read", "delivery.read", "products.read"]),
+    );
+
+    expect(calls).toEqual([]);
+    expect(outcome.answered).toBe(false);
+    expect(outcome.results).toEqual([]);
+    expect(outcome.skipped.map((s) => s.permission)).toEqual(["customers.view_sensitive"]);
+
+    // And the console cannot claim absence from that silence.
+    const nothingFound =
+      outcome.answered && outcome.results.length === 0 && outcome.failed.length === 0;
+    expect(nothingFound).toBe(false);
+  });
+
+  /*
+   * REVOCATION, end to end. The same typed number, the same principal, before
+   * and after the grant is withdrawn. The second lookup must issue nothing —
+   * and because the cache key carries the grant (apsiKeys.lookup), the first
+   * lookup's answer is not at the address the second one reads either.
+   */
+  it("stops issuing the phone search the moment the grant is revoked", async () => {
+    const plan = classifyApsiQuery(CUSTOMER_PHONE);
+
+    const granted = await runApsiLookup(plan, grantsFor(ALL));
+    expect(granted.results.length).toBeGreaterThan(0);
+    const callsWhileGranted = [...calls];
+    expect(callsWhileGranted.some((call) => call.startsWith("customer-search:"))).toBe(true);
+
+    calls.length = 0;
+
+    const revoked = await runApsiLookup(plan, grantsFor(["customers.read"]));
+    expect(calls).toEqual([]);
+    expect(revoked.results).toEqual([]);
+    expect(revoked.answered).toBe(false);
+
+    const { apsiKeys } = await import("@/lib/apsi-query");
+    expect(apsiKeys.lookup("u", "o", plan.normalized, true)).not.toEqual(
+      apsiKeys.lookup("u", "o", plan.normalized, false),
+    );
+  });
+
+  it("never issues a customer search of any kind without customers.read", async () => {
+    await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(["delivery.read"]));
+    expect(calls.some((call) => call.startsWith("customer-search:"))).toBe(false);
+  });
+
   it("never issues a Payment read for a member without payments.read", async () => {
     const outcome = await runApsiLookup(classifyApsiQuery(PAYMENT_ID), grantsFor(["orders.read"]));
 
@@ -308,11 +536,19 @@ describe("Apsi permission model — withheld before the request, not after", () 
   });
 
   it("declares a permission for every probe the classifier can emit", () => {
-    const plan = classifyApsiQuery(ORDER_ID);
-    const freeText = classifyApsiQuery("APSA-1042");
-    for (const probe of [...plan.probes, ...freeText.probes]) {
-      expect(APSI_PROBE_PERMISSION[probe.kind]).toBeTruthy();
+    const plans = [ORDER_ID, ORDER_CODE, CUSTOMER_NAME, CUSTOMER_PHONE, "JT-9001"].map(
+      classifyApsiQuery,
+    );
+    for (const plan of plans) {
+      expect(plan.probes.length).toBeGreaterThan(0);
+      for (const probe of plan.probes) {
+        expect({
+          kind: probe.kind,
+          keys: (APSI_PROBE_PERMISSIONS[probe.kind] ?? []).length,
+        }).toEqual({ kind: probe.kind, keys: expect.any(Number) });
+        expect(APSI_PROBE_PERMISSIONS[probe.kind]!.length).toBeGreaterThan(0);
+      }
+      expect(planApsiLookup(plan, grantsFor([])).runnable).toEqual([]);
     }
-    expect(planApsiLookup(plan, grantsFor([])).runnable).toEqual([]);
   });
 });

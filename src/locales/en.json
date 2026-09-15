@@ -731,7 +731,6 @@
       "add": "Add customer",
       "remove": "Remove customer",
       "search": "Search name or phone",
-      "recent": "Recent customers",
       "results": "Results",
       "quickCreate": "Create new customer",
       "name": "Name",
@@ -740,7 +739,16 @@
       "empty": {
         "title": "No customer found",
         "body": "Try another name or phone number, or create a new customer."
-      }
+      },
+      "prompt": {
+        "title": "Search for a customer",
+        "body": "Type a name, or a phone number if your role can search by phone."
+      },
+      "phoneDenied": {
+        "title": "Phone search not available",
+        "body": "Searching customers by phone number needs the customers.view_sensitive permission, which your role does not have. This is not an answer about whether that customer exists — search by name instead, or ask an owner or manager."
+      },
+      "more": "More customers match than are shown. Type more of the name or number to narrow it."
     },
     "variant": {
       "chooseOne": "Choose a variant"
@@ -972,7 +980,11 @@
     "permission": {
       "title": "You can't apply a discount",
       "body": "Ask an owner or manager to apply a discount."
-    }
+    },
+    "phoneSearchDenied": "Searching by phone number needs the customers.view_sensitive permission, which your role does not have. Search by name instead.",
+    "customerSearchError": "The customer search did not complete. Try again.",
+    "moreCustomers": "More customers match than are shown. Type more to narrow the search.",
+    "customerRecentHint": "Recent customers. Type to search every customer."
   },
   "delivery": {
     "title": "Delivery",
@@ -1819,19 +1831,14 @@
     "title": "Apsi",
     "lead": "Find a record, check its state, then open it where it lives.",
     "searchLabel": "Search or ask Apsi",
-    "searchPlaceholder": "Order code, tracking number, SKU, barcode…",
-    "searchScope": "Searches deliveries by order code, tracking number, courier and customer name, and products by exact SKU or barcode. Paste an order, payment, delivery or customer ID to open it directly.",
+    "searchPlaceholder": "Order code, customer name or phone, tracking number, SKU…",
+    "searchScope": "An order code goes to Orders, a customer name or phone number to Customers, a tracking number or courier to Deliveries, and a SKU or barcode to Products. Paste a record ID to open it directly. Searching by phone number needs the customers.view_sensitive permission.",
     "clearSearch": "Clear search",
     "openDomain": "Open a workspace instead",
     "noTools": "You do not have access to any of Apsi's lookups yet. Ask an owner or manager to review your role.",
-    "noResults": "No delivery, SKU or barcode matched “{{query}}”. Apsi cannot search orders by code, or customers by name or phone — the record may still exist. Open a workspace below to keep looking.",
     "partialFailure": "Part of this search did not complete, so this answer may be incomplete.",
     "retry": "Try again",
     "withheld": "One lookup was not run: it needs the {{permission}} permission, which your role does not have.",
-    "unsupported": {
-      "customer-phone-search": "Apsi cannot search customers by phone number yet — there is no server-side customer search in APSA. Open Inbox to find the conversation instead.",
-      "customer-name-search": "Apsi cannot search customers by name yet — there is no server-side customer search in APSA. A name still matches a delivery's recorded customer."
-    },
     "card": {
       "order": "Order",
       "payment": "Payment",
@@ -1850,6 +1857,14 @@
       "delivery": "Open delivery",
       "customer": "Open customer",
       "product": "Open product"
+    },
+    "moreResults": "More matches exist than are shown here. Narrow the search, or open the workspace below for the full list.",
+    "empty": {
+      "orderCode": "No order matched this order code.",
+      "customerPhone": "No customer matched this phone number.",
+      "customerName": "No customer or delivery matched “{{query}}”. Open a workspace below to keep looking.",
+      "identifier": "No order, payment, delivery or customer carries this ID.",
+      "search": "No delivery, SKU or barcode matched “{{query}}”. Open a workspace below to keep looking."
     }
   }
 }
