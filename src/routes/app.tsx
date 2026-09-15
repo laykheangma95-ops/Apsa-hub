@@ -22,6 +22,7 @@ import { checkAppGuardFn } from "@/api/app-guard";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
+import { enforceApsiCachePrincipal } from "@/lib/apsi-query";
 import { enforceHomeCachePrincipal } from "@/lib/home-query";
 import { enforceCustomerCachePrincipal } from "@/lib/customers-query";
 import { enforceDeliveryCachePrincipal } from "@/lib/deliveries-query";
@@ -115,6 +116,13 @@ function AppLayout() {
   enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
   enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId);
   enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
+  /*
+   * The Apsi console lives in the bottom nav, so it is mounted on every
+   * signed-in screen and its answers — customer names, order codes, payment
+   * states — outlive any single route. It is partitioned here for exactly the
+   * same reason as the five above.
+   */
+  enforceApsiCachePrincipal(queryClient, session.userId, organizationId);
 
   return (
     <CapabilityProvider

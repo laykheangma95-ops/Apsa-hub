@@ -280,7 +280,7 @@ describe("U4: bottom navigation shows only supported destinations", () => {
 
   it("an owner-equivalent permission set keeps every tab", () => {
     const config = filterBusinessNavConfig(getBusinessNavConfig("online-seller"), ownerish);
-    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "inbox", "resolve", "sales", "more"]);
+    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "inbox", "ask", "sales", "my"]);
   });
 
   it("drops the Inbox tab for a member without messages.read", () => {
@@ -296,14 +296,20 @@ describe("U4: bottom navigation shows only supported destinations", () => {
     expect(config.tabs.map((tab) => tab.id)).not.toContain("sales");
   });
 
-  it("hides the Team entry for a member without team.read", () => {
+  /*
+   * The former "More" sheet is gone: account, business profile, the team
+   * roster and sign-out all live behind the My tab, which routes to the
+   * existing Settings screen and gates each of its sections individually.
+   * What the nav still owes is that My is always reachable — every active
+   * member has an account, a language preference and a way out — while the
+   * operational destinations stay gated.
+   */
+  it("keeps My reachable for a member with no administrative access", () => {
     const config = filterBusinessNavConfig(getBusinessNavConfig("online-seller"), cashierish);
-    const actionIds = config.moreGroups.flatMap((group) =>
-      group.actions.map((action) => action.id),
-    );
-    expect(actionIds).not.toContain("staff-team");
-    // Settings stays: every active member has account + language settings.
-    expect(actionIds).toContain("settings");
+    const myTab = config.tabs.find((tab) => tab.id === "my");
+    expect(myTab?.to).toBe("/app/settings");
+    expect(myTab?.requiresAll).toBeUndefined();
+    expect(myTab?.requiresAny).toBeUndefined();
   });
 
   it("hides the Deliveries entry for a member without delivery.read", () => {
@@ -318,12 +324,10 @@ describe("U4: bottom navigation shows only supported destinations", () => {
       getBusinessNavConfig("online-seller"),
       UNRESOLVED_CAPABILITIES,
     );
-    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "resolve", "more"]);
-    const allActions = [
-      ...config.resolveGroups,
-      ...config.salesGroups,
-      ...config.moreGroups,
-    ].flatMap((group) => group.actions);
+    expect(config.tabs.map((tab) => tab.id)).toEqual(["home", "ask", "my"]);
+    const allActions = [...config.askGroups, ...config.salesGroups].flatMap(
+      (group) => group.actions,
+    );
     expect(allActions.every((action) => !action.requiresAll && !action.requiresAny)).toBe(true);
   });
 
@@ -332,7 +336,7 @@ describe("U4: bottom navigation shows only supported destinations", () => {
       getBusinessNavConfig("online-seller"),
       createFixtureCapabilityView([]),
     );
-    for (const group of [...config.resolveGroups, ...config.salesGroups, ...config.moreGroups]) {
+    for (const group of [...config.askGroups, ...config.salesGroups]) {
       expect(group.actions.length).toBeGreaterThan(0);
     }
   });

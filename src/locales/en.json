@@ -39,71 +39,33 @@
   "nav": {
     "home": "Home",
     "inbox": "Inbox",
-    "resolve": "Resolve",
     "sales": "Sales",
     "stock": "Stock",
     "primary": "Primary app navigation",
     "create": "Create",
     "orders": "Orders",
-    "more": "More",
     "contacts": "Contacts",
     "newSale": "New sale",
     "newOrder": "New order",
     "addProduct": "Add product",
     "scanBarcode": "Scan barcode",
     "team": "Team",
-    "openResolve": "Open Resolve",
     "openSales": "Open Sales",
-    "openMore": "Open More",
     "availableNow": "Available now",
     "opensExisting": "Opens existing",
     "comingSoon": "Coming soon",
     "retrySalesHub": "Sales activity did not load. Tap to try again.",
     "openOrder": "Open order",
-    "resolveSheetTitle": "Resolve",
-    "resolveSheetLead": "Find or fix something fast",
-    "resolveSheetBody": "Use the fastest real tool we have today, and show coming-soon states where the workflow is not built yet.",
     "salesSheetTitle": "Sales",
     "salesSheetLead": "Transactions in one place",
     "salesSheetBody": "Sales groups your live transaction entry points first, then recent orders, with honest placeholders for tools that are not ready yet.",
     "salesRecent": "Recent transactions",
     "salesRecentBody": "Open an order to review payment, delivery and return status without leaving the signed-in shell.",
     "salesRecentEmpty": "Recent orders will appear here.",
-    "moreSheetTitle": "More",
-    "moreSheetLead": "Everything else, without crowding the tab bar",
-    "moreSheetBody": "Lower-frequency business tools live here so Home, Inbox and Sales can stay focused.",
-    "resolveGroups": {
-      "quickTools": "Quick tools"
-    },
     "salesGroups": {
       "start": "Start a transaction",
-      "manage": "Manage sales activity"
-    },
-    "moreGroups": {
-      "business": "Business tools",
-      "admin": "Admin and account"
-    },
-    "resolveActions": {
-      "scanBarcode": {
-        "label": "Scan barcode",
-        "description": "Camera barcode scanning is not in the app yet."
-      },
-      "findCustomer": {
-        "label": "Find customer",
-        "description": "Open Inbox and search by customer name or phone."
-      },
-      "findOrder": {
-        "label": "Find order",
-        "description": "Open Orders and browse every order, newest first."
-      },
-      "checkPayment": {
-        "label": "Check payment",
-        "description": "Open Payments and filter by settlement or verification state."
-      },
-      "trackDelivery": {
-        "label": "Track delivery / shipment",
-        "description": "Open Deliveries and search by order, customer or courier."
-      }
+      "manage": "Manage sales activity",
+      "catalogue": "Catalogue and stock"
     },
     "salesActions": {
       "newSale": {
@@ -129,51 +91,54 @@
       "returnsRefunds": {
         "label": "Returns / Refunds",
         "description": "A dedicated returns and refunds hub is not in the app yet."
-      }
-    },
-    "moreActions": {
-      "productsStock": {
-        "label": "Products / Stock",
-        "description": "How much of each item you have on hand."
-      },
-      "customers": {
-        "label": "Customers",
-        "description": "A customer list hub is not in the app yet."
-      },
-      "analytics": {
-        "label": "Analytics",
-        "description": "A business analytics hub is not in the app yet."
-      },
-      "staffTeam": {
-        "label": "Staff / Team",
-        "description": "Open the live team management screen."
-      },
-      "promotionsCrm": {
-        "label": "Promotions / CRM",
-        "description": "A promotions and CRM hub is not in the app yet."
-      },
-      "locations": {
-        "label": "Locations",
-        "description": "A locations management hub is not in the app yet."
-      },
-      "integrations": {
-        "label": "Integrations",
-        "description": "An integrations hub is not in the app yet."
-      },
-      "settings": {
-        "label": "Settings",
-        "description": "Open your business, account and language settings."
-      },
-      "profileAccount": {
-        "label": "Profile / account",
-        "description": "Profile and account settings are not in the app yet."
       },
       "productCatalog": {
         "label": "Product catalogue",
         "description": "Names, variants and prices for what you sell."
+      },
+      "productsStock": {
+        "label": "Products / Stock",
+        "description": "How much of each item you have on hand."
       }
     },
-    "tabWithCount": "{{tab}}, {{count}} need attention"
+    "tabWithCount": "{{tab}}, {{count}} need attention",
+    "ask": "Ask",
+    "my": "My",
+    "openAsk": "Open Apsi",
+    "askGroups": {
+      "find": "Find and check",
+      "products": "Products and stock"
+    },
+    "askActions": {
+      "findCustomer": {
+        "label": "Find customer",
+        "description": "Open Inbox and search by customer name or phone."
+      },
+      "findOrder": {
+        "label": "Find order",
+        "description": "Open Orders and browse every order, newest first."
+      },
+      "checkPayment": {
+        "label": "Check payment",
+        "description": "Open Payments and filter by settlement or verification state."
+      },
+      "trackDelivery": {
+        "label": "Track delivery / shipment",
+        "description": "Open Deliveries and search by order, customer or courier."
+      },
+      "findProduct": {
+        "label": "Find product",
+        "description": "Open the catalogue and browse names, variants and prices."
+      },
+      "checkStock": {
+        "label": "Check stock",
+        "description": "Open Stock and see how much of each item is on hand."
+      },
+      "scanBarcode": {
+        "label": "Scan barcode with camera",
+        "description": "Camera scanning is not in the app yet. Type or paste a barcode above and Apsi will look it up."
+      }
+    }
   },
   "landing": {
     "head": {
@@ -1848,6 +1813,43 @@
       "conflict": "This payment changed while you had it open. Reload and try again.",
       "invalid": "That could not be accepted. Check the amount and the reason.",
       "server_error": "Something went wrong. Nothing was changed."
+    }
+  },
+  "apsi": {
+    "title": "Apsi",
+    "lead": "Find a record, check its state, then open it where it lives.",
+    "searchLabel": "Search or ask Apsi",
+    "searchPlaceholder": "Order code, tracking number, SKU, barcode…",
+    "searchScope": "Searches deliveries by order code, tracking number, courier and customer name, and products by exact SKU or barcode. Paste an order, payment, delivery or customer ID to open it directly.",
+    "clearSearch": "Clear search",
+    "openDomain": "Open a workspace instead",
+    "noTools": "You do not have access to any of Apsi's lookups yet. Ask an owner or manager to review your role.",
+    "noResults": "Nothing in APSA matched “{{query}}”.",
+    "partialFailure": "Part of this search did not complete, so this answer may be incomplete.",
+    "retry": "Try again",
+    "withheld": "One lookup was not run: it needs the {{permission}} permission, which your role does not have.",
+    "unsupported": {
+      "customer-phone-search": "Apsi cannot search customers by phone number yet — there is no server-side customer search in APSA. Open Inbox to find the conversation instead.",
+      "customer-name-search": "Apsi cannot search customers by name yet — there is no server-side customer search in APSA. A name still matches a delivery's recorded customer."
+    },
+    "card": {
+      "order": "Order",
+      "payment": "Payment",
+      "delivery": "Delivery",
+      "customer": "Customer",
+      "product": "Product",
+      "deliveryNoOrderCode": "Order code not available",
+      "customerPhoneWithheld": "Phone hidden — needs customers.view_sensitive",
+      "customerOrders": "{{count}} order(s) recorded",
+      "stockOnHand": "{{count}} on hand",
+      "stockUnknown": "Stock not checked"
+    },
+    "open": {
+      "order": "Open order",
+      "payment": "Open payment",
+      "delivery": "Open delivery",
+      "customer": "Open customer",
+      "product": "Open product"
     }
   }
 }
