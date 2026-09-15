@@ -188,8 +188,27 @@ export function CreateRealOrderSheet({
    */
   const phoneDenied = searching && searchPage?.phoneSearchDenied === true;
   const searchIncomplete = Boolean(searchPage && (searchPage.hasMore || searchPage.truncated));
+  /*
+   * `!searchIncomplete` stops the two lines contradicting each other. A
+   * bounded phone scan that read part of a large tenant and matched nothing
+   * used to render "no customers matched" AND "more customers match than are
+   * shown" together — one of which is false and the other unreadable next to
+   * it. An incomplete search with no matches is searchBounded below, alone.
+   */
   const searchEmpty =
-    searching && !phoneDenied && customerSearch.isSuccess && customerList.length === 0;
+    searching &&
+    !phoneDenied &&
+    customerSearch.isSuccess &&
+    customerList.length === 0 &&
+    !searchIncomplete;
+
+  /** Searched, matched nothing, stopped early. Never presented as absence. */
+  const searchBounded =
+    searching &&
+    !phoneDenied &&
+    customerSearch.isSuccess &&
+    customerList.length === 0 &&
+    searchIncomplete;
   const listEmpty = !searching && customersQuery.isSuccess && customerList.length === 0;
 
   const unitPrice = product?.price ?? usd(0);
@@ -399,6 +418,11 @@ export function CreateRealOrderSheet({
                 {searchEmpty ? (
                   <p className="text-caption text-text-muted">{t("orderCreate.noCustomers")}</p>
                 ) : null}
+                {searchBounded ? (
+                  <p className="text-caption text-text-muted">
+                    {t("orderCreate.boundedCustomers")}
+                  </p>
+                ) : null}
                 {listEmpty ? (
                   <p className="text-caption text-text-muted">{t("orderCreate.customerNone")}</p>
                 ) : null}
@@ -429,7 +453,7 @@ export function CreateRealOrderSheet({
                  * merchant sees twenty names and concludes the twenty-first
                  * does not exist.
                  */}
-                {searching && searchIncomplete ? (
+                {searching && searchIncomplete && customerList.length > 0 ? (
                   <p className="text-caption text-text-muted">{t("orderCreate.moreCustomers")}</p>
                 ) : null}
                 {!searching && customerList.length > 0 ? (

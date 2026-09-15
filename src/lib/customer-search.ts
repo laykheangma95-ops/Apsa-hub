@@ -32,8 +32,12 @@
  *   "012 345 678"  matches a customer stored as "012345678", "012-345-678",
  *                  "012 345 678" or "០១២៣៤៥៦៧៨" — separators and script
  *                  never change the answer.
- *   "01234567"     matches "012345678" — a prefix, so the picker narrows as
- *                  the merchant types the last digits.
+ *   "01234567"     matches "012345678" under phoneDigitsMatch — a prefix, so
+ *                  the picker narrows as the merchant types the last digits.
+ *                  Note that eight digits is below the CLASSIFICATION floor
+ *                  (MIN_LOCAL_PHONE_DIGITS), so a query that short is not
+ *                  routed to phone search in the first place; the prefix rule
+ *                  applies from the ninth digit on.
  *   "012345678"    does NOT match a customer stored as "+855 12 345 678".
  *                  Those are the same human number, and APSA knows it is not
  *                  allowed to assume that: converting 0XX <-> +855XX is a
@@ -48,9 +52,11 @@
  * The length bounds in looksLikeCustomerPhoneQuery exist for two reasons. A
  * short fragment would match most of the tenant, and because phone matching is
  * gated on customers.view_sensitive, a permissive prefix is a cheaper
- * existence oracle than a precise one. And an unbounded digit run would
- * swallow barcodes: an EAN-13 is thirteen digits, and routing a scanned
- * product to the Customer domain would report it as not found.
+ * existence oracle than a precise one. And a loose digit run would swallow
+ * barcodes at BOTH ends: an EAN-13 is thirteen digits, and a UPC-E is eight
+ * beginning with 0 — routing either to the Customer domain reports a scanned
+ * product as not found. The upper bound keeps EAN-13 out; the lower bound
+ * (MIN_LOCAL_PHONE_DIGITS) keeps UPC-E out.
  *
  * Safe to bundle for the browser: pure string work, no imports.
  */
@@ -66,10 +72,32 @@ const PHONE_SHAPE_RE = /^[+]?[\d\s.\-()០-៩]+$/u;
 
 /**
  * Below this, a digit run is a fragment, not a phone number — see the note on
- * existence oracles above. It is also the shortest Cambodian local number the
- * shape rule below accepts, so nothing shorter can reach a phone match.
+ * existence oracles above. This is the floor on the MATCHING side
+ * (phoneDigitsMatch); the CLASSIFICATION floor for a local number is
+ * MIN_LOCAL_PHONE_DIGITS below, which is stricter.
  */
 export const MIN_PHONE_QUERY_DIGITS = 8;
+
+/**
+ * The shortest LOCAL (leading-zero) number that is classified as a phone query.
+ *
+ * Nine, not eight, and the extra digit is what keeps a scanned product out of
+ * the Customer domain. A UPC-E barcode is eight digits and its number-system
+ * digit is almost always 0 — "01234565" is a perfectly ordinary retail barcode
+ * that an eight-digit floor classified as a Cambodian phone number, which sent
+ * it to Customer phone search ALONE and dropped the Catalog probes that would
+ * have found the product.
+ *
+ * Nine is not a guess: every Cambodian local number this app carries is nine or
+ * ten digits (0XX XXX XXX / 0XX XXX XXXX), and every phone value in the
+ * repository is nine. So no complete local number is excluded by this floor —
+ * only an incomplete one, which costs a merchant typing a number one keystroke
+ * before the search fires.
+ *
+ * This deliberately changes NOTHING about country codes. The "+855" branch is
+ * untouched, and no 0XX <-> +855XX conversion is introduced here or anywhere.
+ */
+export const MIN_LOCAL_PHONE_DIGITS = 9;
 
 /** Longest query any customer-search validator accepts. */
 export const CUSTOMER_SEARCH_MAX_QUERY_LENGTH = 100;
@@ -115,7 +143,7 @@ export function looksLikeCustomerPhoneQuery(raw: string): boolean {
     return digits.length >= 10 && digits.length <= 12;
   }
   if (digits.startsWith("0")) {
-    return digits.length >= MIN_PHONE_QUERY_DIGITS && digits.length <= 10;
+    return digits.length >= MIN_LOCAL_PHONE_DIGITS && digits.length <= 10;
   }
   return false;
 }

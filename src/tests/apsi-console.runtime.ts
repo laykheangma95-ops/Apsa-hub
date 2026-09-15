@@ -34,6 +34,13 @@ const CUSTOMER_PHONE = "012 345 678";
  */
 const NO_MATCH_QUERY = "NOMATCH-XYZ";
 
+/**
+ * A phone number in a tenant so large the bounded scan stopped before reaching
+ * the end of it. Zero matches AND `truncated`, which is the pair the console
+ * must never render as "no customer matched this phone number".
+ */
+const TRUNCATED_PHONE = "099 888 777";
+
 const usd = (minor: number) => ({ amountMinor: minor, currency: "USD" as const });
 
 mock.module("@/lib/api", () => ({
@@ -135,6 +142,10 @@ mock.module("@/lib/api", () => ({
       limit: 5,
       offset: 0,
     };
+    if (query === TRUNCATED_PHONE) {
+      // The scan ran, matched nothing, and ran out of budget before the end.
+      return { ...empty, field: "phone", truncated: true };
+    }
     if (query === CUSTOMER_PHONE) {
       return {
         ...empty,
@@ -392,6 +403,56 @@ describe("Apsi permission model — withheld before the request, not after", () 
    * digits were blanked on the card afterwards. Masking the result would leave
    * "which customers came back" answering the question the grant gates.
    */
+  it("reports a truncated phone scan as incomplete, never as a match-free answer", async () => {
+    /*
+     * The bounded scan stops at its safety limit, so a tenant larger than that
+     * bound can return zero matches WITHOUT having looked at every customer.
+     * `incomplete` is the only thing standing between that and the console
+     * telling a staff member the caller is not in APSA.
+     */
+    const outcome = await runApsiLookup(classifyApsiQuery(TRUNCATED_PHONE), grantsFor(ALL));
+
+    expect(outcome.answered).toBe(true);
+    expect(outcome.results).toEqual([]);
+    expect(outcome.incomplete).toBe(true);
+
+    // The console's own two gates, evaluated exactly as ApsiConsoleSheet does.
+    const nothingFound =
+      outcome.answered &&
+      outcome.results.length === 0 &&
+      outcome.failed.length === 0 &&
+      !outcome.incomplete;
+    const boundedNoMatch =
+      outcome.answered &&
+      outcome.failed.length === 0 &&
+      outcome.incomplete &&
+      outcome.results.length === 0;
+
+    expect(nothingFound).toBe(false);
+    expect(boundedNoMatch).toBe(true);
+  });
+
+  it("passes the caller's real sensitive grant to the customer search, never a literal true", async () => {
+    /*
+     * The client boundary refuses to SEND a phone-shaped query without the
+     * grant. Handing it a hardcoded `true` made that guard unreachable and
+     * rested the whole property on an invariant in the classifier, two modules
+     * away. The grant travels from the caller instead.
+     */
+    await runApsiLookup(
+      classifyApsiQuery(CUSTOMER_NAME),
+      grantsFor(["customers.read", "delivery.read"]),
+    );
+    expect(calls).toContain(`customer-search:${CUSTOMER_NAME}:false`);
+    expect(calls).not.toContain(`customer-search:${CUSTOMER_NAME}:true`);
+
+    calls.length = 0;
+
+    // And a caller who does hold it still searches with it.
+    await runApsiLookup(classifyApsiQuery(CUSTOMER_NAME), grantsFor(ALL));
+    expect(calls).toContain(`customer-search:${CUSTOMER_NAME}:true`);
+  });
+
   it("never issues a customer phone search without customers.view_sensitive", async () => {
     const outcome = await runApsiLookup(
       classifyApsiQuery(CUSTOMER_PHONE),

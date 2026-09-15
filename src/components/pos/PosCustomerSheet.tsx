@@ -114,12 +114,29 @@ export function PosCustomerSheet({
   const denied = page?.phoneSearchDenied === true;
   const incomplete = Boolean(page && (page.hasMore || page.truncated));
   const searched = query.trim().length > 0;
+  /*
+   * `!incomplete` is the difference between "we looked everywhere and there is
+   * no such customer" and "we stopped looking before the end". The bounded
+   * phone scan can return zero matches having read only part of a large
+   * tenant, and "No customer found" there is a false claim the cashier repeats
+   * to the person standing at the counter. That case gets boundedNoMatch.
+   */
   const emptyResult =
     searched &&
     !denied &&
     !customersQuery.isPending &&
     !customersQuery.isError &&
-    results.length === 0;
+    results.length === 0 &&
+    !incomplete;
+
+  /** Searched, matched nothing, but stopped early — a caveat, never an absence. */
+  const boundedNoMatch =
+    searched &&
+    !denied &&
+    !customersQuery.isPending &&
+    !customersQuery.isError &&
+    results.length === 0 &&
+    incomplete;
 
   async function quickCreate() {
     if (!name.trim() || !phone.trim()) return;
@@ -215,6 +232,17 @@ export function PosCustomerSheet({
             <PosNotice title={t("pos.customer.empty.title")} body={t("pos.customer.empty.body")} />
           ) : null}
 
+          {/*
+           * Zero matches from a search that stopped early. Rendered INSTEAD of
+           * the empty notice, never alongside it.
+           */}
+          {boundedNoMatch ? (
+            <PosNotice
+              title={t("pos.customer.bounded.title")}
+              body={t("pos.customer.bounded.body")}
+            />
+          ) : null}
+
           {results.length > 0 ? (
             <>
               <p className="text-label text-text-secondary">{t("pos.customer.results")}</p>
@@ -234,11 +262,18 @@ export function PosCustomerSheet({
                   </li>
                 ))}
               </ul>
-              {/* A page is not the whole answer — never let a short list read as "that is everyone". */}
-              {incomplete ? (
-                <p className="text-caption text-text-muted">{t("pos.customer.more")}</p>
-              ) : null}
             </>
+          ) : null}
+
+          {/*
+           * The completeness caveat lives OUTSIDE the results list, so it is
+           * driven by what the server reported and not by whether this page
+           * happened to be non-empty. With results it warns that a page is not
+           * the whole answer; with none, boundedNoMatch above has already said
+           * so, and this stays quiet rather than contradicting it.
+           */}
+          {incomplete && results.length > 0 ? (
+            <p className="text-caption text-text-muted">{t("pos.customer.more")}</p>
           ) : null}
 
           <Button variant="outline" className="tap-target w-full" onClick={() => setCreating(true)}>

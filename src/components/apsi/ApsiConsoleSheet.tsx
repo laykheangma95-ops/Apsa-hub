@@ -123,11 +123,35 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
    * matched, having issued no request at all: a negative existence claim built
    * from silence. That member sees the withheld notices instead.
    */
+  /*
+   * `!outcome.incomplete` is load-bearing, not tidiness.
+   *
+   * The bounded phone scan stops after a fixed number of rows and reports
+   * `truncated`; a tenant larger than that bound can therefore return zero
+   * matches WITHOUT having looked at every customer. Saying "no customer
+   * matched this phone number" there is a claim about the whole tenant that
+   * the scan never earned — and it is the sentence a staff member repeats to a
+   * real customer as "you are not in our system". An incomplete search gets
+   * boundedNoMatch below instead, which says what actually happened.
+   */
   const nothingFound =
     Boolean(outcome) &&
     outcome!.answered &&
     outcome!.results.length === 0 &&
-    outcome!.failed.length === 0;
+    outcome!.failed.length === 0 &&
+    !outcome!.incomplete;
+
+  /*
+   * Searched, answered, found nothing — but stopped before the end. Neither
+   * "here are your results" nor "there is no such customer"; a fourth state,
+   * and the only honest one for a scan that ran out of budget.
+   */
+  const boundedNoMatch =
+    Boolean(outcome) &&
+    outcome!.answered &&
+    outcome!.failed.length === 0 &&
+    outcome!.incomplete &&
+    outcome!.results.length === 0;
 
   /*
    * The not-found sentence is scoped to what was actually searched.
@@ -265,6 +289,19 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
               aria-live="polite"
             >
               {t(emptyScopeKey, { query: plan.normalized })}
+            </p>
+          ) : null}
+
+          {/*
+           * An incomplete search that matched nothing. Never the not-found
+           * line: the customer may exist beyond where the scan stopped.
+           */}
+          {boundedNoMatch ? (
+            <p
+              className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
+              aria-live="polite"
+            >
+              {t("apsi.empty.bounded")}
             </p>
           ) : null}
 

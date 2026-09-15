@@ -332,20 +332,26 @@ async function runProbe(probe: ApsiProbe, grants: ApsiGrants): Promise<ProbeOutc
          * A probe kind here is a ROUTING decision, never an instruction to the
          * server about which column to search.
          *
-         * `true` for canViewSensitive is not a claim of access — the phone
-         * probe only exists in `runnable` when planApsiLookup confirmed BOTH
-         * customers.read and customers.view_sensitive hold, and the name probe
-         * never sends a phone-shaped query (the classifier routed those to the
-         * phone probe). The server re-derives the grant from the membership
-         * regardless and would refuse.
+         * canViewSensitive is read from the caller's OWN grants rather than
+         * passed as a literal. planApsiLookup already guarantees the phone
+         * probe reaches here only when both customers.read and
+         * customers.view_sensitive hold, so this value is `true` on that path
+         * either way — but a hardcoded `true` would make the client-side "never
+         * send a phone-shaped query without the grant" guard in
+         * searchRealCustomers unreachable, resting the whole property on an
+         * invariant two modules away. Reading the grant here keeps that guard
+         * live and fails closed if the classifier ever changes. The server
+         * re-derives the grant from the membership regardless and would refuse.
          *
          * Every match is returned as its own card. Apsi never picks one of
          * several customers who share a name — choosing for the merchant is
          * how the wrong person gets told about someone else's order.
          */
-        const page = await searchRealCustomers(probe.value, true, {
-          limit: APSI_CUSTOMER_RESULT_LIMIT,
-        });
+        const page = await searchRealCustomers(
+          probe.value,
+          grants.can("customers.view_sensitive"),
+          { limit: APSI_CUSTOMER_RESULT_LIMIT },
+        );
         return {
           ok: true,
           incomplete: page.hasMore || page.truncated,

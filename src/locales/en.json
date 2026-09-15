@@ -740,6 +740,10 @@
         "title": "No customer found",
         "body": "Try another name or phone number, or create a new customer."
       },
+      "bounded": {
+        "title": "Search didn't finish",
+        "body": "We couldn't check every customer, so this isn't a complete answer. This customer may still exist — type more of the name or number to narrow it before creating a new one."
+      },
       "prompt": {
         "title": "Search for a customer",
         "body": "Type a name, or a phone number if your role can search by phone."
@@ -965,6 +969,7 @@
     "chooseCustomer": "Choose customer",
     "searchCustomers": "Search customers",
     "noCustomers": "No customer matched that search.",
+    "boundedCustomers": "Search didn't finish, so this isn't a complete answer. The customer may still exist — type more to narrow it.",
     "noPhone": "Phone not shown",
     "subtotal": "Subtotal",
     "total": "Estimated total",
@@ -1862,6 +1867,7 @@
     "empty": {
       "orderCode": "No order matched this order code.",
       "customerPhone": "No customer matched this phone number.",
+      "bounded": "We couldn't finish searching every customer, so this isn't a complete answer. The customer may still exist — type more of the number to narrow it, or open Customers to keep looking.",
       "customerName": "No customer or delivery matched “{{query}}”. Open a workspace below to keep looking.",
       "identifier": "No order, payment, delivery or customer carries this ID.",
       "search": "No delivery, SKU or barcode matched “{{query}}”. Open a workspace below to keep looking."
