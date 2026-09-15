@@ -426,11 +426,12 @@
     "in_review": "កំពុងត្រួតពិនិត្យ",
     "approved": "បានអនុម័ត",
     "cod_pending": "រង់ចាំ COD",
-    "scheduled": "បានកำណត់ពេល",
+    "scheduled": "បានកំណត់ពេល",
     "in_delivery": "កំពុងដឹកជញ្ជូន",
     "archived": "បានរក្សាទុក",
     "paused": "បានផ្អាក",
-    "reversed": "បានដកវិញ"  },
+    "reversed": "បានដកវិញ"
+  },
   "channel": {
     "facebook": "ហ្វេសប៊ុក",
     "instagram": "អ៊ីនស្តាក្រាម",

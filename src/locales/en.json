@@ -430,7 +430,8 @@
     "in_delivery": "In delivery",
     "archived": "Archived",
     "paused": "Paused",
-    "reversed": "Reversed"  },
+    "reversed": "Reversed"
+  },
   "channel": {
     "facebook": "Facebook",
     "instagram": "Instagram",
