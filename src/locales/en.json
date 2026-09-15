@@ -794,7 +794,14 @@
       "viewReceipt": "View receipt",
       "viewOrder": "View order",
       "codNote": "Collect payment when the order is delivered.",
-      "unpaidNote": "Payment hasn't been recorded yet. Record it once it's collected."
+      "unpaidNote": "Payment hasn't been recorded yet. Record it once it's collected.",
+      "recordPayment": "Record payment"
+    },
+    "unsellable": {
+      "title": "This sale can't be completed",
+      "body": "One or more items have no sellable variant, so APSA can't price them or take them out of stock. Remove them from the cart, or add a variant to the product first.",
+      "noVariant": "No sellable variant",
+      "back": "Back to cart"
     }
   },
   "order": {
@@ -1000,7 +1007,9 @@
     "phoneSearchDenied": "Searching by phone number needs the customers.view_sensitive permission, which your role does not have. Search by name instead.",
     "customerSearchError": "The customer search did not complete. Try again.",
     "moreCustomers": "More customers match than are shown. Type more to narrow the search.",
-    "customerRecentHint": "Recent customers. Type to search every customer."
+    "customerRecentHint": "Recent customers. Type to search every customer.",
+    "viewOrder": "View order",
+    "done": "Done"
   },
   "delivery": {
     "title": "Delivery",

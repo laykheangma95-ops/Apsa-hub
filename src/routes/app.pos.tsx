@@ -32,6 +32,7 @@ import {
   addToCart,
   availableStock,
   calculateCartTotals,
+  isSellable,
   lineKey,
   needsManagerApproval,
   removeLine,
@@ -181,6 +182,16 @@ function PosScreen() {
   }
 
   function selectProduct(product: Product) {
+    /*
+     * A real product with no ACTIVE variant has nothing to price a line from
+     * and nothing to draw stock against, so it is not something a merchant can
+     * ring up. It stops here rather than entering the cart: previously such a
+     * line silently routed the WHOLE cart into the prototype checkout, and the
+     * merchant was shown a fabricated order code for a sale that never
+     * reached a server (see classifyCheckout). The row is already disabled in
+     * the list; this is the guard behind it.
+     */
+    if (!isSellable(product)) return;
     // A product needs an explicit choice when the mock prototype's option
     // matrix is present, or when the production catalog returned more than
     // one ACTIVE variant (see ProductionVariant's own comment) — never guess
@@ -426,6 +437,8 @@ function PosScreen() {
         customer={customer}
         offline={offline}
         onCompleted={resetSale}
+        userId={userId}
+        organizationId={routeOrganizationId}
       />
 
       <BottomNav workspace="business" />

@@ -768,8 +768,38 @@ export interface CreateSaleInput {
   customerId?: string;
 }
 
-/** Mock sale creation. COD is never financially settled. */
+/**
+ * PROTOTYPE-ONLY sale creation. Never reachable with production data.
+ *
+ * This function fabricates an order code and a payment status in the browser.
+ * Nothing it returns exists on a server, so a merchant shown its result would
+ * be reading an order that is not real and a `paid` state no money backs.
+ * It survives only to keep the `/design` prototype catalog (src/lib/mock)
+ * clickable, and the Sale it returns is a prop, not a record.
+ *
+ * The guard below is the structural boundary, not a convention: if any item —
+ * or the attached customer — carries a production (UUID) id, the data came
+ * from the real catalog and this sale must never be faked. It throws instead,
+ * so a routing mistake upstream surfaces as an error the merchant can see
+ * rather than as a convincing receipt for a sale that never happened.
+ * PosCheckoutSheet classifies the cart before it ever gets here
+ * (classifyCheckout), so in production this throw is unreachable — it exists
+ * so that it STAYS unreachable if that classification is ever weakened.
+ */
 export async function createSale(input: CreateSaleInput): Promise<Sale> {
+  const productionItem = input.items.find((item) => isProductionId(item.productId));
+  if (productionItem) {
+    throw new Error(
+      "createSale is prototype-only and was called with a production product id " +
+        `(${productionItem.productId}). Real sales must go through createRealOrder.`,
+    );
+  }
+  if (input.customerId && isProductionId(input.customerId)) {
+    throw new Error(
+      "createSale is prototype-only and was called with a production customer id. " +
+        "Real sales must go through createRealOrder.",
+    );
+  }
   const code = `APSA-${String(orderSequence++).padStart(4, "0")}`;
   const sale: Sale = {
     id: `sal-${code}`,

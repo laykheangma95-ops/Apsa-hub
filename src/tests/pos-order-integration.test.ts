@@ -229,17 +229,52 @@ describe("PosCheckoutSheet's production path reuses createRealOrder + confirmRea
     }
   });
 
-  it("calls no Payment-domain function anywhere in the file (payment work is Codex-owned, read-only for this phase)", () => {
+  /*
+   * SUPERSEDED. An earlier phase froze POS out of the Payment domain entirely
+   * ("no Payment-domain function anywhere in the file"). The merchant-journey
+   * phase reverses that deliberately: a confirmed-but-unpaid sale must offer
+   * the money step where the merchant already is. What must still never happen
+   * is POS acquiring its own way to settle money, so the assertions move from
+   * "calls nothing" to "calls only the shared recording path, only against a
+   * real order".
+   */
+  it("reaches the Payment domain only through the shared recordRealPayment + RecordOrderPaymentSheet, never a second settlement path", () => {
+    expect(source).toContain("recordRealPayment");
+    expect(source).toContain("RecordOrderPaymentSheet");
+    // No settlement, verification, refund or reconciliation surface in POS:
+    // those remain the Payments screens' own, against the same ledger.
     for (const forbidden of [
-      "recordPayment",
       "createRefund",
       "transitionOrderPaymentFn",
       "transitionPaymentStatus",
+      "verifyPayment",
       "PaymentEvidence",
       "reconcil",
     ]) {
       expect(source).not.toContain(forbidden);
     }
+  });
+
+  it("records payment only against the authoritative order id returned by the server — never a client-built one", () => {
+    const fn = source.slice(
+      source.indexOf("const recordPaymentMutation"),
+      source.indexOf("// COD is only sensible"),
+    );
+    expect(fn).toContain("orderId: realDetail!.order.id");
+    expect(fn).toContain("idempotencyKey: submit.idempotencyKey");
+    // Never asserts a payment status locally: the order is re-read from the
+    // server after recording (record_payment_v1 writes pending/unverified).
+    expect(fn).toContain("getRealOrderDetail");
+    expect(fn).not.toMatch(/paymentStatus:\s*"paid"/);
+  });
+
+  it("the record-payment sheet is mounted only once a real order exists", () => {
+    expect(source).toMatch(/\{realDetail \? \([\s\S]{0,400}<RecordOrderPaymentSheet/);
+  });
+
+  it("offers the payment step only on the server's own unpaid axis, never inferred from the order being confirmed", () => {
+    expect(source).toContain('realDetail.order.paymentStatus === "unpaid"');
+    expect(source).toContain("canRecordPayment");
   });
 
   it("the real-order review screen never renders the payment-method / cash-received controls", () => {
@@ -317,18 +352,28 @@ describe("Duplicate-submission protection at the POS boundary", () => {
 describe("Mock/production routing never trusts a client id as authorization", () => {
   const source = readSource(CHECKOUT_SHEET);
 
-  it("isRealCheckout requires isProductionId on both productId and variantId for every line", () => {
-    const decl = source.slice(
-      source.indexOf("const isRealCheckout ="),
-      source.indexOf(";", source.indexOf("const isRealCheckout =")) + 1,
-    );
-    expect(decl).toMatch(/lines\.every/);
-    expect(decl).toMatch(/isProductionId\(l\.productId\)/);
-    expect(decl).toMatch(/isProductionId\(l\.variantId/);
+  /*
+   * SUPERSEDED. The real-vs-mock decision used to live inline here as a
+   * two-way `lines.every(...)` test whose false branch ran the PROTOTYPE
+   * checkout — the silent degrade that let a real cart be sold a fabricated
+   * receipt. It now lives in classifyCheckout (pure, unit-tested above) and
+   * has a third outcome. The structural assertion is that the component
+   * defers to it rather than re-deriving the decision.
+   */
+  it("delegates the checkout decision to classifyCheckout rather than re-deriving it inline", () => {
+    expect(source).toContain("classifyCheckout(lines)");
+    expect(source).toContain('const isRealCheckout = checkoutKind === "production"');
+    // The old inline every()-over-both-ids test must not come back.
+    expect(source).not.toMatch(/const isRealCheckout =[\s\S]{0,120}lines\.every/);
   });
 
-  it("a single mock line forces the WHOLE cart through the untouched mock path (lines.every, not .some)", () => {
-    expect(source).not.toMatch(/isRealCheckout[\s\S]{0,40}lines\.some/);
+  it("never treats 'not production' as 'therefore prototype' — the unsellable branch refuses instead of selling", () => {
+    expect(source).toContain('checkoutKind === "unsellable"');
+    // The refusal branch is rendered BEFORE the prototype branch, so an
+    // unsellable cart can never fall through to createSale().
+    expect(source.indexOf('checkoutKind === "unsellable"')).toBeLessThan(
+      source.indexOf(") : isRealCheckout ? ("),
+    );
   });
 
   it("customerId is only sent when isProductionId(customer.id) is true — a mock walk-in customer degrades to null, never sent as-is", () => {

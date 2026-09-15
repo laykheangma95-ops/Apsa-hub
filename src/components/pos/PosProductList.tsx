@@ -4,7 +4,7 @@ import { StatusChip } from "@/design-system";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
-import { availableStock, stockState } from "@/lib/pos-cart";
+import { availableStock, isSellable, stockState } from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Product } from "@/types";
 
@@ -54,7 +54,15 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
     >
       {products.map((product) => {
         const state = stockState(product);
-        const disabled = state === "out_of_stock";
+        /*
+         * A real product with no ACTIVE variant cannot be priced or stocked,
+         * so it cannot be sold. It stays visible — it is genuinely in the
+         * catalog, and hiding it would leave the merchant hunting for a
+         * product they know they have — but it is not ringable, and it says
+         * why rather than failing silently at checkout.
+         */
+        const sellable = isSellable(product);
+        const disabled = state === "out_of_stock" || !sellable;
         const name = localName(product, language);
         const variants = product.options?.map((o) => o.values.join("/")).join(" · ");
         const label = t("pos.addToCartLabel", { name });
@@ -78,6 +86,11 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
                   {t("pos.available", { count: availableStock(product) })}
                 </span>
                 {state !== "available" ? <StatusChip status={state} size="sm" /> : null}
+                {sellable ? null : (
+                  <span className="text-caption text-status-danger-text">
+                    {t("pos.unsellable.noVariant")}
+                  </span>
+                )}
               </button>
             </li>
           );
@@ -117,6 +130,11 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
                     </span>
                   ) : null}
                   {state !== "available" ? <StatusChip status={state} size="sm" /> : null}
+                  {sellable ? null : (
+                    <span className="text-caption text-status-danger-text">
+                      {t("pos.unsellable.noVariant")}
+                    </span>
+                  )}
                 </span>
               </span>
               <span

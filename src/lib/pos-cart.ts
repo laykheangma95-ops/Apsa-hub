@@ -132,3 +132,54 @@ export function availableStock(product: Product): number {
   if (product.stock == null) return 0; // inventory not yet connected — no cap in cart
   return Math.max(0, product.stock - (product.reserved ?? 0));
 }
+
+/* ------------------------------ checkout routing ------------------------- */
+
+/**
+ * Which checkout a cart is allowed to use.
+ *
+ *   production — every line references a real, DB-backed product AND variant.
+ *                The sale goes to the authoritative Order domain.
+ *   prototype  — no line references production data at all. The `/design`
+ *                mock catalog; a fabricated Sale is a prop, not a record.
+ *   unsellable — anything else. Most importantly: a REAL product whose
+ *                catalog row carries no sellable variant (mapServerProductToUi
+ *                leaves `variantId` unset when a product has zero ACTIVE
+ *                variants), and any cart mixing real and prototype lines.
+ *
+ * `unsellable` exists because the previous two-way test degraded silently: it
+ * asked "is every line production?" and, on `false`, ran the PROTOTYPE
+ * checkout. A single real-but-variantless product therefore routed an entire
+ * cart of real goods into a browser-fabricated sale — the merchant saw an
+ * order code and a "paid" chip for a sale no server had ever heard of. There
+ * is no honest third path here: a cart APSA cannot turn into a real order must
+ * refuse checkout and say why, never mint a receipt for it.
+ */
+export type CheckoutKind = "production" | "prototype" | "unsellable";
+
+/** A real, DB-backed product id (and the only thing a real order line accepts). */
+const PRODUCTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True when this catalog row can actually be sold: a prototype product (which
+ * only ever reaches the prototype checkout), or a real product that carries at
+ * least one sellable variant. A real product with no ACTIVE variant is not a
+ * product a merchant can ring up, and POS must not let it into the cart.
+ */
+export function isSellable(product: Product): boolean {
+  if (!PRODUCTION_ID.test(product.id)) return true;
+  return Boolean(product.variantId) || (product.productionVariants?.length ?? 0) > 0;
+}
+
+export function classifyCheckout(lines: CartLine[]): CheckoutKind {
+  if (lines.length === 0) return "unsellable";
+  const production = lines.filter(
+    (l) => PRODUCTION_ID.test(l.productId) && PRODUCTION_ID.test(l.variantId ?? ""),
+  ).length;
+  if (production === lines.length) return "production";
+  // Not "every line is prototype" by elimination — a real productId with a
+  // missing variantId is neither, and must land in `unsellable`.
+  const prototype = lines.filter((l) => !PRODUCTION_ID.test(l.productId)).length;
+  if (prototype === lines.length) return "prototype";
+  return "unsellable";
+}
