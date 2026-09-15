@@ -296,7 +296,27 @@ export function PosCheckoutSheet({
   return (
     <>
       <BottomSheet
-        open={open}
+        /*
+         * Stood down while the payment sheet is up, so exactly ONE focus trap
+         * is ever active.
+         *
+         * BottomSheet registers its Escape and focusin handlers on `document`
+         * (see its open effect), not on its own panel. Two open sheets
+         * therefore run two document-level traps regardless of how they are
+         * nested: each sees focus landing in the other as "outside me" and
+         * calls its own panel.focus(), so focus ping-pongs between them and
+         * the merchant cannot type an amount. Escape is worse — both handlers
+         * fire, so dismissing the payment sheet also tore down the checkout
+         * sheet, and with it the confirmed-but-unpaid order the merchant was
+         * in the middle of settling.
+         *
+         * This is presentation only: `open` is untouched and no state is
+         * reset, so realDetail, the order id and the success surface all
+         * survive and come straight back when the payment sheet closes.
+         * handleOpenChange is never reached by this, so onCompleted() cannot
+         * fire from stepping into payment entry.
+         */
+        open={open && !recordPaymentOpen}
         onOpenChange={handleOpenChange}
         title={sale || realDetail ? undefined : t("pos.checkout")}
         snap="full"
