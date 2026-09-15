@@ -1805,12 +1805,15 @@ describe("H. every new catalog string exists in Khmer and English", () => {
     }
   });
 
-  it("the new navigation entry is translated too", () => {
-    const enNav = (en as unknown as { nav: { moreActions: Record<string, JsonTree> } }).nav;
-    const kmNav = (km as unknown as { nav: { moreActions: Record<string, JsonTree> } }).nav;
-    expect(enNav.moreActions["productCatalog"]).toBeTruthy();
-    expect(kmNav.moreActions["productCatalog"]).toBeTruthy();
-    expect(String(kmNav.moreActions["productCatalog"]!["label"])).toMatch(/[ក-៿]/);
+  // The catalogue row moved from the retired "More" sheet into Sales when the
+  // nav became Home/Inbox/Ask/Sales/My. Same row, same requirement: it must
+  // still be a translated entry, not an English string in a Khmer-first UI.
+  it("the navigation entry is translated too", () => {
+    const enNav = (en as unknown as { nav: { salesActions: Record<string, JsonTree> } }).nav;
+    const kmNav = (km as unknown as { nav: { salesActions: Record<string, JsonTree> } }).nav;
+    expect(enNav.salesActions["productCatalog"]).toBeTruthy();
+    expect(kmNav.salesActions["productCatalog"]).toBeTruthy();
+    expect(String(kmNav.salesActions["productCatalog"]!["label"])).toMatch(/[ក-៿]/);
   });
 
   it("no user-facing string is hard-coded in the new screens", () => {

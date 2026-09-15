@@ -1,17 +1,19 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Home, Inbox, MoreHorizontal, ShoppingBag, Sparkles } from "lucide-react";
+import { ChevronRight, Home, Inbox, ShoppingBag, Sparkles, UserRound } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { LucideIcon } from "lucide-react";
+import { ApsiConsoleSheet } from "@/components/apsi/ApsiConsoleSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { getOrders } from "@/lib/api";
+import { useAppPrincipal } from "@/hooks/use-app-principal";
+import { listRealOrders } from "@/lib/api";
+import { ordersKeys } from "@/lib/orders-query";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import type { Order, Workspace } from "@/types";
 import { BottomSheet } from "./BottomSheet";
-import { ResolveSheet } from "./ResolveSheet";
 import {
   filterBusinessNavConfig,
   getBusinessNavConfig,
@@ -31,10 +33,14 @@ export type NavTab = MobileNavRequirement & {
   id: string;
   labelKey: string;
   icon: LucideIcon;
-  to: "/app" | "/app/inbox" | "/app/pos" | "/app/team";
+  to: "/app" | "/app/inbox" | "/app/pos" | "/app/settings";
   exact?: boolean;
 };
 
+/**
+ * The wide-viewport tab row. Same five-control model as the phone bar: Home,
+ * Inbox, the Apsi console in the centre, Sales, My.
+ */
 export const SELLER_TABS: { left: NavTab[]; right: NavTab[] } = {
   left: [
     { id: "home", labelKey: "nav.home", icon: Home, to: "/app", exact: true },
@@ -54,32 +60,37 @@ export const SELLER_TABS: { left: NavTab[]; right: NavTab[] } = {
       to: "/app/pos",
       requiresAll: ["orders.create"],
     },
-    {
-      id: "more",
-      labelKey: "nav.more",
-      icon: MoreHorizontal,
-      to: "/app/team",
-      requiresAll: ["team.read"],
-    },
+    // The identity anchor. No permission gate: every active member has an
+    // account, a language preference and a way to sign out.
+    { id: "my", labelKey: "nav.my", icon: UserRound, to: "/app/settings" },
   ],
 };
 
+/**
+ * Badges are a claim that a person is waiting. Only Inbox may make it.
+ *
+ * Apsi is a pull tool — a merchant goes to it, it never summons them — and a
+ * red dot there would spend the one signal that means "a customer has not been
+ * answered". Sales and Home are excluded for the same reason: "things are
+ * happening" is not "someone is waiting", and a nav full of red teaches the
+ * merchant to ignore all of it.
+ */
+export type BadgeableTabId = Extract<MobileNavTabId, "inbox">;
+
 interface BottomNavProps {
   workspace?: Workspace;
-  /** Kept for callers that own a create flow; the centre control is Resolve. */
+  /** Kept for callers that own a create flow; the centre control is Apsi. */
   onCreate?: () => void;
   tabs?: { left: NavTab[]; right: NavTab[] };
   className?: string;
   businessType?: BusinessNavVariant;
   /**
-   * Unhandled work per tab. A badge is a claim on the merchant's attention, so
-   * only counts that someone can act on belong here — never a total.
+   * Unhandled work, per tab. Typed to the one tab allowed to carry a badge, so
+   * restoring a badge on Apsi or Sales is a compile error rather than a
+   * judgement call in review.
    */
-  badges?: Partial<Record<MobileNavTabId, number>>;
+  badges?: Partial<Record<BadgeableTabId, number>>;
 }
-
-const sheetActionClass =
-  "press flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]";
 
 const sheetSectionTitleClass = "text-label px-1 pb-2 text-text-muted";
 
@@ -142,31 +153,17 @@ export function BottomNav({
   const activeTab = resolveMobileNavActiveTab(pathname, businessType);
   const isBusiness = workspace === "business";
 
-  const [resolveOpen, setResolveOpen] = useState(false);
-  const [desktopResolveOpen, setDesktopResolveOpen] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
   const [salesOpen, setSalesOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-
-  const recentOrdersQuery = useQuery({
-    queryKey: ["mobile-nav", "recent-orders"],
-    queryFn: getOrders,
-    enabled: salesOpen && isBusiness,
-  });
 
   function closeAllSheets() {
-    setResolveOpen(false);
+    setAskOpen(false);
     setSalesOpen(false);
-    setMoreOpen(false);
   }
 
   function goTo(to: MobileNavRoute) {
     closeAllSheets();
     void navigate({ to });
-  }
-
-  function openOrder(orderId: string) {
-    closeAllSheets();
-    void navigate({ to: "/app/orders/$id", params: { id: orderId } });
   }
 
   if (!isBusiness) return null;
@@ -187,11 +184,11 @@ export function BottomNav({
           <div className="flex flex-1 items-center justify-center">
             <button
               type="button"
-              onClick={() => setDesktopResolveOpen(true)}
-              aria-label={t("nav.resolve")}
+              onClick={() => setAskOpen(true)}
+              aria-label={t("nav.openAsk")}
               aria-haspopup="dialog"
-              aria-expanded={desktopResolveOpen}
-              title={t("nav.resolve")}
+              aria-expanded={askOpen}
+              title={t("nav.openAsk")}
               className="press-tactile glass-panel tap-target -mt-5 flex size-[52px] items-center justify-center rounded-[18px] text-action-primary active:bg-action-primary-soft"
             >
               <Sparkles className="size-6" aria-hidden />
@@ -224,25 +221,17 @@ export function BottomNav({
                   key={tab.id}
                   tab={tab}
                   activeTab={activeTab}
-                  badge={badges[tab.id]}
-                  resolveOpen={resolveOpen}
+                  badge={tab.id === "inbox" ? badges.inbox : undefined}
+                  askOpen={askOpen}
                   salesOpen={salesOpen}
-                  moreOpen={moreOpen}
                   onRoute={goTo}
-                  onOpenResolve={() => {
+                  onOpenAsk={() => {
                     setSalesOpen(false);
-                    setMoreOpen(false);
-                    setResolveOpen(true);
+                    setAskOpen(true);
                   }}
                   onOpenSales={() => {
-                    setResolveOpen(false);
-                    setMoreOpen(false);
+                    setAskOpen(false);
                     setSalesOpen(true);
-                  }}
-                  onOpenMore={() => {
-                    setResolveOpen(false);
-                    setSalesOpen(false);
-                    setMoreOpen(true);
                   }}
                 />
               ))}
@@ -251,17 +240,17 @@ export function BottomNav({
         </div>
       </nav>
 
-      <BottomSheet
-        open={resolveOpen}
-        onOpenChange={setResolveOpen}
-        title={t("nav.resolveSheetTitle")}
-        description={t("nav.resolveSheetLead")}
-        snap="half"
-      >
-        <SheetGroupList groups={config.resolveGroups} onRoute={goTo} />
-      </BottomSheet>
-
-      <ResolveSheet open={desktopResolveOpen} onOpenChange={setDesktopResolveOpen} />
+      {/*
+       * One console for both breakpoints. Opening it never navigates: it is a
+       * sheet over the current route, so an Inbox conversation is still there
+       * when it closes.
+       */}
+      <ApsiConsoleSheet
+        open={askOpen}
+        onOpenChange={setAskOpen}
+        groups={config.askGroups}
+        onRoute={goTo}
+      />
 
       <BottomSheet
         open={salesOpen}
@@ -271,25 +260,7 @@ export function BottomNav({
         snap="full"
       >
         <SheetGroupList groups={config.salesGroups} onRoute={goTo} />
-        <RecentOrders
-          title={t("nav.salesRecent")}
-          body={t("nav.salesRecentBody")}
-          orders={recentOrdersQuery.data}
-          loading={recentOrdersQuery.isPending}
-          error={recentOrdersQuery.isError}
-          onRetry={() => void recentOrdersQuery.refetch()}
-          onOpen={openOrder}
-        />
-      </BottomSheet>
-
-      <BottomSheet
-        open={moreOpen}
-        onOpenChange={setMoreOpen}
-        title={t("nav.moreSheetTitle")}
-        description={t("nav.moreSheetLead")}
-        snap="full"
-      >
-        <SheetGroupList groups={config.moreGroups} onRoute={goTo} />
+        <RecentOrders open={salesOpen} onClose={closeAllSheets} />
       </BottomSheet>
     </>
   );
@@ -299,13 +270,11 @@ interface MobileTabProps {
   tab: MobileNavTabConfig;
   activeTab: MobileNavTabId | undefined;
   badge?: number | undefined;
-  resolveOpen: boolean;
+  askOpen: boolean;
   salesOpen: boolean;
-  moreOpen: boolean;
   onRoute: (to: MobileNavRoute) => void;
-  onOpenResolve: () => void;
+  onOpenAsk: () => void;
   onOpenSales: () => void;
-  onOpenMore: () => void;
 }
 
 /**
@@ -317,33 +286,32 @@ function MobileTab({
   tab,
   activeTab,
   badge,
-  resolveOpen,
+  askOpen,
   salesOpen,
-  moreOpen,
   onRoute,
-  onOpenResolve,
+  onOpenAsk,
   onOpenSales,
-  onOpenMore,
 }: MobileTabProps) {
   const { t } = useTranslation();
   const reduceMotion = useReducedMotion();
-  const active =
-    tab.id === "resolve"
-      ? resolveOpen
-      : tab.id === "sales"
-        ? salesOpen || activeTab === "sales"
-        : tab.id === "more"
-          ? moreOpen || activeTab === "more"
-          : activeTab === tab.id;
-  const isResolve = tab.id === "resolve";
+  const isAsk = tab.kind === "console";
+  /*
+   * Apsi is lit only while its console is open. It is not a place, so no route
+   * ever puts it in the "you are here" state.
+   */
+  const active = isAsk
+    ? askOpen
+    : tab.id === "sales"
+      ? salesOpen || activeTab === "sales"
+      : activeTab === tab.id;
 
   const content = (
     <>
       <span
         className={cn(
           "relative flex items-center justify-center rounded-2xl transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
-          isResolve ? "size-10" : "size-9",
-          isResolve
+          isAsk ? "size-10" : "size-9",
+          isAsk
             ? active
               ? "elevation-action bg-action-primary text-text-on-action"
               : "bg-action-primary-soft text-action-primary"
@@ -352,7 +320,7 @@ function MobileTab({
       >
         {/* The active pill is one shared element that slides between tabs, so
             switching reads as movement rather than two separate blinks. */}
-        {active && !isResolve ? (
+        {active && !isAsk ? (
           <motion.span
             aria-hidden
             layoutId="apsa-nav-active"
@@ -365,7 +333,7 @@ function MobileTab({
           />
         ) : null}
         <tab.icon
-          className={cn("relative", isResolve ? "size-[21px]" : "size-[20px]")}
+          className={cn("relative", isAsk ? "size-[21px]" : "size-[20px]")}
           strokeWidth={active ? 2.2 : 1.9}
           aria-hidden
         />
@@ -415,17 +383,11 @@ function MobileTab({
   return (
     <button
       type="button"
-      onClick={tab.id === "resolve" ? onOpenResolve : tab.id === "sales" ? onOpenSales : onOpenMore}
+      onClick={isAsk ? onOpenAsk : onOpenSales}
       className={buttonClass}
       aria-haspopup="dialog"
-      aria-expanded={tab.id === "resolve" ? resolveOpen : tab.id === "sales" ? salesOpen : moreOpen}
-      aria-label={
-        tab.id === "resolve"
-          ? t("nav.openResolve")
-          : tab.id === "sales"
-            ? t("nav.openSales")
-            : t("nav.openMore")
-      }
+      aria-expanded={isAsk ? askOpen : salesOpen}
+      aria-label={isAsk ? t("nav.openAsk") : t("nav.openSales")}
     >
       {content}
     </button>
@@ -471,7 +433,7 @@ function SheetAction({
     <button
       type="button"
       className={cn(
-        sheetActionClass,
+        "press flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
         disabled
           ? "cursor-not-allowed border-border-default bg-surface-secondary/75 text-text-muted"
           : "border-border-default bg-surface-primary text-text-primary hover:bg-surface-secondary/72 active:bg-surface-secondary",
@@ -493,7 +455,7 @@ function SheetAction({
         <action.icon className="size-5" aria-hidden />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
+        <span className="flex flex-wrap items-center gap-2">
           <span className="text-body block text-left">{t(action.labelKey)}</span>
           <AvailabilityBadge availability={action.availability} />
         </span>
@@ -534,32 +496,48 @@ function AvailabilityBadge({ availability }: { availability: MobileNavActionAvai
   );
 }
 
-function RecentOrders({
-  title,
-  body,
-  orders,
-  loading,
-  error,
-  onRetry,
-  onOpen,
-}: {
-  title: string;
-  body: string;
-  orders: Order[] | undefined;
-  loading: boolean;
-  error: boolean;
-  onRetry: () => void;
-  onOpen: (orderId: string) => void;
-}) {
+/**
+ * Recent orders in the Sales sheet — the production Order list, nothing else.
+ *
+ * This block used to key on `["mobile-nav","recent-orders"]` and call the
+ * fixture `getOrders()` from src/lib/mock/orders.ts, so a live merchant saw
+ * invented order codes and invented money in a production build, and the
+ * entries were readable by whoever signed in next in the same tab. Both are
+ * closed here:
+ *
+ *   - the data comes from `listRealOrders()` (the production Order server
+ *     function, `orders.read`-gated and organization-scoped server-side) with
+ *     NO fixture fallback in any branch — a failure is an error state;
+ *   - the cache key is `ordersKeys.list(userId, organizationId)` from the
+ *     merged PR #60 convention, partitioned by the principal the /app route
+ *     guard resolved, so it shares one entry with the Orders screen rather
+ *     than holding a second, unpartitioned copy of the same rows.
+ *
+ * Outside /app there is no principal, so nothing is fetched at all.
+ */
+function RecentOrders({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation();
-  const recentOrders = (orders ?? []).slice(0, 4);
+  const navigate = useNavigate();
+  const capabilities = useCapabilities();
+  const principal = useAppPrincipal();
+  const canReadOrders = capabilities.can("orders.read");
+
+  const query = useQuery({
+    queryKey: principal ? ordersKeys.list(principal.userId, principal.organizationId) : [],
+    queryFn: listRealOrders,
+    enabled: open && Boolean(principal) && canReadOrders,
+  });
+
+  if (!principal || !canReadOrders) return null;
+
+  const recentOrders: Order[] = (query.data ?? []).slice(0, 4);
 
   return (
     <section className="mt-5 border-t border-border-default pt-4">
-      <h3 className="text-h3 text-text-primary">{title}</h3>
-      <p className="text-body-sm mt-1 text-text-secondary">{body}</p>
+      <h3 className="text-h3 text-text-primary">{t("nav.salesRecent")}</h3>
+      <p className="text-body-sm mt-1 text-text-secondary">{t("nav.salesRecentBody")}</p>
 
-      {loading ? (
+      {query.isPending ? (
         <div className="mt-3 space-y-2">
           {[0, 1, 2].map((index) => (
             <div key={index} className="h-[72px] animate-pulse rounded-2xl bg-surface-secondary" />
@@ -567,29 +545,32 @@ function RecentOrders({
         </div>
       ) : null}
 
-      {error ? (
+      {query.isError ? (
         <button
           type="button"
-          onClick={onRetry}
+          onClick={() => void query.refetch()}
           className="tap-target text-body-sm mt-3 rounded-2xl border border-border-default px-4 py-3 text-left text-action-primary"
         >
           {t("nav.retrySalesHub")}
         </button>
       ) : null}
 
-      {!loading && !error && recentOrders.length === 0 ? (
+      {!query.isPending && !query.isError && recentOrders.length === 0 ? (
         <p className="text-body-sm mt-3 rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary">
           {t("nav.salesRecentEmpty")}
         </p>
       ) : null}
 
-      {!loading && !error && recentOrders.length > 0 ? (
+      {!query.isPending && !query.isError && recentOrders.length > 0 ? (
         <ul className="list-enter mt-3 space-y-2">
           {recentOrders.map((order) => (
             <li key={order.id}>
               <button
                 type="button"
-                onClick={() => onOpen(order.id)}
+                onClick={() => {
+                  onClose();
+                  void navigate({ to: "/app/orders/$id", params: { id: order.id } });
+                }}
                 className="press flex w-full items-center gap-3 rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
               >
                 <div className="min-w-0 flex-1">

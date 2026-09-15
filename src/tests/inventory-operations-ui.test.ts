@@ -1873,7 +1873,8 @@ describe("H. every new inventory string exists in Khmer and English", () => {
     }
     // The nav entry the workspace hangs off is no longer described as missing.
     const en2 = JSON.parse(read("src/locales/en.json"));
-    expect(en2.nav.moreActions.productsStock.description).not.toMatch(/not in the app yet/i);
+    // Moved from the retired "More" sheet into Sales with the nav redesign.
+    expect(en2.nav.salesActions.productsStock.description).not.toMatch(/not in the app yet/i);
   });
 });
 

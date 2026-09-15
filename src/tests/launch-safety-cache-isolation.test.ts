@@ -709,7 +709,7 @@ describe("E. cached customer PII fails closed when the capability goes", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("F. the partitions are wired into the real routes", () => {
-  it("/app enforces all five new principals from server-derived route context", () => {
+  it("/app enforces every shell-wide principal from server-derived route context", () => {
     const source = readSource("src/routes/app.tsx");
     for (const call of [
       "enforceOrderCachePrincipal(queryClient, session.userId, organizationId)",
@@ -717,6 +717,9 @@ describe("F. the partitions are wired into the real routes", () => {
       "enforceCustomerCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceTeamCachePrincipal(queryClient, session.userId, organizationId)",
+      // The Apsi console lives in the nav, so it is mounted on every signed-in
+      // screen and its answers outlive any single route.
+      "enforceApsiCachePrincipal(queryClient, session.userId, organizationId)",
     ]) {
       expect(source).toContain(call);
     }
@@ -748,6 +751,9 @@ describe("F. the partitions are wired into the real routes", () => {
       '["conversation-smart-action-products"]',
       '["deliveries", "real"',
       '["delivery", "real"',
+      // The bottom nav's recent-order block used to hold its own unpartitioned
+      // copy of the Orders list under this key, filled from fixture data.
+      '["mobile-nav", "recent-orders"]',
     ];
     const files = fs
       .readdirSync(path.resolve(ROOT, "src/routes"))
@@ -757,6 +763,10 @@ describe("F. the partitions are wired into the real routes", () => {
         "src/components/inbox/CustomerDetailSheet.tsx",
         "src/components/orders/CreateRealOrderSheet.tsx",
         "src/components/pos/PosCustomerSheet.tsx",
+        // Shell components that fetch: both are mounted on every signed-in
+        // screen, so an unpartitioned key here is the widest leak of all.
+        "src/design-system/BottomNav.tsx",
+        "src/components/apsi/ApsiConsoleSheet.tsx",
       ]);
 
     for (const file of files) {
