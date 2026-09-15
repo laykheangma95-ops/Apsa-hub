@@ -320,10 +320,27 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     }
   }, [query.isError, query.error, navigate]);
 
+  /**
+   * A lifecycle move changes this order's row in the list and the work Home
+   * counts as outstanding, so both are refreshed alongside the detail. The
+   * detail itself is written from the server's own response rather than
+   * refetched — the mutation already returned the authoritative order.
+   *
+   * Deliberately narrow, like invalidateAfterPayment below: this principal's
+   * own partitions only.
+   */
+  function invalidateAfterLifecycleChange() {
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.list(userId, routeOrganizationId),
+    });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+  }
+
   const confirmMutation = useMutation({
     mutationFn: () => confirmRealOrder(id),
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
+      invalidateAfterLifecycleChange();
       setNotice(t("order.confirmedNotice"));
     },
     onError: (error) => {
@@ -335,6 +352,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     mutationFn: (reason: string) => cancelRealOrder(id, reason || undefined),
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
+      invalidateAfterLifecycleChange();
       setCancelOpen(false);
       setNotice(t("order.cancelledNotice"));
     },
@@ -816,6 +834,15 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         orderId={order.id}
         onCreated={(detail) => {
           void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
+          /*
+           * Arranging delivery moves this order's fulfilment axis, so the
+           * order itself and the surfaces that summarise it are stale too —
+           * not just the deliveries sub-entry. Without this the merchant
+           * navigated away, came back, and found the order still claiming
+           * nothing had been arranged.
+           */
+          void queryClient.invalidateQueries({ queryKey });
+          invalidateAfterLifecycleChange();
           void navigate({ to: "/app/deliveries/$id", params: { id: detail.id } });
         }}
       />

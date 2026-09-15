@@ -87,7 +87,7 @@ export function CreateRealOrderSheet({
   const [customer, setCustomer] = useState<OrderCustomerOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
-  const [createdCode, setCreatedCode] = useState<string | null>(null);
+  const [created, setCreated] = useState<Order | null>(null);
 
   /*
    * Both reads are organization data — the catalog with its prices, and a
@@ -228,7 +228,7 @@ export function CreateRealOrderSheet({
     setCustomer(null);
     setSubmitting(false);
     setFailure(null);
-    setCreatedCode(null);
+    setCreated(null);
   }
 
   function handleOpenChange(next: boolean) {
@@ -247,11 +247,16 @@ export function CreateRealOrderSheet({
         customerId: customer?.id ?? null,
         ...(discountEnabled && discount.amount > 0 ? { discountMinor: discount.amount } : {}),
       });
-      setCreatedCode(detail.order.code);
-      window.setTimeout(() => {
-        onCreated(detail.order);
-        handleOpenChange(false);
-      }, 1100);
+      /*
+       * The order is real from here on, so the list is told immediately
+       * rather than after a timer — and the sheet stays open on a confirmation
+       * the merchant can act from. It previously auto-closed after 1100ms,
+       * which showed a code and then took it away: no way to open the order
+       * that had just been created, and no next step toward payment.
+       */
+      setCreated(detail.order);
+      setSubmitting(false);
+      onCreated(detail.order);
     } catch (error) {
       setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
       setSubmitting(false);
@@ -262,11 +267,11 @@ export function CreateRealOrderSheet({
     <BottomSheet
       open={open}
       onOpenChange={handleOpenChange}
-      title={createdCode ? undefined : t("orderCreate.title")}
+      title={created ? undefined : t("orderCreate.title")}
       snap="full"
       className="lg:max-w-[520px]"
     >
-      {createdCode ? (
+      {created ? (
         <motion.div
           className="flex flex-col items-center py-10 text-center"
           initial={{ scale: 0.9, opacity: 0 }}
@@ -284,9 +289,31 @@ export function CreateRealOrderSheet({
             <Check className="size-8" aria-hidden />
           </motion.span>
           <p className="text-h2 mt-4 text-text-primary">
-            {t("orderCreate.created", { code: createdCode })}
+            {t("orderCreate.created", { code: created.code })}
           </p>
           <p className="text-body mt-1 text-text-secondary">{t("orderCreate.createdBody")}</p>
+          {/*
+           * The order's own payment axis, straight from the server — never
+           * inferred from the fact that creation succeeded.
+           */}
+          <p className="text-body-sm mt-2 text-text-secondary">
+            {t(`status.${created.paymentStatus}`)}
+          </p>
+          <div className="mt-6 w-full space-y-2">
+            <a
+              href={`/app/orders/${created.id}`}
+              className="press tap-target text-label elevation-action flex w-full items-center justify-center rounded-full bg-action-primary px-4 py-3 text-text-on-action"
+            >
+              {t("orderCreate.viewOrder")}
+            </a>
+            <Button
+              variant="outline"
+              className="tap-target w-full"
+              onClick={() => handleOpenChange(false)}
+            >
+              {t("orderCreate.done")}
+            </Button>
+          </div>
         </motion.div>
       ) : product ? (
         <section className="space-y-5 pb-4">

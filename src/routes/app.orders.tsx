@@ -18,6 +18,7 @@ import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealOrders } from "@/lib/api";
 import { presentOrderSource } from "@/lib/orders";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -209,6 +210,9 @@ function OrderListScreen() {
         organizationId={routeOrganizationId}
         onCreated={() => {
           void queryClient.invalidateQueries({ queryKey: listKey });
+          // A new order is new outstanding work, so Home's attention counts
+          // move with it rather than waiting for their own refetch.
+          void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
         }}
       />
 
