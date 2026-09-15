@@ -9,6 +9,7 @@ import {
   ChannelBadge,
   ListSkeleton,
   ScreenBleed,
+  StatusBadge,
   StatusChip,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -16,7 +17,7 @@ import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealOrders } from "@/lib/api";
-import { isChannelSource } from "@/lib/orders";
+import { presentOrderSource } from "@/lib/orders";
 import { ordersKeys } from "@/lib/orders-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -63,11 +64,23 @@ function OrderRow({ order }: { order: Order }) {
       </div>
 
       <div className="flex min-w-0 items-center gap-2">
-        {order.source && isChannelSource(order.source) ? (
-          <ChannelBadge channel={order.source} withLabel />
-        ) : (
-          <span className="text-caption text-text-secondary">{t("order.sourceManual")}</span>
-        )}
+        {/*
+         * One shared decision (presentOrderSource) drives both Order
+         * surfaces: a known channel badges itself, an unrecognised source
+         * badges as generic "other", and ONLY an explicitly MANUAL order
+         * reads "Entered by hand". An order with no recorded source claims
+         * nothing at all rather than inventing provenance.
+         */}
+        {(() => {
+          const presented = presentOrderSource(order.source);
+          if (presented.kind === "channel")
+            return <ChannelBadge channel={presented.channel} withLabel />;
+          if (presented.kind === "manual")
+            return (
+              <span className="text-caption text-text-secondary">{t("order.sourceManual")}</span>
+            );
+          return null;
+        })()}
         <span className="text-caption min-w-0 flex-1 truncate text-text-muted">
           {order.customerId ? t("orderList.hasCustomer") : t("orderList.noCustomer")}
         </span>
@@ -77,7 +90,13 @@ function OrderRow({ order }: { order: Order }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        {order.lifecycleStatus ? <StatusChip status={order.lifecycleStatus} /> : null}
+        {/*
+         * The lifecycle axis gets the liquid-glass StatusBadge; payment and
+         * fulfilment remain their own StatusChip facts — three axes, never
+         * merged. All four OrderLifecycleStatus values are direct members of
+         * the StatusBadge vocabulary, so the mapping is the identity.
+         */}
+        {order.lifecycleStatus ? <StatusBadge status={order.lifecycleStatus} size="sm" /> : null}
         <StatusChip status={order.paymentStatus} />
         <StatusChip status={order.fulfillmentStatus} />
       </div>

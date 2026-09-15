@@ -161,11 +161,18 @@ export function PrepareOrderSheet({
     );
 
     try {
-      const useRealOrders = isProductionId(customer.id) && readyLines.every(isProductionReady);
+      // A conversation on an unclassified channel ("other") has no honest DB
+      // provenance — see channelToSourceDb. Rather than persist a fabricated
+      // MANUAL source (claiming a human keyed the order in by hand), the real
+      // -order path is declined and the existing local draft path handles it,
+      // exactly as it already does for any not-yet-production input.
+      const orderSource = channelToSourceDb(channel);
+      const useRealOrders =
+        orderSource !== null && isProductionId(customer.id) && readyLines.every(isProductionReady);
 
       if (useRealOrders) {
         const detail = await createRealOrder({
-          source: channelToSourceDb(channel),
+          source: orderSource,
           items: readyLines.map((line) => ({
             // isProductionReady() above guarantees these are present.
             variantId: line.product.variantId!,

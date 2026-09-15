@@ -30,25 +30,87 @@ const SOURCE_TO_ORDER_SOURCE: Record<OrderSourceDb, OrderSource> = {
   MANUAL: "manual",
 };
 
-const CHANNEL_TO_SOURCE_DB: Record<Channel, OrderSourceDb> = {
+/**
+ * Writable provenance only. "other" is deliberately absent: it is a
+ * display-only bucket for sources we could not identify, and there is no DB
+ * enum member that honestly means "unclassified". Mapping it to MANUAL would
+ * persist a fabricated claim that a human keyed the order in by hand, so
+ * `channelToSourceDb` refuses it instead (returns null) and the caller
+ * decides — it never silently invents manual intent.
+ */
+const CHANNEL_TO_SOURCE_DB: Record<Exclude<Channel, "other">, OrderSourceDb> = {
   pos: "POS",
-  other: "MANUAL",
   facebook: "FACEBOOK",
   instagram: "INSTAGRAM",
   telegram: "TELEGRAM",
 };
 
+/**
+ * Normalises a raw DB source into the UI vocabulary.
+ *
+ * Typed as OrderSourceDb, but the value genuinely arrives from the database,
+ * so legacy rows, a widened server enum, or malformed data can all reach here
+ * as something outside the union. Anything unrecognised becomes "other" — the
+ * generic, honest bucket — and never "manual": an order whose provenance we
+ * cannot identify was NOT necessarily entered by hand, and saying so in the UI
+ * is a false statement about how the business took the order.
+ */
 export function sourceDbToOrderSource(source: OrderSourceDb): OrderSource {
-  return SOURCE_TO_ORDER_SOURCE[source];
+  return SOURCE_TO_ORDER_SOURCE[source] ?? "other";
 }
 
-export function channelToSourceDb(channel: Channel): OrderSourceDb {
-  return CHANNEL_TO_SOURCE_DB[channel];
+/**
+ * Maps a UI channel to the DB source to persist, or null when the channel
+ * carries no honest provenance ("other"). Callers must handle null rather
+ * than defaulting — see CHANNEL_TO_SOURCE_DB above.
+ */
+export function channelToSourceDb(channel: Channel): OrderSourceDb | null {
+  return channel === "other" ? null : CHANNEL_TO_SOURCE_DB[channel];
 }
 
-/** True when a source maps to a renderable ChannelBadge Channel (i.e. not "manual"). */
-export function isChannelSource(source: OrderSource): source is Exclude<Channel, "other"> {
-  return source !== "manual";
+/**
+ * True when a source is a Channel that ChannelBadge can render (every Channel
+ * except "manual", which is not a Channel at all). The check is an explicit
+ * membership test — not `source !== "manual"` — so untyped data that slips
+ * past the OrderSource union (legacy rows, future API values, "POS"-style DB
+ * casing) is rejected here instead of crashing ChannelBadge's icon lookup
+ * later. A value this accepts is guaranteed to exist in ChannelBadge's ICONS.
+ */
+const RENDERABLE_CHANNELS: readonly Channel[] = [
+  "facebook",
+  "instagram",
+  "telegram",
+  "pos",
+  "other",
+];
+
+export function isChannelSource(source: OrderSource): source is Channel {
+  return (RENDERABLE_CHANNELS as readonly string[]).includes(source);
+}
+
+/**
+ * How an order's provenance should be presented — the single decision both
+ * Order surfaces (list and detail) share, so neither grows its own fallback.
+ *
+ * Three genuinely different facts, never collapsed into one another:
+ *   - "channel": we know which channel it came from → ChannelBadge.
+ *   - "manual":  the order is explicitly MANUAL → "Entered by hand".
+ *   - "absent":  no source was recorded at all → assert nothing.
+ *
+ * An unrecognised value is "channel"/"other", never "manual" and never
+ * "absent": we know the order came from somewhere, we just cannot name it.
+ */
+export type OrderSourcePresentation =
+  { kind: "channel"; channel: Channel } | { kind: "manual" } | { kind: "absent" };
+
+export function presentOrderSource(
+  source: OrderSource | null | undefined,
+): OrderSourcePresentation {
+  // Only a genuinely missing value is "absent". An empty string is a broken
+  // stored value, not an absence, so it falls through to the generic bucket.
+  if (source === null || source === undefined) return { kind: "absent" };
+  if (source === "manual") return { kind: "manual" };
+  return { kind: "channel", channel: isChannelSource(source) ? source : "other" };
 }
 
 // ── Server → UI mapping ───────────────────────────────────────────────────────
@@ -60,9 +122,11 @@ export function mapOrderSummaryToUi(row: ServerOrderSummary): Order {
     id: row.id,
     code: row.orderNumber,
     customerId: row.customerId,
-    // Vestigial for real orders — real rendering reads `source`, never `channel`,
-    // because Channel has no "manual" member. Kept only so `Order` stays one type.
-    channel: isChannelSource(source) ? source : "pos",
+    // Derived display channel for surfaces that badge a Channel directly.
+    // "manual" is not a Channel, so it shows as the generic "other" here;
+    // surfaces that must tell manual apart read `source` through
+    // presentOrderSource() rather than this field.
+    channel: isChannelSource(source) ? source : "other",
     items: [],
     subtotal: row.subtotal,
     discount: row.discount,

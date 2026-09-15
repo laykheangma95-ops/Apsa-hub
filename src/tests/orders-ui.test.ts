@@ -12,6 +12,8 @@
  * Run: bun test src/tests/orders-ui.test.ts
  */
 import { describe, it, expect } from "bun:test";
+import * as fs from "fs";
+import * as path from "path";
 import {
   canCancelOrder,
   canConfirmOrder,
@@ -24,6 +26,10 @@ import {
   sourceDbToOrderSource,
   totalStockUnits,
 } from "@/lib/orders";
+
+function readSource(relPath: string): string {
+  return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
+}
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -72,11 +78,27 @@ describe("source <-> channel mapping", () => {
     expect(sourceDbToOrderSource("MANUAL")).toBe("manual");
   });
 
-  it("maps every Channel back to its OrderSourceDb", () => {
+  it("normalises an unrecognised DB source to 'other', never to 'manual'", () => {
+    // Legacy rows, a widened server enum, or malformed data must not be
+    // reported as hand-entered — that is a false claim about provenance.
+    for (const raw of ["WHATSAPP", "", "LINE", "pos", "legacy_garbage_42", null, undefined]) {
+      const normalised = sourceDbToOrderSource(raw as never);
+      expect(normalised).toBe("other");
+      expect(normalised).not.toBe("manual");
+    }
+  });
+
+  it("maps every writable Channel back to its OrderSourceDb", () => {
     expect(channelToSourceDb("pos")).toBe("POS");
     expect(channelToSourceDb("facebook")).toBe("FACEBOOK");
     expect(channelToSourceDb("instagram")).toBe("INSTAGRAM");
     expect(channelToSourceDb("telegram")).toBe("TELEGRAM");
+  });
+
+  it("refuses to write 'other' as a DB source instead of fabricating MANUAL", () => {
+    // "other" is a display-only bucket. Persisting it as MANUAL would record
+    // that a human keyed the order in by hand, which never happened.
+    expect(channelToSourceDb("other")).toBeNull();
   });
 
   it("only 'manual' is not a renderable ChannelBadge channel", () => {
@@ -84,7 +106,32 @@ describe("source <-> channel mapping", () => {
     expect(isChannelSource("facebook")).toBe(true);
     expect(isChannelSource("instagram")).toBe(true);
     expect(isChannelSource("telegram")).toBe(true);
+    expect(isChannelSource("other")).toBe(true);
     expect(isChannelSource("manual")).toBe(false);
+  });
+
+  /*
+   * Regression: the guard used to be `source !== "manual"`, so any string
+   * ("POS", "", a future API value) passed and crashed ChannelBadge's ICONS
+   * lookup with an undefined component. Every accepted value must be a
+   * canonical Channel key that ChannelBadge can index; anything else must be
+   * rejected here so the UI falls back to the generic "other" badge (never
+   * the manual caption — see presentOrderSource).
+   */
+  it("rejects values outside the Channel union instead of crashing ChannelBadge", () => {
+    for (const garbage of ["POS", "Facebook", "", "sms", "telegram ", " point_of_sale"]) {
+      expect(isChannelSource(garbage as never)).toBe(false);
+    }
+  });
+
+  it("every accepted source exists in ChannelBadge's icon lookup (structural)", () => {
+    const badgeSource = readSource("src/design-system/ChannelBadge.tsx");
+    const iconKeys = Array.from(badgeSource.matchAll(/^\s{2}(\w+):/gm)).map((m) => m[1]);
+    for (const channel of ["facebook", "instagram", "telegram", "pos", "other"] as const) {
+      expect(isChannelSource(channel)).toBe(true);
+      expect(iconKeys).toContain(channel);
+    }
+    expect(iconKeys).not.toContain("manual");
   });
 });
 
@@ -122,12 +169,23 @@ describe("mapOrderSummaryToUi", () => {
     expect(ui.subtotal).toEqual({ amount: 1000, currency: "USD" });
   });
 
-  it("MANUAL source maps to source:'manual' and a channel-badge-safe fallback channel", () => {
+  it("MANUAL source maps to source:'manual' and the honest 'other' fallback channel", () => {
     const ui = mapOrderSummaryToUi({ ...BASE_SUMMARY, source: "MANUAL" });
     expect(ui.source).toBe("manual");
-    // `channel` is never read for a manual order (callers branch on `source`),
-    // but it must still be a valid Channel so the type stays sound.
-    expect(["pos", "facebook", "instagram", "telegram"]).toContain(ui.channel);
+    // A manual order is not the POS platform: `channel` must never claim it
+    // is. "other" is the generic Channel; callers that branch on `source`
+    // still render the "Entered by hand" caption for these.
+    expect(ui.channel).toBe("other");
+  });
+
+  it("an unmapped/legacy DB source never becomes a false platform", () => {
+    // A raw value outside OrderSourceDb is normalised at the mapper to the
+    // generic "other" — not left undefined (which the surfaces used to read as
+    // "Entered by hand") and never a real platform.
+    const ui = mapOrderSummaryToUi({ ...BASE_SUMMARY, source: "WHATSAPP" as never });
+    expect(ui.source).toBe("other");
+    expect(ui.source).not.toBe("manual");
+    expect(ui.channel).toBe("other");
   });
 
   it("a social source maps identically to both `source` and `channel`", () => {
