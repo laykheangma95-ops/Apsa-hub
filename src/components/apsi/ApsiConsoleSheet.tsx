@@ -110,8 +110,21 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
 
   const outcome = lookup.data;
   const searching = !plan.empty && lookup.isPending;
+  /*
+   * A "nothing matched" line is a claim about what APSA holds, so it may only
+   * be made when at least one probe actually reached a domain and answered.
+   *
+   * `answered` is false when every probe was withheld for lack of a grant —
+   * runApsiLookup short-circuits before issuing anything. Without this guard a
+   * member with none of the read keys pasted an id and was told nothing
+   * matched, having issued no request at all: a negative existence claim built
+   * from silence. That member sees the withheld notices instead.
+   */
   const nothingFound =
-    Boolean(outcome) && outcome!.results.length === 0 && outcome!.failed.length === 0;
+    Boolean(outcome) &&
+    outcome!.answered &&
+    outcome!.results.length === 0 &&
+    outcome!.failed.length === 0;
 
   return (
     <BottomSheet

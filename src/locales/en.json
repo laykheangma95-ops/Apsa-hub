@@ -1824,7 +1824,7 @@
     "clearSearch": "Clear search",
     "openDomain": "Open a workspace instead",
     "noTools": "You do not have access to any of Apsi's lookups yet. Ask an owner or manager to review your role.",
-    "noResults": "Nothing in APSA matched “{{query}}”.",
+    "noResults": "No delivery, SKU or barcode matched “{{query}}”. Apsi cannot search orders by code, or customers by name or phone — the record may still exist. Open a workspace below to keep looking.",
     "partialFailure": "Part of this search did not complete, so this answer may be incomplete.",
     "retry": "Try again",
     "withheld": "One lookup was not run: it needs the {{permission}} permission, which your role does not have.",

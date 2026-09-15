@@ -21,6 +21,13 @@ const DELIVERY_ID = "33333333-3333-4333-8333-333333333333";
 const CUSTOMER_ID = "44444444-4444-4444-8444-444444444444";
 const VARIANT_ID = "55555555-5555-4555-8555-555555555555";
 
+/**
+ * A single token that every double answers with "nothing", so a lookup can
+ * reach its domains, be answered, and still find no record — the one state in
+ * which the console is entitled to say nothing matched.
+ */
+const NO_MATCH_QUERY = "NOMATCH-XYZ";
+
 const usd = (minor: number) => ({ amountMinor: minor, currency: "USD" as const });
 
 mock.module("@/lib/api", () => ({
@@ -101,6 +108,11 @@ mock.module("@/lib/api", () => ({
   },
   listRealDeliveries: async (options: { search?: string }) => {
     calls.push(`delivery-search:${options.search}`);
+    // A real search that genuinely matches nothing — the case where the
+    // console HAS looked and may honestly say so.
+    if (options.search === NO_MATCH_QUERY) {
+      return { items: [], hasMore: false, truncated: false };
+    }
     return {
       items: [
         {
@@ -244,6 +256,55 @@ describe("Apsi permission model — withheld before the request, not after", () 
     expect(outcome.answered).toBe(false);
     expect(outcome.results).toEqual([]);
     expect(outcome.skipped.length).toBeGreaterThan(0);
+  });
+
+  /*
+   * The console may only say "nothing matched" when a domain actually
+   * answered. `answered` is the flag it gates that sentence on, so the two
+   * tests below fix its meaning behaviourally, against the recording doubles:
+   * silence caused by permissions is never an answer, and a real empty result
+   * always is.
+   *
+   * Before this guard existed, a member with no grants pasted a tracking
+   * number, the console issued NOTHING, and the screen still told them the
+   * record did not match — a negative existence claim built from a request
+   * that was never made.
+   */
+  it("does not count a fully withheld lookup as answered, so nothing-found cannot render", async () => {
+    const plan = classifyApsiQuery("JT-9001");
+    // The input really does produce candidate probes; they are all withheld.
+    expect(plan.probes.length).toBeGreaterThan(0);
+
+    const outcome = await runApsiLookup(plan, grantsFor([]));
+
+    // Behavioural, not source-text: the domain layer recorded no request.
+    expect(calls).toEqual([]);
+    expect(outcome.answered).toBe(false);
+    expect(outcome.results).toEqual([]);
+    expect(outcome.failed).toEqual([]);
+    // What the member is owed instead: the withheld set, one entry per probe.
+    expect(outcome.skipped.map((probe) => probe.kind).sort()).toEqual(
+      [...plan.probes.map((probe) => probe.kind)].sort(),
+    );
+
+    // The exact condition ApsiConsoleSheet renders apsi.noResults behind.
+    const nothingFound =
+      outcome.answered && outcome.results.length === 0 && outcome.failed.length === 0;
+    expect(nothingFound).toBe(false);
+  });
+
+  it("counts a real empty answer as answered, so nothing-found still renders", async () => {
+    const outcome = await runApsiLookup(classifyApsiQuery(NO_MATCH_QUERY), grantsFor(ALL));
+
+    // The requests were genuinely issued and genuinely came back empty.
+    expect(calls).toContain(`delivery-search:${NO_MATCH_QUERY}`);
+    expect(outcome.answered).toBe(true);
+    expect(outcome.results).toEqual([]);
+    expect(outcome.failed).toEqual([]);
+
+    const nothingFound =
+      outcome.answered && outcome.results.length === 0 && outcome.failed.length === 0;
+    expect(nothingFound).toBe(true);
   });
 
   it("declares a permission for every probe the classifier can emit", () => {

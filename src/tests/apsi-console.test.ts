@@ -23,7 +23,12 @@ import {
   looksLikePhoneNumber,
   normalizeApsiQuery,
 } from "@/lib/apsi/input";
-import { APSI_PROBE_PERMISSION, planApsiLookup } from "@/lib/apsi/lookup";
+import {
+  APSI_PROBE_PERMISSION,
+  apsiResultRoute,
+  planApsiLookup,
+  type ApsiResult,
+} from "@/lib/apsi/lookup";
 import { apsiSurfaceForPath, orderApsiActionIds } from "@/lib/apsi/context";
 import { getBusinessNavConfig } from "@/design-system/mobile-nav-config";
 import { APSI_QUERY_ROOT, apsiKeys } from "@/lib/apsi-query";
@@ -141,6 +146,86 @@ describe("Apsi says what it cannot do instead of finding nothing", () => {
   });
 });
 
+// ── Scope honesty ─────────────────────────────────────────────────────────────
+
+/*
+ * The two sentences a merchant reads when Apsi finds nothing are the whole
+ * product promise, and both were once wrong: the scope line was unpinned, and
+ * the empty-result line claimed the record was absent from APSA entirely.
+ *
+ * Apsi searches deliveries (free text), products (exact SKU / barcode) and
+ * pasted ids. It cannot search orders by code, or customers by name or phone.
+ * So neither string may make a whole-system claim — an order with no delivery
+ * row exists and is simply out of reach, and telling a merchant otherwise is
+ * how they tell a customer their order does not exist.
+ *
+ * Asserted semantically rather than by full-string match: the wording is free
+ * to change, the promise is not.
+ */
+describe("Apsi never claims to have searched all of APSA", () => {
+  const en = JSON.parse(read("src/locales/en.json")).apsi;
+  const km = JSON.parse(read("src/locales/km.json")).apsi;
+
+  /** "nothing/everything in APSA", in either language, is the claim to catch. */
+  const UNIVERSAL_EN = /\b(nothing|everything|anything|no record|nowhere)\b[^.]*\bAPSA\b/i;
+  const UNIVERSAL_KM = /(គ្មានអ្វី|ទាំងអស់|អ្វីៗ)[^។]*APSA/;
+
+  it("states the real search scope rather than universal coverage", () => {
+    expect(en.searchScope).not.toMatch(UNIVERSAL_EN);
+    expect(km.searchScope).not.toMatch(UNIVERSAL_KM);
+    // It names what is actually searched, so "not found" can be read in context.
+    expect(en.searchScope).toMatch(/deliver/i);
+    expect(en.searchScope).toMatch(/sku/i);
+    expect(en.searchScope).toMatch(/barcode/i);
+    expect(km.searchScope).toMatch(/ដឹកជញ្ជូន/);
+    expect(km.searchScope).toMatch(/SKU/);
+    expect(km.searchScope).toMatch(/បាកូដ/);
+  });
+
+  it("scopes the empty-result line to what was searched", () => {
+    expect(en.noResults).not.toMatch(UNIVERSAL_EN);
+    expect(km.noResults).not.toMatch(UNIVERSAL_KM);
+
+    // It still echoes the query, and still names the surfaces that were tried.
+    for (const copy of [en.noResults, km.noResults]) {
+      expect(copy).toContain("{{query}}");
+    }
+    expect(en.noResults).toMatch(/deliver/i);
+    expect(en.noResults).toMatch(/sku/i);
+    expect(en.noResults).toMatch(/barcode/i);
+    expect(km.noResults).toMatch(/ដឹកជញ្ជូន/);
+    expect(km.noResults).toMatch(/SKU/);
+    expect(km.noResults).toMatch(/បាកូដ/);
+  });
+
+  it("names the searches it cannot run in the empty-result line", () => {
+    // Order code and customer name/phone are the gaps a merchant will hit
+    // first; the line has to send them somewhere rather than close the door.
+    expect(en.noResults).toMatch(/order/i);
+    expect(en.noResults).toMatch(/name|phone/i);
+    expect(km.noResults).toMatch(/ការបញ្ជាទិញ/);
+    expect(km.noResults).toMatch(/ឈ្មោះ|ទូរស័ព្ទ/);
+  });
+
+  /*
+   * Behavioural proof that this line cannot appear after a lookup that issued
+   * nothing lives in apsi-console.runtime.ts (a recording domain layer, zero
+   * requests, `answered: false`). This pins the wiring: the console must gate
+   * the sentence on that same flag.
+   */
+  it("renders the empty-result line only when a domain actually answered", () => {
+    const console_ = readCode(CONSOLE);
+    const gate = console_.match(/const nothingFound =[\s\S]*?;/)?.[0] ?? "";
+
+    expect(gate).toContain("outcome!.answered");
+    expect(gate).toContain("outcome!.results.length === 0");
+    expect(gate).toContain("outcome!.failed.length === 0");
+    // The flag is only worth anything if the sentence is behind it.
+    expect(console_).toContain("{nothingFound ?");
+    expect(console_).toContain('t("apsi.noResults"');
+  });
+});
+
 // ── Permission model ──────────────────────────────────────────────────────────
 
 describe("Apsi reveals nothing the member could not see directly", () => {
@@ -252,6 +337,77 @@ describe("Apsi context reorders shortcuts and nothing else", () => {
  * failed, and restoring it. They are the regressions most likely to be
  * reintroduced by a well-meaning edit.
  */
+// ── Result routing ────────────────────────────────────────────────────────────
+
+/*
+ * Where a result card sends the member, tested against the real helper.
+ *
+ * The rule is narrow and total: the destination is the domain that owns the
+ * record, and the id is the one the domain returned — unchanged, never
+ * substituted, never derived. A card that routes to a fabricated id sends a
+ * merchant to a 404 while telling them the record was found.
+ *
+ * Previously this was covered only by asserting that the Apsi modules import
+ * no fixtures, which is a different property: a literal id written inline in
+ * the helper imports nothing and would have passed.
+ */
+describe("Apsi routes a result to the record the domain returned", () => {
+  const order: ApsiResult = {
+    kind: "order",
+    id: "11111111-1111-4111-8111-111111111111",
+    code: "APSA-1042",
+    total: { amountMinor: 1980, currency: "USD" },
+    lifecycleStatus: "confirmed",
+    paymentStatus: "pending_payment",
+    fulfillmentStatus: "packing",
+  };
+
+  it("sends an Order result to Order detail under its production id", () => {
+    expect(apsiResultRoute(order)).toEqual({
+      to: "/app/orders/$id",
+      id: "11111111-1111-4111-8111-111111111111",
+    });
+  });
+
+  it("gives every result kind the route of the domain that owns it", () => {
+    const routes = [
+      [order, "/app/orders/$id"],
+      [{ ...order, kind: "payment" } as unknown as ApsiResult, "/app/payments/$id"],
+      [{ ...order, kind: "delivery" } as unknown as ApsiResult, "/app/deliveries/$id"],
+      [{ ...order, kind: "customer" } as unknown as ApsiResult, "/app/customers/$id"],
+      [{ ...order, kind: "product" } as unknown as ApsiResult, "/app/products/$id"],
+    ] as const;
+
+    for (const [result, to] of routes) {
+      expect({ kind: result.kind, ...apsiResultRoute(result) }).toEqual({
+        kind: result.kind,
+        to,
+        id: order.id,
+      });
+    }
+  });
+
+  /*
+   * The id is passed through, not chosen. Several unrelated ids rather than
+   * one, so a hard-coded literal cannot satisfy the assertion by coincidence.
+   */
+  it("never substitutes or manufactures an id", () => {
+    for (const id of [
+      "11111111-1111-4111-8111-111111111111",
+      "99999999-9999-4999-8999-999999999999",
+      "prod-1",
+    ]) {
+      expect(apsiResultRoute({ ...order, id }).id).toBe(id);
+    }
+
+    // And the helper invents nothing on its own: no literal id in its body.
+    const source = readCode(LOOKUP);
+    const body = source.slice(source.indexOf("export function apsiResultRoute"));
+    expect(body).toContain("id: result.id");
+    expect(body).not.toMatch(/id: ["'`]/);
+  });
+});
+
 describe("adversarial probes", () => {
   it("1. Apsi cannot acquire a red badge", () => {
     const nav = read(BOTTOM_NAV);
