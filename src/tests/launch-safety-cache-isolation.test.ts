@@ -1,6 +1,7 @@
 /**
- * Launch-safety: principal partitioning across the five remaining sensitive
- * React Query caches — Orders, Conversations, Customers, POS products, Team.
+ * Launch-safety: principal partitioning across the six remaining sensitive
+ * React Query caches — Orders, Conversations, Customers, POS products, Team
+ * and Deliveries.
  *
  * The failure these guard against is one concrete scene, not an abstraction:
  * a shared phone in a Cambodian shop. User A opens Orders (or the Inbox, or
@@ -47,6 +48,12 @@ import {
   enforceConversationCachePrincipal,
   CONVERSATIONS_QUERY_ROOT,
 } from "@/lib/inbox-query";
+import {
+  clearDeliveryQueries,
+  deliveryKeys,
+  enforceDeliveryCachePrincipal,
+  DELIVERIES_QUERY_ROOT,
+} from "@/lib/deliveries-query";
 import {
   clearOrderQueries,
   enforceOrderCachePrincipal,
@@ -123,6 +130,12 @@ function createFakeServer() {
       [ORG_A]: { org: ORG_A, rows: ["Owner A owner@a.test"] },
       [ORG_B]: { org: ORG_B, rows: ["Owner B owner@b.test"] },
     },
+    // A delivery row is customer name + order code + COD money + the courier's
+    // external tracking number — real tenant data, exactly like the five above.
+    deliveries: {
+      [ORG_A]: { org: ORG_A, rows: ["Sok Dara APSA-0001 COD $42.00 VET-A-77123"] },
+      [ORG_B]: { org: ORG_B, rows: ["Chan Nita APSA-9001 COD $3.00 VET-B-90881"] },
+    },
   };
 
   let session: { userId: string; organizationId: string } | null = null;
@@ -157,13 +170,14 @@ function mountAppLayout(client: QueryClient, userId: string, organizationId: str
   enforceOrderCachePrincipal(client, userId, organizationId);
   enforceConversationCachePrincipal(client, userId, organizationId);
   enforceCustomerCachePrincipal(client, userId, organizationId);
+  enforceDeliveryCachePrincipal(client, userId, organizationId);
   enforceTeamCachePrincipal(client, userId, organizationId);
   enforceCatalogCachePrincipal(client, userId, organizationId);
 }
 
 /**
  * One table of what each migrated domain looks like, so every assertion below
- * runs against all five rather than whichever one a future edit remembers.
+ * runs against all six rather than whichever one a future edit remembers.
  */
 const DOMAINS = [
   {
@@ -201,6 +215,13 @@ const DOMAINS = [
     domain: "team" as const,
     key: (u: string, o: string) => teamKeys.roster(u, o) as readonly unknown[],
     clear: clearTeamQueries,
+  },
+  {
+    name: "Deliveries list",
+    root: DELIVERIES_QUERY_ROOT,
+    domain: "deliveries" as const,
+    key: (u: string, o: string) => deliveryKeys.list(u, o, null, null, null) as readonly unknown[],
+    clear: clearDeliveryQueries,
   },
 ] as const;
 
@@ -259,6 +280,8 @@ describe("A. every migrated key carries the principal", () => {
       ["pos-products"],
       ["pos-customers"],
       ["team"],
+      ["deliveries", "real"],
+      ["delivery", "real"],
     ];
     const migrated = DOMAINS.map((spec) => spec.key(USER_A, ORG_A));
     for (const key of migrated) {
@@ -686,12 +709,13 @@ describe("E. cached customer PII fails closed when the capability goes", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("F. the partitions are wired into the real routes", () => {
-  it("/app enforces all four new principals from server-derived route context", () => {
+  it("/app enforces all five new principals from server-derived route context", () => {
     const source = readSource("src/routes/app.tsx");
     for (const call of [
       "enforceOrderCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceConversationCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceCustomerCachePrincipal(queryClient, session.userId, organizationId)",
+      "enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceTeamCachePrincipal(queryClient, session.userId, organizationId)",
     ]) {
       expect(source).toContain(call);
@@ -722,6 +746,8 @@ describe("F. the partitions are wired into the real routes", () => {
       'queryKey: ["team"]',
       '["order-create"',
       '["conversation-smart-action-products"]',
+      '["deliveries", "real"',
+      '["delivery", "real"',
     ];
     const files = fs
       .readdirSync(path.resolve(ROOT, "src/routes"))
@@ -819,5 +845,430 @@ describe("F. the partitions are wired into the real routes", () => {
     // leaves the other readable.
     expect(readSource("src/routes/app.inbox.$id.tsx")).toContain("customerKeys.detail(");
     expect(readSource("src/routes/app.customers.$id.tsx")).toContain("customerKeys.detail(");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// G. Deliveries — the domain the first review round left unpartitioned
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("G. the Delivery domain fails closed across principals", () => {
+  /**
+   * The sign-out that purges NOTHING.
+   *
+   * Settings' sign-out clears every root and then calls queryClient.clear(),
+   * so it was never the interesting path. This one is: when a session expires
+   * or is revoked, /app's `beforeLoad` throws a redirect (src/routes/app.tsx)
+   * and no purge runs anywhere on that path. The router navigates client-side,
+   * so the tab keeps the same QueryClient object — and the next member to sign
+   * in mounts keys that, before this change, were character-for-character the
+   * departed member's.
+   *
+   * Deliberately no clear() of any kind here. If isolation depends on one,
+   * this test fails.
+   */
+  function guardRedirectSignOut(server: FakeServer) {
+    server.signOut();
+    // …and that is all. No clearDeliveryQueries, no queryClient.clear().
+  }
+
+  it("A's delivery list is unreadable to B after a guard-redirect sign-out", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, ORG_A);
+    mountAppLayout(client, USER_A, ORG_A);
+    const aList = await client.fetchQuery({
+      queryKey: deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[],
+      queryFn: () => server.read("deliveries"),
+    });
+    expect(orgOf(aList)).toBe(ORG_A);
+    expect(aList.rows[0]).toContain("VET-A-77123");
+
+    guardRedirectSignOut(server);
+
+    // B signs in through the same tab and the same QueryClient.
+    server.signIn(USER_B, ORG_B);
+    mountAppLayout(client, USER_B, ORG_B);
+
+    const bKey = deliveryKeys.list(USER_B, ORG_B, null, null, null) as unknown[];
+    // Nothing readable for B before any fetch: no COD amount, no tracking
+    // number, no customer name from A.
+    expect(client.getQueryData(bKey)).toBeUndefined();
+    // And A's own entry is gone from the tab entirely, not merely unreachable.
+    expect(
+      client.getQueryData(deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[]),
+    ).toBeUndefined();
+
+    const bList = await client.fetchQuery({
+      queryKey: bKey,
+      queryFn: () => server.read("deliveries"),
+    });
+    expect(orgOf(bList)).toBe(ORG_B);
+    expect(JSON.stringify(bList)).not.toContain("VET-A-77123");
+    expect(JSON.stringify(bList)).not.toContain("Sok Dara");
+  });
+
+  it("a delivery DETAIL does not survive a guard-redirect sign-out either", async () => {
+    // A UUID in the URL is not an identity: B opening the same delivery URL
+    // must not be handed A's cached detail.
+    const DELIVERY_ID = "dddddddd-0000-0000-0000-00000000000d";
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, ORG_A);
+    mountAppLayout(client, USER_A, ORG_A);
+    await client.fetchQuery({
+      queryKey: deliveryKeys.detail(USER_A, ORG_A, DELIVERY_ID) as unknown[],
+      queryFn: () => server.read("deliveries"),
+    });
+
+    guardRedirectSignOut(server);
+    server.signIn(USER_B, ORG_B);
+    mountAppLayout(client, USER_B, ORG_B);
+
+    expect(
+      client.getQueryData(deliveryKeys.detail(USER_B, ORG_B, DELIVERY_ID) as unknown[]),
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(deliveryKeys.detail(USER_A, ORG_A, DELIVERY_ID) as unknown[]),
+    ).toBeUndefined();
+  });
+
+  it("two members of the SAME organization do not share a delivery entry", async () => {
+    // delivery.read and the transition grants are per-member, so one member's
+    // payload must never be read back for another in the same shop.
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, ORG_A);
+    mountAppLayout(client, USER_A, ORG_A);
+    await client.fetchQuery({
+      queryKey: deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[],
+      queryFn: () => server.read("deliveries"),
+    });
+
+    expect(deliveryKeys.list(USER_A, ORG_A, null, null, null)).not.toEqual(
+      deliveryKeys.list(USER_B, ORG_A, null, null, null),
+    );
+    // The second member of the same org starts empty rather than inheriting.
+    server.signIn(USER_B, ORG_A);
+    mountAppLayout(client, USER_B, ORG_A);
+    expect(
+      client.getQueryData(deliveryKeys.list(USER_B, ORG_A, null, null, null) as unknown[]),
+    ).toBeUndefined();
+  });
+
+  it("the same user switching organization is treated as a new delivery principal", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, ORG_A);
+    mountAppLayout(client, USER_A, ORG_A);
+    await client.fetchQuery({
+      queryKey: deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[],
+      queryFn: () => server.read("deliveries"),
+    });
+
+    server.signIn(USER_A, ORG_B);
+    mountAppLayout(client, USER_A, ORG_B);
+
+    expect(
+      client.getQueryData(deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[]),
+    ).toBeUndefined();
+    const after = await client.fetchQuery({
+      queryKey: deliveryKeys.list(USER_A, ORG_B, null, null, null) as unknown[],
+      queryFn: () => server.read("deliveries"),
+    });
+    expect(orgOf(after)).toBe(ORG_B);
+  });
+
+  it("a delivery fetch already in flight for A cannot resolve into B's key", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+    let release!: (value: TenantPayload) => void;
+    const pending = new Promise<TenantPayload>((resolve) => {
+      release = resolve;
+    });
+
+    server.signIn(USER_A, ORG_A);
+    mountAppLayout(client, USER_A, ORG_A);
+    const inFlight = client.fetchQuery({
+      queryKey: deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[],
+      queryFn: () => pending,
+    });
+
+    // The principal changes while A's request is still open.
+    server.signIn(USER_B, ORG_B);
+    mountAppLayout(client, USER_B, ORG_B);
+
+    release({ org: ORG_A, rows: ["Sok Dara APSA-0001 COD $42.00 VET-A-77123"] });
+    await inFlight.catch(() => undefined);
+
+    // Whatever became of A's entry, B's key is untouched by it.
+    expect(
+      client.getQueryData(deliveryKeys.list(USER_B, ORG_B, null, null, null) as unknown[]),
+    ).toBeUndefined();
+  });
+
+  it("a delivery transition invalidates only the acting principal's lists", async () => {
+    const client = new QueryClient();
+    const server = createFakeServer();
+
+    server.signIn(USER_A, ORG_A);
+    const aKey = deliveryKeys.list(USER_A, ORG_A, null, null, null) as unknown[];
+    await client.fetchQuery({ queryKey: aKey, queryFn: () => server.read("deliveries") });
+
+    server.signIn(USER_B, ORG_B);
+    const bKey = deliveryKeys.list(USER_B, ORG_B, null, null, null) as unknown[];
+    await client.fetchQuery({ queryKey: bKey, queryFn: () => server.read("deliveries") });
+
+    // What app.deliveries.$id.tsx does after a successful transition.
+    await client.invalidateQueries({ queryKey: deliveryKeys.lists(USER_A, ORG_A) as unknown[] });
+
+    expect(client.getQueryState(aKey)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(bKey)?.isInvalidated).toBe(false);
+  });
+
+  it("every filtered delivery list sits under the principal, so one call covers them all", () => {
+    const principal = deliveryKeys.principal(USER_A, ORG_A);
+    for (const key of [
+      deliveryKeys.list(USER_A, ORG_A, "active", null, null),
+      deliveryKeys.list(USER_A, ORG_A, null, "pending", "APSA-0001"),
+      deliveryKeys.lists(USER_A, ORG_A),
+      deliveryKeys.detail(USER_A, ORG_A, "dddddddd-0000-0000-0000-00000000000d"),
+    ]) {
+      expect(key.slice(0, principal.length)).toEqual([...principal]);
+    }
+    // The filters still discriminate, behind the principal.
+    expect(deliveryKeys.list(USER_A, ORG_A, "active", null, null)).not.toEqual(
+      deliveryKeys.list(USER_A, ORG_A, "completed", null, null),
+    );
+  });
+
+  it("the Delivery screens are wired to the partition, and to the Orders one for cross-reference", () => {
+    const list = stripComments(readSource("src/routes/app.deliveries.tsx"));
+    expect(list).toContain("deliveryKeys.list(");
+    expect(list).toContain("const { session, organizationId: routeOrganizationId }");
+
+    const detail = stripComments(readSource("src/routes/app.deliveries.$id.tsx"));
+    expect(detail).toContain("deliveryKeys.detail(userId, routeOrganizationId, id)");
+    expect(detail).toContain("deliveryKeys.lists(userId, routeOrganizationId)");
+    // The Orders cross-reference fixed earlier in this PR must stay partitioned.
+    expect(detail).toContain("ordersKeys.detail(userId, routeOrganizationId");
+
+    // And sign-out purges the new root like the others.
+    expect(readSource("src/routes/app.settings.tsx")).toContain(
+      "clearDeliveryQueries(queryClient)",
+    );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// H. Customer 360 must not claim a customer has no orders
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("H. Customer 360 order history is honest", () => {
+  const source = () => stripComments(readSource("src/routes/app.customers.$id.tsx"));
+
+  it("reads the real Order domain instead of the server's structural empty array", () => {
+    const src = source();
+    // The same production read CustomerDetailSheet uses — no parallel backend.
+    expect(src).toContain("getCustomerOrders(id)");
+    expect(src).toContain("customerKeys.orders(userId, routeOrganizationId, id)");
+    // getCustomer360()'s own `orders` may still feed the mock branch, but it is
+    // no longer what a real customer's tab renders.
+    expect(src).toContain("isRealCustomer ? (ordersQuery.data ?? []) : query.data!.orders");
+  });
+
+  it("gates the history on the capability listOrders already requires", () => {
+    const src = source();
+    expect(src).toContain('capabilities.can("orders.read")');
+    expect(src).toContain("enabled: isRealCustomer && canReadOrders");
+  });
+
+  it('"No orders yet" is unreachable until the real query has actually succeeded', () => {
+    /*
+     * Branch ORDER is the property under test, not merely branch presence.
+     * "No orders yet" is an affirmative claim about this customer, so every
+     * state in which the screen does not KNOW — never asked, still loading,
+     * failed — has to be handled before it.
+     */
+    const src = source();
+    const unavailable = src.indexOf("ordersUnavailable ? (");
+    const pending = src.indexOf("isRealCustomer && ordersQuery.isPending");
+    const errored = src.indexOf("isRealCustomer && ordersQuery.isError");
+    const empty = src.indexOf('t("customer360.noOrders")');
+
+    for (const idx of [unavailable, pending, errored, empty]) expect(idx).toBeGreaterThan(-1);
+    expect(unavailable).toBeLessThan(empty);
+    expect(pending).toBeLessThan(empty);
+    expect(errored).toBeLessThan(empty);
+  });
+
+  it("an unauthorized or failed history says so, in both languages", () => {
+    const src = source();
+    expect(src).toContain('t("customer360.ordersUnavailable")');
+    expect(src).toContain('t("customer360.ordersError")');
+
+    for (const locale of ["src/locales/en.json", "src/locales/km.json"]) {
+      const json = JSON.parse(readSource(locale)) as {
+        customer360: Record<string, string>;
+      };
+      for (const key of [
+        "ordersUnavailable",
+        "ordersUnavailableBody",
+        "ordersError",
+        "ordersErrorBody",
+      ]) {
+        expect({ locale, key, present: typeof json.customer360[key] === "string" }).toEqual({
+          locale,
+          key,
+          present: true,
+        });
+        expect(json.customer360[key]!.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("placeholder lifetime metrics are withheld rather than printed as zero", () => {
+    /*
+     * getCustomer360() hardcodes orderCount: 0 and lifetimeSpend: 0 for every
+     * production customer. "Orders 0" and "Spend $0.00" above a non-empty
+     * order list is the same false claim in a different place — and the values
+     * are not derivable here either, because the history is capped at one
+     * page. So they are withheld, not guessed.
+     */
+    const src = source();
+    expect(src).toContain("const metricsAuthoritative = !isRealCustomer");
+    expect(src).toContain("metricsAuthoritative ? customer.orderCount");
+    expect(src).toContain("!metricsAuthoritative");
+    // No client-side reconstruction of a lifetime total from the loaded page.
+    expect(src).not.toContain("orders.reduce(");
+  });
+
+  it("the history rides under this customer's own partition, so one purge takes it", () => {
+    const principal = customerKeys.principal(USER_A, ORG_A);
+    const detail = customerKeys.detail(USER_A, ORG_A, "cus-uuid");
+    const history = customerKeys.orders(USER_A, ORG_A, "cus-uuid");
+    expect(history.slice(0, principal.length)).toEqual([...principal]);
+    expect(history.slice(0, detail.length)).toEqual([...detail]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// I. POS phone search must fail closed, not just mask
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("I. a hidden phone is not searchable", () => {
+  /**
+   * A stand-in for the POS picker's read, built from the same two rules the
+   * real searchCustomers() now follows: mask every phone through
+   * visibleCustomerPhone FIRST, then never run the phone predicate on a
+   * blanked value.
+   */
+  interface Row {
+    id: string;
+    nameEn: string;
+    nameKm: string;
+    phone: string;
+    sensitiveVisible: boolean;
+  }
+  const ROWS: Row[] = [
+    {
+      id: "c1",
+      nameEn: "Sok Dara",
+      nameKm: "សុខ ដារា",
+      phone: "012345678",
+      sensitiveVisible: true,
+    },
+    {
+      id: "c2",
+      nameEn: "Chan Nita",
+      nameKm: "ចាន់ នីតា",
+      phone: "098765432",
+      sensitiveVisible: true,
+    },
+  ];
+
+  function search(term: string, canViewSensitive: boolean): Row[] {
+    const q = term.trim().toLowerCase();
+    const digits = q.replace(/\s/g, "");
+    const masked = ROWS.map((r) => ({ ...r, phone: visibleCustomerPhone(r, canViewSensitive) }));
+    if (!q) return masked.slice(0, 4);
+    return masked.filter(
+      (c) =>
+        c.nameKm.toLowerCase().includes(q) ||
+        c.nameEn.toLowerCase().includes(q) ||
+        (c.phone !== "" && c.phone.replace(/\s/g, "").includes(digits)),
+    );
+  }
+
+  it("an authorized member finds a customer by phone, and sees the number", () => {
+    const found = search("012345678", true);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.id).toBe("c1");
+    expect(found[0]!.phone).toBe("012345678");
+  });
+
+  it("once the grant is gone the same phone query matches nothing at all", () => {
+    /*
+     * Not "matches but hides the number" — MATCHES NOTHING. Result membership
+     * is itself the disclosure: a set that still came back for a typed
+     * fragment answers "does a customer with this number exist here?" however
+     * thoroughly the digits are blanked on screen.
+     */
+    const found = search("012345678", false);
+    expect(found).toHaveLength(0);
+    expect(JSON.stringify(found)).not.toContain("Sok Dara");
+  });
+
+  it("a stale capability snapshot behaves exactly like a revoked one", () => {
+    // canSensitive is `confirmed && can`, so an unconfirmed snapshot is false.
+    expect(search("012345678", false)).toHaveLength(0);
+  });
+
+  it("name search still works without the grant, and never exposes a number", () => {
+    const found = search("Sok", false);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.phone).toBe("");
+  });
+
+  it("a blanked phone is not matched against an empty needle", () => {
+    // Without the `phone !== ""` guard, "".includes("") is true and every row
+    // would match every query.
+    const found = search("zzz", false);
+    expect(found).toHaveLength(0);
+  });
+
+  it("the real searchCustomers masks before it filters, on both its paths", () => {
+    const src = stripComments(readSource("src/lib/api/index.ts"));
+    const fnIdx = src.indexOf("export async function searchCustomers");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const body = src.slice(fnIdx, fnIdx + 1600);
+    // The grant is a required parameter, so a new caller must state an answer.
+    expect(body).toContain("canViewSensitive: boolean");
+    const maskIdx = body.indexOf("visibleCustomerPhone(c, canViewSensitive)");
+    const predicateIdx = body.indexOf("c.phone.replace(");
+    expect(maskIdx).toBeGreaterThan(-1);
+    expect(predicateIdx).toBeGreaterThan(maskIdx);
+    expect(body).toContain('c.phone !== ""');
+    // The demo-mode fallback path is masked too, not just the production one.
+    expect(body).toContain("customers.map(mask)");
+  });
+
+  it("the POS picker passes the current grant to the read AND into the cache key", () => {
+    const src = stripComments(readSource("src/components/pos/PosCustomerSheet.tsx"));
+    expect(src).toContain('capabilities.canSensitive("customers.view_sensitive")');
+    expect(src).toContain("searchCustomers(query, canSensitive)");
+    // Without the grant in the key, the grant-era result set is served straight
+    // back for the same term after revocation.
+    expect(src).toContain("customerKeys.search(userId, organizationId, query, canSensitive)");
+  });
+
+  it("an authorized and an unauthorized search of the same term are different cache entries", () => {
+    expect(customerKeys.search(USER_A, ORG_A, "012345678", true)).not.toEqual(
+      customerKeys.search(USER_A, ORG_A, "012345678", false),
+    );
   });
 });

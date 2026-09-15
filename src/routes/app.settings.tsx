@@ -29,6 +29,7 @@ import { notifyError, notifySuccess } from "@/lib/feedback";
 import { ORGANIZATION_PROFILE_QUERY_KEY, resolveBusinessSectionView } from "@/lib/settings-view";
 import { clearHomeQueries } from "@/lib/home-query";
 import { clearCustomerQueries } from "@/lib/customers-query";
+import { clearDeliveryQueries } from "@/lib/deliveries-query";
 import { clearConversationQueries } from "@/lib/inbox-query";
 import { clearOrderQueries } from "@/lib/orders-query";
 import { clearTeamQueries } from "@/lib/team-query";
@@ -282,13 +283,15 @@ function SettingsScreen() {
       // The tenant caches are purged through their own central helpers first:
       // none of those calls can throw, so the most sensitive data is gone even
       // if the blanket clear below fails partway. Customer PII, conversation
-      // bodies, order money, the staff roster and the catalog each have a
-      // dedicated purge for exactly that reason — the blanket clear is the
+      // bodies, order money, delivery COD and tracking numbers, the staff
+      // roster and the catalog each have a dedicated purge for exactly that
+      // reason — the blanket clear is the
       // backstop here, never the primary isolation mechanism.
       clearHomeQueries(queryClient);
       clearCustomerQueries(queryClient);
       clearConversationQueries(queryClient);
       clearOrderQueries(queryClient);
+      clearDeliveryQueries(queryClient);
       clearTeamQueries(queryClient);
       clearCatalogQueries(queryClient);
       queryClient.clear();

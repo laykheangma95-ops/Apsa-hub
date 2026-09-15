@@ -67,9 +67,19 @@ export const customerKeys = {
    */
   options: (userId: string, organizationId: string) =>
     [CUSTOMERS_QUERY_ROOT, userId, organizationId, "options"] as const,
-  /** A customer-picker search term's results (POS, order create). */
-  search: (userId: string, organizationId: string, term: string) =>
-    [CUSTOMERS_QUERY_ROOT, userId, organizationId, "search", term] as const,
+  /**
+   * A customer-picker search term's results (POS, order create).
+   *
+   * `sensitive` is part of the identity, not decoration. A result set matched
+   * while `customers.view_sensitive` held was matched against real phone
+   * numbers; one matched without it was not. They are different answers to the
+   * same term, so they must be different entries — otherwise the grant-era set
+   * is served straight back after the grant is revoked, and which customers
+   * come back for a typed fragment still answers "does a customer with this
+   * number exist here?" even though every number on screen is blanked.
+   */
+  search: (userId: string, organizationId: string, term: string, sensitive: boolean) =>
+    [CUSTOMERS_QUERY_ROOT, userId, organizationId, "search", sensitive, term] as const,
 };
 
 export const CUSTOMERS_QUERY_PREFIX = partition.prefix;

@@ -25,6 +25,7 @@ import {
   type UiPaymentDetail,
   type UiPaymentReconciliation,
 } from "@/lib/payments";
+import { visibleCustomerPhone } from "@/lib/customers-query";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -586,33 +587,49 @@ function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
  * contexts (see isDemoModeError's own comment) — once a real backend is
  * reachable, an org with zero real customers sees an empty result, not mock
  * rows, same precedent as getProducts()/getPosProducts().
+ *
+ * `canViewSensitive` masks every phone through visibleCustomerPhone BEFORE
+ * the filter runs, and the phone predicate is skipped entirely once it does.
+ * Masking only the displayed value is not enough: the caller caches these
+ * results per search term, so a set matched against real phone numbers while
+ * `customers.view_sensitive` held stays readable after the grant is revoked.
+ * The numbers would be blanked on screen, but which customers came BACK for a
+ * typed fragment still answers "does a customer with this number exist here?"
+ * — which is precisely the disclosure that grant gates. Filtering on an
+ * already-blanked value cannot answer it.
+ *
+ * The parameter is required rather than defaulted so a new caller has to state
+ * an answer instead of silently inheriting the permissive one. Pass
+ * `capabilities.canSensitive("customers.view_sensitive")`, never `can(...)`.
  */
-export async function searchCustomers(query: string): Promise<Customer[]> {
+export async function searchCustomers(
+  query: string,
+  canViewSensitive: boolean,
+): Promise<Customer[]> {
   const q = query.trim().toLowerCase();
   const digits = q.replace(/\s/g, "");
+  // Masked first, so nothing below — display OR predicate — can read a phone
+  // this member may not see.
+  const mask = (c: Customer): Customer => ({
+    ...c,
+    phone: visibleCustomerPhone(c, canViewSensitive),
+  });
+  const matches = (c: Customer) =>
+    c.nameKm.toLowerCase().includes(q) ||
+    c.nameEn.toLowerCase().includes(q) ||
+    // A blanked phone is skipped rather than matched against an empty needle.
+    (c.phone !== "" && c.phone.replace(/\s/g, "").includes(digits));
   try {
     const rows = await listRealCustomers();
-    const mapped = rows.map(mapOrderCustomerOptionToUi);
+    const mapped = rows.map(mapOrderCustomerOptionToUi).map(mask);
     if (!q) return mapped.slice(0, 4);
-    return mapped.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    );
+    return mapped.filter(matches);
   } catch (err) {
     if (!isDemoModeError(err)) throw err;
   }
-  if (!q) return resolve(customers.slice(0, 4), 80);
-  return resolve(
-    customers.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    ),
-    80,
-  );
+  const mockMapped = customers.map(mask);
+  if (!q) return resolve(mockMapped.slice(0, 4), 80);
+  return resolve(mockMapped.filter(matches), 80);
 }
 
 export interface QuickCustomerInput {

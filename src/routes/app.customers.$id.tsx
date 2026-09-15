@@ -23,7 +23,7 @@ import {
 
 import { OperationalState } from "@/components/common/OperationalState";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { addCustomerNote, getCustomer360 } from "@/lib/api";
+import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
 import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
 import { fullTimestamp, initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
@@ -87,6 +87,37 @@ function Customer360Screen() {
   const detailKey = customerKeys.detail(userId, routeOrganizationId, id);
   const query = useQuery({ queryKey: detailKey, queryFn: () => getCustomer360(id) });
 
+  /*
+   * A production customer and a pre-production mock id are two different
+   * sources here, and conflating them is what made this screen lie.
+   *
+   * getCustomer360() answers a UUID from the server, which returns `orders: []`
+   * STRUCTURALLY — "Orders and events remain empty until their domains are
+   * productionized" (src/server/customers/service.ts) — not because the
+   * customer has none. Rendering that as "No orders yet" told the merchant
+   * something the screen had never asked the server. It also contradicted
+   * CustomerDetailSheet, which shows the same customer's real history.
+   *
+   * The real history comes from the same production read that sheet uses:
+   * getCustomerOrders() -> listOrdersFn, which filters by customerId in SQL
+   * and is scoped by the server to the organization it resolved from the
+   * caller's membership. No new backend, no parallel endpoint, and the key is
+   * this customer's own `orders` sub-key so a customer purge takes it along.
+   *
+   * A non-UUID mock id keeps its existing in-memory path untouched — that
+   * branch really does carry fixture orders, counts and spend.
+   */
+  const isRealCustomer = isProductionId(id);
+  // listOrders requires orders.read server-side; without it there is no
+  // honest version of this tab, so say so rather than imply "none".
+  const canReadOrders = capabilities.can("orders.read");
+
+  const ordersQuery = useQuery({
+    queryKey: customerKeys.orders(userId, routeOrganizationId, id),
+    queryFn: () => getCustomerOrders(id),
+    enabled: isRealCustomer && canReadOrders,
+  });
+
   const noteMutation = useMutation({
     mutationFn: (body: string) => addCustomerNote(id, body),
     onSuccess: (note) => {
@@ -148,9 +179,31 @@ function Customer360Screen() {
     );
   }
 
-  const { customer, orders, events, activeConversationId } = query.data!;
+  const { customer, events, activeConversationId } = query.data!;
   const notes = [...newNotes, ...query.data!.notes];
   const displayName = localName(customer, language);
+
+  /*
+   * Real customers read their history from the Order domain above; the mock
+   * branch keeps the fixture list the payload carries.
+   */
+  const orders = isRealCustomer ? (ordersQuery.data ?? []) : query.data!.orders;
+  const ordersUnavailable = isRealCustomer && !canReadOrders;
+
+  /*
+   * `orderCount` and `lifetimeSpend` are hardcoded to zero by the server for
+   * every production customer, alongside the structural `orders: []`. They are
+   * placeholders, not measurements, so this screen must not print them as
+   * figures — "Orders 0" and "Spend $0.00" above a non-empty order list is the
+   * same false claim in a different place.
+   *
+   * They are also not derivable here: the history above is capped at
+   * CUSTOMER_ORDER_HISTORY_LIMIT rows, so counting or summing it would invent
+   * a lifetime total out of one page. Deriving a wrong number is not an
+   * improvement on withholding one, so these show an explicit "—" until the
+   * server computes them.
+   */
+  const metricsAuthoritative = !isRealCustomer;
   const average =
     customer.orderCount > 0
       ? usd(Math.round(customer.lifetimeSpend.amount / customer.orderCount))
@@ -210,12 +263,18 @@ function Customer360Screen() {
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
               <dd className="text-h2 tnum truncate text-text-primary">
-                {sensitiveVisible ? formatMoney(customer.lifetimeSpend) : t("customer360.hidden")}
+                {!metricsAuthoritative
+                  ? "—"
+                  : sensitiveVisible
+                    ? formatMoney(customer.lifetimeSpend)
+                    : t("customer360.hidden")}
               </dd>
             </div>
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.orders")}</dt>
-              <dd className="text-h2 tnum truncate text-text-primary">{customer.orderCount}</dd>
+              <dd className="text-h2 tnum truncate text-text-primary">
+                {metricsAuthoritative ? customer.orderCount : "—"}
+              </dd>
             </div>
           </dl>
         </section>
@@ -233,7 +292,13 @@ function Customer360Screen() {
             <SectionRows>
               <SectionRow
                 label={t("customer360.averageOrder")}
-                value={sensitiveVisible ? formatMoney(average) : t("customer360.hidden")}
+                value={
+                  !metricsAuthoritative
+                    ? "—"
+                    : sensitiveVisible
+                      ? formatMoney(average)
+                      : t("customer360.hidden")
+                }
               />
               <SectionRow
                 label={t("customer.lastPurchase")}
@@ -272,8 +337,29 @@ function Customer360Screen() {
           </Section>
         ) : null}
 
+        {/*
+         * Order of these branches is the whole point. "No orders yet" is an
+         * affirmative claim about this customer, so it may only render once
+         * the real query has actually SUCCEEDED and come back empty. Never
+         * asked (no orders.read), still loading, or failed each get their own
+         * honest state instead.
+         */}
         {tab === "orders" ? (
-          orders.length === 0 ? (
+          ordersUnavailable ? (
+            <OperationalState
+              title={t("customer360.ordersUnavailable")}
+              body={t("customer360.ordersUnavailableBody")}
+            />
+          ) : isRealCustomer && ordersQuery.isPending ? (
+            <DetailSkeleton />
+          ) : isRealCustomer && ordersQuery.isError ? (
+            <OperationalState
+              tone="danger"
+              title={t("customer360.ordersError")}
+              body={t("customer360.ordersErrorBody")}
+              onRetry={() => void ordersQuery.refetch()}
+            />
+          ) : orders.length === 0 ? (
             <OperationalState
               title={t("customer360.noOrders")}
               body={t("customer360.noOrdersBody")}

@@ -24,6 +24,7 @@ import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
 import { enforceHomeCachePrincipal } from "@/lib/home-query";
 import { enforceCustomerCachePrincipal } from "@/lib/customers-query";
+import { enforceDeliveryCachePrincipal } from "@/lib/deliveries-query";
 import { enforceConversationCachePrincipal } from "@/lib/inbox-query";
 import { enforceOrderCachePrincipal } from "@/lib/orders-query";
 import { enforceTeamCachePrincipal } from "@/lib/team-query";
@@ -86,13 +87,21 @@ function AppLayout() {
   enforceHomeCachePrincipal(queryClient, session.userId, organizationId);
 
   /*
-   * The same guarantee, for the four domains migrated in the launch-safety
+   * The same guarantee, for the five domains migrated in the launch-safety
    * phase. They live here rather than on each route because their data is not
    * confined to one screen: an order list feeds the bottom nav, a customer
-   * profile is opened from the Inbox, from Orders and from POS, and the Team
-   * roster is read by more than /app/team. Enforcing once at the layout means
-   * no child route can render a previous principal's payload even for a frame,
+   * profile is opened from the Inbox, from Orders and from POS, a delivery is
+   * opened from Order detail as well as from its own list, and the Team roster
+   * is read by more than /app/team. Enforcing once at the layout means no
+   * child route can render a previous principal's payload even for a frame,
    * whichever of them the merchant lands on first.
+   *
+   * This is also the ONLY thing that covers a sign-out which never runs
+   * Settings' purge: when a session expires or is revoked, `beforeLoad` above
+   * throws a redirect and nothing clears the cache, yet the router navigates
+   * client-side so the tab keeps this same QueryClient. The next member to
+   * sign in mounts identical keys. These calls are what stops the previous
+   * principal's payload being served to them.
    *
    * Catalog and Inventory keep their existing per-route calls (see
    * src/routes/app.products.tsx, app.inventory.tsx) — this phase does not
@@ -104,6 +113,7 @@ function AppLayout() {
   enforceOrderCachePrincipal(queryClient, session.userId, organizationId);
   enforceConversationCachePrincipal(queryClient, session.userId, organizationId);
   enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
+  enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId);
   enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
 
   return (
