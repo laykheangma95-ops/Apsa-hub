@@ -736,9 +736,12 @@ describe("No migration was required, and the schema says why", () => {
 
   it("this phase adds no migration of its own", () => {
     const migrations = fs.readdirSync(path.join(ROOT, "supabase/migrations"));
-    // 042 is the last migration on main. A new file here would mean this phase
-    // silently changed the schema — which it must not do without first proving
-    // the change is required and reporting it.
-    expect(migrations.filter((f) => /^04[3-9]|^0[5-9]\d/.test(f))).toEqual([]);
+    // 043 is an unrelated Payments fix (see
+    // supabase/migrations/043_payment_referenceless_duplicate.sql), not
+    // anything this customer-search phase added. A migration numbered 044 or
+    // higher would mean THIS phase silently changed the schema — which it
+    // must not do without first proving the change is required and
+    // reporting it.
+    expect(migrations.filter((f) => /^04[4-9]|^0[5-9]\d/.test(f))).toEqual([]);
   });
 });
