@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { readFileSync, readdirSync } from "node:fs";
 
-export async function financialFixture(skipAuthority = false) {
+export async function financialFixture(skipAuthority = false, skipReferencelessDuplicate = false) {
   const db = new PGlite();
   await db.exec(`
     CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
@@ -16,6 +16,11 @@ export async function financialFixture(skipAuthority = false) {
     .filter((n) => /^\d+.*\.sql$/.test(n))
     .sort()) {
     if (skipAuthority && name.startsWith("040_")) continue;
+    // 043 modifies a function that migration 040 creates (by renaming
+    // record_payment_v1 to record_payment_before_order_v1) — it cannot run
+    // before 040 has, so skipping 040 also skips 043 until applyAuthority()
+    // catches both up together.
+    if ((skipAuthority || skipReferencelessDuplicate) && name.startsWith("043_")) continue;
     try {
       await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
     } catch (error) {
@@ -108,7 +113,11 @@ export async function financialFixture(skipAuthority = false) {
     state,
     newOrder,
     close: () => db.close(),
-    applyAuthority: () =>
-      db.exec(readFileSync("supabase/migrations/040_payment_order_authority.sql", "utf8")),
+    applyAuthority: async () => {
+      await db.exec(readFileSync("supabase/migrations/040_payment_order_authority.sql", "utf8"));
+      await db.exec(
+        readFileSync("supabase/migrations/043_payment_referenceless_duplicate.sql", "utf8"),
+      );
+    },
   };
 }

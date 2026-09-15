@@ -902,11 +902,16 @@ describe("production boundary", () => {
 
   it("adds no migration in this phase", () => {
     const migrations = fs.readdirSync(path.resolve(ROOT, "supabase/migrations"));
-    const beyond040 = migrations.filter((file) => {
+    // 043 is an unrelated Payments *domain* fix (duplicate-payment
+    // suspicion — see supabase/migrations/043_payment_referenceless_duplicate.sql),
+    // not anything the Payments Operations *UI* phase this file covers
+    // added. A migration numbered 044 or higher would mean THIS phase
+    // silently changed the schema.
+    const beyond043 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      return Number.isFinite(prefix) && prefix > 42;
+      return Number.isFinite(prefix) && prefix > 43;
     });
-    expect(beyond040).toEqual([]);
+    expect(beyond043).toEqual([]);
   });
 
   it("links to the order through the router, never by mutating order state", () => {

@@ -1915,10 +1915,12 @@ describe("J. the new screens keep the server/browser boundary", () => {
       .readdirSync(path.resolve(ROOT, "supabase/migrations"))
       .filter((name) => name.endsWith(".sql"))
       .sort();
-    // 042 is the migration head this phase inherited. The Product Catalog UI is
-    // built entirely on migrations 017-019, which already exist; adding a new
-    // file here would move this pin and fail the test on purpose.
-    expect(migrations.at(-1)).toBe("042_team_permissions.sql");
+    // 043 is the migration head this phase inherited (bumped by migration 043,
+    // an unrelated Payments fix — see supabase/migrations/043_payment_referenceless_duplicate.sql).
+    // The Product Catalog UI is built entirely on migrations 017-019, which
+    // already exist; adding a new file here would move this pin and fail the
+    // test on purpose.
+    expect(migrations.at(-1)).toBe("043_payment_referenceless_duplicate.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",
