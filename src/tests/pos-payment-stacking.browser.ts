@@ -218,11 +218,16 @@ async function startSession(browser: string): Promise<Session> {
     );
   }
 
-  const targets = (await (await fetch(`${endpoint}/json/list`)).json()) as Array<{
-    type: string;
-    webSocketDebuggerUrl?: string;
-  }>;
-  const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+  /*
+   * Create the page target rather than listing existing ones. A
+   * `--headless=new` launch with no URL argument is not guaranteed to have a
+   * page target yet, so `/json/list` found none on the GitHub runner and the
+   * whole suite failed before it opened a sheet. `/json/new` is the approach
+   * bottom-sheet-focus-trap.browser.ts already proves on this CI.
+   */
+  const pageTarget = (await (
+    await fetch(`${endpoint}/json/new?about:blank`, { method: "PUT" })
+  ).json()) as { webSocketDebuggerUrl?: string };
   if (!pageTarget?.webSocketDebuggerUrl) throw new Error("no page target");
 
   const socket = new WebSocket(pageTarget.webSocketDebuggerUrl);
