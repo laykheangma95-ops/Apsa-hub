@@ -23,6 +23,7 @@ import {
   type RealDeliveryListItem,
   type RealDeliveryStatus,
 } from "@/lib/deliveries";
+import { deliveryKeys } from "@/lib/deliveries-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 
@@ -130,6 +131,19 @@ function DeliveryListScreen() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const detailOpen = pathname !== "/app/deliveries" && pathname.startsWith("/app/deliveries/");
 
+  /*
+   * Cache identity from the /app route guard's server-derived context — a
+   * validated session cookie and the active membership row, never the
+   * capability snapshot and never the URL. A delivery row carries the
+   * customer's name, the order code, the COD amount and the courier's tracking
+   * number, and this list was keyed on its filters alone: one tab could serve
+   * Organization A's deliveries to whoever mounted this screen next. It
+   * partitions the cache and nothing else — listDeliveries() re-checks
+   * delivery.read against the membership the SERVER resolved, on every call.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+
   // listDeliveries requires delivery.read (src/server/deliveries/service.ts).
   const canReadDeliveries = capabilities.can("delivery.read");
 
@@ -147,13 +161,20 @@ function DeliveryListScreen() {
   }, [search]);
 
   const deliveriesQuery = useInfiniteQuery({
-    queryKey: [
-      "deliveries",
-      "real",
+    /*
+     * The filters stay in the key AND the principal now leads them. This is an
+     * infinite query, so the cached entry carries the offset cursor as well as
+     * the pages: partitioning the key partitions the cursor with it, and an
+     * offset walked through Organization A's delivery stream can never be
+     * handed to a request made as Organization B.
+     */
+    queryKey: deliveryKeys.list(
+      userId,
+      routeOrganizationId,
       activeFilter.scope ?? null,
       activeFilter.status ?? null,
       debouncedSearch || null,
-    ],
+    ),
     queryFn: ({ pageParam }) =>
       listRealDeliveries({
         scope: activeFilter.scope,

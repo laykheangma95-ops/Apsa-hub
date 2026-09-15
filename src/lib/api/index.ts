@@ -13,6 +13,19 @@ import {
   type RealDeliveryDetail,
   type RealDeliveryListPage,
 } from "@/lib/deliveries";
+import {
+  mapOrderSettlementToUi,
+  mapPaymentDetailToUi,
+  mapPaymentReconciliationToUi,
+  mapPaymentSummaryToUi,
+  type PaymentStatus,
+  type PaymentVerificationState,
+  type UiOrderSettlement,
+  type UiPayment,
+  type UiPaymentDetail,
+  type UiPaymentReconciliation,
+} from "@/lib/payments";
+import { visibleCustomerPhone } from "@/lib/customers-query";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -216,8 +229,67 @@ export async function getOlderConversationMessages(id: string, beforeId: string)
   return listConversationMessagesFn({ data: { conversationId: id, beforeId } });
 }
 
-export async function getCustomers(): Promise<Customer[]> {
-  return resolve(customers);
+/**
+ * One page of the production customer list.
+ *
+ * 100, not the server's 200 maximum: the read below asks for `limit + 1` rows
+ * to learn whether more exist, and 201 would fail listCustomersFn's own
+ * `max(200)` validator.
+ */
+export const CUSTOMER_PAGE_LIMIT = 100;
+
+/**
+ * A page of customers, with the server's own answer about completeness.
+ *
+ * `hasMore` exists so a caller can never present one page as "every customer".
+ * It is derived by asking for one row more than the page shows and reporting
+ * whether that row came back — there is no count endpoint, and inventing one
+ * client-side would be a guess.
+ */
+export interface CustomerListPage {
+  customers: Customer[];
+  /** True when the server held at least one row beyond this page. */
+  hasMore: boolean;
+  /** How many rows this page can hold — what the caller actually saw. */
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Production customer list — the real, org-scoped, PII-gated Customer domain.
+ *
+ * This used to `return resolve(customers)`: the in-memory fixture array, in
+ * production, on the live Inbox. There is deliberately no mock fallback now,
+ * and no demo-mode branch either (contrast getProducts/getConversationPage,
+ * whose isDemoModeError fallbacks predate this phase): an org with zero
+ * customers must see an empty list, and a backend failure must surface as a
+ * failure. Fake customer rows are never an acceptable answer on this path.
+ *
+ * Tenant scope, permission and PII gating all live in the server function:
+ * listCustomersFn resolves the organization from the caller's active
+ * membership, listCustomers() requires `customers.read`, and `phone` comes
+ * back as "" for any caller without `customers.view_sensitive`. No
+ * organization id is passed from here, because none would be trusted.
+ */
+export async function getCustomers(
+  options: { offset?: number; limit?: number } = {},
+): Promise<CustomerListPage> {
+  const limit = Math.min(options.limit ?? CUSTOMER_PAGE_LIMIT, CUSTOMER_PAGE_LIMIT);
+  const offset = options.offset ?? 0;
+
+  const { listCustomersFn } = await import("@/api/customers");
+  // limit + 1: the extra row is the completeness probe, never displayed.
+  const rows = (await listCustomersFn({
+    data: { limit: limit + 1, offset, status: "active" },
+  })) as unknown as OrderCustomerOption[];
+
+  const hasMore = rows.length > limit;
+  return {
+    customers: rows.slice(0, limit).map(mapOrderCustomerOptionToUi),
+    hasMore,
+    limit,
+    offset,
+  };
 }
 
 export async function getCustomer(id: string): Promise<Customer> {
@@ -234,11 +306,38 @@ export async function getCustomer(id: string): Promise<Customer> {
   return (result as unknown as Customer360).customer as unknown as Customer;
 }
 
+/** How many of a customer's orders the history surfaces load at once. */
+export const CUSTOMER_ORDER_HISTORY_LIMIT = 20;
+
+/**
+ * One customer's order history, from the production Order domain.
+ *
+ * This used to filter the in-memory `orders` fixture. It now reuses the same
+ * production read every other order surface uses — listOrdersFn already
+ * accepts `customerId` and filters in SQL — so the history is tenant-scoped by
+ * the server, ordered newest-first by the server, and never reconstructed
+ * here. No parallel order-history endpoint was added.
+ *
+ * No mock fallback: a failure is an error the caller must show, and an empty
+ * result means the customer genuinely has no orders in this organization.
+ *
+ * A non-UUID id is refused before the request rather than sent: the server's
+ * zod validator would reject it anyway, and the mock ids that shape belongs to
+ * (`cus-1`) have no production meaning. Same contract as
+ * markRealConversationRead and friends above.
+ *
+ * `customerId` is not an authorization input. listOrders() scopes the query to
+ * the organization it resolved from the caller's membership, so a customer id
+ * guessed from another organization matches no row and comes back empty —
+ * exactly as it would for an id that does not exist at all.
+ */
 export async function getCustomerOrders(customerId: string): Promise<Order[]> {
-  const list = orders
-    .filter((o) => o.customerId === customerId)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return resolve(list);
+  if (!isProductionId(customerId)) throw new Error("invalid_reference");
+  const { listOrdersFn } = await import("@/api/orders");
+  const rows = await listOrdersFn({
+    data: { customerId, limit: CUSTOMER_ORDER_HISTORY_LIMIT },
+  });
+  return rows.map(mapOrderSummaryToUi);
 }
 
 /** Server product shape returned by listProductsFn / getProductDetailFn. */
@@ -488,33 +587,49 @@ function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
  * contexts (see isDemoModeError's own comment) — once a real backend is
  * reachable, an org with zero real customers sees an empty result, not mock
  * rows, same precedent as getProducts()/getPosProducts().
+ *
+ * `canViewSensitive` masks every phone through visibleCustomerPhone BEFORE
+ * the filter runs, and the phone predicate is skipped entirely once it does.
+ * Masking only the displayed value is not enough: the caller caches these
+ * results per search term, so a set matched against real phone numbers while
+ * `customers.view_sensitive` held stays readable after the grant is revoked.
+ * The numbers would be blanked on screen, but which customers came BACK for a
+ * typed fragment still answers "does a customer with this number exist here?"
+ * — which is precisely the disclosure that grant gates. Filtering on an
+ * already-blanked value cannot answer it.
+ *
+ * The parameter is required rather than defaulted so a new caller has to state
+ * an answer instead of silently inheriting the permissive one. Pass
+ * `capabilities.canSensitive("customers.view_sensitive")`, never `can(...)`.
  */
-export async function searchCustomers(query: string): Promise<Customer[]> {
+export async function searchCustomers(
+  query: string,
+  canViewSensitive: boolean,
+): Promise<Customer[]> {
   const q = query.trim().toLowerCase();
   const digits = q.replace(/\s/g, "");
+  // Masked first, so nothing below — display OR predicate — can read a phone
+  // this member may not see.
+  const mask = (c: Customer): Customer => ({
+    ...c,
+    phone: visibleCustomerPhone(c, canViewSensitive),
+  });
+  const matches = (c: Customer) =>
+    c.nameKm.toLowerCase().includes(q) ||
+    c.nameEn.toLowerCase().includes(q) ||
+    // A blanked phone is skipped rather than matched against an empty needle.
+    (c.phone !== "" && c.phone.replace(/\s/g, "").includes(digits));
   try {
     const rows = await listRealCustomers();
-    const mapped = rows.map(mapOrderCustomerOptionToUi);
+    const mapped = rows.map(mapOrderCustomerOptionToUi).map(mask);
     if (!q) return mapped.slice(0, 4);
-    return mapped.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    );
+    return mapped.filter(matches);
   } catch (err) {
     if (!isDemoModeError(err)) throw err;
   }
-  if (!q) return resolve(customers.slice(0, 4), 80);
-  return resolve(
-    customers.filter(
-      (c) =>
-        c.nameKm.toLowerCase().includes(q) ||
-        c.nameEn.toLowerCase().includes(q) ||
-        c.phone.replace(/\s/g, "").includes(digits),
-    ),
-    80,
-  );
+  const mockMapped = customers.map(mask);
+  if (!q) return resolve(mockMapped.slice(0, 4), 80);
+  return resolve(mockMapped.filter(matches), 80);
 }
 
 export interface QuickCustomerInput {
@@ -1240,4 +1355,192 @@ export async function cancelInvite(id: string): Promise<string> {
     teamMembers = teamMembers.filter((m) => m.id !== id);
     return resolve(id, 200);
   }
+}
+
+/* ---------- Payment UI Production Integration (production Payment domain) ----
+ *
+ * These functions are the ONLY way UI code reaches the production Payment
+ * domain (src/server/payments/service.ts via src/api/payments.ts). Each is a
+ * thin wrapper: call the TanStack server function, map the result with
+ * src/lib/payments.ts, return it.
+ *
+ * NO MOCK FALLBACK, and no `isDemoModeError` branch. The Payments screens are
+ * a production financial surface: a failure here must surface as a failure.
+ * Inventing a payment row would be inventing money — the exact opposite of
+ * what this domain exists to guarantee. Contrast getProducts()/searchCustomers()
+ * above, whose fallbacks exist only for the pre-production POS/mock path.
+ *
+ * organizationId/userId are never parameters — the server functions derive
+ * both from the validated session and the caller's own active DB membership
+ * (src/api/payments.ts#resolveAuthContext), so a caller has no way to name a
+ * tenant. Nothing here computes, adjusts or re-derives a settlement fact:
+ * every amount, status and verification state comes back already decided by
+ * the Payment domain.
+ */
+
+export interface ListRealPaymentsOptions {
+  /** Applied in SQL by the server, never as a client-side narrowing of a page. */
+  status?: PaymentStatus | undefined;
+  verificationState?: PaymentVerificationState | undefined;
+  orderId?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+/**
+ * One page of the production Payments list — src/routes/app.payments.tsx.
+ *
+ * The server returns a bare array with no total and no "is there more" flag,
+ * so the screen asks for one row beyond the page it intends to show and this
+ * function reports whether that extra row existed. That is pagination
+ * bookkeeping, not a business derivation: the extra row is dropped rather
+ * than displayed, and no count is ever presented to the merchant as a total.
+ */
+export interface RealPaymentListPage {
+  items: UiPayment[];
+  hasMore: boolean;
+}
+
+export async function listRealPayments(
+  options: ListRealPaymentsOptions = {},
+): Promise<RealPaymentListPage> {
+  const { listPaymentsFn } = await import("@/api/payments");
+  const pageSize = options.limit ?? 30;
+  const rows = await listPaymentsFn({
+    data: {
+      ...(options.status ? { status: options.status } : {}),
+      ...(options.verificationState ? { verificationState: options.verificationState } : {}),
+      ...(options.orderId ? { orderId: options.orderId } : {}),
+      // One beyond the page, so "load more" is offered only when a next row
+      // genuinely exists — never as a guess from a full-looking page.
+      limit: pageSize + 1,
+      ...(options.offset !== undefined ? { offset: options.offset } : {}),
+    },
+  });
+  const hasMore = rows.length > pageSize;
+  return {
+    items: rows.slice(0, pageSize).map(mapPaymentSummaryToUi),
+    hasMore,
+  };
+}
+
+/**
+ * Record one payment claim against a production order.
+ *
+ * This is the only way a merchant tells APSA that money arrived, and it is
+ * deliberately NOT a settlement. record_payment_v1 (migration 035) writes the
+ * row as status `pending` / verification `unverified` — including for cash —
+ * and moving to `paid` happens only through verifyPaymentFn's authoritative
+ * state machine. Nothing on this path may present the result as paid.
+ *
+ * `amountMinor` is an integer minor unit in the ORDER'S OWN currency. There is
+ * no currency parameter: the payment inherits the order's currency server-side,
+ * so this path cannot express a conversion.
+ *
+ * `idempotencyKey` is what makes a retry safe. Retries of the same
+ * record-payment attempt reuse the same idempotency key and replay the existing
+ * claim: uniqueness is enforced per ORGANIZATION, on
+ * (organization_id, idempotency_key) — migration 034's partial unique index,
+ * which record_payment_v1 targets with ON CONFLICT ... DO NOTHING — not per
+ * order, so a repeat returns the original payment instead of writing a second
+ * row. A double tap or a lost response therefore records one claim, not two.
+ *
+ * Recording charges nobody: the row is written `pending`/`unverified` and
+ * contributes nothing to received settlement until it is verified. A deliberate
+ * second payment against the same order (a split or later instalment) is a
+ * separate claim and correctly carries its own key.
+ */
+export interface RecordRealPaymentInput {
+  orderId: string;
+  method: PaymentMethod;
+  amountMinor: number;
+  reference?: string | undefined;
+  idempotencyKey: string;
+  note?: string | undefined;
+}
+
+export async function recordRealPayment(input: RecordRealPaymentInput): Promise<UiPaymentDetail> {
+  const { recordPaymentFn } = await import("@/api/payments");
+  const detail = await recordPaymentFn({
+    data: {
+      orderId: input.orderId,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      ...(input.reference ? { reference: input.reference } : {}),
+      idempotencyKey: input.idempotencyKey,
+      ...(input.note ? { note: input.note } : {}),
+    },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
+/** Production Payment detail with its immutable event ledger — src/routes/app.payments.$id.tsx. */
+export async function getRealPaymentDetail(paymentId: string): Promise<UiPaymentDetail> {
+  const { getPaymentByIdFn } = await import("@/api/payments");
+  return mapPaymentDetailToUi(await getPaymentByIdFn({ data: { paymentId } }));
+}
+
+/**
+ * Move a payment's verification state through the authoritative state machine.
+ *
+ * `to` is the only thing sent. The resulting payment `status` is the server's
+ * own derived consequence (state-machine.ts#resultingPaymentStatus) and is
+ * never proposed from here — there is deliberately no way for this function
+ * to ask for a status directly.
+ */
+export async function verifyRealPayment(
+  paymentId: string,
+  to: PaymentVerificationState,
+  reason?: string,
+): Promise<UiPaymentDetail> {
+  const { verifyPaymentFn } = await import("@/api/payments");
+  const detail = await verifyPaymentFn({
+    data: { paymentId, to, ...(reason ? { reason } : {}) },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
+/**
+ * Refund, in full or in part. The refunded total is derived by SQL from the
+ * immutable refund event ledger; `amountMinor` is this one refund only, in the
+ * payment's own currency, as an integer minor unit.
+ */
+export async function refundRealPayment(
+  paymentId: string,
+  amountMinor: number,
+  reason: string,
+): Promise<UiPaymentDetail> {
+  const { refundPaymentFn } = await import("@/api/payments");
+  const detail = await refundPaymentFn({ data: { paymentId, amountMinor, reason } });
+  return mapPaymentDetailToUi(detail);
+}
+
+/** Reverse a claimed or settled payment. Appends an event; never deletes the record. */
+export async function reverseRealPayment(
+  paymentId: string,
+  reason: string,
+): Promise<UiPaymentDetail> {
+  const { reversePaymentFn } = await import("@/api/payments");
+  return mapPaymentDetailToUi(await reversePaymentFn({ data: { paymentId, reason } }));
+}
+
+/**
+ * One order's ledger-derived settlement snapshot (order_payment_totals,
+ * migration 040) — the authoritative none/partial/full refund verdict and the
+ * received/refunded/net figures. Requires payments.reconcile server-side.
+ */
+export async function getRealOrderSettlement(orderId: string): Promise<UiOrderSettlement> {
+  const { getOrderSettlementFn } = await import("@/api/payments");
+  return mapOrderSettlementToUi(await getOrderSettlementFn({ data: { orderId } }));
+}
+
+/**
+ * Per-currency reconciliation aggregates for the caller's organization.
+ * Requires payments.reconcile server-side. USD and KHR come back as separate
+ * entries and are never blended — there is no implicit exchange rate anywhere
+ * in this path.
+ */
+export async function getRealPaymentReconciliation(): Promise<UiPaymentReconciliation[]> {
+  const { getPaymentReconciliationFn } = await import("@/api/payments");
+  return mapPaymentReconciliationToUi(await getPaymentReconciliationFn());
 }

@@ -19,6 +19,10 @@ import {
 } from "@/design-system";
 
 import { getConversationCounts, getConversationPage, getCustomers, getStaff } from "@/api/inbox";
+import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
+import { useCapabilities } from "@/hooks/use-capabilities";
+import { customerKeys } from "@/lib/customers-query";
+import { conversationKeys } from "@/lib/inbox-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
@@ -68,6 +72,27 @@ function InboxLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const threadOpen = pathname.startsWith("/app/inbox/");
 
+  /*
+   * Cache identity for every query on this screen. Both values come from the
+   * /app route guard's server-derived context — a validated session cookie and
+   * the active membership row — never from the capability snapshot and never
+   * from the URL. They partition the cache so one tab cannot serve
+   * Organization A's threads, counts or customer names to Organization B; they
+   * are never sent to the server and authorize nothing.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+  const capabilities = useCapabilities();
+
+  /*
+   * listConversations requires messages.read and listCustomers requires
+   * customers.read, both enforced in src/server/**. Gating the fetch here
+   * means a member without the grant sees an honest denied state instead of a
+   * spinner that resolves into a 403.
+   */
+  const canReadMessages = capabilities.can("messages.read");
+  const canReadCustomers = capabilities.can("customers.read");
+
   const [tab, setTab] = useState<InboxTab>("messages");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [channel, setChannel] = useState<ChannelFilter>("all");
@@ -75,17 +100,42 @@ function InboxLayout() {
   const [channelSheetOpen, setChannelSheetOpen] = useState(false);
 
   const conversationsQuery = useInfiniteQuery({
-    queryKey: ["conversations", status, channel, query],
+    /*
+     * The filters stay in the key AND the principal is now in front of them.
+     * This is an infinite query, so the cached entry carries `nextCursor` as
+     * well as the pages: partitioning the key partitions the cursor with it,
+     * and a cursor minted while paging Organization A's stream can never be
+     * handed to a request made as Organization B.
+     */
+    queryKey: conversationKeys.list(userId, routeOrganizationId, status, channel, query),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       getConversationPage({ status, channel, query, ...(pageParam ? { cursor: pageParam } : {}) }),
     getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: canReadMessages,
   });
   const countsQuery = useQuery({
-    queryKey: ["conversation-counts"],
+    queryKey: conversationKeys.counts(userId, routeOrganizationId),
     queryFn: getConversationCounts,
+    enabled: canReadMessages,
   });
-  const customersQuery = useQuery({ queryKey: ["customers"], queryFn: getCustomers });
+  /*
+   * The real, org-scoped, PII-gated customer list — this used to be the
+   * in-memory fixture array (src/lib/api/index.ts#getCustomers), so the live
+   * Inbox rendered invented customer names over real conversations.
+   *
+   * It is ONE PAGE, and the screen treats it as one: it is a name enrichment,
+   * never the authority on who this conversation belongs to. A production
+   * conversation already carries `customerName`, resolved server-side through
+   * the same PII-gated Customer domain, so a customer beyond this page changes
+   * nothing about what the row displays. Nothing here filters, counts or
+   * totals over the page as if it were the whole customer set.
+   */
+  const customersQuery = useQuery({
+    queryKey: customerKeys.list(userId, routeOrganizationId, 0),
+    queryFn: () => getCustomers(),
+    enabled: canReadCustomers,
+  });
   const staffQuery = useQuery({ queryKey: ["staff"], queryFn: getStaff });
 
   const refresh = useCallback(async () => {
@@ -243,7 +293,15 @@ function InboxLayout() {
                     : null}
             </div>
 
-            {conversationsQuery.isPending ? <ListSkeleton rows={6} /> : null}
+            {/*
+             * messages.read is what listConversations requires server-side, so
+             * without it there is no honest version of this list. Say so
+             * instead of leaving a skeleton that never resolves — the query is
+             * disabled, so it would stay "pending" forever.
+             */}
+            {!canReadMessages ? <CapabilityDeniedState capabilities={capabilities} /> : null}
+
+            {canReadMessages && conversationsQuery.isPending ? <ListSkeleton rows={6} /> : null}
 
             {conversationsQuery.isError ? (
               <ErrorState
@@ -261,14 +319,22 @@ function InboxLayout() {
             ) : null}
 
             <ul className="list-enter">
-              {conversations.map((conversation) => {
-                const customer = customersQuery.data?.find((c) => c.id === conversation.customerId);
-                // Production conversations resolve their customer via the real
-                // Customer domain server-side (conversation.customerName) rather
-                // than this mock lookup — see src/lib/api/index.ts#getConversations.
-                const customerName = customer
-                  ? localName(customer, language)
-                  : (conversation.customerName ?? "—");
+              {(canReadMessages ? conversations : []).map((conversation) => {
+                /*
+                 * The server's own resolved name leads. It is authoritative,
+                 * PII-gated where it needs to be, and present for every
+                 * production conversation regardless of which customers
+                 * happened to fit in the single page loaded above — so the
+                 * row never depends on that page being complete.
+                 *
+                 * The loaded page is a fallback only, for a conversation the
+                 * server returned without a name.
+                 */
+                const customer = conversation.customerId
+                  ? customersQuery.data?.customers.find((c) => c.id === conversation.customerId)
+                  : undefined;
+                const customerName =
+                  conversation.customerName ?? (customer ? localName(customer, language) : "—");
                 const assigned = staffQuery.data?.find(
                   (s) => s.id === conversation.assignedStaffId,
                 );

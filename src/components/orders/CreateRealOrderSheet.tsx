@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import {
   createRealOrder,
   getProducts,
@@ -29,6 +30,8 @@ import {
   type OrderCustomerOption,
 } from "@/lib/api";
 import { classifyOrderError } from "@/lib/orders";
+import { catalogKeys } from "@/lib/catalog";
+import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
@@ -53,11 +56,25 @@ interface CreateRealOrderSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (order: Order) => void;
+  /**
+   * The signed-in principal, from the /app route guard's server-derived
+   * context. Cache identity for the two reads below and nothing else — the
+   * server resolves both values itself and re-authorizes every call.
+   */
+  userId: string;
+  organizationId: string;
 }
 
-export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRealOrderSheetProps) {
+export function CreateRealOrderSheet({
+  open,
+  onOpenChange,
+  onCreated,
+  userId,
+  organizationId,
+}: CreateRealOrderSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const capabilities = useCapabilities();
 
   const [productQuery, setProductQuery] = useState("");
   const [product, setProduct] = useState<Product | null>(null);
@@ -71,13 +88,20 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
 
+  /*
+   * Both reads are organization data — the catalog with its prices, and a
+   * customer list whose `phone` the server PII-gates per member. They were
+   * keyed on `["order-create", ...]` with no principal at all, so a picker
+   * opened by the next member to use this tab could be filled from the
+   * previous one's cache. Each now lives in its own domain's partition.
+   */
   const productsQuery = useQuery({
-    queryKey: ["order-create", "products"],
+    queryKey: catalogKeys.uiProducts(userId, organizationId, "order-create"),
     queryFn: getProducts,
     enabled: open,
   });
   const customersQuery = useQuery({
-    queryKey: ["order-create", "customers"],
+    queryKey: customerKeys.options(userId, organizationId),
     queryFn: listRealCustomers,
     enabled: open,
   });
@@ -94,8 +118,21 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
     );
   }, [productsQuery.data, productQuery]);
 
+  /*
+   * Masked against the CURRENT grant before anything reads the phone —
+   * including the search filter below.
+   *
+   * Masking before filtering matters on its own: matching a typed phone
+   * fragment against a number this member may no longer see would answer
+   * "does a customer with this number exist here?" without ever displaying it.
+   * With the value already blanked, the filter cannot answer that question.
+   */
+  const canSensitive = capabilities.canSensitive("customers.view_sensitive");
   const customerList = useMemo(() => {
-    const all = customersQuery.data ?? [];
+    const all = (customersQuery.data ?? []).map((c) => ({
+      ...c,
+      phone: visibleCustomerPhone(c, canSensitive),
+    }));
     const q = customerQuery.trim().toLowerCase();
     const matches = !q
       ? all
@@ -103,10 +140,10 @@ export function CreateRealOrderSheet({ open, onOpenChange, onCreated }: CreateRe
           (c) =>
             c.nameEn.toLowerCase().includes(q) ||
             c.nameKm.toLowerCase().includes(q) ||
-            c.phone.replace(/\s/g, "").includes(q.replace(/\s/g, "")),
+            (c.phone !== "" && c.phone.replace(/\s/g, "").includes(q.replace(/\s/g, ""))),
         );
     return matches.slice(0, 20);
-  }, [customersQuery.data, customerQuery]);
+  }, [customersQuery.data, customerQuery, canSensitive]);
 
   const unitPrice = product?.price ?? usd(0);
   const subtotal = multiplyMoney(unitPrice, Math.max(1, quantity));

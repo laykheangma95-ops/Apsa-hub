@@ -22,15 +22,21 @@ import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
+import { Route as AppInventoryRouteImport } from './routes/app.inventory'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
+import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppPosRouteImport } from './routes/app.pos'
+import { Route as AppProductsRouteImport } from './routes/app.products'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppTeamRouteImport } from './routes/app.team'
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
+import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventory.$variantId'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
+import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
+import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -97,14 +103,29 @@ const AppInboxRoute = AppInboxRouteImport.update({
   path: '/inbox',
   getParentRoute: () => AppRoute,
 } as any)
+const AppInventoryRoute = AppInventoryRouteImport.update({
+  id: '/inventory',
+  path: '/inventory',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppOrdersRoute = AppOrdersRouteImport.update({
   id: '/orders',
   path: '/orders',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPaymentsRoute = AppPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppPosRoute = AppPosRouteImport.update({
   id: '/pos',
   path: '/pos',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppProductsRoute = AppProductsRouteImport.update({
+  id: '/products',
+  path: '/products',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
@@ -137,10 +158,25 @@ const AppInboxIdRoute = AppInboxIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppInboxRoute,
 } as any)
+const AppInventoryVariantIdRoute = AppInventoryVariantIdRouteImport.update({
+  id: '/$variantId',
+  path: '/$variantId',
+  getParentRoute: () => AppInventoryRoute,
+} as any)
 const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => AppOrdersRoute,
+} as any)
+const AppPaymentsIdRoute = AppPaymentsIdRouteImport.update({
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppPaymentsRoute,
+} as any)
+const AppProductsIdRoute = AppProductsIdRouteImport.update({
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppProductsRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -156,8 +192,11 @@ export interface FileRoutesByFullPath {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
+  '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/invite/$token': typeof InviteTokenRoute
@@ -165,7 +204,10 @@ export interface FileRoutesByFullPath {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -179,8 +221,11 @@ export interface FileRoutesByTo {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
+  '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/invite/$token': typeof InviteTokenRoute
@@ -188,7 +233,10 @@ export interface FileRoutesByTo {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -204,8 +252,11 @@ export interface FileRoutesById {
   '/verify-email': typeof VerifyEmailRoute
   '/app/deliveries': typeof AppDeliveriesRouteWithChildren
   '/app/inbox': typeof AppInboxRouteWithChildren
+  '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
+  '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/invite/$token': typeof InviteTokenRoute
@@ -213,7 +264,10 @@ export interface FileRoutesById {
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
+  '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/products/$id': typeof AppProductsIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -230,8 +284,11 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
+    | '/app/products'
     | '/app/settings'
     | '/app/team'
     | '/invite/$token'
@@ -239,7 +296,10 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/payments/$id'
+    | '/app/products/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -253,8 +313,11 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
+    | '/app/products'
     | '/app/settings'
     | '/app/team'
     | '/invite/$token'
@@ -262,7 +325,10 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/payments/$id'
+    | '/app/products/$id'
   id:
     | '__root__'
     | '/'
@@ -277,8 +343,11 @@ export interface FileRouteTypes {
     | '/verify-email'
     | '/app/deliveries'
     | '/app/inbox'
+    | '/app/inventory'
     | '/app/orders'
+    | '/app/payments'
     | '/app/pos'
+    | '/app/products'
     | '/app/settings'
     | '/app/team'
     | '/invite/$token'
@@ -286,7 +355,10 @@ export interface FileRouteTypes {
     | '/app/customers/$id'
     | '/app/deliveries/$id'
     | '/app/inbox/$id'
+    | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/payments/$id'
+    | '/app/products/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -396,6 +468,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/inventory': {
+      id: '/app/inventory'
+      path: '/inventory'
+      fullPath: '/app/inventory'
+      preLoaderRoute: typeof AppInventoryRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/orders': {
       id: '/app/orders'
       path: '/orders'
@@ -403,11 +482,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrdersRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/payments': {
+      id: '/app/payments'
+      path: '/payments'
+      fullPath: '/app/payments'
+      preLoaderRoute: typeof AppPaymentsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/pos': {
       id: '/app/pos'
       path: '/pos'
       fullPath: '/app/pos'
       preLoaderRoute: typeof AppPosRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/products': {
+      id: '/app/products'
+      path: '/products'
+      fullPath: '/app/products'
+      preLoaderRoute: typeof AppProductsRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/settings': {
@@ -452,12 +545,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxIdRouteImport
       parentRoute: typeof AppInboxRoute
     }
+    '/app/inventory/$variantId': {
+      id: '/app/inventory/$variantId'
+      path: '/$variantId'
+      fullPath: '/app/inventory/$variantId'
+      preLoaderRoute: typeof AppInventoryVariantIdRouteImport
+      parentRoute: typeof AppInventoryRoute
+    }
     '/app/orders/$id': {
       id: '/app/orders/$id'
       path: '/$id'
       fullPath: '/app/orders/$id'
       preLoaderRoute: typeof AppOrdersIdRouteImport
       parentRoute: typeof AppOrdersRoute
+    }
+    '/app/payments/$id': {
+      id: '/app/payments/$id'
+      path: '/$id'
+      fullPath: '/app/payments/$id'
+      preLoaderRoute: typeof AppPaymentsIdRouteImport
+      parentRoute: typeof AppPaymentsRoute
+    }
+    '/app/products/$id': {
+      id: '/app/products/$id'
+      path: '/$id'
+      fullPath: '/app/products/$id'
+      preLoaderRoute: typeof AppProductsIdRouteImport
+      parentRoute: typeof AppProductsRoute
     }
   }
 }
@@ -486,6 +600,18 @@ const AppInboxRouteWithChildren = AppInboxRoute._addFileChildren(
   AppInboxRouteChildren,
 )
 
+interface AppInventoryRouteChildren {
+  AppInventoryVariantIdRoute: typeof AppInventoryVariantIdRoute
+}
+
+const AppInventoryRouteChildren: AppInventoryRouteChildren = {
+  AppInventoryVariantIdRoute: AppInventoryVariantIdRoute,
+}
+
+const AppInventoryRouteWithChildren = AppInventoryRoute._addFileChildren(
+  AppInventoryRouteChildren,
+)
+
 interface AppOrdersRouteChildren {
   AppOrdersIdRoute: typeof AppOrdersIdRoute
 }
@@ -498,11 +624,38 @@ const AppOrdersRouteWithChildren = AppOrdersRoute._addFileChildren(
   AppOrdersRouteChildren,
 )
 
+interface AppPaymentsRouteChildren {
+  AppPaymentsIdRoute: typeof AppPaymentsIdRoute
+}
+
+const AppPaymentsRouteChildren: AppPaymentsRouteChildren = {
+  AppPaymentsIdRoute: AppPaymentsIdRoute,
+}
+
+const AppPaymentsRouteWithChildren = AppPaymentsRoute._addFileChildren(
+  AppPaymentsRouteChildren,
+)
+
+interface AppProductsRouteChildren {
+  AppProductsIdRoute: typeof AppProductsIdRoute
+}
+
+const AppProductsRouteChildren: AppProductsRouteChildren = {
+  AppProductsIdRoute: AppProductsIdRoute,
+}
+
+const AppProductsRouteWithChildren = AppProductsRoute._addFileChildren(
+  AppProductsRouteChildren,
+)
+
 interface AppRouteChildren {
   AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
   AppInboxRoute: typeof AppInboxRouteWithChildren
+  AppInventoryRoute: typeof AppInventoryRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
+  AppPaymentsRoute: typeof AppPaymentsRouteWithChildren
   AppPosRoute: typeof AppPosRoute
+  AppProductsRoute: typeof AppProductsRouteWithChildren
   AppSettingsRoute: typeof AppSettingsRoute
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -512,8 +665,11 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDeliveriesRoute: AppDeliveriesRouteWithChildren,
   AppInboxRoute: AppInboxRouteWithChildren,
+  AppInventoryRoute: AppInventoryRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
+  AppPaymentsRoute: AppPaymentsRouteWithChildren,
   AppPosRoute: AppPosRoute,
+  AppProductsRoute: AppProductsRouteWithChildren,
   AppSettingsRoute: AppSettingsRoute,
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,

@@ -158,7 +158,12 @@ export type StatusKey =
   | "processing"
   | "fulfilled"
   // Production Delivery domain (src/server/deliveries/state-machine.ts).
-  | "preparing";
+  | "preparing"
+  // Production Payment domain (src/server/payments/state-machine.ts). Its
+  // other settlement statuses — pending / paid / failed / refunded — already
+  // exist above; only 'reversed' (a claim voided before or instead of
+  // settling) had no counterpart in the mock vocabulary.
+  | "reversed";
 
 export type CompanionColor = "nilo" | "minto" | "vela" | "suri" | "luma";
 
@@ -320,6 +325,19 @@ export type FulfillmentStatus =
 /** The production Order domain's lifecycle axis — absent from the mock model. */
 export type OrderLifecycleStatus = "draft" | "confirmed" | "completed" | "cancelled";
 
+/**
+ * The production Order domain's refund axis — INDEPENDENT of the payment axis
+ * (CORRECTIONS.md, "Approved financial semantics"). A fully paid $100 order
+ * refunded by $20 is `paid` / `partial`; refunded in full it is `paid` /
+ * `full`. A refund never rewrites the payment axis to `unpaid` or `failed`,
+ * which is exactly why this cannot be folded into OrderPaymentStatus.
+ *
+ * Mirrors ORDER_REFUND_STATUSES in src/server/orders/state-machine.ts. Declared
+ * here rather than imported so this browser-safe module never reaches into
+ * src/server/**.
+ */
+export type OrderRefundStatus = "none" | "partial" | "full";
+
 /** Where the order came from. POS and manual entry are not social channels. */
 export type OrderSource = Channel | "manual";
 
@@ -355,6 +373,12 @@ export interface Order {
   restricted?: boolean;
   /** Present on the production path — the order's lifecycle-axis status. */
   lifecycleStatus?: OrderLifecycleStatus;
+  /**
+   * Present on the production path — the order's refund-axis status, derived
+   * in SQL from the immutable Payment refund ledger (migration 040). Carried
+   * separately from `paymentStatus` on purpose; see OrderRefundStatus.
+   */
+  refundStatus?: OrderRefundStatus;
   /** Present on the production path — the order's immutable status trail. */
   statusHistory?: OrderStatusHistoryEntry[];
   /** Present on the production path — the DB UUID of the location, if any. */

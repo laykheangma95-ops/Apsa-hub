@@ -34,15 +34,80 @@ export const UI_PERMISSION_KEYS = [
   "orders.create",
   "orders.confirm",
   "orders.cancel",
-  // Refunds are a Payment-domain action: refundPayment requires payments.refund
-  // (src/server/payments/service.ts). The historical orders.refund key no
-  // longer authorizes anything, so the UI must not gate on it.
+  // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
+  // action: refundPayment requires payments.refund. The historical
+  // orders.refund key no longer authorizes anything, so the UI must not gate
+  // on it.
+  //
+  // manual_confirm and verify are listed separately on purpose, and are not
+  // interchangeable: staff_confirmed — the "Confirm payment received" move
+  // that works with no bank integration at all — needs only
+  // payments.manual_confirm, while every escalation or correction
+  // (manager_verified, bank_verified, mismatch, clearing a flagged duplicate)
+  // needs payments.verify. Both come from VERIFICATION_TRANSITION_PERMISSIONS
+  // in src/server/payments/state-machine.ts, which verifyPayment() feeds
+  // straight into ctx.require.
+  //
+  // payments.view_provider_reference is deliberately NOT here: the server
+  // withholds the reference value itself rather than trusting the browser to
+  // hide it, so the UI has nothing to decide and needs no bit for it.
+  //
+  // payments.record and payments.mark_cod gate the "Record payment" affordance
+  // on Order detail. They are two separate grants because migration 036 seeds
+  // them to different roles (mark_cod reaches SALES, record does not), and
+  // recordPayment() derives the required grant from exactly that distinction
+  // before touching data, by looking the method up in a declared table:
+  //   ctx.require(RECORD_METHOD_PERMISSIONS[input.method])
+  // in src/server/payments/service.ts, where RECORD_METHOD_PERMISSIONS maps
+  // cod -> payments.mark_cod and every other method -> payments.record
+  // (src/server/payments/state-machine.ts). The method is validated first, so
+  // an unknown one is rejected rather than indexing the table to `undefined`.
+  // Recording never marks anything paid —
+  // record_payment_v1 writes status 'pending' and leaves settlement to
+  // verification — so neither key here implies any authority over money.
+  "payments.record",
+  "payments.mark_cod",
+  "payments.read",
+  "payments.manual_confirm",
+  "payments.verify",
   "payments.refund",
+  "payments.reverse",
+  "payments.reconcile",
   // Customers — src/server/customers/service.ts
   "customers.read",
   "customers.view_sensitive",
-  // Products — src/server/products/service.ts
+  // Products — src/server/products/service.ts. Every key here is required or
+  // checked there (getProductCatalog/getProductDetail, createProduct,
+  // updateProduct, updateVariant, archiveProduct, createCategory,
+  // updateCategory) and seeded by supabase/migrations/019_product_permissions.sql.
+  // view_cost and update_cost are listed separately on purpose: seeing a cost
+  // and changing one are different grants, and the server withholds the cost
+  // value itself rather than trusting the browser to hide it.
+  "products.read",
   "products.create",
+  "products.update_basic",
+  "products.update_price",
+  "products.update_cost",
+  "products.view_cost",
+  "products.archive",
+  "products.manage_categories",
+  // Inventory — src/server/inventory/service.ts. Each key is required there
+  // today (listOrganizationStock/getVariantStock -> inventory.read,
+  // listMovementHistory -> inventory.view_movements, recordMovement's
+  // initial/restock branch -> inventory.receive_stock, its manual_adjustment
+  // branch -> inventory.adjust) and seeded by
+  // supabase/migrations/022_inventory_permissions.sql.
+  //
+  // PERMISSIONS_MATRIX.md §13 also lists inventory.transfer, inventory.mark_damage
+  // and inventory.override_reservation. They are deliberately NOT here: no
+  // migration seeds them, no server function checks them, and the movement-type
+  // taxonomy they belong to (transfer/damage/reservation) is post-MVP per
+  // migration 021. Declaring them would create a UI-only gate over behaviour
+  // that does not exist.
+  "inventory.read",
+  "inventory.view_movements",
+  "inventory.receive_stock",
+  "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
   // Team — src/server/team/service.ts
@@ -50,8 +115,12 @@ export const UI_PERMISSION_KEYS = [
   "team.invite",
   "team.roles_assign",
   "team.remove",
-  // Organization — src/server/org/get-organization-profile.ts
+  // Organization — src/server/org/get-organization-profile.ts,
+  // src/server/org/update-organization-profile.ts. update gates only the
+  // Settings "Business" → Edit affordance; the two fields it can touch
+  // (display_name, business_type) are re-checked server-side regardless.
   "organization.read",
+  "organization.update",
 ] as const;
 
 export type UiPermissionKey = (typeof UI_PERMISSION_KEYS)[number];
@@ -111,6 +180,19 @@ export type CapabilityState = "pending" | "denied" | "ready";
 
 export interface CapabilityView {
   state: CapabilityState;
+  /**
+   * True when this view is served from a snapshot we already held whose LATEST
+   * refresh failed — "ready", but not currently confirmed by the server.
+   *
+   * `can()` deliberately still answers from that retained snapshot (see the
+   * background-refetch note in createCapabilityView): emptying a merchant's
+   * navigation every time a refresh times out on a patchy connection would be
+   * its own defect. `canSensitive()` does not. Anything whose mere DISPLAY
+   * discloses something — a cost, a margin — must not ride on a snapshot the
+   * server has not just confirmed, because a permission revoked in that same
+   * unconfirmed window would still read as granted here.
+   */
+  stale: boolean;
   /** Server-derived role label, for display only. null unless state is "ready". */
   role: string | null;
   /** null unless state is "ready". */
@@ -120,26 +202,42 @@ export interface CapabilityView {
   can(key: UiPermissionKey): boolean;
   canAll(keys: readonly UiPermissionKey[]): boolean;
   canAny(keys: readonly UiPermissionKey[]): boolean;
+  /**
+   * `can()`, narrowed for sensitive DISPLAY: additionally false whenever this
+   * view is not a currently-confirmed "ready" snapshot.
+   *
+   * True requires all of: the snapshot resolved to "ready" (so not pending,
+   * not denied/unauthenticated/email_unverified/no_membership, and not an
+   * identity mismatch — createCapabilityView denies those outright), the
+   * latest capability query did NOT error (`stale` false), and the key is
+   * actually granted. Authorizes nothing — the server re-checks every action
+   * regardless; this only decides whether a value may be drawn.
+   */
+  canSensitive(key: UiPermissionKey): boolean;
 }
 
 function buildView(
   state: CapabilityState,
   reason: CapabilityView["reason"],
   snapshot: CapabilitySnapshot | null,
+  stale = false,
 ): CapabilityView {
   const granted: ReadonlySet<string> =
     state === "ready" && snapshot ? new Set<string>(snapshot.permissions) : new Set<string>();
 
   const can = (key: UiPermissionKey): boolean => granted.has(key);
+  const confirmed = state === "ready" && !stale;
 
   return {
     state,
+    stale,
     reason,
     role: state === "ready" && snapshot ? snapshot.role : null,
     organizationId: state === "ready" && snapshot ? snapshot.organizationId : null,
     can,
     canAll: (keys) => keys.length > 0 && keys.every(can),
     canAny: (keys) => keys.some(can),
+    canSensitive: (key) => confirmed && can(key),
   };
 }
 
@@ -174,6 +272,11 @@ export function createCapabilityView(input: CapabilityViewInput): CapabilityView
    * is still the last thing the server actually said about this exact member.
    * Revocation does not come through this path — a revoked member gets a
    * successful response saying "no_membership", handled below.
+   *
+   * That tolerance is scoped to `can()`. A retained snapshot whose refresh
+   * failed is marked `stale`, and `canSensitive()` refuses it: a permission
+   * revoked during exactly that unconfirmed window would still read as
+   * granted, so nothing whose display is itself a disclosure may ride on it.
    */
   if (!input.result) {
     if (input.isError) return buildView("denied", "unavailable", null);
@@ -192,7 +295,10 @@ export function createCapabilityView(input: CapabilityViewInput): CapabilityView
 
   // Defence in depth: ignore anything outside the declared UI vocabulary.
   const permissions = result.permissions.filter(isUiPermissionKey);
-  return buildView("ready", null, { ...result, permissions });
+  // isError here means: this snapshot is retained, but the latest refresh of
+  // it failed. Still "ready" for navigation; never "confirmed" for a
+  // sensitive value — see CapabilityView.stale / canSensitive.
+  return buildView("ready", null, { ...result, permissions }, input.isError);
 }
 
 /**

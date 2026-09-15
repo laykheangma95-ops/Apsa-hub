@@ -62,3 +62,50 @@ export function calculateChange(paid: Money, total: Money): Money {
   const totalKhr = usdToKhr(total);
   return khr(roundKhr(paidKhr.amount - totalKhr.amount));
 }
+
+// ── Editable minor-unit amounts (typed input <-> integer minor units) ───────
+
+/** Decimal places a currency's major unit shows. KHR has none — riel is the minor unit. */
+export const MINOR_UNIT_DIGITS: Record<Currency, number> = { USD: 2, KHR: 0 };
+
+/** Minor units in one major unit. The same table toMajor() divides by — never a second copy. */
+function minorUnitFactor(currency: Currency): number {
+  return MINOR_UNITS[currency];
+}
+
+/** Render minor units into an editable field. Integer division only. */
+export function formatMinorUnitsForInput(amount: number, currency: Currency): string {
+  const digits = MINOR_UNIT_DIGITS[currency];
+  if (digits === 0) return String(amount);
+  const factor = minorUnitFactor(currency);
+  const whole = Math.trunc(amount / factor);
+  const fraction = Math.abs(amount % factor);
+  return `${whole}.${String(fraction).padStart(digits, "0")}`;
+}
+
+/**
+ * Parse a typed amount into integer minor units, or null when it is not a
+ * valid amount for this currency.
+ *
+ * Deliberately not `parseFloat(x) * 100`: 19.99 * 100 is 1998.9999999999998 in
+ * IEEE-754, and rounding that away is exactly the floating-point money handling
+ * ARCHITECTURE.md forbids. The whole and fractional parts are parsed as
+ * separate integers and combined with integer arithmetic.
+ */
+export function parseMinorUnits(input: string, currency: Currency): number | null {
+  const text = input.trim().replace(/,/g, "");
+  if (text === "") return null;
+
+  const digits = MINOR_UNIT_DIGITS[currency];
+  const match = digits === 0 ? /^(\d+)$/.exec(text) : /^(\d+)(?:\.(\d{0,2}))?$/.exec(text);
+  if (!match) return null;
+
+  const whole = Number.parseInt(match[1]!, 10);
+  if (!Number.isSafeInteger(whole)) return null;
+  if (digits === 0) return whole;
+
+  const fractionText = (match[2] ?? "").padEnd(digits, "0");
+  const fraction = fractionText === "" ? 0 : Number.parseInt(fractionText, 10);
+  const total = whole * minorUnitFactor(currency) + fraction;
+  return Number.isSafeInteger(total) ? total : null;
+}

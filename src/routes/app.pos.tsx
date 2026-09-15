@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -24,6 +24,7 @@ import { PosCustomerSheet } from "@/components/pos/PosCustomerSheet";
 import { PosProductList } from "@/components/pos/PosProductList";
 import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
 import { getActiveShop, getPosProducts } from "@/lib/api";
+import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
@@ -73,6 +74,23 @@ function PosScreen() {
   const { language } = useLanguage();
   const reduceMotion = useReducedMotion();
   const capabilities = useCapabilities();
+  const queryClient = useQueryClient();
+
+  /*
+   * POS reads the organization's ACTIVE catalog — the same production read the
+   * Product screens use — and it was keyed on the bare string
+   * `["pos-products"]`. On a shared phone that meant Organization A's catalog,
+   * with its prices and SKUs, was served to whoever opened POS next in the
+   * same tab, for the whole window before the refetch resolved.
+   *
+   * Identity comes from the /app route guard's server-derived context. The key
+   * lives under the Catalog domain's own root so it is covered by the same
+   * purge the Product screens already use, rather than inventing a second
+   * catalog partition.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+  enforceCatalogCachePrincipal(queryClient, userId, routeOrganizationId);
   /*
    * POS exists to take a sale, and taking a sale is createOrder — which
    * requires orders.create server-side (src/server/orders/service.ts). Without
@@ -110,7 +128,7 @@ function PosScreen() {
 
   const shopQuery = useQuery({ queryKey: ["shop"], queryFn: getActiveShop });
   const productsQuery = useQuery({
-    queryKey: ["pos-products"],
+    queryKey: catalogKeys.uiProducts(userId, routeOrganizationId, "pos"),
     queryFn: getPosProducts,
     enabled: canSell,
   });
@@ -392,6 +410,8 @@ function PosScreen() {
       <PosCustomerSheet
         open={customerOpen}
         onOpenChange={setCustomerOpen}
+        userId={userId}
+        organizationId={routeOrganizationId}
         onSelect={(next) => {
           setCustomer(next);
           setCustomerOpen(false);

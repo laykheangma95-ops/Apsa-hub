@@ -248,9 +248,14 @@ describe("Cancellation drives order fulfillment via the server only, never reset
 
   it("cancelling invalidates the linked order's query so the authoritative unfulfilled state is re-read", () => {
     const route = readSource(DELIVERY_DETAIL_ROUTE);
+    // The Order domain's cache is principal-partitioned (src/lib/orders-query.ts).
+    // This screen writes into an ORDER entry, so it must build the key with
+    // the Order domain's own helper and the server-derived principal —
+    // otherwise the invalidation would target an entry no Order screen reads.
     expect(route).toMatch(
-      /invalidateQueries\(\{ queryKey: \["order", "real", detail\?\.orderId\] \}\)/,
+      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(userId, routeOrganizationId, detail\?\.orderId \?\? "none"\),\s*\}\)/,
     );
+    expect(route).not.toContain('["order", "real"');
   });
 
   it("the Order screen lists deliveries by order id so a cancelled+replaced delivery both stay visible in history", () => {
@@ -386,9 +391,21 @@ describe("Successful transitions refresh the on-screen delivery", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Scope discipline: no Payment-domain, Conversation, or POS code touched", () => {
-  it("no new file in this phase imports a Payment-domain module", () => {
+  /*
+   * API_INDEX is deliberately NOT in this list any more.
+   *
+   * src/lib/api/index.ts is the shared client boundary for every domain — it
+   * already reaches Orders, Customers, Products, Team and Deliveries — and the
+   * Payments Operations UI phase added its own Payment-domain wrappers there,
+   * which is exactly where they belong. What this guard is actually protecting
+   * is narrower and still fully enforced below: no DELIVERY file may reach into
+   * the Payment domain, so a courier flow can never decide whether money
+   * arrived. The COD-is-not-payment invariant that motivated it is also
+   * asserted directly elsewhere (see src/lib/deliveries.ts's codAmount and
+   * delivery-list-ui.test.ts's "never fabricates a payment field").
+   */
+  it("no Delivery file imports a Payment-domain module", () => {
     for (const file of [
-      API_INDEX,
       DELIVERIES_LIB,
       DELIVERY_DETAIL_ROUTE,
       ORDER_DETAIL_ROUTE,

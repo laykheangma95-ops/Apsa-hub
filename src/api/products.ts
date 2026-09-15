@@ -83,11 +83,21 @@ export const listProductsFn = createServerFn()
 // ── getProductDetailFn ────────────────────────────────────────────────────────
 
 export const getProductDetailFn = createServerFn()
-  .validator((data: unknown) => z.object({ id: z.string().uuid("Invalid product ID") }).parse(data))
+  .validator((data: unknown) =>
+    z
+      .object({
+        id: z.string().uuid("Invalid product ID"),
+        // Presentation choice only — the catalog screen's archived-variant
+        // toggle. It never widens scope: the read still requires products.read
+        // and is still confined to the caller's own organization.
+        includeArchivedVariants: z.boolean().optional(),
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { getProductDetail } = await import("@/server/products/service");
-    return getProductDetail(authCtx, data.id);
+    return getProductDetail(authCtx, data.id, data.includeArchivedVariants ?? false);
   });
 
 // ── lookupBySkuFn ─────────────────────────────────────────────────────────────
@@ -252,15 +262,28 @@ export const updateVariantFn = createServerFn()
     const authCtx = await resolveAuthContext();
     const { updateVariant } = await import("@/server/products/service");
     const { variantId, ...patch } = data;
+
+    /*
+     * `?? undefined` used to collapse an explicit null into "field omitted", so
+     * a caller could never clear a SKU, barcode, cost or weight: the validator
+     * accepted null (nullish()), the mapping discarded it, and the column kept
+     * its old value while the caller was told the update succeeded.
+     *
+     * Absent and null are different instructions and are now kept apart:
+     * undefined leaves the column alone, null clears it. This does not widen
+     * access — an explicit null cost_amount is a cost change, so updateVariant
+     * still demands products.update_cost for it — and it matches updateProductFn
+     * above, which has always passed its patch through untouched.
+     */
     return updateVariant(authCtx, variantId, {
-      sku: patch.sku ?? undefined,
-      barcode: patch.barcode ?? undefined,
+      sku: patch.sku,
+      barcode: patch.barcode,
       name: patch.name,
       price_amount: patch.price_amount,
       price_currency: patch.price_currency,
-      cost_amount: patch.cost_amount ?? undefined,
-      cost_currency: patch.cost_currency ?? undefined,
-      weight_grams: patch.weight_grams ?? undefined,
+      cost_amount: patch.cost_amount,
+      cost_currency: patch.cost_currency,
+      weight_grams: patch.weight_grams,
       status: patch.status,
     });
   });

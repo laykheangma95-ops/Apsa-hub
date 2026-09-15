@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { UserPlus } from "lucide-react";
@@ -15,6 +15,7 @@ import { getTeam, getWorkspaces } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { isPermissionDeniedError } from "@/lib/team-errors";
+import { teamKeys } from "@/lib/team-query";
 import type { Staff } from "@/types";
 
 export const Route = createFileRoute("/app/team")({
@@ -41,6 +42,22 @@ function TeamScreen() {
   const { t } = useTranslation();
   const { language } = useLanguage();
   const capabilities = useCapabilities();
+  const queryClient = useQueryClient();
+
+  /*
+   * The roster carries every staff member's name, email or phone, role and
+   * membership status. It was keyed on the bare string `["team"]`, so
+   * Organization A's roster was readable, unchanged, by a member of
+   * Organization B who mounted this screen next in the same tab.
+   *
+   * Identity comes from the /app route guard's server-derived context — the
+   * validated session and the active membership row — never from the
+   * capability snapshot. It partitions the cache and nothing else: listTeamFn
+   * re-checks team.read server-side, and every membership mutation re-checks
+   * its own grant plus CORRECTION-001's role-authority cap.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const rosterKey = teamKeys.roster(session.userId, routeOrganizationId);
   // listTeamFn requires team.read; inviteStaffFn requires team.invite. Both are
   // re-checked on the server for every call — this only decides what is shown.
   const canReadTeam = capabilities.can("team.read");
@@ -54,10 +71,24 @@ function TeamScreen() {
   const [roleChanges, setRoleChanges] = useState<Record<string, Staff>>({});
 
   const teamQuery = useQuery({
-    queryKey: ["team"],
+    queryKey: rosterKey,
     queryFn: getTeam,
     enabled: canReadTeam,
   });
+
+  /*
+   * Every membership mutation makes this principal's roster stale, and nothing
+   * else. The local overlays below (extra/removed/roleChanges) keep the change
+   * on screen immediately; this is what reconciles them with what the server
+   * actually stored — including a role the server capped under CORRECTION-001
+   * differently from what the sheet optimistically showed.
+   *
+   * Deliberately narrow: this principal's roster root only. No other user's
+   * partition, no queryClient.clear().
+   */
+  function invalidateRoster() {
+    void queryClient.invalidateQueries({ queryKey: rosterKey });
+  }
   const workspaceQuery = useQuery({ queryKey: ["workspaces"], queryFn: getWorkspaces });
 
   const activeWorkspace = workspaceQuery.data?.find((w) => w.active);
@@ -149,7 +180,10 @@ function TeamScreen() {
       <InviteStaffSheet
         open={inviteOpen}
         onOpenChange={setInviteOpen}
-        onInvited={(member) => setExtra((prev) => [...prev, member])}
+        onInvited={(member) => {
+          setExtra((prev) => [...prev, member]);
+          invalidateRoster();
+        }}
       />
 
       <StaffDetailSheet
@@ -161,10 +195,12 @@ function TeamScreen() {
         onChanged={(member) => {
           setRoleChanges((prev) => ({ ...prev, [member.id]: member }));
           setSelected(member);
+          invalidateRoster();
         }}
         onRemoved={(id) => {
           setRemoved((prev) => [...prev, id]);
           setSelected(null);
+          invalidateRoster();
         }}
       />
 

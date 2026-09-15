@@ -185,16 +185,27 @@ export async function getProductCatalog(
   return products.map((p) => mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost));
 }
 
+/**
+ * One product, with its variants.
+ *
+ * `includeArchivedVariants` opts into the archived rows the repository already
+ * knows how to return (repo.listVariantsByProduct's own third argument, as
+ * archiveProduct below already uses). It defaults to false, so every existing
+ * caller — POS, order create, the product list mapper — keeps seeing active
+ * variants only. It widens nothing: the read still requires products.read and
+ * is still scoped to ctx.organizationId in the repository.
+ */
 export async function getProductDetail(
   ctx: AuthorizationContext,
   productId: string,
+  includeArchivedVariants = false,
 ): Promise<ProductDetail> {
   ctx.require("products.read");
 
   const canViewCost = ctx.can("products.view_cost");
   const [product, variants] = await Promise.all([
     repo.findProductById(ctx.organizationId, productId),
-    repo.listVariantsByProduct(ctx.organizationId, productId),
+    repo.listVariantsByProduct(ctx.organizationId, productId, includeArchivedVariants),
   ]);
 
   if (!product) {

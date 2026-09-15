@@ -49,6 +49,8 @@ import {
   type RealDeliveryStatus,
 } from "@/lib/deliveries";
 import { fullTimestamp, localName } from "@/lib/format";
+import { deliveryKeys } from "@/lib/deliveries-query";
+import { ordersKeys } from "@/lib/orders-query";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
 import { useCapabilities } from "@/hooks/use-capabilities";
@@ -136,11 +138,30 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
   const [failOpen, setFailOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const queryKey = ["delivery", "real", id];
+  /*
+   * Identity from the /app guard's server-derived context, for two domains at
+   * once.
+   *
+   * This delivery's own detail carries the COD amount, the courier's external
+   * tracking number and the provider it went out with, and it was keyed on the
+   * bare `["delivery","real",id]` — a UUID in the URL is not an identity, so
+   * that payload stayed readable to whoever opened the same URL next in this
+   * tab.
+   *
+   * The screen also reads and invalidates an ORDER-domain cache entry, so that
+   * one must use the Order domain's own key (src/lib/orders-query.ts) rather
+   * than rebuilding the old bare `["order","real",id]` shape — otherwise a
+   * delivery transition would write to, and invalidate, an entry no Order
+   * screen reads.
+   */
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+
+  const queryKey = deliveryKeys.detail(userId, routeOrganizationId, id);
   const query = useQuery({ queryKey, queryFn: () => getRealDeliveryDetail(id) });
   const delivery = query.data;
 
-  const orderQueryKey = ["order", "real", delivery?.orderId];
+  const orderQueryKey = ordersKeys.detail(userId, routeOrganizationId, delivery?.orderId ?? "none");
   const orderQuery = useQuery({
     queryKey: orderQueryKey,
     queryFn: () => getRealOrderDetail(delivery!.orderId),
@@ -159,10 +180,21 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
   function onTransitionSuccess(detail: typeof delivery) {
     queryClient.setQueryData(queryKey, detail);
     setNotice(t("delivery.actionDone"));
-    void queryClient.invalidateQueries({ queryKey: ["order", "real", detail?.orderId] });
-    // The Deliveries list shows this order's latest attempt — a transition
-    // changes it, so refresh rather than relying on the default staleTime.
-    void queryClient.invalidateQueries({ queryKey: ["deliveries", "real"] });
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.detail(userId, routeOrganizationId, detail?.orderId ?? "none"),
+    });
+    /*
+     * The Deliveries list shows this order's latest attempt — a transition
+     * changes it, so refresh rather than relying on the default staleTime.
+     *
+     * Every filtered list this principal holds, and nothing else: the old bare
+     * `["deliveries","real"]` root reached every principal's entries in the
+     * tab, which is both wrong and, after the partition above, no longer the
+     * shape any Delivery screen reads.
+     */
+    void queryClient.invalidateQueries({
+      queryKey: deliveryKeys.lists(userId, routeOrganizationId),
+    });
   }
 
   function onTransitionError(error: unknown) {

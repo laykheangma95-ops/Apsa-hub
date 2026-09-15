@@ -39,71 +39,33 @@
   "nav": {
     "home": "Home",
     "inbox": "Inbox",
-    "resolve": "Resolve",
     "sales": "Sales",
     "stock": "Stock",
     "primary": "Primary app navigation",
     "create": "Create",
     "orders": "Orders",
-    "more": "More",
     "contacts": "Contacts",
     "newSale": "New sale",
     "newOrder": "New order",
     "addProduct": "Add product",
     "scanBarcode": "Scan barcode",
     "team": "Team",
-    "openResolve": "Open Resolve",
     "openSales": "Open Sales",
-    "openMore": "Open More",
     "availableNow": "Available now",
     "opensExisting": "Opens existing",
     "comingSoon": "Coming soon",
     "retrySalesHub": "Sales activity did not load. Tap to try again.",
     "openOrder": "Open order",
-    "resolveSheetTitle": "Resolve",
-    "resolveSheetLead": "Find or fix something fast",
-    "resolveSheetBody": "Use the fastest real tool we have today, and show coming-soon states where the workflow is not built yet.",
     "salesSheetTitle": "Sales",
     "salesSheetLead": "Transactions in one place",
     "salesSheetBody": "Sales groups your live transaction entry points first, then recent orders, with honest placeholders for tools that are not ready yet.",
     "salesRecent": "Recent transactions",
     "salesRecentBody": "Open an order to review payment, delivery and return status without leaving the signed-in shell.",
     "salesRecentEmpty": "Recent orders will appear here.",
-    "moreSheetTitle": "More",
-    "moreSheetLead": "Everything else, without crowding the tab bar",
-    "moreSheetBody": "Lower-frequency business tools live here so Home, Inbox and Sales can stay focused.",
-    "resolveGroups": {
-      "quickTools": "Quick tools"
-    },
     "salesGroups": {
       "start": "Start a transaction",
-      "manage": "Manage sales activity"
-    },
-    "moreGroups": {
-      "business": "Business tools",
-      "admin": "Admin and account"
-    },
-    "resolveActions": {
-      "scanBarcode": {
-        "label": "Scan barcode",
-        "description": "Camera barcode scanning is not in the app yet."
-      },
-      "findCustomer": {
-        "label": "Find customer",
-        "description": "Open Inbox and search by customer name or phone."
-      },
-      "findOrder": {
-        "label": "Find order",
-        "description": "A global order finder is not in the app yet."
-      },
-      "checkPayment": {
-        "label": "Check payment",
-        "description": "A payment lookup hub is not in the app yet."
-      },
-      "trackDelivery": {
-        "label": "Track delivery / shipment",
-        "description": "A shipment finder is not in the app yet."
-      }
+      "manage": "Manage sales activity",
+      "catalogue": "Catalogue and stock"
     },
     "salesActions": {
       "newSale": {
@@ -120,7 +82,7 @@
       },
       "payments": {
         "label": "Payments",
-        "description": "A dedicated payments hub is not in the app yet."
+        "description": "Settlement, verification and refunds for every payment."
       },
       "delivery": {
         "label": "Delivery",
@@ -129,47 +91,54 @@
       "returnsRefunds": {
         "label": "Returns / Refunds",
         "description": "A dedicated returns and refunds hub is not in the app yet."
-      }
-    },
-    "moreActions": {
+      },
+      "productCatalog": {
+        "label": "Product catalogue",
+        "description": "Names, variants and prices for what you sell."
+      },
       "productsStock": {
         "label": "Products / Stock",
-        "description": "A dedicated stock workspace is not in the app yet."
-      },
-      "customers": {
-        "label": "Customers",
-        "description": "A customer list hub is not in the app yet."
-      },
-      "analytics": {
-        "label": "Analytics",
-        "description": "A business analytics hub is not in the app yet."
-      },
-      "staffTeam": {
-        "label": "Staff / Team",
-        "description": "Open the live team management screen."
-      },
-      "promotionsCrm": {
-        "label": "Promotions / CRM",
-        "description": "A promotions and CRM hub is not in the app yet."
-      },
-      "locations": {
-        "label": "Locations",
-        "description": "A locations management hub is not in the app yet."
-      },
-      "integrations": {
-        "label": "Integrations",
-        "description": "An integrations hub is not in the app yet."
-      },
-      "settings": {
-        "label": "Settings",
-        "description": "Open your business, account and language settings."
-      },
-      "profileAccount": {
-        "label": "Profile / account",
-        "description": "Profile and account settings are not in the app yet."
+        "description": "How much of each item you have on hand."
       }
     },
-    "tabWithCount": "{{tab}}, {{count}} need attention"
+    "tabWithCount": "{{tab}}, {{count}} need attention",
+    "ask": "Ask",
+    "my": "My",
+    "openAsk": "Open Apsi",
+    "askGroups": {
+      "find": "Find and check",
+      "products": "Products and stock"
+    },
+    "askActions": {
+      "findCustomer": {
+        "label": "Find customer",
+        "description": "Open Inbox and search by customer name or phone."
+      },
+      "findOrder": {
+        "label": "Find order",
+        "description": "Open Orders and browse every order, newest first."
+      },
+      "checkPayment": {
+        "label": "Check payment",
+        "description": "Open Payments and filter by settlement or verification state."
+      },
+      "trackDelivery": {
+        "label": "Track delivery / shipment",
+        "description": "Open Deliveries and search by order, customer or courier."
+      },
+      "findProduct": {
+        "label": "Find product",
+        "description": "Open the catalogue and browse names, variants and prices."
+      },
+      "checkStock": {
+        "label": "Check stock",
+        "description": "Open Stock and see how much of each item is on hand."
+      },
+      "scanBarcode": {
+        "label": "Scan barcode with camera",
+        "description": "Camera scanning is not in the app yet. Type or paste a barcode above and Apsi will look it up."
+      }
+    }
   },
   "landing": {
     "head": {
@@ -433,6 +402,9 @@
     "out_of_stock": "Out of stock",
     "partially_paid": "Partly paid",
     "partially_refunded": "Partly refunded",
+    "none": "No refunds",
+    "partial": "Partly refunded",
+    "full": "Fully refunded",
     "requested": "Requested",
     "accepted": "Courier accepted",
     "picked_up": "Picked up",
@@ -457,8 +429,8 @@
     "scheduled": "Scheduled",
     "in_delivery": "In delivery",
     "archived": "Archived",
-    "paused": "Paused"
-  },
+    "paused": "Paused",
+    "reversed": "Reversed"  },
   "channel": {
     "facebook": "Facebook",
     "instagram": "Instagram",
@@ -568,6 +540,7 @@
     "customer": {
       "recentOrders": "Recent orders",
       "noOrders": "No orders yet",
+      "ordersUnavailable": "Order history is not available for this customer.",
       "timeline": "Timeline",
       "notes": "Notes",
       "identities": "Channels"
@@ -905,7 +878,8 @@
     "axis": {
       "lifecycle": "Order",
       "payment": "Payment",
-      "fulfillment": "Fulfilment"
+      "fulfillment": "Fulfilment",
+      "refund": "Refund"
     },
     "historyEntry": "{{axis}}: {{status}}",
     "confirmOrder": "Confirm order",
@@ -931,7 +905,37 @@
         "body": "This order can't move to that status from where it is."
       }
     },
-    "balanceDue": "{{amount}} still to collect."
+    "balanceDue": "{{amount}} still to collect.",
+    "noCustomerBody": "This order has no customer attached.",
+    "customerRestricted": "You cannot open customer records.",
+    "paymentsRestricted": "You cannot see payments for this order.",
+    "paymentsLoading": "Loading payments…",
+    "paymentsError": {
+      "title": "Payments could not be loaded",
+      "body": "The payments for this order are not available right now."
+    },
+    "paymentsTruncated": "More payments exist than shown here. Open Payments to see them all.",
+    "openPayments": "Open Payments",
+    "paymentRecordedNotice": "Payment recorded. It still needs to be confirmed before it counts as paid.",
+    "settlement": {
+      "received": "Received",
+      "refunded": "Refunded",
+      "net": "Net",
+      "overpaid": "Overpaid by {{amount}} — check this with the customer."
+    },
+    "recordPaymentSheet": {
+      "title": "Record payment",
+      "body": "Write down money the customer has handed over. Confirming it as received is a separate step.",
+      "methodLabel": "How was it paid",
+      "amountLabel": "Amount ({{currency}})",
+      "amountHint": "Order total {{amount}}. Record only what was handed over this time.",
+      "referenceLabel": "Reference (optional)",
+      "referenceHint": "A transfer number or receipt number, if there is one.",
+      "pendingNote": "This is recorded as a claim. It is not counted as paid until someone confirms the money arrived.",
+      "codNote": "Cash on delivery — the courier still holds this money. It is not counted as paid.",
+      "submit": "Record payment",
+      "working": "Recording…"
+    }
   },
   "orderList": {
     "title": "Orders",
@@ -1125,6 +1129,10 @@
     "hidden": "Hidden for your role",
     "noOrders": "No orders yet",
     "noOrdersBody": "When this customer buys, their orders appear here.",
+    "ordersUnavailable": "Order history unavailable",
+    "ordersUnavailableBody": "You do not have permission to view this customer's orders.",
+    "ordersError": "Could not load order history",
+    "ordersErrorBody": "The order history could not be loaded. This is not a statement about whether this customer has orders.",
     "noTimeline": "Nothing has happened yet",
     "noTimelineBody": "Messages, orders and deliveries will show up here.",
     "noNotes": "No notes yet",
@@ -1292,7 +1300,19 @@
       "currency": "Currency",
       "country": "Country",
       "errorTitle": "Could not load business details",
-      "errorBody": "Check your connection and try again."
+      "errorBody": "Check your connection and try again.",
+      "edit": "Edit",
+      "editForm": {
+        "title": "Edit business details",
+        "save": "Save",
+        "saving": "Saving…",
+        "success": "Business details updated.",
+        "nameRequired": "Business name is required.",
+        "nameTooLong": "Business name is too long.",
+        "typeTooLong": "Business type is too long.",
+        "errorDenied": "You no longer have permission to edit business details.",
+        "errorServer": "Could not save changes. Check your connection and try again."
+      }
     },
     "account": {
       "email": "Email",
@@ -1326,6 +1346,520 @@
     "unavailable": {
       "title": "Access could not be checked",
       "body": "APSA could not confirm what you are allowed to do right now. Try again in a moment."
+    }
+  },
+  "catalog": {
+    "list": {
+      "title": "Products",
+      "subtitle": "Your catalogue — names, variants and prices",
+      "searchPlaceholder": "Search the products below",
+      "searchScope": "Searches only the products loaded on this page, not the whole catalogue.",
+      "pageLimit": "This page shows the first {{count}} products. Pick a category to narrow it down.",
+      "status": {
+        "active": "Active",
+        "archived": "Archived"
+      },
+      "statusLabel": "Product list",
+      "categoryFilter": "Category",
+      "categoryAll": "All",
+      "addProduct": "Add product",
+      "manageCategories": "Categories",
+      "variants": "Variants: {{count}}",
+      "noPrice": "No price yet",
+      "empty": {
+        "activeTitle": "No products yet",
+        "activeBody": "Products you add will show up here.",
+        "archivedTitle": "Nothing archived",
+        "archivedBody": "Products you archive stay here instead of being deleted."
+      },
+      "noMatches": {
+        "title": "Nothing matches that",
+        "body": "Only the products loaded on this page were searched. Clear the search or pick another category."
+      },
+      "error": {
+        "title": "Products didn't load",
+        "body": "Check your connection and try again."
+      }
+    },
+    "detail": {
+      "title": "Product",
+      "basics": "Product details",
+      "nameKm": "Name (Khmer)",
+      "nameKmHint": "Required. This is the name your customers see.",
+      "nameKmMissing": "Enter the Khmer name.",
+      "nameEn": "Name (English)",
+      "nameEnHint": "Optional.",
+      "descriptionKm": "Description (Khmer)",
+      "descriptionEn": "Description (English)",
+      "category": "Category",
+      "categoryNone": "No category",
+      "save": "Save changes",
+      "saved": "Product saved",
+      "readOnly": "You can view this product but not change it.",
+      "archivedNotice": "This product is archived. It stays in your records and is not sold.",
+      "variants": "Variants",
+      "variantsActive": "Active",
+      "variantsArchived": "Archived",
+      "variantsEmpty": "No variants in this list.",
+      "addVariant": "Add variant",
+      "editVariant": "Edit variant",
+      "costHidden": "Cost is not shown to your account.",
+      "notFound": {
+        "title": "Product not found",
+        "body": "This product does not exist in your business, or it is no longer available to you."
+      },
+      "error": {
+        "title": "Product didn't load",
+        "body": "Check your connection and try again."
+      },
+      "archive": {
+        "action": "Archive product",
+        "title": "Archive this product?",
+        "body": "It stops being offered for sale and stays in your records. Nothing is deleted.",
+        "confirm": "Archive",
+        "done": "Product archived"
+      },
+      "viewStock": "View stock"
+    },
+    "variant": {
+      "create": "Add variant",
+      "edit": "Edit variant",
+      "name": "Variant name",
+      "nameHint": "Optional — for example a size or a colour.",
+      "unnamed": "Unnamed variant",
+      "sku": "SKU",
+      "barcode": "Barcode",
+      "price": "Selling price",
+      "cost": "Cost",
+      "costOptional": "Optional.",
+      "currency": "Currency",
+      "weight": "Weight (grams)",
+      "priceLocked": "Your account cannot change prices.",
+      "costLocked": "Your account cannot change cost.",
+      "costWithheld": "Cost is not shown to your account, so it is left unchanged.",
+      "invalidPrice": "Enter a price like 12.50 for USD or 4000 for riel.",
+      "invalidCost": "Enter a cost like 12.50 for USD or 4000 for riel.",
+      "invalidWeight": "Enter a whole number of grams.",
+      "created": "Variant added",
+      "saved": "Variant saved",
+      "archiveAction": "Archive variant",
+      "restoreAction": "Restore variant",
+      "archived": "Variant archived",
+      "restored": "Variant restored"
+    },
+    "category": {
+      "title": "Categories",
+      "manage": "Manage categories",
+      "add": "Add category",
+      "nameKm": "Category name (Khmer)",
+      "nameEn": "Category name (English)",
+      "nameKmMissing": "Enter the Khmer name.",
+      "created": "Category added",
+      "saved": "Category saved",
+      "archive": "Archive",
+      "restore": "Restore",
+      "empty": "No categories yet. Add one to group your products.",
+      "error": {
+        "title": "Categories didn't load",
+        "body": "Check your connection and try again."
+      }
+    },
+    "error": {
+      "denied": "You do not have permission for this action.",
+      "not_found": "That record is no longer available.",
+      "duplicate_sku": "That SKU is already used by another variant in this business.",
+      "duplicate_barcode": "That barcode is already used by another variant in this business.",
+      "invalid_money": "That amount is not valid. Enter it again.",
+      "generic": "That didn't save. Try again."
+    },
+    "save": "Save",
+    "saving": "Saving"
+  },
+  "inventory": {
+    "saving": "Saving",
+    "movementRecorded": "Stock movement recorded",
+    "error": {
+      "denied": "Your account cannot do this.",
+      "not_found": "This item does not exist in your business, or it is no longer available to you.",
+      "location_not_found": "That location does not exist in your business.",
+      "reason_required": "A reason is required for a manual adjustment.",
+      "invalid_quantity": "Enter a whole number that is not zero.",
+      "duplicate": "This movement was already recorded. Nothing was counted twice.",
+      "audit_blocked": "The adjustment was blocked because its audit record could not be saved. Stock did not change.",
+      "generic": "That did not go through. Check your connection and try again."
+    }
+  },
+  "inventoryList": {
+    "title": "Stock",
+    "subtitle": "What you have on hand right now",
+    "searchPlaceholder": "Search the items below",
+    "searchScope": "Searches only the items loaded on this page, not your whole catalogue.",
+    "filterLabel": "Stock view",
+    "filter": {
+      "all": "All",
+      "negative": "Below zero",
+      "zero": "None left"
+    },
+    "state": {
+      "negative": "Below zero",
+      "zero": "None left"
+    },
+    "sku": "SKU",
+    "unnamedVariant": "Unnamed variant",
+    "unknownQty": "Not loaded",
+    "ledgerNote": "Quantities come from your stock movement record.",
+    "stockTruncated": "Stock was read for the first {{count}} items. Others show as not loaded.",
+    "catalogPageLimit": "This page shows the first {{count}} products.",
+    "empty": {
+      "title": "Nothing to count yet",
+      "body": "Products you add to your catalogue show up here with their stock."
+    },
+    "noMatches": {
+      "title": "Nothing matches that",
+      "body": "Only the items loaded on this page were searched. Clear the search or pick another view."
+    },
+    "needsCatalog": {
+      "title": "Stock cannot be listed",
+      "body": "Your account can see stock but not the product catalogue, so there is no way to say which item each quantity belongs to."
+    },
+    "error": {
+      "title": "Stock didn't load",
+      "body": "Check your connection and try again."
+    }
+  },
+  "inventoryDetail": {
+    "title": "Stock item",
+    "onHand": "On hand",
+    "units": "units",
+    "negativeNotice": "More was sold than your record says was received. Receive the missing stock or adjust it with a reason.",
+    "zeroNotice": "Nothing left on hand.",
+    "byLocation": "By location",
+    "noLocationRows": "No stock movements recorded for this item yet.",
+    "unassignedLocation": "No location",
+    "unknownLocation": "Location not listed",
+    "variantActive": "Active",
+    "variantArchived": "Archived",
+    "noCatalogAccess": "Your account cannot see catalogue details for this item.",
+    "notFound": {
+      "title": "Item not found",
+      "body": "This item does not exist in your business, or it is no longer available to you."
+    },
+    "error": {
+      "title": "Stock didn't load",
+      "body": "Check your connection and try again."
+    },
+    "viewProduct": "View product"
+  },
+  "receiveStock": {
+    "action": "Receive stock",
+    "title": "Receive stock",
+    "movementType": "Kind of receipt",
+    "type": {
+      "restock": "Restock",
+      "initial": "Opening stock"
+    },
+    "typeHint": {
+      "restock": "New stock arriving for an item you already sell.",
+      "initial": "The stock you already had when you started recording it."
+    },
+    "quantity": "Quantity received",
+    "quantityHint": "Whole units, more than zero.",
+    "invalidQuantity": "Enter a whole number above zero.",
+    "location": "Where it lands",
+    "noLocation": "No location",
+    "confirm": "Record receipt"
+  },
+  "stockAdjustment": {
+    "action": "Adjust stock",
+    "title": "Manual adjustment",
+    "currentOnHand": "On hand now:",
+    "delta": "Change",
+    "deltaHint": "Use a minus sign to write stock down, for example -3.",
+    "invalidDelta": "Enter a whole number that is not zero.",
+    "resultPreview": "{{delta}} leaves {{result}} on hand.",
+    "reason": "Reason",
+    "reasonHint": "Required. This is kept on the record with your name and the time.",
+    "reasonRequiredNote": "Enter a reason to record this adjustment.",
+    "location": "Which location",
+    "noLocation": "No location",
+    "confirm": "Record adjustment"
+  },
+  "movementHistory": {
+    "title": "Stock movements",
+    "loading": "Loading",
+    "loadMore": "Show older movements",
+    "empty": "No stock movements recorded for this item yet.",
+    "denied": "Your account can see stock but not the movements behind it.",
+    "type": {
+      "initial": "Opening stock",
+      "sale": "Sold",
+      "return": "Returned",
+      "manual_adjustment": "Manual adjustment",
+      "restock": "Stock received"
+    },
+    "error": {
+      "title": "Movements didn't load",
+      "body": "Check your connection and try again."
+    }
+  },
+  "payments": {
+    "list": {
+      "title": "Payments",
+      "subtitle": "Every payment claim, and what still needs a decision.",
+      "filterScope": "Filters run on the server, across every payment in your business — not just the rows on this page. Mismatch, suspected duplicate and unverified are listed separately because they are different findings.",
+      "partialRefundNote": "A partly refunded payment still reads as Paid. Open a payment to see each refund.",
+      "loadMore": "Load more payments",
+      "loadingMore": "Loading…",
+      "empty": {
+        "title": "No payments yet",
+        "body": "Payments recorded against your orders appear here, newest first."
+      },
+      "emptyFilter": {
+        "title": "Nothing matches this filter",
+        "body": "No payment in your business is in this state right now. Try another filter."
+      },
+      "error": {
+        "title": "Could not load payments",
+        "body": "The payment list did not come back. Nothing was changed."
+      },
+      "forbidden": {
+        "title": "Payments are not open to you",
+        "body": "Your role does not include reading payment records."
+      }
+    },
+    "filters": {
+      "label": "Payment filters",
+      "all": "All"
+    },
+    "row": {
+      "order": "Order {{id}}",
+      "needsReview": "Needs review",
+      "fullyRefunded": "Fully refunded"
+    },
+    "attention": {
+      "currencyLabel": "Needs attention · {{currency}}",
+      "needsReview": "Waiting on a decision",
+      "codUnsettled": "Cash on delivery, not settled",
+      "entry": "{{count}} · {{amount}}",
+      "separateCurrencies": "Counted per currency. US dollars and riel are never added together."
+    },
+    "status": {
+      "label": "Payment status",
+      "help": "Whether this one payment settled. Separate from verification and from refunds.",
+      "pending": "Pending",
+      "paid": "Paid",
+      "failed": "Failed",
+      "reversed": "Reversed",
+      "refunded": "Refunded"
+    },
+    "verification": {
+      "label": "Verification",
+      "help": "How far the claim that this money arrived has been checked. It never means the payment settled on its own.",
+      "unverified": "Not checked",
+      "staff_confirmed": "Staff confirmed",
+      "manager_verified": "Manager verified",
+      "bank_verified": "Bank verified",
+      "mismatch": "Mismatch",
+      "duplicate_suspected": "Possible duplicate"
+    },
+    "method": {
+      "label": "Method",
+      "cash": "Cash",
+      "khqr": "KHQR",
+      "bank_transfer": "Bank transfer",
+      "cod": "Cash on delivery",
+      "codNote": "Cash on delivery is a collection arrangement. It never means the money has arrived."
+    },
+    "detail": {
+      "title": "Payment",
+      "details": "Payment details",
+      "reference": "Reference",
+      "note": "Note",
+      "recordedAt": "Recorded {{at}}",
+      "order": {
+        "title": "Order",
+        "view": "Open the order",
+        "id": "Linked order",
+        "noAccess": "Your role does not include reading orders.",
+        "note": "Payment never changes an order directly. The order's own payment and refund state is derived from the payment ledger."
+      },
+      "notFound": {
+        "title": "Payment not found",
+        "body": "This payment does not exist in your business, or the link is out of date."
+      },
+      "error": {
+        "title": "Could not load this payment",
+        "body": "The payment did not come back. Nothing was changed."
+      }
+    },
+    "settlement": {
+      "title": "Order settlement",
+      "note": "Worked out in the database from the whole order's payment ledger — not from this one payment.",
+      "unavailable": "Settlement figures are not available for this order right now.",
+      "total": "Order total",
+      "received": "Received",
+      "refunded": "Refunded",
+      "net": "Net",
+      "paymentStatus": "Order payment",
+      "refundStatus": "Order refunds",
+      "overpaid": "Received {{amount}} more than the order total. Worth a look.",
+      "orderPaymentStatus": {
+        "unpaid": "Unpaid",
+        "pending": "Pending",
+        "paid": "Paid",
+        "failed": "Failed"
+      },
+      "refundStatusValue": {
+        "none": "No refunds",
+        "partial": "Partly refunded",
+        "full": "Fully refunded"
+      }
+    },
+    "refunds": {
+      "title": "Refunds on this payment",
+      "empty": "No refunds recorded against this payment.",
+      "noAmount": "Amount not recorded",
+      "note": "Each line is one refund from the payment's permanent history. A refund never cancels the payment — it is recorded beside it."
+    },
+    "evidence": {
+      "title": "Evidence",
+      "empty": "No evidence attached.",
+      "note": "Evidence is a document, not a settlement. Attaching a screenshot or receipt changes nothing about this payment.",
+      "type": {
+        "screenshot": "Screenshot",
+        "qr_scan": "QR scan",
+        "receipt": "Receipt",
+        "other": "Other document"
+      }
+    },
+    "history": {
+      "title": "History",
+      "empty": "No history recorded.",
+      "event": {
+        "created": "Payment recorded",
+        "evidence_attached": "Evidence attached",
+        "staff_confirmed": "Staff confirmed the payment",
+        "manager_verified": "Manager verified the payment",
+        "bank_verified": "Bank verified the payment",
+        "verification_failed": "Marked as a mismatch",
+        "correction": "Details corrected",
+        "reversal": "Payment reversed",
+        "refund": "Refund recorded",
+        "duplicate_flagged": "Flagged as a possible duplicate"
+      }
+    },
+    "actions": {
+      "title": "What you can do",
+      "readOnly": "You can view this payment, but your role does not include changing it.",
+      "frozen": "This payment is {{status}} and can no longer be changed.",
+      "working": "Working…",
+      "reasonRequired": "Reason",
+      "reasonOptional": "Reason (optional)",
+      "reasonHint": "Written into this payment's permanent history.",
+      "serverNote": "Every action here is checked again by the server before anything changes.",
+      "verify": {
+        "staff_confirmed": {
+          "label": "Confirm payment received",
+          "body": "You checked and the money arrived. This settles the payment as paid.",
+          "submit": "Confirm received",
+          "done": "Payment confirmed as received."
+        },
+        "manager_verified": {
+          "label": "Verify as manager",
+          "body": "Re-confirm the payment at manager level, above a staff confirmation.",
+          "submit": "Verify",
+          "done": "Payment verified at manager level."
+        },
+        "bank_verified": {
+          "label": "Mark as bank verified",
+          "body": "The payment was matched against the bank record.",
+          "submit": "Mark bank verified",
+          "done": "Payment marked as bank verified."
+        },
+        "mismatch": {
+          "label": "Flag a mismatch",
+          "body": "The claim did not hold up on inspection. The payment stops counting as settled.",
+          "submit": "Flag mismatch",
+          "done": "Payment flagged as a mismatch."
+        },
+        "unverified": {
+          "label": "Send back for checking",
+          "body": "Reopen this payment so it can be checked again from the start.",
+          "submit": "Send back",
+          "done": "Payment sent back for checking."
+        },
+        "duplicate_suspected": {
+          "label": "Flag as a possible duplicate",
+          "body": "Set this payment aside as a suspected duplicate.",
+          "submit": "Flag duplicate",
+          "done": "Payment flagged as a possible duplicate."
+        }
+      },
+      "refund": {
+        "label": "Refund",
+        "rowBody": "Return money from this payment, in full or in part.",
+        "title": "Refund this payment",
+        "body": "The payment stays on record as paid. The refund is recorded beside it.",
+        "amountLabel": "Refund amount ({{currency}})",
+        "amountHint": "This payment is {{amount}}. Refunds are always in the payment's own currency.",
+        "note": "How much is still refundable is worked out from this payment's history. A refund larger than that is refused.",
+        "submit": "Record refund",
+        "done": "Refund recorded."
+      },
+      "reverse": {
+        "label": "Reverse",
+        "rowBody": "Void this payment claim. Use a refund instead when money actually moved back.",
+        "title": "Reverse this payment",
+        "body": "The payment stops counting as settled. Nothing is deleted — the record stays with its history.",
+        "note": "Use this when the payment should never have been recorded. If money genuinely went back to the customer, record a refund instead.",
+        "submit": "Reverse payment",
+        "done": "Payment reversed."
+      }
+    },
+    "errors": {
+      "unauthorized": "Your session has ended. Sign in again.",
+      "forbidden": "Your role does not include that action.",
+      "not_found": "This payment is no longer available.",
+      "conflict": "This payment changed while you had it open. Reload and try again.",
+      "invalid": "That could not be accepted. Check the amount and the reason.",
+      "server_error": "Something went wrong. Nothing was changed."
+    }
+  },
+  "apsi": {
+    "title": "Apsi",
+    "lead": "Find a record, check its state, then open it where it lives.",
+    "searchLabel": "Search or ask Apsi",
+    "searchPlaceholder": "Order code, tracking number, SKU, barcode…",
+    "searchScope": "Searches deliveries by order code, tracking number, courier and customer name, and products by exact SKU or barcode. Paste an order, payment, delivery or customer ID to open it directly.",
+    "clearSearch": "Clear search",
+    "openDomain": "Open a workspace instead",
+    "noTools": "You do not have access to any of Apsi's lookups yet. Ask an owner or manager to review your role.",
+    "noResults": "No delivery, SKU or barcode matched “{{query}}”. Apsi cannot search orders by code, or customers by name or phone — the record may still exist. Open a workspace below to keep looking.",
+    "partialFailure": "Part of this search did not complete, so this answer may be incomplete.",
+    "retry": "Try again",
+    "withheld": "One lookup was not run: it needs the {{permission}} permission, which your role does not have.",
+    "unsupported": {
+      "customer-phone-search": "Apsi cannot search customers by phone number yet — there is no server-side customer search in APSA. Open Inbox to find the conversation instead.",
+      "customer-name-search": "Apsi cannot search customers by name yet — there is no server-side customer search in APSA. A name still matches a delivery's recorded customer."
+    },
+    "card": {
+      "order": "Order",
+      "payment": "Payment",
+      "delivery": "Delivery",
+      "customer": "Customer",
+      "product": "Product",
+      "deliveryNoOrderCode": "Order code not available",
+      "customerPhoneWithheld": "Phone hidden — needs customers.view_sensitive",
+      "customerOrders": "{{count}} order(s) recorded",
+      "stockOnHand": "{{count}} on hand",
+      "stockUnknown": "Stock not checked"
+    },
+    "open": {
+      "order": "Open order",
+      "payment": "Open payment",
+      "delivery": "Open delivery",
+      "customer": "Open customer",
+      "product": "Open product"
     }
   }
 }

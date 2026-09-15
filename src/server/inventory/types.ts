@@ -62,3 +62,22 @@ export interface ListMovementsOptions {
   limit?: number | undefined;
   offset?: number | undefined;
 }
+
+/** Options for the org-wide stock list read. */
+export interface ListOrgStockOptions {
+  /** Maximum active variants to cover in one read. See INVENTORY_STOCK_MAX_LIMIT. */
+  limit?: number | undefined;
+}
+
+/** Identity-only projection of an active variant, read by the Inventory domain. */
+export interface ActiveVariantIdentityRow {
+  id: string;
+  product_id: string;
+}
+
+/** Minimal location projection — id, name, status. No address, no phone. */
+export interface InventoryLocationRow {
+  id: string;
+  name: string;
+  status: string;
+}

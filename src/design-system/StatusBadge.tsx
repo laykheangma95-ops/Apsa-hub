@@ -28,6 +28,7 @@ import {
   PackageOpen,
   PackageX,
   RotateCcw,
+  Undo2,
   ShoppingBag,
   Sparkles,
   Truck,
@@ -109,6 +110,9 @@ const META: Record<StatusBadgeKey, { tone: StatusBadgeTone; icon: LucideIcon }> 
   // ── Payments ───────────────────────────────────────────────────────────────
   partially_paid: { tone: "warning", icon: Wallet },
   partially_refunded: { tone: "neutral", icon: RotateCcw },
+  // Brought in with main's refund axis: a claim voided before/instead of
+  // settling. Same tone + icon as StatusChip so the two never disagree.
+  reversed: { tone: "neutral", icon: Undo2 },
   unpaid: { tone: "warning", icon: Wallet },
   // ── Delivery ───────────────────────────────────────────────────────────────
   requested: { tone: "neutral", icon: Clock },

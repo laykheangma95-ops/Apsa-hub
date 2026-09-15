@@ -129,3 +129,38 @@ export const listMovementHistoryFn = createServerFn()
       offset: data?.offset,
     });
   });
+
+// ── listOrganizationStockFn ──────────────────────────────────────────────────
+//
+// The org-wide stock read the Inventory workspace needs. `limit` is the only
+// input and it only ever NARROWS what the caller's own organization returns —
+// there is no organization_id, no user_id and no variant list on the wire, so
+// nothing here can be pointed at another tenant. The service clamps the value
+// and reports `truncated` rather than silently dropping variants.
+
+export const listOrganizationStockFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({ limit: z.number().int().min(1).max(1000).optional() })
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listOrganizationStock } = await import("@/server/inventory/service");
+    return listOrganizationStock(authCtx, { limit: data?.limit });
+  });
+
+// ── listInventoryLocationsFn ─────────────────────────────────────────────────
+//
+// Minimum read surface for putting a human-readable name on a per-location
+// stock row and for choosing where received stock lands. Takes no input at all:
+// the organization is resolved from the caller's own active membership, so a
+// crafted request cannot enumerate another tenant's locations. Read-only —
+// there is deliberately no create/update/delete counterpart in this phase.
+
+export const listInventoryLocationsFn = createServerFn().handler(async () => {
+  const authCtx = await resolveAuthContext();
+  const { listInventoryLocations } = await import("@/server/inventory/service");
+  return listInventoryLocations(authCtx);
+});
