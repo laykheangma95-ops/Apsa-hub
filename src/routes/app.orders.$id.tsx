@@ -63,7 +63,7 @@ import {
   canCancelOrder,
   canConfirmOrder,
   classifyOrderError,
-  isChannelSource,
+  presentOrderSource,
   totalStockUnits,
   type OrderErrorKind,
 } from "@/lib/orders";
@@ -527,15 +527,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
          * supporting chips.
          */}
         <StatusHero
-          eyebrow={
-            order.source && isChannelSource(order.source) ? (
-              <ChannelBadge channel={order.source} withLabel />
-            ) : order.source && order.source !== "manual" ? (
-              <ChannelBadge channel="other" withLabel />
-            ) : (
+          /*
+           * Same shared decision as the Orders list (presentOrderSource):
+           * known channel → its badge, unrecognised source → generic "other",
+           * explicit MANUAL → "Entered by hand", no recorded source → no
+           * claim. An unknown source is never presented as hand-entered.
+           */
+          eyebrow={((presented) =>
+            presented.kind === "channel" ? (
+              <ChannelBadge channel={presented.channel} withLabel />
+            ) : presented.kind === "manual" ? (
               t("order.sourceManual")
-            )
-          }
+            ) : undefined)(presentOrderSource(order.source))}
           headline={<MoneyText value={order.total} showSecondary size="lg" />}
           {...(order.lifecycleStatus ? { primaryStatus: order.lifecycleStatus } : {})}
           secondaryStatuses={[order.paymentStatus, order.fulfillmentStatus]}

@@ -17,7 +17,7 @@ import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listRealOrders } from "@/lib/api";
-import { isChannelSource } from "@/lib/orders";
+import { presentOrderSource } from "@/lib/orders";
 import { ordersKeys } from "@/lib/orders-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -65,18 +65,22 @@ function OrderRow({ order }: { order: Order }) {
 
       <div className="flex min-w-0 items-center gap-2">
         {/*
-         * Known channel → its badge. A present source the guard rejects
-         * (legacy/unknown value that escaped the mapper) → the generic
-         * "other" badge — never a false platform, never a crash. Only a
-         * genuinely manual or absent source reads "Entered by hand".
+         * One shared decision (presentOrderSource) drives both Order
+         * surfaces: a known channel badges itself, an unrecognised source
+         * badges as generic "other", and ONLY an explicitly MANUAL order
+         * reads "Entered by hand". An order with no recorded source claims
+         * nothing at all rather than inventing provenance.
          */}
-        {order.source && isChannelSource(order.source) ? (
-          <ChannelBadge channel={order.source} withLabel />
-        ) : order.source && order.source !== "manual" ? (
-          <ChannelBadge channel="other" withLabel />
-        ) : (
-          <span className="text-caption text-text-secondary">{t("order.sourceManual")}</span>
-        )}
+        {(() => {
+          const presented = presentOrderSource(order.source);
+          if (presented.kind === "channel")
+            return <ChannelBadge channel={presented.channel} withLabel />;
+          if (presented.kind === "manual")
+            return (
+              <span className="text-caption text-text-secondary">{t("order.sourceManual")}</span>
+            );
+          return null;
+        })()}
         <span className="text-caption min-w-0 flex-1 truncate text-text-muted">
           {order.customerId ? t("orderList.hasCustomer") : t("orderList.noCustomer")}
         </span>

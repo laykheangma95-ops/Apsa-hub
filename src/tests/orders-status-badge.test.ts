@@ -98,15 +98,16 @@ describe("Orders list — presentation contract (structural)", () => {
     expect(rowSource).not.toMatch(/can\("|hasRole|isAdmin|permissions\./);
   });
 
-  it("a rejected-but-present source renders the generic 'other' badge, not a false label", () => {
-    // Both order surfaces must send unknown/legacy sources to ChannelBadge
-    // "other" — never the "Entered by hand" caption (that would falsely call
-    // an unknown source manual) and never straight into the icon lookup.
+  it("delegates source presentation to the shared presenter on both surfaces", () => {
+    // Structural guard only — it proves neither surface grew a second,
+    // divergent fallback. What actually renders is proven behaviourally in
+    // orders-source-presentation.test.ts.
     for (const rel of [ORDER_LIST_ROUTE, "src/routes/app.orders.$id.tsx"]) {
       const src = readSource(rel);
-      expect(src).toMatch(/isChannelSource\(order\.source\)\s*\?\s*\(/);
-      expect(src).toMatch(/order\.source !== "manual"\s*\?\s*\(/);
-      expect(src).toMatch(/<ChannelBadge channel="other" withLabel \/>/);
+      expect(src).toMatch(/presentOrderSource\(order\.source\)/);
+      // No surface-local manual fallback outside the presenter's own branch.
+      expect(src).not.toMatch(/order\.source !== "manual"/);
+      expect(src).not.toMatch(/isChannelSource\(order\.source\)/);
     }
   });
 });
