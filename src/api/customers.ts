@@ -100,6 +100,42 @@ export const listCustomersFn = createServerFn()
     return listCustomers(authCtx, opts);
   });
 
+// ── searchCustomersFn ──────────────────────────────────────────────────────────
+
+/**
+ * Bounded, org-scoped customer search.
+ *
+ * WHAT THIS VALIDATOR DELIBERATELY DOES NOT ACCEPT: a field selector. There is
+ * no `field: "phone"` parameter, and adding one would be the dangerous change
+ * to this file — the server decides which column may participate, from the
+ * shape of the query and from the caller's own resolved grants
+ * (src/server/customers/service.ts). A caller that could name the field could
+ * name the one it is not allowed to search.
+ *
+ * It also accepts no organizationId, for the same reason nothing else here
+ * does: the tenant is resolved from the caller's active membership.
+ */
+export const searchCustomersFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        query: z.string().trim().min(1, "Search query is required").max(100),
+        // Capped so a caller cannot ask for the whole tenant in one request.
+        limit: z.number().int().min(1).max(50).optional(),
+        offset: z.number().int().min(0).optional(),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { searchCustomers } = await import("@/server/customers/service");
+    return searchCustomers(authCtx, {
+      query: data.query,
+      limit: data.limit,
+      offset: data.offset,
+    });
+  });
+
 // ── createCustomerFn ───────────────────────────────────────────────────────────
 
 export const createCustomerFn = createServerFn()

@@ -146,6 +146,39 @@ export async function findOrderById(
   return (data ?? null) as OrderRow | null;
 }
 
+/**
+ * Find one order by its merchant-facing code, within one organization.
+ *
+ * Index-backed and exact: uniq_orders_number_per_org is a UNIQUE index on
+ * (organization_id, order_number), so this is a single index probe and no
+ * migration is required to make it selective. The query never applies a
+ * function to the column (the CALLER normalizes the needle — see
+ * src/lib/order-code.ts), which is precisely what keeps the index usable.
+ *
+ * Returns null both for a code that was never issued and for one belonging to
+ * another organization, for the same reason findOrderById does: a guessed code
+ * must not confirm that it named something real. The uniqueness is per tenant,
+ * so two merchants legitimately hold the same code and neither may probe the
+ * other's.
+ */
+export async function findOrderByNumber(
+  organizationId: string,
+  orderNumber: string,
+): Promise<OrderRow | null> {
+  const { data, error } = await db
+    .from("orders")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("order_number", orderNumber)
+    .single();
+
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`findOrderByNumber: ${errMessage(error)}`);
+  }
+  return (data ?? null) as OrderRow | null;
+}
+
 export async function listOrders(
   organizationId: string,
   opts: ListOrdersOptions = {},

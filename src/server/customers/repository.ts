@@ -25,7 +25,21 @@ import type {
 
 // Typed alias for new tables not yet in the generated schema.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const db = supabaseAdmin as any;
+let db = supabaseAdmin as any;
+
+/**
+ * Test-only override for exercising repository functions against a mocked
+ * query chain. Same convention as setOrderRepositoryDbForTests — it is what
+ * lets a test prove that a phone query was NEVER ISSUED, rather than only
+ * that its result was hidden afterwards.
+ */
+export function setCustomerRepositoryDbForTests(testDb: unknown): () => void {
+  const previousDb = db;
+  db = testDb;
+  return () => {
+    db = previousDb;
+  };
+}
 
 // ── Customers ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +74,104 @@ export async function listCustomers(
 
   const { data, error } = await query;
   if (error) throw new Error(`listCustomers: ${(error as { message: string }).message}`);
+  return (data ?? []) as CustomerRow[];
+}
+
+// ── Search reads ──────────────────────────────────────────────────────────────
+//
+// Both functions below filter IN POSTGRES and are scoped to one organization.
+// Neither is ever handed a needle the caller has not been authorized for —
+// searchCustomersByName is reached only after customers.read, and
+// scanCustomersWithPhone only after customers.read AND
+// customers.view_sensitive (src/server/customers/service.ts). The repository
+// deliberately holds no permission logic of its own; it holds no way to bypass
+// one either, because neither function takes an organization from anywhere but
+// its argument.
+
+export interface CustomerNameSearchOptions {
+  /** Already normalized and LIKE-escaped by the service. */
+  pattern: string;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Customers whose display name contains `pattern`, case-insensitively.
+ *
+ * Server-side filtering: the ILIKE runs in Postgres and only matching rows
+ * cross the wire. There is no index on display_name today, so this is a scan
+ * of the tenant's own customer rows within the idx_customers_org_status
+ * partition — correct and bounded, and fast at MVP customer counts. If a
+ * tenant ever grows past the point where that is acceptable, the fix is a
+ * pg_trgm GIN index, NOT client-side filtering (see the migration note in the
+ * PR description).
+ *
+ * Ordering is (display_name, id): deterministic, so offset pagination cannot
+ * show a row twice or skip one between pages, and two customers with the same
+ * name keep a stable relative order.
+ *
+ * A literal "%" or "_" a merchant typed reaches here backslash-escaped by the
+ * service, which is what Postgres LIKE/ILIKE treats as an escape by default —
+ * so "100%" searches for that text instead of matching the whole tenant. One
+ * character is NOT escapable: PostgREST expands "*" to "%" in a like/ilike
+ * value before Postgres sees it, so a typed asterisk still behaves as a
+ * wildcard. That over-matches (more rows than asked for) rather than
+ * under-matching, so it can never hide a customer who exists.
+ */
+export async function searchCustomersByName(
+  organizationId: string,
+  opts: CustomerNameSearchOptions,
+): Promise<CustomerRow[]> {
+  const { data, error } = await db
+    .from("customers")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("status", "active")
+    .ilike("display_name", opts.pattern)
+    .order("display_name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(opts.offset, opts.offset + opts.limit - 1);
+
+  if (error) throw new Error(`searchCustomersByName: ${(error as { message: string }).message}`);
+  return (data ?? []) as CustomerRow[];
+}
+
+/**
+ * One window of the tenant's customers that have a phone number on file.
+ *
+ * Why a windowed scan and not a WHERE clause on the phone: APSA stores
+ * `primary_phone` exactly as it was typed, so "012345678", "012 345 678" and
+ * "012-345-678" are three different strings for one number and no single SQL
+ * predicate over the raw column finds all three. Comparing digit sequences
+ * requires normalizing the stored value, and normalizing it inside the query
+ * (regexp_replace) would make idx_customers_primary_phone unusable anyway. The
+ * service therefore reduces both sides to digits itself, over a BOUNDED window
+ * of rows, and reports honestly when the bound was reached — the same
+ * scan-with-a-truncation-signal shape the Delivery list already uses.
+ *
+ * `primary_phone IS NOT NULL` is pushed into the query, so the scan reads only
+ * rows that can possibly match and uses the partial index that exists for
+ * exactly that predicate.
+ *
+ * Ordering is (created_at DESC, id DESC): deterministic, and newest-first so a
+ * truncated scan has looked at the most recently created customers — the ones
+ * a merchant is most likely searching for.
+ */
+export async function scanCustomersWithPhone(
+  organizationId: string,
+  opts: { offset: number; limit: number },
+): Promise<CustomerRow[]> {
+  const { data, error } = await db
+    .from("customers")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("status", "active")
+    .not("primary_phone", "is", null)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .range(opts.offset, opts.offset + opts.limit - 1);
+
+  if (error) throw new Error(`scanCustomersWithPhone: ${(error as { message: string }).message}`);
   return (data ?? []) as CustomerRow[];
 }
 

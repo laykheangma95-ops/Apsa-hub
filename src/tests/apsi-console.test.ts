@@ -18,17 +18,19 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   APSI_QUERY_MAX_LENGTH,
+  apsiEmptyScope,
   classifyApsiQuery,
   looksLikePersonName,
   looksLikePhoneNumber,
   normalizeApsiQuery,
 } from "@/lib/apsi/input";
 import {
-  APSI_PROBE_PERMISSION,
+  APSI_PROBE_PERMISSIONS,
   apsiResultRoute,
   planApsiLookup,
   type ApsiResult,
 } from "@/lib/apsi/lookup";
+import { looksLikeOrderCode, normalizeOrderCode } from "@/lib/order-code";
 import { apsiSurfaceForPath, orderApsiActionIds } from "@/lib/apsi/context";
 import { getBusinessNavConfig } from "@/design-system/mobile-nav-config";
 import { APSI_QUERY_ROOT, apsiKeys } from "@/lib/apsi-query";
@@ -112,19 +114,48 @@ describe("Apsi routes a structured identifier deterministically", () => {
 
 // ── Honesty about what it cannot do ───────────────────────────────────────────
 
-describe("Apsi says what it cannot do instead of finding nothing", () => {
-  it("flags a phone number as an unsupported customer search", () => {
+describe("Apsi routes each shape to the domain that owns it", () => {
+  /*
+   * The order code was the headline gap. Apsi could only reach an order code
+   * through the DELIVERY list's free-text search, so an order with no delivery
+   * row was unfindable by the reference printed on its own receipt — and the
+   * console reported that as "nothing matched", which a staff member repeats
+   * to a customer as "we have no record of your order".
+   */
+  it("sends an order code to Orders, and to nothing else", () => {
+    for (const input of ["APSA-2026-000123", "apsa-2026-000123", " APSA-2026-000123 "]) {
+      const plan = classifyApsiQuery(input);
+      expect({ input, kinds: plan.probes.map((p) => p.kind) }).toEqual({
+        input,
+        kinds: ["order-by-code"],
+      });
+      // Normalized once, so all three spellings are one lookup.
+      expect((plan.probes[0] as { value: string }).value).toBe("APSA-2026-000123");
+    }
+  });
+
+  it("never reaches an order code through the Delivery search again", () => {
+    const plan = classifyApsiQuery("APSA-2026-000123");
+    expect(plan.probes.some((p) => p.kind === "delivery-search")).toBe(false);
+    expect(plan.probes.some((p) => p.kind === "product-by-sku")).toBe(false);
+  });
+
+  it("sends a phone number to Customers, and to nothing else", () => {
     for (const input of ["012 345 678", "+855 12 345 678", "០១២៣៤៥៦៧៨"]) {
       const plan = classifyApsiQuery(input);
-      expect({ input, unsupported: plan.unsupported }).toEqual({
+      expect({ input, kinds: plan.probes.map((p) => p.kind) }).toEqual({
         input,
-        unsupported: ["customer-phone-search"],
+        kinds: ["customer-by-phone"],
       });
     }
   });
 
-  it("flags a bare name as an unsupported customer search", () => {
-    expect(classifyApsiQuery("Sokha").unsupported).toEqual(["customer-name-search"]);
+  it("sends a name to Customers, alongside the Delivery search that also records names", () => {
+    const kinds = classifyApsiQuery("Sokha").probes.map((p) => p.kind);
+    expect(kinds).toContain("customer-by-name");
+    // A courier name is also just letters, so Delivery still sees it. Two
+    // targeted probes, not a broadcast across every backend.
+    expect(kinds).toContain("delivery-search");
     expect(looksLikePersonName("Sokha")).toBe(true);
     expect(looksLikePersonName("APSA-1042")).toBe(false);
   });
@@ -133,16 +164,32 @@ describe("Apsi says what it cannot do instead of finding nothing", () => {
     expect(looksLikePhoneNumber("APSA-1042")).toBe(false);
     expect(looksLikePhoneNumber("JT-9001")).toBe(false);
     expect(looksLikePhoneNumber("012345678")).toBe(true);
+    // Too few digits to be a phone number — that fragment would match most of
+    // a tenant, which is a cheaper existence oracle than a precise match.
+    expect(looksLikePhoneNumber("0123")).toBe(false);
   });
 
-  /*
-   * A phone number can still be part of a tracking reference, so the delivery
-   * search runs anyway. The honest note sits alongside the result, not instead
-   * of the attempt.
-   */
-  it("still runs the delivery search for a phone-shaped input", () => {
-    const plan = classifyApsiQuery("012 345 678");
-    expect(plan.probes.map((p) => p.kind)).toEqual(["delivery-search"]);
+  it("recognises an order code without inferring a year that was never typed", () => {
+    expect(looksLikeOrderCode(normalizeOrderCode("apsa-2026-000123"))).toBe(true);
+    expect(looksLikeOrderCode(normalizeOrderCode("APSA-1042"))).toBe(true);
+    expect(looksLikeOrderCode("SKU-COKE-330")).toBe(false);
+    expect(looksLikeOrderCode("JT-9001")).toBe(false);
+    // "APSA-123" is looked up verbatim; the code is never padded or rewritten
+    // into a guess at which year's order the merchant meant.
+    expect(normalizeOrderCode(" apsa-123 ")).toBe("APSA-123");
+  });
+
+  it("still sends a tracking number to Delivery and a barcode to Catalog", () => {
+    expect(classifyApsiQuery("JT-9001").probes.map((p) => p.kind)).toEqual([
+      "product-by-barcode",
+      "product-by-sku",
+      "delivery-search",
+    ]);
+    expect(classifyApsiQuery("8850007123456").probes.map((p) => p.kind)).toEqual([
+      "product-by-barcode",
+      "product-by-sku",
+      "delivery-search",
+    ]);
   });
 });
 
@@ -173,45 +220,92 @@ describe("Apsi never claims to have searched all of APSA", () => {
   it("states the real search scope rather than universal coverage", () => {
     expect(en.searchScope).not.toMatch(UNIVERSAL_EN);
     expect(km.searchScope).not.toMatch(UNIVERSAL_KM);
-    // It names what is actually searched, so "not found" can be read in context.
+    // It names each domain that is actually reached, so "not found" can be
+    // read in context — and the phone permission, so an unavailable search
+    // does not read as an absent customer.
+    expect(en.searchScope).toMatch(/order code/i);
+    expect(en.searchScope).toMatch(/customer/i);
     expect(en.searchScope).toMatch(/deliver/i);
     expect(en.searchScope).toMatch(/sku/i);
-    expect(en.searchScope).toMatch(/barcode/i);
+    expect(en.searchScope).toMatch(/customers\.view_sensitive/);
+    expect(km.searchScope).toMatch(/ការបញ្ជាទិញ/);
+    expect(km.searchScope).toMatch(/អតិថិជន/);
     expect(km.searchScope).toMatch(/ដឹកជញ្ជូន/);
     expect(km.searchScope).toMatch(/SKU/);
-    expect(km.searchScope).toMatch(/បាកូដ/);
+    expect(km.searchScope).toMatch(/customers\.view_sensitive/);
   });
 
-  it("scopes the empty-result line to what was searched", () => {
-    expect(en.noResults).not.toMatch(UNIVERSAL_EN);
-    expect(km.noResults).not.toMatch(UNIVERSAL_KM);
+  /*
+   * The not-found line is now SCOPED TO THE DOMAIN THAT ANSWERED, which is the
+   * whole point of routing an order code to Orders. One sentence covering
+   * every shape could only ever be the broadest one, and the broadest one is a
+   * claim about APSA that a single-domain probe never earned.
+   */
+  it("scopes each empty-result line to the domain that was actually searched", () => {
+    for (const copy of [en.empty, km.empty]) {
+      for (const value of Object.values(copy) as string[]) {
+        expect(value).not.toMatch(UNIVERSAL_EN);
+        expect(value).not.toMatch(UNIVERSAL_KM);
+      }
+    }
 
-    // It still echoes the query, and still names the surfaces that were tried.
-    for (const copy of [en.noResults, km.noResults]) {
+    // An order code goes to Orders alone, so the line may only speak of orders.
+    expect(en.empty.orderCode).toMatch(/order/i);
+    expect(en.empty.orderCode).not.toMatch(/deliver|sku|barcode|customer/i);
+    expect(km.empty.orderCode).toMatch(/ការបញ្ជាទិញ/);
+    expect(km.empty.orderCode).not.toMatch(/ដឹកជញ្ជូន|SKU|បាកូដ/);
+
+    // A phone number goes to Customers alone.
+    expect(en.empty.customerPhone).toMatch(/customer/i);
+    expect(en.empty.customerPhone).not.toMatch(/deliver|sku|barcode|order/i);
+    expect(km.empty.customerPhone).toMatch(/អតិថិជន/);
+    expect(km.empty.customerPhone).not.toMatch(/ដឹកជញ្ជូន|SKU|បាកូដ/);
+
+    // The broader shapes still echo the query and name what was tried.
+    for (const copy of [
+      en.empty.customerName,
+      km.empty.customerName,
+      en.empty.search,
+      km.empty.search,
+    ]) {
       expect(copy).toContain("{{query}}");
     }
-    expect(en.noResults).toMatch(/deliver/i);
-    expect(en.noResults).toMatch(/sku/i);
-    expect(en.noResults).toMatch(/barcode/i);
-    expect(km.noResults).toMatch(/ដឹកជញ្ជូន/);
-    expect(km.noResults).toMatch(/SKU/);
-    expect(km.noResults).toMatch(/បាកូដ/);
+
+    /*
+     * The name line may not claim a search that did not run. A multi-word name
+     * ("Sokha Chan") is not a single token, so the exact SKU and barcode
+     * probes are never issued for it — naming them would be a claim about
+     * Products built from a request that was never made, which is the same
+     * defect as an APSA-wide claim, only smaller.
+     */
+    const nameProbes = classifyApsiQuery("Sokha Chan").probes.map((p) => p.kind);
+    expect(nameProbes).toEqual(["customer-by-name", "delivery-search"]);
+    expect(en.empty.customerName).not.toMatch(/sku|barcode/i);
+    expect(km.empty.customerName).not.toMatch(/SKU|បាកូដ/);
+    // It still names both domains that DID run.
+    expect(en.empty.customerName).toMatch(/customer/i);
+    expect(en.empty.customerName).toMatch(/deliver/i);
   });
 
-  it("names the searches it cannot run in the empty-result line", () => {
-    // Order code and customer name/phone are the gaps a merchant will hit
-    // first; the line has to send them somewhere rather than close the door.
-    expect(en.noResults).toMatch(/order/i);
-    expect(en.noResults).toMatch(/name|phone/i);
-    expect(km.noResults).toMatch(/ការបញ្ជាទិញ/);
-    expect(km.noResults).toMatch(/ឈ្មោះ|ទូរស័ព្ទ/);
+  it("picks the empty-result line from the probes the query actually produced", () => {
+    expect(apsiEmptyScope(classifyApsiQuery("APSA-2026-000123"))).toBe("orderCode");
+    expect(apsiEmptyScope(classifyApsiQuery("012 345 678"))).toBe("customerPhone");
+    expect(apsiEmptyScope(classifyApsiQuery("Sokha"))).toBe("customerName");
+    expect(apsiEmptyScope(classifyApsiQuery(ORDER_ID))).toBe("identifier");
+    expect(apsiEmptyScope(classifyApsiQuery("JT-9001"))).toBe("search");
+
+    // Every scope it can return has copy in both languages.
+    for (const scope of ["orderCode", "customerPhone", "customerName", "identifier", "search"]) {
+      expect({ scope, en: typeof en.empty[scope] }).toEqual({ scope, en: "string" });
+      expect({ scope, km: typeof km.empty[scope] }).toEqual({ scope, km: "string" });
+    }
   });
 
   /*
    * Behavioural proof that this line cannot appear after a lookup that issued
    * nothing lives in apsi-console.runtime.ts (a recording domain layer, zero
    * requests, `answered: false`). This pins the wiring: the console must gate
-   * the sentence on that same flag.
+   * the sentence on that same flag, and must pick its wording from the plan.
    */
   it("renders the empty-result line only when a domain actually answered", () => {
     const console_ = readCode(CONSOLE);
@@ -222,32 +316,88 @@ describe("Apsi never claims to have searched all of APSA", () => {
     expect(gate).toContain("outcome!.failed.length === 0");
     // The flag is only worth anything if the sentence is behind it.
     expect(console_).toContain("{nothingFound ?");
-    expect(console_).toContain('t("apsi.noResults"');
+    // …and the sentence is the domain-scoped one, not a single global string.
+    expect(console_).toContain("const emptyScopeKey = `apsi.empty.${apsiEmptyScope(plan)}`");
+    expect(console_).toContain("t(emptyScopeKey, { query: plan.normalized })");
+  });
+
+  /*
+   * A page is not the whole answer. A customer search returns five cards out
+   * of however many matched, and five names must never read as "these are all
+   * the people called that".
+   */
+  it("says so when a domain reported more matches than it returned", () => {
+    const console_ = readCode(CONSOLE);
+    expect(console_).toContain("outcome!.incomplete");
+    expect(console_).toContain('t("apsi.moreResults")');
+    expect(typeof en.moreResults).toBe("string");
+    expect(typeof km.moreResults).toBe("string");
   });
 });
 
 // ── Permission model ──────────────────────────────────────────────────────────
 
 describe("Apsi reveals nothing the member could not see directly", () => {
-  it("maps every probe to a permission key this UI is allowed to consult", () => {
-    for (const [kind, key] of Object.entries(APSI_PROBE_PERMISSION)) {
-      expect({ kind, declared: (UI_PERMISSION_KEYS as readonly string[]).includes(key) }).toEqual({
-        kind,
-        declared: true,
-      });
+  it("maps every probe to permission keys this UI is allowed to consult", () => {
+    for (const [kind, keys] of Object.entries(APSI_PROBE_PERMISSIONS)) {
+      expect({ kind, keys: keys.length > 0 }).toEqual({ kind, keys: true });
+      for (const key of keys) {
+        expect({
+          kind,
+          key,
+          declared: (UI_PERMISSION_KEYS as readonly string[]).includes(key),
+        }).toEqual({ kind, key, declared: true });
+      }
     }
   });
 
-  it("keys each probe to the permission its own server function requires", () => {
-    expect(APSI_PROBE_PERMISSION).toEqual({
-      "order-by-id": "orders.read",
-      "payment-by-id": "payments.read",
-      "delivery-by-id": "delivery.read",
-      "customer-by-id": "customers.read",
-      "product-by-barcode": "products.read",
-      "product-by-sku": "products.read",
-      "delivery-search": "delivery.read",
+  it("keys each probe to every permission its own server function requires", () => {
+    expect(APSI_PROBE_PERMISSIONS).toEqual({
+      "order-by-id": ["orders.read"],
+      "order-by-code": ["orders.read"],
+      "payment-by-id": ["payments.read"],
+      "delivery-by-id": ["delivery.read"],
+      "customer-by-id": ["customers.read"],
+      "customer-by-name": ["customers.read"],
+      // BOTH, and the second is the one that matters: which customers come
+      // back for a typed phone fragment is itself the disclosure that
+      // customers.view_sensitive gates, so the grant is checked before the
+      // request exists rather than applied to its result.
+      "customer-by-phone": ["customers.read", "customers.view_sensitive"],
+      "product-by-barcode": ["products.read"],
+      "product-by-sku": ["products.read"],
+      "delivery-search": ["delivery.read"],
     });
+  });
+
+  /*
+   * THE LAUNCH-CRITICAL ONE. A member who can read customers but may not see
+   * their PII must not be able to use Apsi as a phone-number existence oracle.
+   * Holding one of the two keys is not enough, and the probe is dropped from
+   * the plan rather than issued and masked.
+   */
+  it("withholds the phone search from a member holding customers.read alone", () => {
+    const plan = classifyApsiQuery("012 345 678");
+    const { runnable, skipped } = planApsiLookup(plan, grantsFor(["customers.read"]));
+
+    expect(runnable).toEqual([]);
+    expect(skipped.map((s) => s.permission)).toEqual(["customers.view_sensitive"]);
+  });
+
+  it("runs the phone search only when BOTH grants hold", () => {
+    const plan = classifyApsiQuery("012 345 678");
+    const { runnable } = planApsiLookup(
+      plan,
+      grantsFor(["customers.read", "customers.view_sensitive"]),
+    );
+    expect(runnable.map((p) => p.kind)).toEqual(["customer-by-phone"]);
+  });
+
+  it("still runs the name search for a member without the sensitive grant", () => {
+    // Name is not PII behind that grant — withholding it would be a different
+    // defect: a staff member unable to find a customer who is right there.
+    const { runnable } = planApsiLookup(classifyApsiQuery("Sokha"), grantsFor(["customers.read"]));
+    expect(runnable.map((p) => p.kind)).toContain("customer-by-name");
   });
 
   it("withholds a probe rather than running it and hiding the answer", () => {
@@ -283,11 +433,24 @@ describe("Apsi reveals nothing the member could not see directly", () => {
 
 describe("Apsi cache identity is partitioned by principal", () => {
   it("keys every console answer by user AND organization", () => {
-    const key = apsiKeys.lookup("user-a", "org-a", "APSA-1042");
+    const key = apsiKeys.lookup("user-a", "org-a", "APSA-1042", false);
 
-    expect(key).toEqual([APSI_QUERY_ROOT, "user-a", "org-a", "lookup", "APSA-1042"]);
-    expect(key).not.toEqual(apsiKeys.lookup("user-b", "org-a", "APSA-1042"));
-    expect(key).not.toEqual(apsiKeys.lookup("user-a", "org-b", "APSA-1042"));
+    expect(key).toEqual([APSI_QUERY_ROOT, "user-a", "org-a", "lookup", false, "APSA-1042"]);
+    expect(key).not.toEqual(apsiKeys.lookup("user-b", "org-a", "APSA-1042", false));
+    expect(key).not.toEqual(apsiKeys.lookup("user-a", "org-b", "APSA-1042", false));
+  });
+
+  /*
+   * REVOCATION. A phone search run while customers.view_sensitive held must
+   * not be served back out of the cache after it is revoked — same tab, same
+   * principal, same typed number. Nothing purges this cache on a revocation:
+   * capabilities and lookups are two independent queries, so the grant-era
+   * answer has to live at an address the post-revocation render never reads.
+   */
+  it("keys an answer produced under the sensitive grant apart from one without it", () => {
+    expect(apsiKeys.lookup("user-a", "org-a", "012345678", true)).not.toEqual(
+      apsiKeys.lookup("user-a", "org-a", "012345678", false),
+    );
   });
 });
 

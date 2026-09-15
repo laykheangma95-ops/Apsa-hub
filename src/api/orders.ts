@@ -30,6 +30,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSessionFn } from "@/api/auth";
+import { ORDER_CODE_MAX_LENGTH } from "@/lib/order-code";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 
 const orderSourceSchema = z.enum(["POS", "FACEBOOK", "INSTAGRAM", "TELEGRAM", "MANUAL"]);
@@ -183,6 +184,38 @@ export const getOrderByIdFn = createServerFn()
     const authCtx = await resolveAuthContext();
     const { getOrderById } = await import("@/server/orders/service");
     return getOrderById(authCtx, data.orderId);
+  });
+
+/**
+ * Find one order by the merchant-facing code ("APSA-2026-000123").
+ *
+ * No organizationId parameter, exactly like every other function here: the
+ * organization comes from the caller's active membership, so a code cannot be
+ * aimed at another tenant. Order numbers are unique per tenant, which makes
+ * that scoping load-bearing rather than incidental — the same string is a real
+ * order in many organizations at once.
+ *
+ * Returns null for "no order carries this code", which is an ordinary search
+ * answer and NOT an error. A cross-tenant code and an unissued one produce the
+ * identical null.
+ */
+export const findOrderByCodeFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        // Bounded at the same length the domain accepts; the normalization
+        // itself is the domain's (src/lib/order-code.ts), not this validator's.
+        code: z.string().trim().min(1, "Order code is required").max(ORDER_CODE_MAX_LENGTH),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { findOrderByCode } = await import("@/server/orders/service");
+    const order = await findOrderByCode(authCtx, data.code);
+    // Wrapped rather than returned bare: a top-level null is indistinguishable
+    // from a handler that returned nothing at all on the client side.
+    return { order };
   });
 
 export const listOrdersFn = createServerFn()

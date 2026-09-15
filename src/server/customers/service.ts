@@ -15,6 +15,13 @@
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLogRequired } from "@/server/auth/audit";
+import {
+  CUSTOMER_SEARCH_MAX_QUERY_LENGTH,
+  escapeLikePattern,
+  looksLikeCustomerPhoneQuery,
+  normalizeCustomerNameQuery,
+  phoneDigitsMatch,
+} from "@/lib/customer-search";
 import * as repo from "./repository";
 import type { CustomerRow, CustomerIdentityRow, CustomerAddressRow } from "./types";
 import type { Channel, CompanionColor, Address, Money, SocialIdentity } from "@/types";
@@ -199,6 +206,212 @@ export async function listCustomers(
   const rows = await repo.listCustomers(ctx.organizationId, opts);
   const sensitiveVisible = ctx.can("customers.view_sensitive");
   return rows.map((row) => toCustomerListItem(row, sensitiveVisible));
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+/** Which column the server actually matched on. `null` when nothing was searched. */
+export type CustomerSearchField = "name" | "phone";
+
+/**
+ * One truthful page of a customer search.
+ *
+ * Four different negative answers are kept apart all the way to the screen,
+ * because collapsing any of them into "no customer" is how a staff member
+ * tells a caller they are not a customer when they are:
+ *
+ *   EMPTY        items: [], field set, denied false  — the search ran and
+ *                matched nothing.
+ *   DENIED       phoneSearchDenied: true             — the query was a phone
+ *                number and this member may not search by phone. NO QUERY WAS
+ *                ISSUED; `items` being empty says nothing about what exists.
+ *   INCOMPLETE   hasMore / truncated                 — more may exist beyond
+ *                this page, or beyond the scan bound.
+ *   ERROR        — not represented here at all. A failed search THROWS; it
+ *                never arrives as an empty page.
+ */
+export interface CustomerSearchPage {
+  items: CustomerListItem[];
+  /** The column that participated. null when nothing was searched (denied, or empty query). */
+  field: CustomerSearchField | null;
+  /** True when the server held at least one row beyond this page. Probe-derived, never estimated. */
+  hasMore: boolean;
+  /** True when a bounded phone scan stopped before the tenant's rows were exhausted. */
+  truncated: boolean;
+  /**
+   * True when the query was phone-shaped and the caller lacks
+   * customers.view_sensitive. The phone column was NOT read.
+   */
+  phoneSearchDenied: boolean;
+  /** Server-authoritative PII gate for the rows in `items` — same meaning as CustomerProfile's. */
+  sensitiveVisible: boolean;
+  limit: number;
+  offset: number;
+}
+
+export interface SearchCustomersOptions {
+  query: string;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+const CUSTOMER_SEARCH_DEFAULT_LIMIT = 20;
+const CUSTOMER_SEARCH_MAX_LIMIT = 50;
+
+/**
+ * Rows read per phone-scan round trip, and the ceiling on rows read for one
+ * phone search. A safety valve, not a correctness boundary: within it the scan
+ * is complete, and when it stops early the page says `truncated` rather than
+ * presenting a short list as the whole truth.
+ */
+const PHONE_SCAN_WINDOW = 500;
+const PHONE_SCAN_SAFETY_LIMIT = 5_000;
+
+/**
+ * Find customers by display name, or by phone number.
+ *
+ * ── THE PHONE RULE, WHICH IS THE WHOLE POINT OF THIS FUNCTION ────────────────
+ *
+ * Phone matching requires BOTH `customers.read` AND
+ * `customers.view_sensitive`, and the check happens BEFORE any phone data is
+ * read — not after. That ordering is the security property, and it is not
+ * interchangeable with masking the result:
+ *
+ *   A member without customers.view_sensitive who could match on the phone
+ *   column and receive a blanked phone back has still learned that a customer
+ *   with that number exists in this organization. WHICH ROWS COME BACK is the
+ *   disclosure, not the digits printed on them. Masking after the fact leaves
+ *   Customer search usable as a phone-number existence oracle, which is
+ *   exactly what customers.view_sensitive gates.
+ *
+ * So for an unauthorized caller the phone query is never issued at all, and
+ * the page comes back with `phoneSearchDenied: true` and no items. The UI must
+ * present that as "you may not search by phone", never as "no such customer" —
+ * and because the two are different fields on this result, it can.
+ *
+ * The caller never states which field to search. The SERVER decides, from the
+ * shape of the query (src/lib/customer-search.ts) and from the caller's own
+ * resolved grants. A client that could name the field could name "phone".
+ *
+ * ── WHAT IS MATCHED ──────────────────────────────────────────────────────────
+ *
+ * Name: case-insensitive substring of display_name, filtered in Postgres,
+ * ordered deterministically, one page at a time with a probe row for hasMore.
+ * Every match is returned — several customers sharing a name all come back,
+ * and this function never picks one of them.
+ *
+ * Phone: digit-sequence prefix match, exactly as documented in
+ * src/lib/customer-search.ts. No country-code conversion is performed or
+ * implied, because APSA stores no normalized phone and therefore has no data
+ * contract that would make one correct.
+ *
+ * Archived customers are excluded from both: a picker offering an archived
+ * customer to attach to a new order is a defect, and the Customer 360 route
+ * still reaches one directly by id.
+ */
+export async function searchCustomers(
+  ctx: AuthorizationContext,
+  options: SearchCustomersOptions,
+): Promise<CustomerSearchPage> {
+  ctx.require("customers.read");
+
+  const sensitiveVisible = ctx.can("customers.view_sensitive");
+  const limit = Math.min(
+    Math.max(options.limit ?? CUSTOMER_SEARCH_DEFAULT_LIMIT, 1),
+    CUSTOMER_SEARCH_MAX_LIMIT,
+  );
+  const offset = Math.max(options.offset ?? 0, 0);
+
+  const base = {
+    items: [] as CustomerListItem[],
+    field: null as CustomerSearchField | null,
+    hasMore: false,
+    truncated: false,
+    phoneSearchDenied: false,
+    sensitiveVisible,
+    limit,
+    offset,
+  };
+
+  const raw = options.query.slice(0, CUSTOMER_SEARCH_MAX_QUERY_LENGTH);
+
+  if (looksLikeCustomerPhoneQuery(raw)) {
+    /*
+     * THE GATE. Note what is above this line: nothing has touched the database
+     * yet. An unauthorized caller leaves here having caused no read of any
+     * kind, so there is no query plan, no row count and no timing difference
+     * that could answer "does this number exist here?".
+     */
+    if (!sensitiveVisible) return { ...base, phoneSearchDenied: true };
+    return searchByPhone(ctx.organizationId, raw, { ...base, field: "phone" });
+  }
+
+  const name = normalizeCustomerNameQuery(raw);
+  if (name.length === 0) return base;
+
+  // limit + 1: the extra row is the completeness probe and is never returned.
+  const rows = await repo.searchCustomersByName(ctx.organizationId, {
+    pattern: `%${escapeLikePattern(name)}%`,
+    limit: limit + 1,
+    offset,
+  });
+
+  return {
+    ...base,
+    field: "name",
+    hasMore: rows.length > limit,
+    items: rows.slice(0, limit).map((row) => toCustomerListItem(row, sensitiveVisible)),
+  };
+}
+
+/**
+ * The bounded phone scan. Only ever reached after the grant check above.
+ *
+ * Walks the tenant's phone-bearing customers newest-first in windows,
+ * comparing digit sequences, and stops as soon as it has one row more than the
+ * page needs. `truncated` is set when PHONE_SCAN_SAFETY_LIMIT stopped it
+ * before the rows ran out — the one circumstance in which this answer is
+ * knowingly incomplete, and it is reported rather than hidden.
+ */
+async function searchByPhone(
+  organizationId: string,
+  query: string,
+  base: CustomerSearchPage,
+): Promise<CustomerSearchPage> {
+  const { limit, offset, sensitiveVisible } = base;
+  // Everything up to the end of this page, plus one probe row for hasMore.
+  const wanted = offset + limit + 1;
+
+  const matched: CustomerRow[] = [];
+  let scanned = 0;
+  let exhausted = false;
+  let truncated = false;
+
+  while (matched.length < wanted && !exhausted) {
+    if (scanned >= PHONE_SCAN_SAFETY_LIMIT) {
+      truncated = true;
+      break;
+    }
+    const window = Math.min(PHONE_SCAN_WINDOW, PHONE_SCAN_SAFETY_LIMIT - scanned);
+    const rows = await repo.scanCustomersWithPhone(organizationId, {
+      offset: scanned,
+      limit: window,
+    });
+    scanned += rows.length;
+    if (rows.length < window) exhausted = true;
+
+    for (const row of rows) {
+      if (phoneDigitsMatch(row.primary_phone, query)) matched.push(row);
+    }
+  }
+
+  const page = matched.slice(offset, offset + limit);
+  return {
+    ...base,
+    items: page.map((row) => toCustomerListItem(row, sensitiveVisible)),
+    hasMore: matched.length > offset + limit,
+    truncated,
+  };
 }
 
 export async function createCustomer(

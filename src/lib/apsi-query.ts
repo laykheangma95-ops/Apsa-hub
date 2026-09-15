@@ -30,9 +30,40 @@ export const apsiKeys = {
   /** Everything this principal has cached from the Apsi console. */
   principal: (userId: string, organizationId: string) =>
     partition.principal(userId, organizationId),
-  /** One console search. The normalized query is part of the key, never the raw input. */
-  lookup: (userId: string, organizationId: string, normalizedQuery: string) =>
-    [APSI_QUERY_ROOT, userId, organizationId, "lookup", normalizedQuery] as const,
+  /**
+   * One console search.
+   *
+   * Three things are part of the identity, and the third is the launch-critical
+   * one.
+   *
+   * The NORMALIZED query, never the raw input, so trailing whitespace and
+   * letter case do not fragment one lookup into several entries.
+   *
+   * `sensitive` — whether `customers.view_sensitive` held when this answer was
+   * produced. It is NOT decoration on an already-partitioned key:
+   *
+   *   Apsi withholds the customer phone probe entirely from a member without
+   *   that grant, so a phone-shaped query returns a real result set for a
+   *   member who holds it and an un-issued, empty one for a member who does
+   *   not. Those are different answers to the same string. Without this
+   *   discriminator, a member who searched a phone number while the grant held
+   *   would have that result served straight back out of the cache after the
+   *   grant was revoked — same tab, same principal, same typed number — and
+   *   WHICH CUSTOMERS COME BACK is precisely the disclosure the grant gates.
+   *   Blanking the digits on the card would not close it.
+   *
+   *   The grant can be revoked mid-session, and nothing purges this cache when
+   *   it is: capabilities and lookups are two independent queries. So the
+   *   answer produced under the grant must live at an address the
+   *   post-revocation render never reads from. It is the same rule
+   *   customerKeys.search follows, for the same reason.
+   *
+   * Pass `capabilities.canSensitive("customers.view_sensitive")`, never
+   * `can(...)` — a snapshot whose latest refresh failed must not keep a
+   * grant-era entry addressable.
+   */
+  lookup: (userId: string, organizationId: string, normalizedQuery: string, sensitive: boolean) =>
+    [APSI_QUERY_ROOT, userId, organizationId, "lookup", sensitive, normalizedQuery] as const,
 };
 
 export const APSI_QUERY_PREFIX = partition.prefix;

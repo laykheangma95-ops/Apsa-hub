@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { BottomSheet, ErrorState, ListSkeleton } from "@/design-system";
 import { PosNotice } from "@/components/pos/PosNotice";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { createQuickCustomer, searchCustomers } from "@/lib/api";
+import { createQuickCustomer, searchRealCustomers } from "@/lib/api";
 import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
@@ -19,8 +19,8 @@ interface PosCustomerSheetProps {
   onSelect: (customer: Customer) => void;
   /**
    * The signed-in principal, from the /app route guard's server-derived
-   * context. Cache identity only — searchCustomers() sends no organization id,
-   * and the server scopes the read to the membership it resolved itself.
+   * context. Cache identity only — searchRealCustomers() sends no organization
+   * id, and the server scopes the read to the membership it resolved itself.
    */
   userId: string;
   organizationId: string;
@@ -67,10 +67,20 @@ export function PosCustomerSheet({
    */
   const customersQuery = useQuery({
     queryKey: customerKeys.search(userId, organizationId, query, canSensitive),
-    // Masked BEFORE the filter runs, so the phone predicate never reads a
-    // number this member may not see — same rule CreateRealOrderSheet follows.
-    queryFn: () => searchCustomers(query, canSensitive),
-    enabled: open,
+    /*
+     * The SERVER searches now (searchRealCustomers -> searchCustomersFn ->
+     * src/server/customers/service.ts). This used to fetch one bounded page of
+     * the customer list and filter it in the browser, which meant a real
+     * customer past that page was reported to the cashier as "no customers
+     * found" while the caller was standing at the counter.
+     *
+     * `canSensitive` is still passed, and not as an access decision: the
+     * server re-derives the grant from the membership regardless. It is so a
+     * phone-shaped query from a member without the grant is never SENT — see
+     * searchRealCustomers' own note on why not asking beats being told no.
+     */
+    queryFn: () => searchRealCustomers(query, canSensitive),
+    enabled: open && query.trim().length > 0,
   });
 
   /*
@@ -83,10 +93,50 @@ export function PosCustomerSheet({
    * customer object the cart and checkout screens go on to render inherits it
    * rather than each of them needing its own check.
    */
-  const results = (customersQuery.data ?? []).map((customer) => ({
+  const page = customersQuery.data;
+  const results = (page?.customers ?? []).map((customer) => ({
     ...customer,
     phone: visibleCustomerPhone(customer, canSensitive),
   }));
+
+  /*
+   * Four different things the cashier may need to be told apart, and they are
+   * four different sentences. Collapsing any of them into "no customers" is
+   * how a real customer gets told they are not one:
+   *
+   *   denied     — the typed value is a phone number and this member may not
+   *                search by phone. NOTHING WAS SEARCHED, so this says nothing
+   *                about whether that customer exists.
+   *   error      — the search did not complete (handled by ErrorState below).
+   *   incomplete — more matches exist than are shown; narrow the query.
+   *   empty      — the search ran, over the whole tenant, and matched nothing.
+   */
+  const denied = page?.phoneSearchDenied === true;
+  const incomplete = Boolean(page && (page.hasMore || page.truncated));
+  const searched = query.trim().length > 0;
+  /*
+   * `!incomplete` is the difference between "we looked everywhere and there is
+   * no such customer" and "we stopped looking before the end". The bounded
+   * phone scan can return zero matches having read only part of a large
+   * tenant, and "No customer found" there is a false claim the cashier repeats
+   * to the person standing at the counter. That case gets boundedNoMatch.
+   */
+  const emptyResult =
+    searched &&
+    !denied &&
+    !customersQuery.isPending &&
+    !customersQuery.isError &&
+    results.length === 0 &&
+    !incomplete;
+
+  /** Searched, matched nothing, but stopped early — a caveat, never an absence. */
+  const boundedNoMatch =
+    searched &&
+    !denied &&
+    !customersQuery.isPending &&
+    !customersQuery.isError &&
+    results.length === 0 &&
+    incomplete;
 
   async function quickCreate() {
     if (!name.trim() || !phone.trim()) return;
@@ -159,20 +209,43 @@ export function PosCustomerSheet({
             onChange={(e) => setQuery(e.target.value)}
           />
 
-          {customersQuery.isPending ? <ListSkeleton rows={3} /> : null}
+          {!searched ? (
+            <PosNotice
+              title={t("pos.customer.prompt.title")}
+              body={t("pos.customer.prompt.body")}
+            />
+          ) : null}
+
+          {searched && customersQuery.isPending ? <ListSkeleton rows={3} /> : null}
           {customersQuery.isError ? (
             <ErrorState onRetry={() => void customersQuery.refetch()} />
           ) : null}
 
-          {!customersQuery.isPending && !customersQuery.isError && results.length === 0 ? (
+          {denied ? (
+            <PosNotice
+              title={t("pos.customer.phoneDenied.title")}
+              body={t("pos.customer.phoneDenied.body")}
+            />
+          ) : null}
+
+          {emptyResult ? (
             <PosNotice title={t("pos.customer.empty.title")} body={t("pos.customer.empty.body")} />
+          ) : null}
+
+          {/*
+           * Zero matches from a search that stopped early. Rendered INSTEAD of
+           * the empty notice, never alongside it.
+           */}
+          {boundedNoMatch ? (
+            <PosNotice
+              title={t("pos.customer.bounded.title")}
+              body={t("pos.customer.bounded.body")}
+            />
           ) : null}
 
           {results.length > 0 ? (
             <>
-              <p className="text-label text-text-secondary">
-                {query ? t("pos.customer.results") : t("pos.customer.recent")}
-              </p>
+              <p className="text-label text-text-secondary">{t("pos.customer.results")}</p>
               <ul className="divide-y divide-border-default">
                 {results.map((customer) => (
                   <li key={customer.id}>
@@ -190,6 +263,17 @@ export function PosCustomerSheet({
                 ))}
               </ul>
             </>
+          ) : null}
+
+          {/*
+           * The completeness caveat lives OUTSIDE the results list, so it is
+           * driven by what the server reported and not by whether this page
+           * happened to be non-empty. With results it warns that a page is not
+           * the whole answer; with none, boundedNoMatch above has already said
+           * so, and this stays quiet rather than contradicting it.
+           */}
+          {incomplete && results.length > 0 ? (
+            <p className="text-caption text-text-muted">{t("pos.customer.more")}</p>
           ) : null}
 
           <Button variant="outline" className="tap-target w-full" onClick={() => setCreating(true)}>

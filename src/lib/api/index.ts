@@ -4,6 +4,7 @@
  */
 import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
+import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
 import {
   mapDeliveryDetailToUi,
   mapDeliveryListPageToUi,
@@ -579,57 +580,134 @@ function mapOrderCustomerOptionToUi(row: OrderCustomerOption): Customer {
 }
 
 /**
- * Production-first customer search for the POS customer picker. Reuses the
- * exact same production read as the Manual Order create flow
- * (listRealCustomers -> listCustomersFn) and filters client-side, same as
- * CreateRealOrderSheet's customerList — there is no server search endpoint,
- * only a bounded list. Falls back to in-memory mock data only in demo-mode
- * contexts (see isDemoModeError's own comment) — once a real backend is
- * reachable, an org with zero real customers sees an empty result, not mock
- * rows, same precedent as getProducts()/getPosProducts().
+ * How many rows one customer-picker search shows before it says "keep typing".
  *
- * `canViewSensitive` masks every phone through visibleCustomerPhone BEFORE
- * the filter runs, and the phone predicate is skipped entirely once it does.
- * Masking only the displayed value is not enough: the caller caches these
- * results per search term, so a set matched against real phone numbers while
- * `customers.view_sensitive` held stays readable after the grant is revoked.
- * The numbers would be blanked on screen, but which customers came BACK for a
- * typed fragment still answers "does a customer with this number exist here?"
- * — which is precisely the disclosure that grant gates. Filtering on an
- * already-blanked value cannot answer it.
- *
- * The parameter is required rather than defaulted so a new caller has to state
- * an answer instead of silently inheriting the permissive one. Pass
- * `capabilities.canSensitive("customers.view_sensitive")`, never `can(...)`.
+ * 20, not the server's 50 maximum: a picker is a list a merchant scans with
+ * their eyes, and the read below asks for the page plus the server's own
+ * completeness answer, so a longer list buys nothing a narrower query does not.
  */
-export async function searchCustomers(
+export const CUSTOMER_SEARCH_LIMIT = 20;
+
+/**
+ * One page of a customer search, with the server's own answers about what it
+ * searched and what it refused to search.
+ *
+ * Every field here exists because the UI must be able to say a DIFFERENT
+ * sentence for each outcome. "No customer matched" and "you may not search by
+ * phone" and "there are more than these" are three different things to tell a
+ * staff member with a caller on the line, and a boolean-less `Customer[]` can
+ * only say the first one.
+ */
+export interface CustomerSearchPageUi {
+  customers: Customer[];
+  /** Which column the SERVER matched on. null when nothing was searched. */
+  field: "name" | "phone" | null;
+  /** True when the server held at least one row beyond this page. */
+  hasMore: boolean;
+  /** True when a bounded phone scan stopped before the tenant's rows ran out. */
+  truncated: boolean;
+  /**
+   * True when the query was a phone number and this member may not search by
+   * phone. No phone query was issued — by the server, and (see below) not by
+   * this function either. An empty `customers` alongside this flag says
+   * NOTHING about whether such a customer exists.
+   */
+  phoneSearchDenied: boolean;
+  limit: number;
+  offset: number;
+}
+
+/** Nothing was asked and nothing was found — the shape an un-issued search returns. */
+function emptyCustomerSearchPage(
+  limit: number,
+  offset: number,
+  phoneSearchDenied: boolean,
+): CustomerSearchPageUi {
+  return {
+    customers: [],
+    field: null,
+    hasMore: false,
+    truncated: false,
+    phoneSearchDenied,
+    limit,
+    offset,
+  };
+}
+
+/**
+ * Production customer search — the one search path every picker and Apsi use.
+ *
+ * This REPLACES the previous `searchCustomers(query, canViewSensitive)`, which
+ * fetched `listRealCustomers()` (one bounded page of 100 rows) and filtered it
+ * in the browser. That had two defects this function exists to remove:
+ *
+ *   1. COMPLETENESS. A customer at row 101 of the tenant could not be found by
+ *      typing their name, and the picker said "no customers" — a merchant with
+ *      a real customer on the phone was told they were not in APSA. Filtering
+ *      now happens in Postgres over the whole tenant, one bounded page at a
+ *      time, and the page reports whether more exist.
+ *   2. HONESTY ON FAILURE. It fell back to the in-memory `customers` fixture in
+ *      demo-mode contexts. There is no fixture fallback here and no demo-mode
+ *      branch, exactly as getCustomers() already settled for the customer list:
+ *      an org with no matching customer sees none, and a backend failure
+ *      surfaces as a failure. Invented customer rows are never an answer on a
+ *      path a merchant uses to identify a caller.
+ *
+ * ── WHY THIS FUNCTION STILL TAKES `canViewSensitive` ─────────────────────────
+ *
+ * Not to decide access — the server does that, and re-derives the grant from
+ * the caller's membership regardless of what is passed here. It is so that a
+ * phone-shaped query from a member without the grant is NEVER SENT. The server
+ * would refuse it, but refusing it here means no request carrying that phone
+ * number leaves the browser at all: no server log line, no timing signal, no
+ * request at all to correlate. "Do not ask" is a stronger property than "be
+ * told no", and both are in force.
+ *
+ * Pass `capabilities.canSensitive("customers.view_sensitive")`, never
+ * `can(...)`: which customers come back for a typed fragment is itself the
+ * disclosure, so it must not ride on a snapshot whose latest refresh failed.
+ * The parameter is required rather than defaulted so a new caller has to state
+ * an answer instead of silently inheriting the permissive one.
+ */
+export async function searchRealCustomers(
   query: string,
   canViewSensitive: boolean,
-): Promise<Customer[]> {
-  const q = query.trim().toLowerCase();
-  const digits = q.replace(/\s/g, "");
-  // Masked first, so nothing below — display OR predicate — can read a phone
-  // this member may not see.
-  const mask = (c: Customer): Customer => ({
-    ...c,
-    phone: visibleCustomerPhone(c, canViewSensitive),
-  });
-  const matches = (c: Customer) =>
-    c.nameKm.toLowerCase().includes(q) ||
-    c.nameEn.toLowerCase().includes(q) ||
-    // A blanked phone is skipped rather than matched against an empty needle.
-    (c.phone !== "" && c.phone.replace(/\s/g, "").includes(digits));
-  try {
-    const rows = await listRealCustomers();
-    const mapped = rows.map(mapOrderCustomerOptionToUi).map(mask);
-    if (!q) return mapped.slice(0, 4);
-    return mapped.filter(matches);
-  } catch (err) {
-    if (!isDemoModeError(err)) throw err;
+  options: { limit?: number; offset?: number } = {},
+): Promise<CustomerSearchPageUi> {
+  const limit = Math.min(options.limit ?? CUSTOMER_SEARCH_LIMIT, CUSTOMER_SEARCH_LIMIT);
+  const offset = options.offset ?? 0;
+
+  const trimmed = query.trim();
+  if (trimmed.length === 0) return emptyCustomerSearchPage(limit, offset, false);
+
+  // The client-side half of the phone gate. Same predicate the server uses, so
+  // the two can never disagree about what counts as a phone number.
+  if (looksLikeCustomerPhoneQuery(trimmed) && !canViewSensitive) {
+    return emptyCustomerSearchPage(limit, offset, true);
   }
-  const mockMapped = customers.map(mask);
-  if (!q) return resolve(mockMapped.slice(0, 4), 80);
-  return resolve(mockMapped.filter(matches), 80);
+
+  const { searchCustomersFn } = await import("@/api/customers");
+  const page = (await searchCustomersFn({
+    data: { query: trimmed, limit, offset },
+  })) as unknown as {
+    items: OrderCustomerOption[];
+    field: "name" | "phone" | null;
+    hasMore: boolean;
+    truncated: boolean;
+    phoneSearchDenied: boolean;
+    limit: number;
+    offset: number;
+  };
+
+  return {
+    customers: page.items.map(mapOrderCustomerOptionToUi),
+    field: page.field,
+    hasMore: page.hasMore,
+    truncated: page.truncated,
+    phoneSearchDenied: page.phoneSearchDenied,
+    limit: page.limit,
+    offset: page.offset,
+  };
 }
 
 export interface QuickCustomerInput {
@@ -783,6 +861,28 @@ export async function getMostRecentRealOrderForCustomer(
   const mostRecent = rows[0];
   if (!mostRecent) return null;
   return getRealOrderDetail(mostRecent.id);
+}
+
+/**
+ * Find one order by the code a merchant reads out loud ("APSA-2026-000123").
+ *
+ * The Orders domain answering about an Order. Apsi previously reached an order
+ * code only through the Delivery list's free-text search, which meant an order
+ * with no delivery row was unfindable by the reference printed on its own
+ * receipt — and the console reported that as "nothing matched".
+ *
+ * `null` means no order in this organization carries this code. It is an
+ * ordinary answer, not a failure: a request that does not complete THROWS, and
+ * the caller must keep those two apart on screen. A code belonging to another
+ * organization produces the same null as one that was never issued.
+ *
+ * The id on the returned order is the real production order id, so a caller
+ * routes straight to /app/orders/$id with it.
+ */
+export async function lookupRealOrderByCode(code: string): Promise<Order | null> {
+  const { findOrderByCodeFn } = await import("@/api/orders");
+  const result = await findOrderByCodeFn({ data: { code } });
+  return result.order ? mapOrderSummaryToUi(result.order) : null;
 }
 
 export interface CreateRealOrderInput {
