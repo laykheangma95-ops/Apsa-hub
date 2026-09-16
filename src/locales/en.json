@@ -619,6 +619,13 @@
       "permission": {
         "title": "You can't create this order",
         "body": "Ask an owner or manager for order permission."
+      },
+      "unsellable": {
+        "title": "This order can't be created yet",
+        "no-variant": "One or more items have no sellable variant, so APSA can't price them or take them out of stock. Add a variant to the product first, then create the order again.",
+        "unwritable-channel": "APSA can't tell which channel this conversation came from, and an order has to record where it came from. Take this one in POS instead.",
+        "mixed": "Some items in this order aren't from your live catalogue, so APSA can't create it. Search the catalogue and choose each item again.",
+        "noVariantLine": "No sellable variant"
       }
     },
     "loadEarlier": "Load earlier messages",

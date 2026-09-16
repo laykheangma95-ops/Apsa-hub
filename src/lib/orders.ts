@@ -256,3 +256,88 @@ export function classifyOrderError(err: unknown): OrderErrorKind {
   }
   return "server_error";
 }
+
+// ── Prepare-Order checkout routing ────────────────────────────────────────────
+
+/** A real, DB-backed id — the only thing a real order line or customer accepts. */
+const PRODUCTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One prepared line, reduced to the only two things the routing decision needs. */
+export interface PreparedOrderLine {
+  productId: string;
+  variantId?: string | null | undefined;
+}
+
+export interface PreparedOrderInput {
+  channel: Channel;
+  customerId: string;
+  lines: readonly PreparedOrderLine[];
+}
+
+/**
+ * Which order-creation path a prepared conversation order is allowed to use.
+ *
+ *   production — a writable channel, a real customer, and every line backed by
+ *                a real product AND a real variant. Goes to the authoritative
+ *                Order domain via createRealOrder().
+ *   prototype  — nothing production is involved at all: a fixture customer and
+ *                only fixture products (the `/design` catalog). The Order that
+ *                the local path returns is a prop, not a record.
+ *   unsellable — anything else, and this is the case that matters.
+ *
+ * This mirrors classifyCheckout() in src/lib/pos-cart.ts, and exists for the
+ * same reason. PrepareOrderSheet used to ask a single two-way question —
+ * "is this fully production?" — and on `false` ran the LOCAL path, which mints
+ * an `APSA-00NN` code and reports "Order created" to the merchant while
+ * persisting nothing. Two ordinary production situations took that branch:
+ *
+ *   - a real conversation whose channel is "other" (channelToSourceDb returns
+ *     null, because no DB enum member honestly means "unclassified"), and
+ *   - a real catalog product with no ACTIVE variant, which
+ *     mapServerProductToUi leaves without a variantId.
+ *
+ * In both, a merchant with a real customer and real goods was shown an order
+ * code, and a system message was appended to the real conversation saying the
+ * order existed. It did not. There is no honest third path: an order APSA
+ * cannot actually create must be refused with a reason, never fabricated.
+ */
+export type PreparedOrderKind = "production" | "prototype" | "unsellable";
+
+export function classifyPreparedOrder(input: PreparedOrderInput): PreparedOrderKind {
+  const { channel, customerId, lines } = input;
+  if (lines.length === 0) return "unsellable";
+
+  const customerIsProduction = PRODUCTION_ID_RE.test(customerId);
+  const channelIsWritable = channelToSourceDb(channel) !== null;
+  const productionLines = lines.filter(
+    (line) => PRODUCTION_ID_RE.test(line.productId) && PRODUCTION_ID_RE.test(line.variantId ?? ""),
+  ).length;
+
+  if (channelIsWritable && customerIsProduction && productionLines === lines.length) {
+    return "production";
+  }
+
+  // Not "everything else is prototype" by elimination. A real product with no
+  // variant, a real customer on an unwritable channel, or a cart mixing real
+  // and fixture goods are all real data that cannot become a real order — they
+  // belong in `unsellable`, not in a fabricated receipt.
+  const prototypeLines = lines.filter((line) => !PRODUCTION_ID_RE.test(line.productId)).length;
+  if (!customerIsProduction && prototypeLines === lines.length) return "prototype";
+
+  return "unsellable";
+}
+
+/**
+ * Why a prepared order was refused, so the sheet can tell the merchant the one
+ * thing they can actually act on rather than a generic failure.
+ */
+export type PreparedOrderBlocker = "no-variant" | "unwritable-channel" | "mixed";
+
+export function explainUnsellablePreparedOrder(input: PreparedOrderInput): PreparedOrderBlocker {
+  const hasVariantlessRealLine = input.lines.some(
+    (line) => PRODUCTION_ID_RE.test(line.productId) && !PRODUCTION_ID_RE.test(line.variantId ?? ""),
+  );
+  if (hasVariantlessRealLine) return "no-variant";
+  if (channelToSourceDb(input.channel) === null) return "unwritable-channel";
+  return "mixed";
+}

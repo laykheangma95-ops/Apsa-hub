@@ -15,7 +15,14 @@ import {
 } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { classifyOrderError, channelToSourceDb, type RealOrderDetail } from "@/lib/orders";
+import {
+  classifyOrderError,
+  channelToSourceDb,
+  classifyPreparedOrder,
+  explainUnsellablePreparedOrder,
+  type PreparedOrderBlocker,
+  type RealOrderDetail,
+} from "@/lib/orders";
 import { addMoney, formatMoney, multiplyMoney, usd } from "@/lib/money";
 import { defaultVariantSelection, variantLabel } from "@/lib/order-draft";
 import type { PrepareOrderItemInput } from "@/lib/conversation/smart-actions";
@@ -71,13 +78,6 @@ function toEditableLine(input: PrepareOrderItemInput): EditableLine {
   };
 }
 
-/** A production order needs a real product AND a real variant on every line. */
-function isProductionReady(line: EditableLine): boolean {
-  return Boolean(
-    line.product && isProductionId(line.product.id) && isProductionId(line.product.variantId ?? ""),
-  );
-}
-
 type Step =
   | { name: "review" }
   | { name: "created-mock"; order: Order }
@@ -105,6 +105,7 @@ export function PrepareOrderSheet({
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
+  const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
   const submittingRef = useRef(false);
 
   function reset() {
@@ -113,6 +114,7 @@ export function PrepareOrderSheet({
     setSubmitting(false);
     setConfirming(false);
     setFailure(null);
+    setBlocker(null);
     submittingRef.current = false;
   }
 
@@ -150,31 +152,61 @@ export function PrepareOrderSheet({
     [lines],
   );
 
+  /** The chosen lines, for naming the ones that blocked the order. */
+  const readyLinesForDisplay = useMemo(
+    () =>
+      lines.filter((line): line is EditableLine & { product: Product } => Boolean(line.product)),
+    [lines],
+  );
+
   async function submit() {
     if (submittingRef.current || !readyToSubmit) return;
     submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
+    setBlocker(null);
 
     const readyLines = lines.filter((line): line is EditableLine & { product: Product } =>
       Boolean(line.product),
     );
 
-    try {
-      // A conversation on an unclassified channel ("other") has no honest DB
-      // provenance — see channelToSourceDb. Rather than persist a fabricated
-      // MANUAL source (claiming a human keyed the order in by hand), the real
-      // -order path is declined and the existing local draft path handles it,
-      // exactly as it already does for any not-yet-production input.
-      const orderSource = channelToSourceDb(channel);
-      const useRealOrders =
-        orderSource !== null && isProductionId(customer.id) && readyLines.every(isProductionReady);
+    /*
+     * Three-way, never two-way. The old test was "is this fully production?",
+     * and its false branch ran the local path — which reports an order code to
+     * the merchant and appends "Order created" to the conversation while
+     * persisting nothing. A real conversation on an unclassified channel, and
+     * a real product with no ACTIVE variant, both took that branch with real
+     * customers and real goods. `unsellable` catches exactly those and refuses
+     * with a reason. See classifyPreparedOrder for the full account.
+     *
+     * Browser-side id inspection is UX routing only, never authorization — the
+     * server independently validates every id it receives.
+     */
+    const prepared = {
+      channel,
+      customerId: customer.id,
+      lines: readyLines.map((line) => ({
+        productId: line.product.id,
+        variantId: line.product.variantId ?? null,
+      })),
+    };
+    const kind = classifyPreparedOrder(prepared);
 
-      if (useRealOrders) {
+    if (kind === "unsellable") {
+      setBlocker(explainUnsellablePreparedOrder(prepared));
+      submittingRef.current = false;
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      if (kind === "production") {
+        // classifyPreparedOrder returned "production", which is true only when
+        // the channel maps to a writable DB source and every line carries a
+        // real variant. Both non-null assertions are that guarantee.
         const detail = await createRealOrder({
-          source: orderSource,
+          source: channelToSourceDb(channel)!,
           items: readyLines.map((line) => ({
-            // isProductionReady() above guarantees these are present.
             variantId: line.product.variantId!,
             quantity: line.quantity,
             productId: line.product.id,
@@ -406,6 +438,39 @@ export function PrepareOrderSheet({
               {t("conversation.prepareOrder.estimatedNote")}
             </p>
           </div>
+
+          {/*
+           * A refusal, not a failure: APSA cannot turn this draft into a real
+           * order, so it says which thing is in the way and offers no retry —
+           * retrying changes nothing until the merchant fixes the catalog or
+           * the conversation. What it must never do is fall through to a
+           * fabricated order code, which is what this branch replaced.
+           */}
+          {blocker ? (
+            <div className="space-y-2">
+              <ErrorState
+                title={t("conversation.prepareOrder.unsellable.title")}
+                body={t(`conversation.prepareOrder.unsellable.${blocker}`)}
+                className="py-4"
+              />
+              {blocker === "no-variant" ? (
+                <ul className="space-y-1">
+                  {readyLinesForDisplay
+                    .filter((line) => !line.product.variantId)
+                    .map((line) => (
+                      <li key={line.key} className="flex justify-between gap-2">
+                        <span className="text-body-sm min-w-0 truncate text-text-primary">
+                          {localName(line.product, language)}
+                        </span>
+                        <span className="text-caption shrink-0 text-status-danger-text">
+                          {t("conversation.prepareOrder.unsellable.noVariantLine")}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
 
           {failure ? (
             <ErrorState
