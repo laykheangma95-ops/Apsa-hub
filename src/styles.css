@@ -128,8 +128,16 @@
      a pb-28 / pb-48 / bottom-[5.75rem] literal. */
   --nav-height: 64px;
   --nav-gap: 0.5rem;
-  --nav-clearance: calc(
-    var(--nav-height) + var(--nav-gap) + env(safe-area-inset-bottom)
+  /*
+     --nav-measured-height is published by BottomNav from the mobile nav's own
+     ResizeObserver, because the real footprint is not a constant: it changes
+     with width, with the active language (a wrapped Khmer label adds a line)
+     and with the device's safe-area inset. The calc() below is the fallback
+     used for server-rendered frames, and on desktop, where the fixed-height
+     lg: bar is the one on screen. */
+  --nav-clearance: var(
+    --nav-measured-height,
+    calc(var(--nav-height) + var(--nav-gap) + env(safe-area-inset-bottom))
   );
   --space-nav-clearance: calc(var(--nav-clearance) + 1rem);
   /* Comfortable one-handed reach: content never ends flush against a bar. */
@@ -701,11 +709,29 @@ select:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Khmer has no spaces between words — never ellipsis-truncate it in a chip. */
+/*
+ * Khmer has no spaces between words — never ellipsis-truncate it in a chip.
+ *
+ * `white-space: normal` alone only permits a wrap; it does not create one.
+ * Khmer offers no break opportunity, so a label wider than its box did not
+ * wrap — it painted straight out of the box. Measured in Chromium at 320px:
+ * the bottom-nav Inbox label (ប្រអប់សារ) rendered 66px wide inside a 57px tab
+ * and ran 13px past it, across the boundary of the neighbouring tab's tap
+ * target; at 360px it still crossed by 3px. Nothing was clipped, so the
+ * existing `overflow: visible` hid the problem rather than causing it.
+ *
+ * `overflow-wrap: anywhere` supplies the missing break opportunity, so the
+ * label wraps inside its own box instead of overlapping its neighbour. It
+ * breaks between grapheme clusters, never inside one, so a Khmer base
+ * character is never separated from its vowel sign or diacritic. This
+ * completes the wrapping the rule above already asked for; it is not a new
+ * truncation — no Khmer text loses characters in either state.
+ */
 [data-lang="km"] .chip-text {
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .font-khmer {

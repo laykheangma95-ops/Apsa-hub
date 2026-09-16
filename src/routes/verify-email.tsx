@@ -13,12 +13,14 @@
  * recoverable state, never an infinite spinner.
  */
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { CheckCircle2, MailCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { useTranslation } from "react-i18next";
+import { useTranslation } from "@/lib/i18n";
 import { verifyEmailFn } from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
+import { Spinner } from "@/design-system";
 
 const verifyEmailSearchSchema = z.object({
   token: z.string().optional(),
@@ -84,22 +86,34 @@ function VerifyEmailPage() {
   }, [token, email, type]);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-8">
-      <div className="w-full max-w-sm space-y-6">
-        <h1 className="text-center text-2xl font-semibold tracking-tight text-foreground">
-          {t("verifyEmail.title")}
-        </h1>
+    <div className="flex min-h-dvh flex-col justify-center bg-surface-page px-4 py-10">
+      <div className="mx-auto w-full max-w-sm space-y-6 text-center">
+        {state.kind === "verifying" || state.kind === "success" ? (
+          <>
+            <span
+              aria-hidden
+              className={
+                state.kind === "success"
+                  ? "mx-auto flex size-14 items-center justify-center rounded-full bg-status-success-soft text-status-success-text"
+                  : "mx-auto flex size-14 items-center justify-center rounded-full bg-action-primary-soft text-action-primary"
+              }
+            >
+              {state.kind === "success" ? (
+                <CheckCircle2 className="size-7" />
+              ) : (
+                <MailCheck className="size-7" />
+              )}
+            </span>
 
-        {state.kind === "verifying" ? (
-          <p className="text-center text-sm text-muted-foreground" role="status">
-            {t("verifyEmail.verifying")}
-          </p>
-        ) : null}
+            <div>
+              <h1 className="text-h1 text-text-primary">{t("verifyEmail.title")}</h1>
+              <p className="text-body-sm mt-2 text-text-secondary" role="status">
+                {state.kind === "success" ? t("verifyEmail.success") : t("verifyEmail.verifying")}
+              </p>
+            </div>
 
-        {state.kind === "success" ? (
-          <p className="text-center text-sm text-muted-foreground" role="status">
-            {t("verifyEmail.success")}
-          </p>
+            {state.kind === "verifying" ? <Spinner className="mx-auto size-5" /> : null}
+          </>
         ) : null}
 
         {state.kind === "missing_params" ? (
@@ -108,7 +122,7 @@ function VerifyEmailPage() {
             body={t("verifyEmail.missingParams")}
             tone="danger"
             action={
-              <Button asChild className="h-12 w-full">
+              <Button asChild className="tap-target h-12 w-full">
                 <Link to="/sign-up">{t("verifyEmail.backToSignUp")}</Link>
               </Button>
             }
@@ -125,7 +139,7 @@ function VerifyEmailPage() {
             }
             tone="danger"
             action={
-              <Button asChild className="h-12 w-full">
+              <Button asChild className="tap-target h-12 w-full">
                 <Link to="/sign-up">{t("verifyEmail.backToSignUp")}</Link>
               </Button>
             }
