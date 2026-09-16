@@ -1,87 +1,150 @@
 /**
- * Email verification waiting room.
+ * Email verification landing page.
  *
- * The /app and /onboarding guards redirect a signed-up member here whenever
- * their email is not confirmed yet, so this is a route real merchants land on
- * — it was previously a one-line "coming soon" stub with no explanation and no
- * way out, which stranded them mid-signup.
+ * Reached from the Supabase confirmation email link, which carries the OTP
+ * as `token` + `email` (+ optional `type`) query params — the exact shape
+ * verifyEmailFn (src/api/auth.ts) already expects via client.auth.verifyOtp.
+ * This page only wires the existing, already-working server function to a
+ * UI; it does not change the verification contract.
  *
- * This screen is presentation only. It sends no mail and grants nothing: the
- * confirmation link in the merchant's inbox is the only thing that verifies an
- * address, and checkAppGuardFn on the server is the only thing that decides
- * whether they may continue. "I have confirmed — continue" simply re-enters
- * /app so that server guard runs again; if the address is still unconfirmed,
- * the guard sends them straight back here.
- *
- * Resending the confirmation mail needs a server function that does not exist
- * yet — recorded as deferred backend work rather than faked here.
+ * Error handling: the exchange is a network request and can fail for
+ * reasons unrelated to the token (offline, a 5xx, a timeout) as well as for
+ * an actually invalid/expired token — both are surfaced as a visible,
+ * recoverable state, never an infinite spinner.
  */
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { MailCheck } from "lucide-react";
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/design-system";
+import { CheckCircle2, MailCheck } from "lucide-react";
+import { useEffect, useState } from "react";
+import { z } from "zod";
 import { useTranslation } from "@/lib/i18n";
+import { verifyEmailFn } from "@/api/auth";
+import { Button } from "@/components/ui/button";
+import { OperationalState } from "@/components/common/OperationalState";
+import { Spinner } from "@/design-system";
+
+const verifyEmailSearchSchema = z.object({
+  token: z.string().optional(),
+  email: z.string().optional(),
+  type: z.enum(["signup", "recovery", "invite"]).optional(),
+});
 
 export const Route = createFileRoute("/verify-email")({
   head: () => ({
-    meta: [{ title: "Check your email — APSA" }],
+    meta: [{ title: "Verify your email - APSA" }],
   }),
+  validateSearch: (search) => verifyEmailSearchSchema.parse(search),
   component: VerifyEmailPage,
 });
+
+type VerifyState =
+  | { kind: "missing_params" }
+  | { kind: "verifying" }
+  | { kind: "success" }
+  | { kind: "error"; code: "invalid_token" | "unexpected_error" };
 
 function VerifyEmailPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [checking, setChecking] = useState(false);
+  const { token, email, type } = Route.useSearch();
 
-  async function handleContinue() {
-    if (checking) return;
-    setChecking(true);
-    try {
-      // The server guard on /app decides. If the address is still
-      // unconfirmed it redirects back here, which is the honest answer.
-      await navigate({ to: "/app" });
-    } finally {
-      setChecking(false);
+  const [state, setState] = useState<VerifyState>(
+    token && email ? { kind: "verifying" } : { kind: "missing_params" },
+  );
+
+  useEffect(() => {
+    if (!token || !email) return;
+
+    let cancelled = false;
+
+    async function run() {
+      try {
+        const result = await verifyEmailFn({
+          data: { token: token!, email: email!, type: type ?? "signup" },
+        });
+        if (cancelled) return;
+
+        if (result.ok) {
+          setState({ kind: "success" });
+          await navigate({ to: "/onboarding" });
+          return;
+        }
+
+        setState({
+          kind: "error",
+          code: result.code === "invalid_token" ? "invalid_token" : "unexpected_error",
+        });
+      } catch {
+        if (!cancelled) setState({ kind: "error", code: "unexpected_error" });
+      }
     }
-  }
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, email, type]);
 
   return (
     <div className="flex min-h-dvh flex-col justify-center bg-surface-page px-4 py-10">
       <div className="mx-auto w-full max-w-sm space-y-6 text-center">
-        <span
-          aria-hidden
-          className="mx-auto flex size-14 items-center justify-center rounded-full bg-action-primary-soft text-action-primary"
-        >
-          <MailCheck className="size-7" />
-        </span>
+        {state.kind === "verifying" || state.kind === "success" ? (
+          <>
+            <span
+              aria-hidden
+              className={
+                state.kind === "success"
+                  ? "mx-auto flex size-14 items-center justify-center rounded-full bg-status-success-soft text-status-success-text"
+                  : "mx-auto flex size-14 items-center justify-center rounded-full bg-action-primary-soft text-action-primary"
+              }
+            >
+              {state.kind === "success" ? (
+                <CheckCircle2 className="size-7" />
+              ) : (
+                <MailCheck className="size-7" />
+              )}
+            </span>
 
-        <div>
-          <h1 className="text-h1 text-text-primary">{t("auth.verifyEmail.title")}</h1>
-          <p className="text-body-sm mt-2 text-text-secondary">{t("auth.verifyEmail.subtitle")}</p>
-          <p className="text-caption mt-3 text-text-muted">{t("auth.verifyEmail.hint")}</p>
-        </div>
+            <div>
+              <h1 className="text-h1 text-text-primary">{t("verifyEmail.title")}</h1>
+              <p className="text-body-sm mt-2 text-text-secondary" role="status">
+                {state.kind === "success" ? t("verifyEmail.success") : t("verifyEmail.verifying")}
+              </p>
+            </div>
 
-        <div className="space-y-3">
-          <Button
-            type="button"
-            className="min-h-11 w-full"
-            onClick={handleContinue}
-            disabled={checking}
-            aria-busy={checking}
-          >
-            {checking ? <Spinner className="size-4" /> : null}
-            {t("auth.verifyEmail.continueAction")}
-          </Button>
+            {state.kind === "verifying" ? <Spinner className="mx-auto size-5" /> : null}
+          </>
+        ) : null}
 
-          <Link
-            to="/sign-in"
-            className="text-body-sm tap-target inline-flex w-full items-center justify-center font-medium text-text-secondary underline underline-offset-4"
-          >
-            {t("auth.verifyEmail.backToSignIn")}
-          </Link>
-        </div>
+        {state.kind === "missing_params" ? (
+          <OperationalState
+            title={t("verifyEmail.title")}
+            body={t("verifyEmail.missingParams")}
+            tone="danger"
+            action={
+              <Button asChild className="tap-target h-12 w-full">
+                <Link to="/sign-up">{t("verifyEmail.backToSignUp")}</Link>
+              </Button>
+            }
+          />
+        ) : null}
+
+        {state.kind === "error" ? (
+          <OperationalState
+            title={t("verifyEmail.title")}
+            body={
+              state.code === "invalid_token"
+                ? t("verifyEmail.invalidToken")
+                : t("verifyEmail.unexpectedError")
+            }
+            tone="danger"
+            action={
+              <Button asChild className="tap-target h-12 w-full">
+                <Link to="/sign-up">{t("verifyEmail.backToSignUp")}</Link>
+              </Button>
+            }
+          />
+        ) : null}
       </div>
     </div>
   );

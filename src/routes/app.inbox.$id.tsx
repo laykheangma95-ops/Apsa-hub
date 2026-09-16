@@ -51,6 +51,8 @@ import { useCapabilities } from "@/hooks/use-capabilities";
 import { customerKeys } from "@/lib/customers-query";
 import { conversationKeys } from "@/lib/inbox-query";
 import { catalogKeys } from "@/lib/catalog";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { ordersKeys } from "@/lib/orders-query";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -113,6 +115,21 @@ function ConversationScreen() {
   activeIdRef.current = id;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+
+  /**
+   * An order created (or confirmed) from a conversation is real merchant
+   * state the same way a POS sale is — without this, the Orders list and
+   * Home kept serving their pre-order cache until it naturally expired,
+   * even though the order already existed on the server (see PosCheckoutSheet's
+   * invalidateAfterSale for the equivalent POS-side fix).
+   */
+  function invalidateAfterOrderCreated() {
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.principal(userId, routeOrganizationId),
+    });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+  }
+
   const [operationError, setOperationError] = useState(false);
   const [olderMessages, setOlderMessages] = useState<Message[]>([]);
   const [olderCursor, setOlderCursor] = useState<string | null | undefined>();
@@ -786,8 +803,12 @@ function ConversationScreen() {
             });
             setStatus("order_created");
             setLastOrder(order);
+            invalidateAfterOrderCreated();
           }}
-          onConfirmed={(order) => setLastOrder(order)}
+          onConfirmed={(order) => {
+            setLastOrder(order);
+            invalidateAfterOrderCreated();
+          }}
         />
       ) : null}
     </div>

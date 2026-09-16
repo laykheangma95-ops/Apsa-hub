@@ -1346,6 +1346,15 @@
       "generic": "We could not create your business right now. Please try again."
     }
   },
+  "verifyEmail": {
+    "title": "Verify your email",
+    "verifying": "Verifying your email…",
+    "success": "Email verified. Taking you to your account…",
+    "missingParams": "This verification link is missing or incomplete. Please use the link from your email, or sign up again.",
+    "invalidToken": "This verification link is invalid or has expired. Please sign up again to get a new one.",
+    "unexpectedError": "We could not verify your email right now. Please try again.",
+    "backToSignUp": "Back to sign up"
+  },
   "inviteAccept": {
     "title": "Team invite",
     "loading": "Checking your invite…",
