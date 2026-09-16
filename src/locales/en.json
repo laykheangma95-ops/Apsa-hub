@@ -3,6 +3,55 @@
     "name": "APSA",
     "tagline": "One inbox. Every customer."
   },
+  "auth": {
+    "signIn": {
+      "title": "Welcome back",
+      "subtitle": "Sign in to your APSA business.",
+      "emailLabel": "Email",
+      "emailPlaceholder": "you@business.com",
+      "passwordLabel": "Password",
+      "passwordPlaceholder": "Your password",
+      "submit": "Sign in",
+      "submitting": "Signing in",
+      "noAccount": "New to APSA?",
+      "createAccount": "Create an account",
+      "errors": {
+        "invalidCredentials": "That email and password do not match. Please try again.",
+        "generic": "We could not sign you in right now. Please try again."
+      }
+    },
+    "signUp": {
+      "title": "Create your account",
+      "subtitle": "Start selling with APSA in a few minutes.",
+      "nameLabel": "Your name",
+      "namePlaceholder": "Dara Sok",
+      "emailLabel": "Email",
+      "emailPlaceholder": "you@business.com",
+      "passwordLabel": "Password",
+      "passwordPlaceholder": "At least 8 characters",
+      "submit": "Create account",
+      "submitting": "Creating your account",
+      "haveAccount": "Already have an account?",
+      "signIn": "Sign in",
+      "errors": {
+        "emailTaken": "That email is already registered. Try signing in instead.",
+        "generic": "We could not create your account right now. Please try again."
+      }
+    },
+    "verifyEmail": {
+      "title": "Check your email",
+      "subtitle": "We sent a confirmation link to your email address. Open it to activate your APSA account.",
+      "hint": "The link can take a minute to arrive. Remember to look in your spam folder.",
+      "continueAction": "I have confirmed — continue",
+      "backToSignIn": "Back to sign in"
+    },
+    "accessDenied": {
+      "title": "You no longer have access",
+      "subtitle": "Your access to this business has been paused or removed.",
+      "hint": "Ask the business owner to restore your access, then sign in again.",
+      "backToSignIn": "Back to sign in"
+    }
+  },
   "common": {
     "language": "Language",
     "khmer": "ខ្មែរ",
@@ -157,7 +206,8 @@
       "primaryNav": "Primary navigation",
       "mobileNav": "Mobile navigation",
       "openMenu": "Open menu",
-      "closeMenu": "Close menu"
+      "closeMenu": "Close menu",
+      "signIn": "Sign in"
     },
     "hero": {
       "title": "Your business. All in one place.",

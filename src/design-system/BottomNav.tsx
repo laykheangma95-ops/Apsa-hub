@@ -2,7 +2,7 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Home, Inbox, ShoppingBag, Sparkles, UserRound } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { LucideIcon } from "lucide-react";
 import { ApsiConsoleSheet } from "@/components/apsi/ApsiConsoleSheet";
@@ -122,6 +122,50 @@ function TabItem({ tab }: { tab: NavTab }) {
   );
 }
 
+/**
+ * Publishes the mobile nav's REAL painted height as `--nav-measured-height`.
+ *
+ * `--nav-clearance` was derived from a hand-written `--nav-height: 64px`, but
+ * the mobile nav is not 64px tall: measured in Chromium it is 87px at 360/390/
+ * 430 and 96px at 320, where a wrapped Khmer label adds a second line. Every
+ * screen's bottom padding and every sticky action bar sitting above the nav
+ * derives from that token, so the constant under-reserved by 15-24px — the
+ * exact shape of the defect where the nav covered the button underneath it.
+ *
+ * A constant cannot be right here: the footprint depends on width, on the
+ * active language, and on the device's own safe-area inset. So the nav
+ * measures itself and publishes the answer, and the static token in styles.css
+ * stays as the server-render fallback for the frames before this runs.
+ *
+ * Height 0 means the mobile nav is not displayed (the lg: desktop bar is), so
+ * the variable is removed and the fallback — which matches the desktop bar —
+ * applies again.
+ */
+function useMeasuredNavHeight(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+
+    const root = document.documentElement;
+    const publish = () => {
+      const height = node.getBoundingClientRect().height;
+      if (height > 0) {
+        root.style.setProperty("--nav-measured-height", `${Math.ceil(height)}px`);
+      } else {
+        root.style.removeProperty("--nav-measured-height");
+      }
+    };
+
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--nav-measured-height");
+    };
+  }, [ref]);
+}
+
 export function BottomNav({
   workspace = "business",
   tabs = SELLER_TABS,
@@ -155,6 +199,8 @@ export function BottomNav({
 
   const [askOpen, setAskOpen] = useState(false);
   const [salesOpen, setSalesOpen] = useState(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  useMeasuredNavHeight(mobileNavRef);
 
   function closeAllSheets() {
     setAskOpen(false);
@@ -201,6 +247,7 @@ export function BottomNav({
       </nav>
 
       <nav
+        ref={mobileNavRef}
         aria-label={t("nav.primary")}
         className={cn("fixed inset-x-0 bottom-0 z-50 px-2 pb-2 lg:hidden", className)}
       >
@@ -348,7 +395,12 @@ function MobileTab({
       </span>
       <span
         className={cn(
-          "chip-text block max-w-full px-0.5 text-[11px] leading-[13px]",
+          /*
+             No horizontal padding of its own: the tab button already carries
+             px-0.5, and those 4px were the difference between a Khmer label
+             fitting on one line at 390/430 and wrapping to two.
+          */
+          "chip-text block max-w-full text-[11px] leading-[13px]",
           active ? "font-semibold" : "font-medium",
         )}
       >

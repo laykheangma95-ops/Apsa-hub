@@ -195,6 +195,21 @@ function Landing() {
 
           <LanguageToggle className="text-text-secondary" />
 
+          {/*
+            A returning merchant must be able to sign in from the first screen,
+            without opening a menu first. This is the ONE header control that
+            stays visible at every width — the hamburger below holds the
+            marketing sections and the sign-up CTA, which a returning user does
+            not need. `shrink-0` so a long Khmer label keeps its full width and
+            the brand link (flex-1) gives way instead.
+          */}
+          <Link
+            to="/sign-in"
+            className="text-label press tap-target inline-flex shrink-0 items-center rounded-full px-2 text-text-secondary transition-colors hover:text-text-primary"
+          >
+            {t("landing.nav.signIn")}
+          </Link>
+
           <Button asChild size="sm" className="tap-target hidden md:inline-flex">
             <Link to="/sign-up">{t("landing.nav.start")}</Link>
           </Button>

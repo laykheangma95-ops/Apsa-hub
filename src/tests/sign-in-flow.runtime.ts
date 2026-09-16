@@ -303,7 +303,13 @@ describe("sign-in flow runtime", () => {
     expect(routeCode).not.toMatch(/@\/lib\/supabase\/client/);
     expect(routeCode).toMatch(/if \(loading\) return;/);
     expect(routeCode).toMatch(/disabled=\{loading\}/);
-    expect(routeCode).toMatch(/className="w-full"/);
+    /*
+     * The submit button spans the form. Matched on the w-full utility rather
+     * than on the whole class string, which also carries the 44px touch-target
+     * sizing the mobile audit added — pinning the exact attribute value made
+     * this assertion fail for a change that kept the button full width.
+     */
+    expect(routeCode).toMatch(/<Button[^>]*className="[^"]*\bw-full\b/);
   });
 
   it("returns a real error instead of fake success when membership resolution fails", async () => {
