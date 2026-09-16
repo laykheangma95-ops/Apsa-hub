@@ -204,6 +204,14 @@ function PosScreen() {
     setDiscount({ enabled: false, mode: "amount", value: 0 });
     setCustomer(null);
     setCartOpen(false);
+    // A sold-out variant's stock is server-authoritative at order time either
+    // way, but this screen's own product list is cached UI data too —
+    // without this it keeps showing pre-sale availability until it naturally
+    // goes stale. Fires at the same moment PosCheckoutSheet's own
+    // invalidateAfterSale() does (both driven by onCompleted()).
+    void queryClient.invalidateQueries({
+      queryKey: catalogKeys.uiProducts(userId, routeOrganizationId, "pos"),
+    });
   }
 
   const cartProps = {
