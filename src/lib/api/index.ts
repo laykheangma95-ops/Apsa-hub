@@ -482,8 +482,40 @@ let orderSequence = nextOrderSequence;
 export const ORDER_APPROVAL_LIMIT_CENTS = 50_000;
 export const PERMISSION_DENIED = "permission_denied";
 
-/** Mock order creation. Returns the created order; nothing is persisted. */
+/**
+ * PROTOTYPE-ONLY order creation. Never reachable with production data.
+ *
+ * This fabricates an `APSA-00NN` code in the browser and returns an Order that
+ * no server has ever heard of. Shown to a merchant, it is a claim that an
+ * order exists when none does — the conversation even gets a system message
+ * saying so.
+ *
+ * The guard below is the structural boundary, not a convention, and it is the
+ * exact counterpart of createSale()'s. If any line item — or the attached
+ * customer — carries a production (UUID) id, the data came from the real
+ * catalog and this order must never be faked; it throws instead, so a routing
+ * mistake upstream surfaces as an error the merchant can see rather than as a
+ * convincing confirmation for an order that never happened.
+ *
+ * PrepareOrderSheet classifies the draft before it ever gets here
+ * (classifyPreparedOrder), so in production this throw is unreachable — it
+ * exists so that it STAYS unreachable if that classification is ever weakened,
+ * which is precisely how this hole was opened the first time.
+ */
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
+  const productionItem = input.items.find((item) => isProductionId(item.productId));
+  if (productionItem) {
+    throw new Error(
+      "createOrder is prototype-only and was called with a production product id " +
+        `(${productionItem.productId}). Real orders must go through createRealOrder.`,
+    );
+  }
+  if (isProductionId(input.customerId)) {
+    throw new Error(
+      "createOrder is prototype-only and was called with a production customer id. " +
+        "Real orders must go through createRealOrder.",
+    );
+  }
   if (input.total.amount > ORDER_APPROVAL_LIMIT_CENTS) {
     await resolve(null, 160);
     throw new Error(PERMISSION_DENIED);

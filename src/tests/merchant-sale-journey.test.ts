@@ -506,3 +506,36 @@ describe("Failure never renders as success", () => {
     expect(source).toContain("paymentErrorKey(classifyPaymentError(recordPaymentMutation.error))");
   });
 });
+
+/**
+ * POS must not tell a merchant they are someone else.
+ *
+ * The POS header's subtitle was `localName(shopQuery.data)`, and shopQuery ran
+ * `getActiveShop()` — which resolves against src/lib/mock/shop.ts
+ * unconditionally, with no server call and no demo-mode gate. Every real
+ * merchant, on every real till, was therefore labelled "ហាងស្រីនាង /
+ * Sreyneang Shop": a fixture business name printed over a production sale
+ * surface.
+ *
+ * The honest fix is no subtitle. The real name lives behind
+ * getOrganizationProfileFn, which requires `organization.read` — a permission
+ * cashiers deliberately do not have — so POS cannot show it without inventing
+ * a parallel data path, and showing nothing is true while showing a fixture is
+ * not.
+ */
+describe("POS carries no fixture identity", () => {
+  const source = readSource(POS_ROUTE);
+
+  it("does not call the fixture shop lookup", () => {
+    expect(source).not.toContain("getActiveShop");
+  });
+
+  it("renders no shop subtitle rather than a fabricated one", () => {
+    expect(source).not.toMatch(/subtitle=\{shopQuery/);
+    expect(source).not.toContain("shopQuery");
+  });
+
+  it("reaches the mock catalogue module nowhere", () => {
+    expect(source).not.toContain("@/lib/mock");
+  });
+});

@@ -23,10 +23,8 @@ import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
 import { PosCustomerSheet } from "@/components/pos/PosCustomerSheet";
 import { PosProductList } from "@/components/pos/PosProductList";
 import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
-import { getActiveShop, getPosProducts } from "@/lib/api";
+import { getPosProducts } from "@/lib/api";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
-import { localName } from "@/lib/format";
-import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
 import {
   addToCart,
@@ -72,7 +70,6 @@ const CATEGORIES: (ProductCategory | "all")[] = [
 
 function PosScreen() {
   const { t } = useTranslation();
-  const { language } = useLanguage();
   const reduceMotion = useReducedMotion();
   const capabilities = useCapabilities();
   const queryClient = useQueryClient();
@@ -127,7 +124,6 @@ function PosScreen() {
     };
   }, []);
 
-  const shopQuery = useQuery({ queryKey: ["shop"], queryFn: getActiveShop });
   const productsQuery = useQuery({
     queryKey: catalogKeys.uiProducts(userId, routeOrganizationId, "pos"),
     queryFn: getPosProducts,
@@ -244,11 +240,7 @@ function PosScreen() {
 
   return (
     <div className="min-h-dvh bg-surface-secondary pb-[calc(var(--nav-clearance)+var(--action-bar-height))] lg:pb-0">
-      <AppHeader
-        title={t("pos.title")}
-        subtitle={shopQuery.data ? localName(shopQuery.data, language) : undefined}
-        onBack={() => window.history.back()}
-      />
+      <AppHeader title={t("pos.title")} onBack={() => window.history.back()} />
 
       {offline ? (
         <p
