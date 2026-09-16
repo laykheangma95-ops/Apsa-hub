@@ -50,7 +50,10 @@ committed — put them in `.env.staging.local` (git-ignored) or your shell.
 
 ### 3.1 A dedicated staging Supabase project
 
-A **separate** Supabase project from production.
+A **separate** Supabase project from production (`apsa-staging`). Creating and
+configuring it — project, region, Postgres version, Auth settings, QA identities,
+QA data policy and backup policy — is covered step by step in
+[`STAGING_BOOTSTRAP.md`](./STAGING_BOOTSTRAP.md). This document assumes it exists.
 
 | Variable                            | Where to find it                                                           |
 | ----------------------------------- | -------------------------------------------------------------------------- |

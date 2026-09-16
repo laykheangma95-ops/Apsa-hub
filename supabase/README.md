@@ -3,7 +3,14 @@
 This directory contains APSA's database migrations.
 APSA uses its own dedicated Supabase project — never shared with Domner or any other application.
 
-**Do NOT create a new Supabase project.** APSA already has its own project in **Seoul (ap-northeast-2)**.  
+**Do NOT create an additional APSA _production_ Supabase project.** APSA already has its
+production project in **Seoul (ap-northeast-2)**, and it stays the single production database.
+
+A **dedicated APSA _staging_ Supabase project (`apsa-staging`) is required** for migration
+rehearsals and pre-production verification. It is a non-production environment holding only
+fabricated QA data, and it is never a second production project. See
+[`docs/STAGING_BOOTSTRAP.md`](../docs/STAGING_BOOTSTRAP.md) for how to create and configure it.
+
 GitHub: `laykheangma95-ops/Apsa-hub` | Production branch: `main`
 
 ---
@@ -32,8 +39,10 @@ cannot be added inline. Migration 007 adds them after `memberships` exists.
 
 ## Setup Steps (Project Owner)
 
-1. **Open APSA's existing Supabase project** — Seoul region, `laykheangma95-ops/Apsa-hub`.
-   Do NOT create a new project.
+1. **Open APSA's existing production Supabase project** — Seoul region,
+   `laykheangma95-ops/Apsa-hub`. Do NOT create an additional production project.
+   (Creating the separate non-production `apsa-staging` project is expected and is
+   covered by `docs/STAGING_BOOTSTRAP.md`.)
 
 2. **Copy `.env.example` to `.env.local`** and fill in:
    - `VITE_SUPABASE_URL` — Dashboard → Project Settings → API → Project URL
@@ -81,8 +90,9 @@ cannot be added inline. Migration 007 adds them after `memberships` exists.
 ## Integration Tests
 
 The integration test suite (`src/tests/tenant-isolation.test.ts`) reads the same environment
-variables used by the server client. To run live DB tests, configure a **dedicated APSA
-test/staging Supabase project** — never the production project — and set:
+variables used by the server client. To run live DB tests, use the **dedicated APSA
+`apsa-staging` Supabase project** (see `docs/STAGING_BOOTSTRAP.md`) — never the production
+project — and set:
 
 ```
 VITE_SUPABASE_URL=https://<your-test-project>.supabase.co
