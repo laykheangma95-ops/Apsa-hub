@@ -77,11 +77,15 @@ describe("the guard's own destinations are not dead ends", () => {
    * untranslated one-liners with no way out: a merchant who landed on either
    * was stranded mid-journey with no explanation and no control to press.
    */
-  it("/verify-email explains itself and offers a route onward", () => {
+  it("/verify-email explains itself, verifies for real, and offers a route onward", () => {
+    // PR #70 replaced the passive "waiting room" stub with the real
+    // verification wiring; this pins that the real behaviour survives —
+    // no local/fake verification, an honest route onward on every state.
     expect(verifyEmail).not.toContain("coming soon");
-    expect(verifyEmail).toContain("auth.verifyEmail.title");
-    expect(verifyEmail).toContain('to="/sign-in"');
-    expect(verifyEmail).toContain('to: "/app"');
+    expect(verifyEmail).toContain("verifyEmailFn");
+    expect(verifyEmail).toContain("verifyEmail.title");
+    expect(verifyEmail).toContain('to="/sign-up"');
+    expect(verifyEmail).toContain('to: "/onboarding"');
   });
 
   it("/access-denied explains itself and offers a route back to sign in", () => {
