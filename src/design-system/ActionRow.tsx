@@ -6,6 +6,8 @@ interface ActionRowProps {
   label: string;
   /** One line of "what this does". Omit when the label is self-evident. */
   description?: string | undefined;
+  /** Extra classes on the description span — e.g. "truncate" for a value that must stay one line. */
+  descriptionClassName?: string | undefined;
   onClick?: () => void;
   disabled?: boolean;
   /** Marks the one action the merchant most likely came for. At most one. */
@@ -26,6 +28,7 @@ export function ActionRow({
   icon: Icon,
   label,
   description,
+  descriptionClassName,
   onClick,
   disabled = false,
   emphasis = false,
@@ -64,7 +67,11 @@ export function ActionRow({
       <span className="min-w-0 flex-1">
         <span className={cn("text-body block", emphasis && "font-semibold")}>{label}</span>
         {description ? (
-          <span className="text-body-sm mt-0.5 block text-text-secondary">{description}</span>
+          <span
+            className={cn("text-body-sm mt-0.5 block text-text-secondary", descriptionClassName)}
+          >
+            {description}
+          </span>
         ) : null}
       </span>
 
