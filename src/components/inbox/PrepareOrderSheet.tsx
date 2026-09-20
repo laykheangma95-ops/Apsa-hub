@@ -27,7 +27,7 @@ import { addMoney, formatMoney, multiplyMoney, usd } from "@/lib/money";
 import { defaultVariantSelection, variantLabel } from "@/lib/order-draft";
 import type { PrepareOrderItemInput } from "@/lib/conversation/smart-actions";
 import { cn } from "@/lib/utils";
-import type { Channel, Customer, Order, Product } from "@/types";
+import type { Channel, Customer, Money, Order, Product } from "@/types";
 
 interface PrepareOrderSheetProps {
   open: boolean;
@@ -62,9 +62,35 @@ interface EditableLine {
   quantity: number;
   product: Product | null;
   variant: Record<string, string>;
+  /**
+   * The chosen production variant, when `product.productionVariants` holds
+   * more than one ACTIVE variant. Null means "not chosen yet" and blocks
+   * submit — mirroring PosVariantSheet's "never guess between multiple
+   * variants" rule, which this sheet used to skip entirely by always
+   * submitting `product.variantId` (the first ACTIVE variant returned by the
+   * server), regardless of which one the customer actually wants.
+   */
+  variantId: string | null;
   /** shown as a picker until the merchant chooses one, or searches instead */
   candidates: Product[];
   query: string;
+}
+
+/** True only when the merchant must explicitly pick one of several real variants. */
+function needsVariantChoice(product: Product): boolean {
+  return (product.productionVariants?.length ?? 0) > 1;
+}
+
+/** A single-variant product resolves itself; a multi-variant one starts unchosen. */
+function defaultLineVariantId(product: Product | null): string | null {
+  if (!product || needsVariantChoice(product)) return null;
+  return product.variantId ?? null;
+}
+
+/** The chosen variant's own price when one exists, else the product's own price. */
+function linePrice(line: EditableLine): Money {
+  const variant = line.product?.productionVariants?.find((v) => v.variantId === line.variantId);
+  return variant?.price ?? line.product?.price ?? usd(0);
 }
 
 function toEditableLine(input: PrepareOrderItemInput): EditableLine {
@@ -73,6 +99,7 @@ function toEditableLine(input: PrepareOrderItemInput): EditableLine {
     quantity: Math.max(1, Math.trunc(input.quantity) || 1),
     product: input.product ?? null,
     variant: input.product ? defaultVariantSelection(input.product.options) : {},
+    variantId: defaultLineVariantId(input.product ?? null),
     candidates: input.candidates ?? [],
     query: "",
   };
@@ -136,17 +163,23 @@ export function PrepareOrderSheet({
       product,
       candidates: [],
       variant: defaultVariantSelection(product.options),
+      variantId: defaultLineVariantId(product),
       query: "",
     });
   }
 
-  const readyToSubmit = lines.length > 0 && lines.every((line) => Boolean(line.product));
+  const readyToSubmit =
+    lines.length > 0 &&
+    lines.every(
+      (line) =>
+        Boolean(line.product) && (!needsVariantChoice(line.product!) || Boolean(line.variantId)),
+    );
 
   const estimatedTotal = useMemo(
     () =>
       lines.reduce(
         (sum, line) =>
-          line.product ? addMoney(sum, multiplyMoney(line.product.price, line.quantity)) : sum,
+          line.product ? addMoney(sum, multiplyMoney(linePrice(line), line.quantity)) : sum,
         usd(0),
       ),
     [lines],
@@ -187,7 +220,7 @@ export function PrepareOrderSheet({
       customerId: customer.id,
       lines: readyLines.map((line) => ({
         productId: line.product.id,
-        variantId: line.product.variantId ?? null,
+        variantId: line.variantId,
       })),
     };
     const kind = classifyPreparedOrder(prepared);
@@ -207,7 +240,7 @@ export function PrepareOrderSheet({
         const detail = await createRealOrder({
           source: channelToSourceDb(channel)!,
           items: readyLines.map((line) => ({
-            variantId: line.product.variantId!,
+            variantId: line.variantId!,
             quantity: line.quantity,
             productId: line.product.id,
           })),
@@ -289,6 +322,39 @@ export function PrepareOrderSheet({
       title={step.name === "review" ? t("conversation.prepareOrder.reviewTitle") : undefined}
       snap="full"
       className="lg:max-w-[520px]"
+      /*
+       * Pinned rather than the last thing in the scrollable body: a review
+       * with several item cards, or the product-search field's own
+       * scroll-into-view on focus, could push this button out of reach —
+       * exactly the form BottomSheet's `footer` slot exists to prevent (see
+       * its own comment). Only the review step needs this; the "created"
+       * steps are short celebration screens whose actions were never at risk
+       * of scrolling away.
+       */
+      footer={
+        step.name === "review" ? (
+          <div>
+            <Button
+              className="tap-target h-12 w-full"
+              disabled={!readyToSubmit || submitting}
+              onClick={() => void submit()}
+            >
+              {submitting
+                ? t("conversation.prepareOrder.creating")
+                : t(
+                    isProductionId(customer.id)
+                      ? "conversation.prepareOrder.createDraft"
+                      : "conversation.prepareOrder.createOrder",
+                  )}
+            </Button>
+            {!readyToSubmit ? (
+              <p className="text-caption mt-2 text-center text-text-muted">
+                {t("conversation.prepareOrder.resolveItemsFirst")}
+              </p>
+            ) : null}
+          </div>
+        ) : undefined
+      }
     >
       {step.name === "review" ? (
         <div className="space-y-5 pb-4">
@@ -338,36 +404,67 @@ export function PrepareOrderSheet({
                     </button>
                   </div>
 
-                  {line.product.options?.map((option) => (
-                    <div key={option.name}>
-                      <p className="text-label text-text-secondary capitalize">{option.name}</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {option.values.map((value) => {
-                          const selected = line.variant[option.name] === value;
+                  {needsVariantChoice(line.product) ? (
+                    <div>
+                      <p className="text-label text-text-secondary">{t("pos.variant.chooseOne")}</p>
+                      <ul className="mt-2 space-y-2">
+                        {line.product.productionVariants!.map((v) => {
+                          const selected = v.variantId === line.variantId;
                           return (
-                            <button
-                              key={value}
-                              type="button"
-                              aria-pressed={selected}
-                              onClick={() =>
-                                updateLine(line.key, {
-                                  variant: { ...line.variant, [option.name]: value },
-                                })
-                              }
-                              className={cn(
-                                "tap-target rounded-full border px-4 text-label transition-colors",
-                                selected
-                                  ? "border-action-primary bg-action-primary text-text-on-action"
-                                  : "border-border-strong bg-surface-primary text-text-primary",
-                              )}
-                            >
-                              <span className="chip-text">{value}</span>
-                            </button>
+                            <li key={v.variantId}>
+                              <button
+                                type="button"
+                                aria-pressed={selected}
+                                onClick={() => updateLine(line.key, { variantId: v.variantId })}
+                                className={cn(
+                                  "tap-target flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left transition-colors",
+                                  selected
+                                    ? "border-action-primary bg-action-primary-soft text-action-primary"
+                                    : "border-border-strong bg-surface-primary text-text-primary",
+                                )}
+                              >
+                                <span className="min-w-0 flex-1 truncate text-label">{v.name}</span>
+                                <span className="text-financial shrink-0">
+                                  {formatMoney(v.price)}
+                                </span>
+                              </button>
+                            </li>
                           );
                         })}
-                      </div>
+                      </ul>
                     </div>
-                  ))}
+                  ) : (
+                    line.product.options?.map((option) => (
+                      <div key={option.name}>
+                        <p className="text-label text-text-secondary capitalize">{option.name}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {option.values.map((value) => {
+                            const selected = line.variant[option.name] === value;
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                aria-pressed={selected}
+                                onClick={() =>
+                                  updateLine(line.key, {
+                                    variant: { ...line.variant, [option.name]: value },
+                                  })
+                                }
+                                className={cn(
+                                  "tap-target rounded-full border px-4 text-label transition-colors",
+                                  selected
+                                    ? "border-action-primary bg-action-primary text-text-on-action"
+                                    : "border-border-strong bg-surface-primary text-text-primary",
+                                )}
+                              >
+                                <span className="chip-text">{value}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  )}
 
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-label text-text-secondary">
@@ -382,10 +479,10 @@ export function PrepareOrderSheet({
 
                   <div className="flex items-center justify-between">
                     <span className="text-body-sm text-text-secondary">
-                      {formatMoney(line.product.price)} × {line.quantity}
+                      {formatMoney(linePrice(line))} × {line.quantity}
                     </span>
                     <span className="text-financial text-text-primary">
-                      {formatMoney(multiplyMoney(line.product.price, line.quantity))}
+                      {formatMoney(multiplyMoney(linePrice(line), line.quantity))}
                     </span>
                   </div>
                 </div>
@@ -487,25 +584,6 @@ export function PrepareOrderSheet({
               onRetry={() => void submit()}
               className="py-4"
             />
-          ) : null}
-
-          <Button
-            className="tap-target h-12 w-full"
-            disabled={!readyToSubmit || submitting}
-            onClick={() => void submit()}
-          >
-            {submitting
-              ? t("conversation.prepareOrder.creating")
-              : t(
-                  isProductionId(customer.id)
-                    ? "conversation.prepareOrder.createDraft"
-                    : "conversation.prepareOrder.createOrder",
-                )}
-          </Button>
-          {!readyToSubmit ? (
-            <p className="text-caption text-center text-text-muted">
-              {t("conversation.prepareOrder.resolveItemsFirst")}
-            </p>
           ) : null}
         </div>
       ) : step.name === "created-mock" ? (

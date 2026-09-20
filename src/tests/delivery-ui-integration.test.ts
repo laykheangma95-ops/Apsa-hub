@@ -337,7 +337,7 @@ describe("Error states are classified and mapped to translated copy, never raw e
     expect(route).toMatch(/isProductionId\(id\)/);
   });
 
-  it("every t(\"delivery....\") key referenced by the detail route exists in both locales", () => {
+  it('every t("delivery....") key referenced by the detail route exists in both locales', () => {
     // Regression: the Cancel pill called t("delivery.cancel"), a key that
     // exists in neither locale file — i18next's missing-key fallback renders
     // the raw key string on screen instead of a label.

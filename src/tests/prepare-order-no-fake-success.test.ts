@@ -257,3 +257,73 @@ describe("no fabricated-order path survives in the API layer", () => {
     expect(fn.slice(0, 600)).toContain("isProductionId");
   });
 });
+
+describe("Prepare Order never guesses between multiple production variants", () => {
+  // Regression: mapServerProductToUi sets `variantId` to the first ACTIVE
+  // variant only, and PrepareOrderSheet used to submit `line.product.variantId`
+  // straight through with no picker of its own — unlike PosVariantSheet, which
+  // explicitly refuses to pre-select ("Do not guess between multiple
+  // variants"). A merchant preparing an order for a product with 2+ ACTIVE
+  // variants (e.g. a T-shirt in several colors/sizes) got whichever variant
+  // the server happened to return first, silently, with no warning and
+  // nothing in the UI showing a choice was skipped.
+  const source = readSource(PREPARE_SHEET);
+
+  it("tracks a per-line variantId separately from the product's default one", () => {
+    expect(source).toMatch(/variantId:\s*string\s*\|\s*null/);
+    expect(source).toMatch(/function needsVariantChoice/);
+    expect(source).toMatch(/function defaultLineVariantId/);
+    // A multi-variant product starts unchosen, exactly like PosVariantSheet.
+    const fn = source.slice(
+      source.indexOf("function defaultLineVariantId"),
+      source.indexOf("function linePrice"),
+    );
+    expect(fn).toMatch(/needsVariantChoice\(product\)\)\s*return null/);
+  });
+
+  it("renders a chooser for a multi-variant line instead of the mock option chips", () => {
+    expect(source).toMatch(/needsVariantChoice\(line\.product\)/);
+    expect(source).toMatch(/line\.product\.productionVariants!\.map/);
+  });
+
+  it("submit is blocked until a multi-variant line has an explicit choice", () => {
+    const fn = source.slice(
+      source.indexOf("const readyToSubmit ="),
+      source.indexOf("const estimatedTotal"),
+    );
+    expect(fn).toMatch(/needsVariantChoice\(line\.product!\)/);
+    expect(fn).toMatch(/Boolean\(line\.variantId\)/);
+  });
+
+  it("the real order is created with the CHOSEN variant, never product.variantId directly", () => {
+    const fn = source.slice(
+      source.indexOf("async function submit"),
+      source.indexOf("async function confirm"),
+    );
+    expect(fn).toMatch(/variantId:\s*line\.variantId/);
+    expect(fn).not.toMatch(/variantId:\s*line\.product\.variantId/);
+  });
+});
+
+describe("Prepare Order's submit button is pinned, not scrollable out of reach", () => {
+  // Regression: the "Create Draft"/"Create Order" button used to sit inline
+  // in the scrollable body. With 2+ item cards, or the product-search field's
+  // own focus scroll-into-view, it could scroll out of reach on a small
+  // viewport — exactly what BottomSheet's `footer` slot exists to prevent
+  // (see its own comment; CreateProductSheet/EditBusinessProfileSheet already
+  // use it for the same reason).
+  const source = readSource(PREPARE_SHEET);
+
+  const bodyStart = source.indexOf('<div className="space-y-5 pb-4">');
+
+  it("passes the review step's submit button through BottomSheet's footer prop", () => {
+    const footerBlock = source.slice(source.indexOf("footer={"), bodyStart);
+    expect(footerBlock).toContain('step.name === "review"');
+    expect(footerBlock).toMatch(/onClick=\{\(\) => void submit\(\)\}/);
+  });
+
+  it("the button is no longer duplicated inline in the scrollable review body", () => {
+    const reviewBody = source.slice(bodyStart, source.indexOf('step.name === "created-mock"'));
+    expect(reviewBody).not.toMatch(/onClick=\{\(\) => void submit\(\)\}/);
+  });
+});

@@ -42,6 +42,7 @@ import {
 import {
   buildSmartActionSuggestion,
   filterSmartActionSuggestion,
+  filterUnsendableSmartActions,
   toPrepareOrderItems,
   toRepeatOrderItems,
   type PrepareOrderItemInput,
@@ -224,9 +225,19 @@ function ConversationScreen() {
 
   // Suggestions this member cannot carry out are dropped before they reach the
   // strip. The engine still runs the same way — only the offer narrows.
+  //
+  // Reply-only actions ("Check stock", "Send price", …) are then dropped too
+  // on a production conversation: outbound sending is not wired up for any
+  // provider channel yet (the composer disables its own submit for the same
+  // reason), so offering a chip that only fills the composer with no way to
+  // send it promises something the screen cannot deliver.
   const suggestion = useMemo(
-    () => filterSmartActionSuggestion(rawSuggestion, capabilities),
-    [rawSuggestion, capabilities],
+    () =>
+      filterUnsendableSmartActions(
+        filterSmartActionSuggestion(rawSuggestion, capabilities),
+        !isProductionId(id),
+      ),
+    [rawSuggestion, capabilities, id],
   );
 
   useEffect(() => {

@@ -1667,11 +1667,11 @@ describe("17. Team roster does not duplicate a row after inviting staff", () => 
   // the refetch resolved — normally within one round trip — the just-invited
   // person rendered twice, with a duplicate React key.
   it("app.team.tsx's members computation drops an `extra` entry once the server copy of it is present", () => {
-    const route = fs.readFileSync(
-      path.resolve(process.cwd(), "src/routes/app.team.tsx"),
-      "utf-8",
+    const route = fs.readFileSync(path.resolve(process.cwd(), "src/routes/app.team.tsx"), "utf-8");
+    const fn = route.slice(
+      route.indexOf("const members = useMemo"),
+      route.indexOf("const ownerOnly"),
     );
-    const fn = route.slice(route.indexOf("const members = useMemo"), route.indexOf("const ownerOnly"));
     expect(fn).toMatch(/serverIds\.has\(m\.id\)/);
     expect(fn).toMatch(/new Set\(server\.map/);
   });
