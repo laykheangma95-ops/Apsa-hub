@@ -149,7 +149,7 @@ function InviteAcceptPage() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-8">
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-background px-4 py-8">
       <div className="w-full max-w-sm space-y-6">
         <h1 className="text-center text-2xl font-semibold tracking-tight text-foreground">
           {t("inviteAccept.title")}
@@ -189,6 +189,11 @@ function InviteAcceptPage() {
             title={t("inviteAccept.title")}
             body={t("inviteAccept.notFound")}
             tone="danger"
+            action={
+              <Button asChild className="min-h-11 w-full">
+                <Link to="/sign-in">{t("inviteAccept.backToSignIn")}</Link>
+              </Button>
+            }
           />
         ) : null}
         {preview.kind === "expired" ? (
@@ -196,6 +201,11 @@ function InviteAcceptPage() {
             title={t("inviteAccept.title")}
             body={t("inviteAccept.expired")}
             tone="danger"
+            action={
+              <Button asChild className="min-h-11 w-full">
+                <Link to="/sign-in">{t("inviteAccept.backToSignIn")}</Link>
+              </Button>
+            }
           />
         ) : null}
         {preview.kind === "already_used" ? (
@@ -203,6 +213,11 @@ function InviteAcceptPage() {
             title={t("inviteAccept.title")}
             body={t("inviteAccept.alreadyUsed")}
             tone="danger"
+            action={
+              <Button asChild className="min-h-11 w-full">
+                <Link to="/sign-in">{t("inviteAccept.backToSignIn")}</Link>
+              </Button>
+            }
           />
         ) : null}
 

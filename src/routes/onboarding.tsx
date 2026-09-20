@@ -145,7 +145,7 @@ function OnboardingPage() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-background px-4 py-8">
+    <div className="flex min-h-dvh flex-col bg-background px-4 py-8">
       <div className="mx-auto w-full max-w-sm space-y-6">
         <div className="flex flex-col items-center text-center">
           <Apsi emotion="waving" size="md" withCompanion />
@@ -164,6 +164,7 @@ function OnboardingPage() {
               autoComplete="organization"
               autoFocus
               required
+              className="min-h-11"
               value={name}
               onChange={(event) => handleNameChange(event.target.value)}
               placeholder={t("onboarding.namePlaceholder")}
@@ -193,6 +194,7 @@ function OnboardingPage() {
               spellCheck={false}
               inputMode="url"
               required
+              className="min-h-11"
               value={slug}
               onChange={(event) => handleSlugChange(event.target.value)}
               placeholder={t("onboarding.slugPlaceholder")}
@@ -218,7 +220,12 @@ function OnboardingPage() {
             </p>
           ) : null}
 
-          <Button type="submit" className="w-full" disabled={submitting} aria-busy={submitting}>
+          <Button
+            type="submit"
+            className="min-h-11 w-full"
+            disabled={submitting}
+            aria-busy={submitting}
+          >
             {submitting ? t("onboarding.submitting") : t("onboarding.submit")}
           </Button>
         </form>
