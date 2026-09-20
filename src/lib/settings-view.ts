@@ -57,6 +57,20 @@ export function resolveBusinessSectionView(query: BusinessSectionQueryState): Bu
   return { kind: "ready", profile: query.data };
 }
 
+/**
+ * Whether the Business Profile row (src/routes/app.settings.tsx) should
+ * exist at all. `canRead` is a client-side capability snapshot that can lag
+ * the server; `view.kind === "denied"` is the server-authoritative read
+ * itself coming back denied. Either signal hides the row — never a
+ * clickable row that opens into an empty sheet. Server truth always wins,
+ * so a stale `canRead === true` does not override a denied `view`.
+ */
+export function isBusinessProfileRowVisible(canRead: boolean, view: BusinessSectionView): boolean {
+  if (!canRead) return false;
+  if (view.kind === "denied") return false;
+  return true;
+}
+
 // ── Business profile edit (Settings "Business" → Edit, Phase 1) ────────────
 
 /**

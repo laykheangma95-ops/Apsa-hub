@@ -24,7 +24,11 @@ import { getAccountProfileFn, signOutFn } from "@/api/auth";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useLanguage } from "@/lib/i18n";
 import { notifyError, notifySuccess } from "@/lib/feedback";
-import { ORGANIZATION_PROFILE_QUERY_KEY, resolveBusinessSectionView } from "@/lib/settings-view";
+import {
+  isBusinessProfileRowVisible,
+  ORGANIZATION_PROFILE_QUERY_KEY,
+  resolveBusinessSectionView,
+} from "@/lib/settings-view";
 import { clearHomeQueries } from "@/lib/home-query";
 import { clearCustomerQueries } from "@/lib/customers-query";
 import { clearDeliveryQueries } from "@/lib/deliveries-query";
@@ -86,9 +90,10 @@ function BusinessProfileRow() {
     enabled: canRead,
   });
 
-  if (!canRead) return null;
-
   const view = resolveBusinessSectionView(query);
+
+  if (!isBusinessProfileRowVisible(canRead, view)) return null;
+
   const secondary = view.kind === "ready" ? view.profile.displayName : undefined;
 
   return (

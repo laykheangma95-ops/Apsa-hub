@@ -47,13 +47,28 @@ describe("Settings hub — real destinations preserved", () => {
   it("Business Profile row exists, gated on organization.read, opens a detail sheet", () => {
     expect(SOURCE).toContain('capabilities.can("organization.read")');
     expect(SOURCE).toContain('t("settings.business.rowLabel")');
-    expect(SOURCE).toContain("if (!canRead) return null;");
+    expect(SOURCE).toContain("if (!isBusinessProfileRowVisible(canRead, view)) return null;");
     expect(SOURCE).toContain("setDetailOpen(true)");
   });
 
   it("Business edit stays gated on organization.update, distinct from the read gate", () => {
     expect(SOURCE).toContain('capabilities.can("organization.update")');
     expect(SOURCE).toContain('canEdit && view.kind === "ready"');
+  });
+
+  it("Business Profile row is gated by isBusinessProfileRowVisible — a denied server read hides the row, not just a missing client capability", () => {
+    // Guards against the P2 regression where the row checked only `canRead`
+    // (a client capability snapshot) and never `view.kind === "denied"` (the
+    // server-authoritative read), leaving a clickable row that opened an
+    // empty sheet when a stale capability disagreed with the server.
+    expect(SOURCE).toContain("isBusinessProfileRowVisible");
+    expect(SOURCE).toContain("if (!isBusinessProfileRowVisible(canRead, view)) return null;");
+    // The visibility check must run against the resolved view, so it must be
+    // computed before the row is allowed to render.
+    const viewIndex = SOURCE.indexOf("const view = resolveBusinessSectionView(query);");
+    const visibilityCheckIndex = SOURCE.indexOf("isBusinessProfileRowVisible(canRead, view)");
+    expect(viewIndex).toBeGreaterThan(-1);
+    expect(visibilityCheckIndex).toBeGreaterThan(viewIndex);
   });
 
   it("editing still writes straight into the read query's cache — no stale name after save", () => {
