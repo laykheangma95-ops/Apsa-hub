@@ -17,7 +17,7 @@
  * Run: bun test src/tests/settings-business-view.test.ts
  */
 import { describe, it, expect } from "bun:test";
-import { resolveBusinessSectionView } from "../lib/settings-view";
+import { isBusinessProfileRowVisible, resolveBusinessSectionView } from "../lib/settings-view";
 import type { OrganizationProfile } from "../api/org";
 
 const PROFILE: OrganizationProfile = {
@@ -94,5 +94,43 @@ describe("resolveBusinessSectionView", () => {
       data: undefined,
     });
     expect(view.kind).toBe("loading");
+  });
+});
+
+/**
+ * Regression coverage for a P2 permission-state UX defect: a stale client
+ * capability could leave `canRead` true while the server-authoritative read
+ * resolved to "denied" — resolveBusinessSectionView() classified this
+ * correctly (see test B above), but src/routes/app.settings.tsx's
+ * BusinessProfileRow never checked view.kind at all, so the row stayed
+ * clickable and opened into an empty BottomSheet. Fixed by having the row
+ * gate on isBusinessProfileRowVisible(canRead, view) instead of `canRead`
+ * alone. These tests exercise the actual decision function the component
+ * calls, so they fail if that composition regresses — not just a source
+ * string.
+ */
+describe("isBusinessProfileRowVisible", () => {
+  it("hides the row when the server-authoritative read is denied, even if canRead (stale client capability) is true", () => {
+    const deniedView = resolveBusinessSectionView({
+      isLoading: false,
+      isError: true,
+      error: new Error("Missing permission: organization.read"),
+      data: undefined,
+    });
+    expect(deniedView.kind).toBe("denied");
+    expect(isBusinessProfileRowVisible(true, deniedView)).toBe(false);
+  });
+
+  it("hides the row when canRead is false, regardless of view", () => {
+    expect(isBusinessProfileRowVisible(false, { kind: "ready", profile: PROFILE })).toBe(false);
+    expect(isBusinessProfileRowVisible(false, { kind: "denied" })).toBe(false);
+    expect(isBusinessProfileRowVisible(false, { kind: "loading" })).toBe(false);
+    expect(isBusinessProfileRowVisible(false, { kind: "error" })).toBe(false);
+  });
+
+  it("shows the row for loading, error, and ready views when canRead is true — only denied hides it", () => {
+    expect(isBusinessProfileRowVisible(true, { kind: "loading" })).toBe(true);
+    expect(isBusinessProfileRowVisible(true, { kind: "error" })).toBe(true);
+    expect(isBusinessProfileRowVisible(true, { kind: "ready", profile: PROFILE })).toBe(true);
   });
 });
