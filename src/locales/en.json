@@ -804,6 +804,8 @@
       "name": "Name",
       "phone": "Phone",
       "save": "Save customer",
+      "saving": "Saving…",
+      "saveError": "Could not save this customer. Please try again.",
       "empty": {
         "title": "No customer found",
         "body": "Try another name or phone number, or create a new customer."
@@ -1224,6 +1226,7 @@
     "addNote": "Add note",
     "notePlaceholder": "What should your team remember?",
     "saveNote": "Save note",
+    "saveNoteError": "Could not save this note. Please try again.",
     "openConversation": "Open conversation",
     "createOrder": "Create order",
     "averageOrder": "Average order",

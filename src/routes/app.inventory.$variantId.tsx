@@ -227,7 +227,7 @@ function InventoryDetailScreen() {
   const showActions = Boolean(stock) && (canReceiveStock || canAdjustStock);
 
   return (
-    <ScreenBleed surface="raised">
+    <ScreenBleed surface="raised" bottom="none">
       <AppHeader
         title={productQuery.data?.nameKm ?? t("inventoryDetail.title")}
         {...(variant?.name ? { subtitle: variant.name } : {})}

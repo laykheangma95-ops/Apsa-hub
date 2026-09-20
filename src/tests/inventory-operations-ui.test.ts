@@ -1987,3 +1987,14 @@ describe("K. this phase adds no migration and no schema change", () => {
     }
   });
 });
+
+describe("Inventory detail does not reserve dead space for a nav it never renders", () => {
+  // Same defect class as the Product detail regression: this route is a
+  // pushed sub-route (BottomNav never mounted here) but ScreenBleed's
+  // bottom="nav" default reserved its ~100px clearance anyway, leaving a
+  // dead band under the sticky Receive/Adjust button on every load.
+  it("wraps its screen with bottom=\"none\"", () => {
+    const detail = read("src/routes/app.inventory.$variantId.tsx");
+    expect(detail).toMatch(/<ScreenBleed surface="raised" bottom="none">/);
+  });
+});

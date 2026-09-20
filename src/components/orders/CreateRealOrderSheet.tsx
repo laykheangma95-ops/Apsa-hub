@@ -15,7 +15,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Check, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -88,6 +88,13 @@ export function CreateRealOrderSheet({
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
+  /*
+   * `submitting` state alone does not block a second tap fired in the same
+   * event tick, before React re-renders the disabled button — the exact bug
+   * class already fixed in PosCheckoutSheet.completeReal() via this same
+   * ref, checked synchronously before any await.
+   */
+  const submittingRef = useRef(false);
 
   /*
    * Both reads are organization data — the catalog with its prices, and a
@@ -229,6 +236,7 @@ export function CreateRealOrderSheet({
     setSubmitting(false);
     setFailure(null);
     setCreated(null);
+    submittingRef.current = false;
   }
 
   function handleOpenChange(next: boolean) {
@@ -238,6 +246,8 @@ export function CreateRealOrderSheet({
 
   async function submit() {
     if (!product?.variantId) return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
     try {
@@ -255,10 +265,11 @@ export function CreateRealOrderSheet({
        * that had just been created, and no next step toward payment.
        */
       setCreated(detail.order);
-      setSubmitting(false);
       onCreated(detail.order);
     } catch (error) {
       setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
+    } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

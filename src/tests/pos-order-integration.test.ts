@@ -439,6 +439,23 @@ describe("Customer search/quick-create try the production Customer domain first"
     expect(searchFn).not.toMatch(/catch/);
     expect(searchFn).not.toMatch(/@\/lib\/mock/);
   });
+
+  it("PosCustomerSheet's quickCreate never lets a real createQuickCustomer failure leave `saving` stuck true", () => {
+    // createQuickCustomer() re-throws every non-demo-mode error (see the test
+    // above). quickCreate() used to await it bare, so any real failure
+    // (duplicate phone, network, permission) skipped setSaving(false)
+    // forever — the Save button stayed disabled until the whole POS screen
+    // unmounted, with no error shown at all.
+    const sheet = readSource(CUSTOMER_SHEET);
+    const fn = sheet.slice(
+      sheet.indexOf("async function quickCreate"),
+      sheet.indexOf("return (", sheet.indexOf("async function quickCreate")),
+    );
+    expect(fn).toMatch(/try\s*\{/);
+    expect(fn).toMatch(/catch/);
+    expect(fn).toMatch(/finally\s*\{[\s\S]*setSaving\(false\)/);
+    expect(fn).toMatch(/setSaveError/);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

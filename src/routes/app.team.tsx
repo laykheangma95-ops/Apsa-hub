@@ -95,7 +95,17 @@ function TeamScreen() {
   const workspaceName = activeWorkspace ? localName(activeWorkspace, language) : "";
 
   const members = useMemo(() => {
-    const base = [...(teamQuery.data ?? []), ...extra];
+    /*
+     * `extra` is the optimistic just-invited row, kept on screen until the
+     * background refetch from invalidateRoster() resolves. That refetch
+     * normally lands within one round-trip and brings back the SAME
+     * invitation id from the server, so once it does, the entry must be
+     * deduped rather than shown twice — a bare concat rendered the newly
+     * invited person once from each source.
+     */
+    const server = teamQuery.data ?? [];
+    const serverIds = new Set(server.map((m) => m.id));
+    const base = [...server, ...extra.filter((m) => !serverIds.has(m.id))];
     return base.filter((m) => !removed.includes(m.id)).map((m) => roleChanges[m.id] ?? m);
   }, [teamQuery.data, extra, removed, roleChanges]);
 

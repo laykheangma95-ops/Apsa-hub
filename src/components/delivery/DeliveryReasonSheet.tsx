@@ -14,6 +14,13 @@ interface DeliveryReasonSheetProps {
   reasonLabel: string;
   submitLabel: string;
   onConfirm: (reason: string) => void;
+  /**
+   * The server rejected the last submit — permission revoked mid-session, the
+   * delivery already moved on, a network failure. Without this the sheet just
+   * stopped spinning with the reason still typed in, and the merchant had no
+   * way to tell the tap failed rather than the sheet simply not being ready.
+   */
+  error?: string | null;
 }
 
 /**
@@ -31,6 +38,7 @@ export function DeliveryReasonSheet({
   reasonLabel,
   submitLabel,
   onConfirm,
+  error,
 }: DeliveryReasonSheetProps) {
   const { t } = useTranslation();
   const [reason, setReason] = useState("");
@@ -56,6 +64,11 @@ export function DeliveryReasonSheet({
           onChange={(e) => setReason(e.target.value)}
         />
       </div>
+      {error ? (
+        <p role="alert" className="text-body-sm mt-3 text-status-danger-text">
+          {error}
+        </p>
+      ) : null}
       <Button
         className="tap-target mt-5 h-12 w-full"
         variant="destructive"

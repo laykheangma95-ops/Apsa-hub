@@ -304,6 +304,24 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
   })();
 
   /*
+   * markFailedMutation/cancelMutation errors are shown INSIDE their own reason
+   * sheet (still open on failure) rather than folded into mutationErrorBanner
+   * above, which only renders once that sheet has closed.
+   */
+  const failSheetError = (() => {
+    if (!markFailedMutation.error) return null;
+    const kind = classifyDeliveryError(markFailedMutation.error);
+    if (kind === "stale") return null;
+    return errorCopy(kind).body;
+  })();
+  const cancelSheetError = (() => {
+    if (!cancelMutation.error) return null;
+    const kind = classifyDeliveryError(cancelMutation.error);
+    if (kind === "stale") return null;
+    return errorCopy(kind).body;
+  })();
+
+  /*
    * A delivery has exactly one forward move at a time — the state machine says
    * so. The old bar stacked up to four equally loud full-width buttons and left
    * the merchant to work out which one was next; the transition that is legal
@@ -324,7 +342,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
       ? { key: "failed", label: t("delivery.markFailed"), open: () => setFailOpen(true) }
       : null,
     canCancelDelivery(d.status)
-      ? { key: "cancel", label: t("delivery.cancel"), open: () => setCancelOpen(true) }
+      ? { key: "cancel", label: t("delivery.cancelDelivery"), open: () => setCancelOpen(true) }
       : null,
   ].filter(Boolean) as { key: string; label: string; open: () => void }[];
 
@@ -449,23 +467,31 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
 
       <DeliveryReasonSheet
         open={failOpen}
-        onOpenChange={setFailOpen}
+        onOpenChange={(next) => {
+          setFailOpen(next);
+          if (!next) markFailedMutation.reset();
+        }}
         pending={markFailedMutation.isPending}
         title={t("delivery.failSheet.title")}
         body={t("delivery.failSheet.body")}
         reasonLabel={t("delivery.failSheet.reason")}
         submitLabel={t("delivery.failSheet.submit")}
         onConfirm={(reason) => markFailedMutation.mutate(reason)}
+        error={failSheetError}
       />
       <DeliveryReasonSheet
         open={cancelOpen}
-        onOpenChange={setCancelOpen}
+        onOpenChange={(next) => {
+          setCancelOpen(next);
+          if (!next) cancelMutation.reset();
+        }}
         pending={cancelMutation.isPending}
         title={t("delivery.cancelSheet.title")}
         body={t("delivery.cancelSheet.body")}
         reasonLabel={t("delivery.cancelSheet.reason")}
         submitLabel={t("delivery.cancelSheet.submit")}
         onConfirm={(reason) => cancelMutation.mutate(reason)}
+        error={cancelSheetError}
       />
     </div>
   );
