@@ -24,7 +24,13 @@ import {
   type RealOrderDetail,
 } from "@/lib/orders";
 import { addMoney, formatMoney, multiplyMoney, usd } from "@/lib/money";
-import { defaultVariantSelection, variantLabel } from "@/lib/order-draft";
+import {
+  defaultProductVariantId,
+  defaultVariantSelection,
+  needsVariantChoice,
+  productVariantPrice,
+  variantLabel,
+} from "@/lib/order-draft";
 import type { PrepareOrderItemInput } from "@/lib/conversation/smart-actions";
 import { cn } from "@/lib/utils";
 import type { Channel, Customer, Money, Order, Product } from "@/types";
@@ -76,21 +82,13 @@ interface EditableLine {
   query: string;
 }
 
-/** True only when the merchant must explicitly pick one of several real variants. */
-function needsVariantChoice(product: Product): boolean {
-  return (product.productionVariants?.length ?? 0) > 1;
-}
-
-/** A single-variant product resolves itself; a multi-variant one starts unchosen. */
-function defaultLineVariantId(product: Product | null): string | null {
-  if (!product || needsVariantChoice(product)) return null;
-  return product.variantId ?? null;
-}
-
-/** The chosen variant's own price when one exists, else the product's own price. */
+/**
+ * The chosen variant's own price when one exists, else the product's own
+ * price. Delegates to the shared rule in @/lib/order-draft so this sheet,
+ * CreateRealOrderSheet and POS cannot drift apart on variant pricing.
+ */
 function linePrice(line: EditableLine): Money {
-  const variant = line.product?.productionVariants?.find((v) => v.variantId === line.variantId);
-  return variant?.price ?? line.product?.price ?? usd(0);
+  return productVariantPrice(line.product, line.variantId);
 }
 
 function toEditableLine(input: PrepareOrderItemInput): EditableLine {
@@ -99,7 +97,7 @@ function toEditableLine(input: PrepareOrderItemInput): EditableLine {
     quantity: Math.max(1, Math.trunc(input.quantity) || 1),
     product: input.product ?? null,
     variant: input.product ? defaultVariantSelection(input.product.options) : {},
-    variantId: defaultLineVariantId(input.product ?? null),
+    variantId: defaultProductVariantId(input.product ?? null),
     candidates: input.candidates ?? [],
     query: "",
   };
@@ -163,7 +161,7 @@ export function PrepareOrderSheet({
       product,
       candidates: [],
       variant: defaultVariantSelection(product.options),
-      variantId: defaultLineVariantId(product),
+      variantId: defaultProductVariantId(product),
       query: "",
     });
   }

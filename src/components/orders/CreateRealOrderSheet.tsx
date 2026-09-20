@@ -36,6 +36,11 @@ import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
+import {
+  defaultProductVariantId,
+  needsVariantChoice,
+  productVariantPrice,
+} from "@/lib/order-draft";
 import { cn } from "@/lib/utils";
 import type { Order, Product } from "@/types";
 
@@ -79,6 +84,19 @@ export function CreateRealOrderSheet({
 
   const [productQuery, setProductQuery] = useState("");
   const [product, setProduct] = useState<Product | null>(null);
+  /*
+   * The ACTIVE variant this order will actually be placed against.
+   *
+   * `mapServerProductToUi` sets `product.variantId` to whichever ACTIVE
+   * variant the server returned FIRST, and exposes the full list as
+   * `productionVariants` precisely so that a multi-variant product is never
+   * sold on that guess. This sheet used to submit `product.variantId`
+   * unconditionally — the same wrong-variant defect already fixed in
+   * PosVariantSheet and PrepareOrderSheet. Null on a multi-variant product
+   * means "the merchant has not chosen yet" and blocks submit; there is no
+   * fallback to the first variant anywhere below.
+   */
+  const [variantId, setVariantId] = useState<string | null>(null);
   const [quantity, setQuantity] = useState(1);
   const [source, setSource] = useState<OrderSourceDb>("POS");
   const [discountEnabled, setDiscountEnabled] = useState(false);
@@ -218,7 +236,22 @@ export function CreateRealOrderSheet({
     searchIncomplete;
   const listEmpty = !searching && customersQuery.isSuccess && customerList.length === 0;
 
-  const unitPrice = product?.price ?? usd(0);
+  /*
+   * Selecting (or changing) a product must never carry the previous product's
+   * variant choice over — a stale variantId would submit a variant that
+   * belongs to a different product entirely. Single-variant products resolve
+   * themselves here; multi-variant ones reset to unchosen.
+   */
+  function selectProduct(next: Product | null) {
+    setProduct(next);
+    setVariantId(defaultProductVariantId(next));
+  }
+
+  const mustChooseVariant = needsVariantChoice(product);
+  const activeVariants = product?.productionVariants ?? [];
+  const selectedVariant = activeVariants.find((v) => v.variantId === variantId) ?? null;
+  /** The chosen variant's own price — never the product's first-variant price. */
+  const unitPrice = product ? productVariantPrice(product, variantId) : usd(0);
   const subtotal = multiplyMoney(unitPrice, Math.max(1, quantity));
   const discount =
     discountEnabled && discountCents > 0 ? usd(Math.min(discountCents, subtotal.amount)) : usd(0);
@@ -227,6 +260,7 @@ export function CreateRealOrderSheet({
   function reset() {
     setProductQuery("");
     setProduct(null);
+    setVariantId(null);
     setQuantity(1);
     setSource("POS");
     setDiscountEnabled(false);
@@ -244,8 +278,15 @@ export function CreateRealOrderSheet({
     onOpenChange(next);
   }
 
+  /*
+   * Submit is impossible without a resolved variant. For a multi-variant
+   * product that means an EXPLICIT choice; `product.variantId` is deliberately
+   * not consulted here, so restoring it would fail the regression tests.
+   */
+  const readyToSubmit = Boolean(product) && Boolean(variantId);
+
   async function submit() {
-    if (!product?.variantId) return;
+    if (!product || !variantId) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -253,7 +294,7 @@ export function CreateRealOrderSheet({
     try {
       const detail = await createRealOrder({
         source,
-        items: [{ variantId: product.variantId, quantity, productId: product.id }],
+        items: [{ variantId, quantity, productId: product.id }],
         customerId: customer?.id ?? null,
         ...(discountEnabled && discount.amount > 0 ? { discountMinor: discount.amount } : {}),
       });
@@ -281,6 +322,34 @@ export function CreateRealOrderSheet({
       title={created ? undefined : t("orderCreate.title")}
       snap="full"
       className="lg:max-w-[520px]"
+      /*
+       * Pinned rather than the last thing in the scrollable body. The order
+       * line now carries a variant picker on top of source chips, quantity,
+       * discount, customer search and the totals card — more than enough to
+       * push an inline CTA off a 320/360px screen, and the customer field's
+       * own scroll-into-view on focus could hide it behind the keyboard. Same
+       * fix, same slot, as PrepareOrderSheet. Only this step needs it: the
+       * product search step scrolls its own list and the created step is a
+       * short confirmation whose actions were never at risk.
+       */
+      footer={
+        !created && product ? (
+          <div>
+            <Button
+              className="tap-target h-12 w-full"
+              disabled={!readyToSubmit || submitting}
+              onClick={() => void submit()}
+            >
+              {submitting ? t("orderCreate.creating") : t("orderCreate.submit")}
+            </Button>
+            {!readyToSubmit ? (
+              <p className="text-caption mt-2 text-center text-text-muted">
+                {t("orderCreate.chooseVariantFirst")}
+              </p>
+            ) : null}
+          </div>
+        ) : undefined
+      }
     >
       {created ? (
         <motion.div
@@ -332,16 +401,66 @@ export function CreateRealOrderSheet({
             <div className="min-w-0 flex-1">
               <p className="text-caption text-text-muted">{t("orderCreate.product")}</p>
               <p className="text-h3 truncate text-text-primary">{localName(product, language)}</p>
-              <p className="text-data text-text-muted">{product.sku}</p>
+              <p className="text-data text-text-muted">{selectedVariant?.sku ?? product.sku}</p>
+              {/* The variant this line will actually be placed against, once chosen. */}
+              {selectedVariant ? (
+                <p className="text-body-sm text-text-secondary">{selectedVariant.name}</p>
+              ) : null}
             </div>
             <button
               type="button"
-              onClick={() => setProduct(null)}
+              onClick={() => selectProduct(null)}
               className="tap-target text-label shrink-0 px-2 text-action-primary"
             >
               {t("orderCreate.change")}
             </button>
           </div>
+
+          {/*
+           * Explicit variant choice for a multi-variant product. Rendered in
+           * the order line itself (directly under the product it belongs to),
+           * ACTIVE variants only — `productionVariants` is built server-side
+           * from a `status = "ACTIVE"` query, so an archived SKU never
+           * appears here and cannot be chosen. Name and price are both shown
+           * because a real variant has no attribute matrix, only a free-text
+           * name ("Red / L") that is the merchant's one way to tell two SKUs
+           * apart. Same markup as PosVariantSheet and PrepareOrderSheet: one
+           * full-width row per variant, so a long Khmer variant name wraps
+           * into the row rather than being clipped at 320px.
+           */}
+          {mustChooseVariant ? (
+            <div>
+              <p className="text-label text-text-secondary">{t("pos.variant.chooseOne")}</p>
+              <ul className="mt-2 space-y-2">
+                {activeVariants.map((v) => {
+                  const selected = v.variantId === variantId;
+                  return (
+                    <li key={v.variantId}>
+                      <button
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => setVariantId(v.variantId)}
+                        className={cn(
+                          "tap-target flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-2.5 text-left transition-colors",
+                          selected
+                            ? "border-action-primary bg-action-primary-soft text-action-primary"
+                            : "border-border-strong bg-surface-primary text-text-primary",
+                        )}
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="text-label block truncate">{v.name}</span>
+                          <span className="text-caption tnum block truncate text-text-muted">
+                            {v.sku}
+                          </span>
+                        </span>
+                        <span className="text-financial shrink-0">{formatMoney(v.price)}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
 
           <fieldset>
             <legend className="text-label text-text-secondary">{t("orderCreate.source")}</legend>
@@ -537,14 +656,6 @@ export function CreateRealOrderSheet({
               onRetry={() => void submit()}
             />
           ) : null}
-
-          <Button
-            className="tap-target h-12 w-full"
-            disabled={submitting}
-            onClick={() => void submit()}
-          >
-            {submitting ? t("orderCreate.creating") : t("orderCreate.submit")}
-          </Button>
         </section>
       ) : (
         <section>
@@ -589,8 +700,8 @@ export function CreateRealOrderSheet({
               <li key={item.id}>
                 <button
                   type="button"
-                  onClick={() => setProduct(item)}
-                  disabled={!item.variantId}
+                  onClick={() => selectProduct(item)}
+                  disabled={!item.variantId && (item.productionVariants?.length ?? 0) === 0}
                   className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
                 >
                   <span className="min-w-0 flex-1">

@@ -345,10 +345,19 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
 });
 
 describe("Create flow guardrails", () => {
-  it("a product with no resolved variantId cannot be submitted (disabled in the picker, guarded in submit)", () => {
+  it("a product with no sellable variant at all cannot even be picked", () => {
     const sheet = readSource(CREATE_SHEET);
-    expect(sheet).toMatch(/disabled=\{!item\.variantId\}/);
-    expect(sheet).toMatch(/if \(!product\?\.variantId\) return;/);
+    expect(sheet).toMatch(
+      /disabled=\{!item\.variantId && \(item\.productionVariants\?\.length \?\? 0\) === 0\}/,
+    );
+  });
+
+  it("submit is guarded on the CHOSEN variant, never on product.variantId", () => {
+    const sheet = readSource(CREATE_SHEET);
+    expect(sheet).toMatch(/if \(!product \|\| !variantId\) return;/);
+    // The first-ACTIVE-variant guess must not reach the submit path — see
+    // src/tests/create-real-order-variant.test.ts for the full rule.
+    expect(sheet).not.toMatch(/variantId: product\.variantId/);
   });
 
   it("a forbidden discount attempt surfaces the permission-specific copy, not the generic one", () => {

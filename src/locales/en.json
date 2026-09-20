@@ -1050,6 +1050,7 @@
     "noPhone": "Phone not shown",
     "subtotal": "Subtotal",
     "total": "Estimated total",
+    "chooseVariantFirst": "Choose a variant to continue.",
     "totalNote": "The final price is set by the server when the order is created.",
     "submit": "Create order",
     "creating": "Creating order",

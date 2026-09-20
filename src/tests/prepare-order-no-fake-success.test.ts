@@ -271,14 +271,16 @@ describe("Prepare Order never guesses between multiple production variants", () 
 
   it("tracks a per-line variantId separately from the product's default one", () => {
     expect(source).toMatch(/variantId:\s*string\s*\|\s*null/);
-    expect(source).toMatch(/function needsVariantChoice/);
-    expect(source).toMatch(/function defaultLineVariantId/);
-    // A multi-variant product starts unchosen, exactly like PosVariantSheet.
-    const fn = source.slice(
-      source.indexOf("function defaultLineVariantId"),
-      source.indexOf("function linePrice"),
-    );
-    expect(fn).toMatch(/needsVariantChoice\(product\)\)\s*return null/);
+    // The rule itself now lives in @/lib/order-draft, shared with
+    // CreateRealOrderSheet so the two order sheets cannot drift apart on it
+    // (behaviour is executed in src/tests/create-real-order-variant.test.ts).
+    // What matters here is that this sheet seeds every line THROUGH that rule
+    // rather than reaching for the product's first-ACTIVE-variant default.
+    expect(source).toMatch(/from "@\/lib\/order-draft"/);
+    expect(source).toMatch(/needsVariantChoice/);
+    expect(source).toMatch(/variantId: defaultProductVariantId\(input\.product \?\? null\)/);
+    expect(source).toMatch(/variantId: defaultProductVariantId\(product\)/);
+    expect(source).not.toMatch(/variantId: product\.variantId/);
   });
 
   it("renders a chooser for a multi-variant line instead of the mock option chips", () => {
