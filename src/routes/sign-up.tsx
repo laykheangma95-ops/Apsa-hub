@@ -16,11 +16,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/design-system";
-import { useTranslation } from "@/lib/i18n";
+import i18n, { useTranslation } from "@/lib/i18n";
 
 export const Route = createFileRoute("/sign-up")({
   head: () => ({
-    meta: [{ title: "Create account — APSA" }],
+    meta: [{ title: i18n.t("auth.signUp.head.title") }],
   }),
   component: SignUpPage,
 });

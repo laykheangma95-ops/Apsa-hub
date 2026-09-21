@@ -124,6 +124,32 @@ export function AdjustStockSheet({
       description={variantLabel}
       snap="full"
       className="lg:max-w-[520px]"
+      // Pinned rather than the last thing in the scrollable body: the delta
+      // field, its result preview, a required reason textarea and a location
+      // picker are all above it — enough to push an inline CTA off a
+      // 320/360px screen. Same fix as CreateRealOrderSheet/PrepareOrderSheet.
+      footer={
+        <div>
+          {formError ? (
+            <p className="text-caption mb-2 text-status-danger-text" role="alert">
+              {formError}
+            </p>
+          ) : null}
+          <Button
+            className="tap-target h-12 w-full"
+            disabled={!canSubmit}
+            aria-busy={saving}
+            onClick={() => void submit()}
+          >
+            {saving ? t("inventory.saving") : t("stockAdjustment.confirm")}
+          </Button>
+          {!reasonProvided ? (
+            <p className="text-caption mt-2 text-center text-text-secondary" role="status">
+              {t("stockAdjustment.reasonRequiredNote")}
+            </p>
+          ) : null}
+        </div>
+      }
     >
       <div className="space-y-4">
         <p className="text-body-sm rounded-2xl bg-surface-secondary px-4 py-3 text-text-secondary">
@@ -197,25 +223,6 @@ export function AdjustStockSheet({
             noneLabel={t("stockAdjustment.noLocation")}
             className="mx-0 px-0"
           />
-        ) : null}
-
-        {formError ? (
-          <p className="text-caption text-status-danger-text" role="alert">
-            {formError}
-          </p>
-        ) : null}
-
-        <Button
-          className="tap-target h-12 w-full"
-          disabled={!canSubmit}
-          onClick={() => void submit()}
-        >
-          {saving ? t("inventory.saving") : t("stockAdjustment.confirm")}
-        </Button>
-        {!reasonProvided ? (
-          <p className="text-caption text-center text-text-secondary" role="status">
-            {t("stockAdjustment.reasonRequiredNote")}
-          </p>
         ) : null}
       </div>
     </BottomSheet>

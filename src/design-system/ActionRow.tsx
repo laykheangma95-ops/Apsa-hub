@@ -12,6 +12,8 @@ interface ActionRowProps {
   disabled?: boolean;
   /** Marks the one action the merchant most likely came for. At most one. */
   emphasis?: boolean;
+  /** A financial or otherwise largely irreversible action (refund, reverse) — visually separated from safe actions, never conveyed by label alone. */
+  tone?: "default" | "danger";
   /** Replaces the chevron — a value, a count, a status chip. */
   trailing?: React.ReactNode;
   className?: string;
@@ -32,9 +34,11 @@ export function ActionRow({
   onClick,
   disabled = false,
   emphasis = false,
+  tone = "default",
   trailing,
   className,
 }: ActionRowProps) {
+  const danger = tone === "danger" && !disabled;
   return (
     <button
       type="button"
@@ -45,9 +49,11 @@ export function ActionRow({
         "press flex w-full items-center gap-3 rounded-2xl border px-3.5 py-3 text-left transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
         disabled
           ? "cursor-not-allowed border-border-default bg-surface-secondary/70 text-text-muted"
-          : emphasis
-            ? "border-action-primary-border bg-action-primary-soft text-text-primary"
-            : "border-border-default bg-surface-primary text-text-primary active:bg-surface-secondary",
+          : danger
+            ? "border-status-danger bg-status-danger-soft text-text-primary"
+            : emphasis
+              ? "border-action-primary-border bg-action-primary-soft text-text-primary"
+              : "border-border-default bg-surface-primary text-text-primary active:bg-surface-secondary",
         className,
       )}
     >
@@ -56,9 +62,11 @@ export function ActionRow({
           "flex size-10 shrink-0 items-center justify-center rounded-2xl",
           disabled
             ? "bg-surface-primary text-text-muted"
-            : emphasis
-              ? "bg-action-primary text-text-on-action"
-              : "bg-action-primary-soft text-action-primary",
+            : danger
+              ? "bg-status-danger text-text-on-action"
+              : emphasis
+                ? "bg-action-primary text-text-on-action"
+                : "bg-action-primary-soft text-action-primary",
         )}
       >
         <Icon className="size-[18px]" aria-hidden />

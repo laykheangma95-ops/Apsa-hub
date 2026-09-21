@@ -179,7 +179,11 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
 
   function onTransitionSuccess(detail: typeof delivery) {
     queryClient.setQueryData(queryKey, detail);
-    setNotice(t("delivery.actionDone"));
+    setNotice(
+      detail
+        ? t("delivery.actionDoneStatus", { status: t(`status.${detail.status}`) })
+        : t("delivery.actionDone"),
+    );
     void queryClient.invalidateQueries({
       queryKey: ordersKeys.detail(userId, routeOrganizationId, detail?.orderId ?? "none"),
     });
@@ -379,7 +383,9 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
          */}
         <StatusHero
           eyebrow={t("delivery.courier")}
-          headline={<p className="text-h1 truncate text-text-primary">{d.providerName}</p>}
+          headline={
+            <p className="text-h1 min-w-0 wrap-anywhere text-text-primary">{d.providerName}</p>
+          }
           support={
             d.externalTrackingNumber ? (
               <span className="tnum">
@@ -457,8 +463,10 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
             <Button
               className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={anyPending}
+              aria-busy={anyPending}
               onClick={advanceAction.run}
             >
+              {anyPending ? <Spinner /> : null}
               {anyPending ? t("common.loading") : advanceAction.label}
             </Button>
           ) : null}
@@ -512,7 +520,7 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
     mutationFn: (action: DeliveryAction) => applyDeliveryAction(id, action),
     onSuccess: (status) => {
       setStatusOverride(status);
-      setNotice(t("delivery.actionDone"));
+      setNotice(t("delivery.actionDoneStatus", { status: t(`status.${status}`) }));
     },
   });
 
@@ -583,7 +591,11 @@ function MockDeliveryDetailScreen({ id }: { id: string }) {
 
         <StatusHero
           eyebrow={t("delivery.courier")}
-          headline={<p className="text-h1 truncate text-text-primary">{delivery.courierName}</p>}
+          headline={
+            <p className="text-h1 min-w-0 wrap-anywhere text-text-primary">
+              {delivery.courierName}
+            </p>
+          }
           support={
             <span className="tnum">
               {t("delivery.tracking")}: {delivery.trackingNumber}

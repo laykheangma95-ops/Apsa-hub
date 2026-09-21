@@ -129,6 +129,7 @@ export function PrepareOrderSheet({
   const [step, setStep] = useState<Step>({ name: "review" });
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
   const submittingRef = useRef(false);
@@ -303,12 +304,15 @@ export function PrepareOrderSheet({
    * starting lines.
    */
   async function discardAndEdit() {
-    if (step.name !== "created-real") return;
+    if (step.name !== "created-real" || discarding) return;
+    setDiscarding(true);
     try {
       await cancelRealOrder(step.detail.order.id, "Merchant edited before confirming");
     } catch {
       // Best-effort: if cancellation fails (e.g. permission), the merchant can
       // still cancel it later from Order Detail. Editing must not get stuck.
+    } finally {
+      setDiscarding(false);
     }
     setStep({ name: "review" });
   }
@@ -388,7 +392,7 @@ export function PrepareOrderSheet({
                 <div className="space-y-3">
                   <div className="flex items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="text-label truncate text-text-primary">
+                      <p className="chip-text text-label text-text-primary">
                         {localName(line.product, language)}
                       </p>
                       <p className="text-data text-text-muted">{line.product.sku}</p>
@@ -415,16 +419,24 @@ export function PrepareOrderSheet({
                                 aria-pressed={selected}
                                 onClick={() => updateLine(line.key, { variantId: v.variantId })}
                                 className={cn(
-                                  "tap-target flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left transition-colors",
+                                  "tap-target flex w-full items-center gap-2 rounded-xl border px-4 py-2.5 text-left transition-colors",
                                   selected
                                     ? "border-action-primary bg-action-primary-soft text-action-primary"
                                     : "border-border-strong bg-surface-primary text-text-primary",
                                 )}
                               >
-                                <span className="min-w-0 flex-1 truncate text-label">{v.name}</span>
+                                <span className="chip-text min-w-0 flex-1 text-label">
+                                  {v.name}
+                                </span>
                                 <span className="text-financial shrink-0">
                                   {formatMoney(v.price)}
                                 </span>
+                                {selected ? (
+                                  <Check
+                                    className="size-4 shrink-0 text-action-primary"
+                                    aria-hidden
+                                  />
+                                ) : null}
                               </button>
                             </li>
                           );
@@ -449,13 +461,16 @@ export function PrepareOrderSheet({
                                   })
                                 }
                                 className={cn(
-                                  "tap-target rounded-full border px-4 text-label transition-colors",
+                                  "tap-target inline-flex items-center gap-1.5 rounded-full border px-4 text-label transition-colors",
                                   selected
                                     ? "border-action-primary bg-action-primary text-text-on-action"
                                     : "border-border-strong bg-surface-primary text-text-primary",
                                 )}
                               >
                                 <span className="chip-text">{value}</span>
+                                {selected ? (
+                                  <Check className="size-3.5 shrink-0" aria-hidden />
+                                ) : null}
                               </button>
                             );
                           })}
@@ -626,10 +641,14 @@ export function PrepareOrderSheet({
             {step.detail.order.lifecycleStatus !== "confirmed" ? (
               <button
                 type="button"
+                disabled={discarding}
+                aria-busy={discarding}
                 onClick={() => void discardAndEdit()}
-                className="press tap-target text-label flex-1 rounded-full border border-border-default px-4 py-3 text-text-primary"
+                className="press tap-target text-label flex-1 rounded-full border border-border-default px-4 py-3 text-text-primary disabled:opacity-50"
               >
-                {t("conversation.prepareOrder.discardDraft")}
+                {discarding
+                  ? t("conversation.prepareOrder.discardingDraft")
+                  : t("conversation.prepareOrder.discardDraft")}
               </button>
             ) : null}
             <a

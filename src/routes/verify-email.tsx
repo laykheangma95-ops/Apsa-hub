@@ -16,7 +16,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { CheckCircle2, MailCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { useTranslation } from "@/lib/i18n";
+import i18n, { useTranslation } from "@/lib/i18n";
 import { verifyEmailFn } from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -30,7 +30,7 @@ const verifyEmailSearchSchema = z.object({
 
 export const Route = createFileRoute("/verify-email")({
   head: () => ({
-    meta: [{ title: "Verify your email - APSA" }],
+    meta: [{ title: i18n.t("verifyEmail.head.title") }],
   }),
   validateSearch: (search) => verifyEmailSearchSchema.parse(search),
   component: VerifyEmailPage,

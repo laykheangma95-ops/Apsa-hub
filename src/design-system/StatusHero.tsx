@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { StatusBadge } from "./StatusBadge";
 import { StatusChip } from "./StatusChip";
 import type { StatusKey } from "@/types";
 
@@ -53,7 +54,7 @@ export function StatusHero({
 
       {primaryStatus || secondaryStatuses.length > 0 ? (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          {primaryStatus ? <StatusChip status={primaryStatus} size="md" /> : null}
+          {primaryStatus ? <StatusBadge status={primaryStatus} size="md" /> : null}
           {secondaryStatuses.map((status) => (
             <StatusChip key={status} status={status} size="sm" />
           ))}

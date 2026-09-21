@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getHomeSummary } from "@/lib/api";
@@ -148,6 +148,12 @@ function BusinessHome() {
   const homeQuery = useQuery({
     queryKey: homeQueryKey(session.userId, organizationId, range),
     queryFn: () => getHomeSummary(range),
+    // Switching Today/Week/Month keys a new query. Without this, `summary`
+    // goes briefly undefined and the whole attention/overview column —
+    // including the segmented control the merchant just tapped — is replaced
+    // by HomeSkeleton mid-interaction. Keeping the previous range's data
+    // visible until the new one resolves avoids that blank flicker.
+    placeholderData: keepPreviousData,
   });
 
   const summary = homeQuery.data;
@@ -214,6 +220,7 @@ function BusinessHome() {
   }
   const createActions: readonly CreateAction[] = (
     [
+      { key: "sendInvoice", to: null, available: true },
       { key: "newSale", to: "/app/pos", available: capabilities.can("orders.create") },
       { key: "newOrder", to: "/app/orders", available: capabilities.can("orders.read") },
       { key: "addProduct", to: "/app/products", available: capabilities.can("products.create") },

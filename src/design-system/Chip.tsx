@@ -4,6 +4,13 @@ import { cn } from "@/lib/utils";
 interface ChipProps {
   children: ReactNode;
   selected?: boolean;
+  /**
+   * Overrides the aria-pressed/aria-selected state `selected` would otherwise
+   * set. Use when `selected` styles pure visual emphasis (e.g. "this is the
+   * primary suggestion") rather than an actual toggled/pressed state — tapping
+   * the chip fires an action and nothing about it stays "pressed".
+   */
+  ariaPressed?: boolean;
   disabled?: boolean;
   onClick?: () => void;
   count?: number | undefined;
@@ -20,6 +27,7 @@ interface ChipProps {
 export function Chip({
   children,
   selected = false,
+  ariaPressed,
   disabled = false,
   onClick,
   count,
@@ -28,8 +36,9 @@ export function Chip({
   ariaLabel,
   className,
 }: ChipProps) {
+  const pressedState = ariaPressed ?? selected;
   const selectionProps =
-    role === "tab" ? { "aria-selected": selected } : { "aria-pressed": selected };
+    role === "tab" ? { "aria-selected": pressedState } : { "aria-pressed": pressedState };
 
   return (
     <button
@@ -40,7 +49,7 @@ export function Chip({
       aria-label={ariaLabel}
       {...selectionProps}
       className={cn(
-        "text-label inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3.5 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
+        "tap-target text-label inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
         selected
           ? "border-action-primary-border bg-action-primary-soft text-status-info-text"
           : "border-border-default bg-surface-primary text-text-secondary hover:bg-surface-secondary",

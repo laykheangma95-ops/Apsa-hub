@@ -5,6 +5,7 @@
   },
   "auth": {
     "signIn": {
+      "head": { "title": "Sign in — APSA" },
       "title": "Welcome back",
       "subtitle": "Sign in to your APSA business.",
       "emailLabel": "Email",
@@ -21,6 +22,7 @@
       }
     },
     "signUp": {
+      "head": { "title": "Create account — APSA" },
       "title": "Create your account",
       "subtitle": "Start selling with APSA in a few minutes.",
       "nameLabel": "Your name",
@@ -46,6 +48,7 @@
       "backToSignIn": "Back to sign in"
     },
     "accessDenied": {
+      "head": { "title": "Access paused — APSA" },
       "title": "You no longer have access",
       "subtitle": "Your access to this business has been paused or removed.",
       "hint": "Ask the business owner to restore your access, then sign in again.",
@@ -97,6 +100,7 @@
     "newSale": "New sale",
     "newOrder": "New order",
     "addProduct": "Add product",
+    "sendInvoice": "Send invoice",
     "scanBarcode": "Scan barcode",
     "team": "Team",
     "openSales": "Open Sales",
@@ -661,6 +665,7 @@
       "edit": "Edit",
       "viewOrder": "View order",
       "discardDraft": "Discard and edit again",
+      "discardingDraft": "Discarding…",
       "resolveItemsFirst": "Choose a product for every item before creating the order",
       "error": {
         "title": "This order didn't go through",
@@ -1106,6 +1111,7 @@
     "returnToShop": "Return to shop",
     "markDelivered": "Mark as delivered",
     "actionDone": "Delivery updated",
+    "actionDoneStatus": "Delivery updated to {{status}}",
     "startPreparing": "Start preparing",
     "markReady": "Mark ready",
     "markInTransit": "Mark in transit",
@@ -1332,6 +1338,7 @@
     }
   },
   "onboarding": {
+    "head": { "title": "Create your business — APSA" },
     "title": "Create your business",
     "subtitle": "APSA needs one business workspace before you can start selling.",
     "nameLabel": "Business name",
@@ -1351,6 +1358,7 @@
     }
   },
   "verifyEmail": {
+    "head": { "title": "Verify your email — APSA" },
     "title": "Verify your email",
     "verifying": "Verifying your email…",
     "success": "Email verified. Taking you to your account…",
@@ -1360,6 +1368,7 @@
     "backToSignUp": "Back to sign up"
   },
   "inviteAccept": {
+    "head": { "title": "Team invite — APSA" },
     "title": "Team invite",
     "loading": "Checking your invite…",
     "loadError": "Could not load this invite. Check your connection and try again.",

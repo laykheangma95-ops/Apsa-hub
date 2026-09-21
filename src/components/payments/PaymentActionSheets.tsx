@@ -151,6 +151,30 @@ export function PaymentRefundSheet({
       title={t("payments.actions.refund.title")}
       description={t("payments.actions.refund.body")}
       snap="full"
+      // Pinned rather than the last thing in the scrollable body: the amount
+      // field scrolls itself into view on focus (BottomSheet's keyboard-safe
+      // fields), which could otherwise push this off a 320/360px screen with
+      // the keyboard open. Same fix as CreateRealOrderSheet/PrepareOrderSheet.
+      footer={
+        <div>
+          {error ? (
+            <p className="text-caption mb-2 text-status-danger-text" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <Button
+            className="tap-target h-12 w-full"
+            variant="destructive"
+            disabled={pending || !amountValid || trimmedReason.length === 0}
+            onClick={() => {
+              if (parsed === null) return;
+              onConfirm(parsed, trimmedReason);
+            }}
+          >
+            {pending ? t("payments.actions.working") : t("payments.actions.refund.submit")}
+          </Button>
+        </div>
+      }
     >
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
@@ -194,24 +218,6 @@ export function PaymentRefundSheet({
         </div>
 
         <p className="text-caption text-text-secondary">{t("payments.actions.refund.note")}</p>
-
-        {error ? (
-          <p className="text-caption text-status-danger-text" role="alert">
-            {error}
-          </p>
-        ) : null}
-
-        <Button
-          className="tap-target h-12 w-full"
-          variant="destructive"
-          disabled={pending || !amountValid || trimmedReason.length === 0}
-          onClick={() => {
-            if (parsed === null) return;
-            onConfirm(parsed, trimmedReason);
-          }}
-        >
-          {pending ? t("payments.actions.working") : t("payments.actions.refund.submit")}
-        </Button>
       </div>
     </BottomSheet>
   );

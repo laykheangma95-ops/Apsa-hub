@@ -400,7 +400,7 @@ export function CreateRealOrderSheet({
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
               <p className="text-caption text-text-muted">{t("orderCreate.product")}</p>
-              <p className="text-h3 truncate text-text-primary">{localName(product, language)}</p>
+              <p className="chip-text text-h3 text-text-primary">{localName(product, language)}</p>
               <p className="text-data text-text-muted">{selectedVariant?.sku ?? product.sku}</p>
               {/* The variant this line will actually be placed against, once chosen. */}
               {selectedVariant ? (
@@ -441,19 +441,22 @@ export function CreateRealOrderSheet({
                         aria-pressed={selected}
                         onClick={() => setVariantId(v.variantId)}
                         className={cn(
-                          "tap-target flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-2.5 text-left transition-colors",
+                          "tap-target flex w-full items-center gap-3 rounded-xl border px-4 py-2.5 text-left transition-colors",
                           selected
                             ? "border-action-primary bg-action-primary-soft text-action-primary"
                             : "border-border-strong bg-surface-primary text-text-primary",
                         )}
                       >
                         <span className="min-w-0 flex-1">
-                          <span className="text-label block truncate">{v.name}</span>
+                          <span className="chip-text text-label block">{v.name}</span>
                           <span className="text-caption tnum block truncate text-text-muted">
                             {v.sku}
                           </span>
                         </span>
                         <span className="text-financial shrink-0">{formatMoney(v.price)}</span>
+                        {selected ? (
+                          <Check className="size-4 shrink-0 text-action-primary" aria-hidden />
+                        ) : null}
                       </button>
                     </li>
                   );

@@ -93,9 +93,10 @@ export function RecordPaymentSheet({
       <Button
         className="tap-target mt-5 h-12 w-full"
         disabled={pending || amount <= 0}
+        aria-busy={pending}
         onClick={() => onConfirm({ method, amountCents: amount, reference })}
       >
-        {t("order.paymentSheet.submit")}
+        {pending ? t("common.loading") : t("order.paymentSheet.submit")}
       </Button>
     </BottomSheet>
   );
@@ -158,9 +159,10 @@ export function ReturnSheet({
       <Button
         className="tap-target mt-5 h-12 w-full"
         disabled={pending}
+        aria-busy={pending}
         onClick={() => onConfirm({ reason, restock })}
       >
-        {t("order.returnSheet.submit")}
+        {pending ? t("common.loading") : t("order.returnSheet.submit")}
       </Button>
     </BottomSheet>
   );
@@ -220,10 +222,11 @@ export function RefundSheet({
       ) : null}
       <Button
         className="tap-target mt-5 h-12 w-full"
-        disabled={pending}
-        onClick={() => onConfirm({ amountCents: amount, method, reason })}
+        disabled={pending || amount <= 0 || reason.trim().length === 0}
+        aria-busy={pending}
+        onClick={() => onConfirm({ amountCents: amount, method, reason: reason.trim() })}
       >
-        {t("order.refundSheet.submit")}
+        {pending ? t("common.loading") : t("order.refundSheet.submit")}
       </Button>
     </BottomSheet>
   );
@@ -275,9 +278,10 @@ export function ArrangeDeliverySheet({
       <Button
         className="tap-target mt-5 h-12 w-full"
         disabled={pending || !courierId}
+        aria-busy={pending}
         onClick={() => onConfirm(courierId)}
       >
-        {t("order.deliverySheet.submit")}
+        {pending ? t("common.loading") : t("order.deliverySheet.submit")}
       </Button>
     </BottomSheet>
   );

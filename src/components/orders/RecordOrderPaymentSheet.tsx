@@ -122,6 +122,35 @@ export function RecordOrderPaymentSheet({
       title={t("order.recordPaymentSheet.title")}
       description={t("order.recordPaymentSheet.body")}
       snap="full"
+      // Pinned rather than the last thing in the scrollable body: the amount
+      // field scrolls itself into view on focus (BottomSheet's keyboard-safe
+      // fields), which could otherwise push this off a 320/360px screen with
+      // the keyboard open. Same fix as CreateRealOrderSheet/PrepareOrderSheet.
+      footer={
+        <div>
+          {error ? (
+            <p className="text-caption mb-2 text-status-danger-text" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <Button
+            className="tap-target h-12 w-full"
+            disabled={pending || !amountValid}
+            aria-busy={pending}
+            onClick={() => {
+              if (parsed === null) return;
+              onConfirm({
+                method,
+                amountMinor: parsed,
+                reference: trimmedReference.length > 0 ? trimmedReference : undefined,
+                idempotencyKey: idempotencyKeyRef.current,
+              });
+            }}
+          >
+            {pending ? t("order.recordPaymentSheet.working") : t("order.recordPaymentSheet.submit")}
+          </Button>
+        </div>
+      }
     >
       <div className="flex flex-col gap-4">
         <fieldset>
@@ -209,29 +238,6 @@ export function RecordOrderPaymentSheet({
               : "order.recordPaymentSheet.pendingNote",
           )}
         </p>
-
-        {error ? (
-          <p className="text-caption text-status-danger-text" role="alert">
-            {error}
-          </p>
-        ) : null}
-
-        <Button
-          className="tap-target h-12 w-full"
-          disabled={pending || !amountValid}
-          aria-busy={pending}
-          onClick={() => {
-            if (parsed === null) return;
-            onConfirm({
-              method,
-              amountMinor: parsed,
-              reference: trimmedReference.length > 0 ? trimmedReference : undefined,
-              idempotencyKey: idempotencyKeyRef.current,
-            });
-          }}
-        >
-          {pending ? t("order.recordPaymentSheet.working") : t("order.recordPaymentSheet.submit")}
-        </Button>
       </div>
     </BottomSheet>
   );

@@ -279,11 +279,17 @@ function PosScreen() {
                   onChange={(e) => setQuery(e.target.value)}
                 />
               </div>
+              {/*
+               * No barcode scanner exists yet (see Home's create sheet for the
+               * same rule). Silently dropping a fabricated barcode into search
+               * used to read as a broken tap that matched nothing — an honestly
+               * disabled control is the correct answer until this is built.
+               */}
               <button
                 type="button"
-                aria-label={t("pos.scan")}
-                onClick={() => setQuery("8850001000031")}
-                className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
+                disabled
+                aria-label={`${t("pos.scan")} · ${t("nav.comingSoon")}`}
+                className="tap-target flex size-12 shrink-0 cursor-not-allowed items-center justify-center rounded-2xl border border-border-default bg-surface-secondary text-text-muted"
               >
                 <ScanLine className="size-5" aria-hidden />
               </button>

@@ -11,11 +11,11 @@
  */
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ShieldAlert } from "lucide-react";
-import { useTranslation } from "@/lib/i18n";
+import i18n, { useTranslation } from "@/lib/i18n";
 
 export const Route = createFileRoute("/access-denied")({
   head: () => ({
-    meta: [{ title: "Access paused — APSA" }],
+    meta: [{ title: i18n.t("auth.accessDenied.head.title") }],
   }),
   component: AccessDeniedPage,
 });

@@ -220,7 +220,7 @@ function InboxLayout() {
                   type="button"
                   onClick={() => setQuery("")}
                   aria-label={t("inbox.clearSearch")}
-                  className="press absolute top-1/2 right-1 flex size-9 -translate-y-1/2 items-center justify-center rounded-full text-text-muted"
+                  className="press tap-target absolute top-1/2 right-1 flex size-9 -translate-y-1/2 items-center justify-center rounded-full text-text-muted"
                 >
                   <X className="size-4" aria-hidden />
                 </button>
