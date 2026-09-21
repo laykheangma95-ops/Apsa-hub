@@ -336,6 +336,42 @@ describe("Error states are classified and mapped to translated copy, never raw e
     const route = readSource(DELIVERY_DETAIL_ROUTE);
     expect(route).toMatch(/isProductionId\(id\)/);
   });
+
+  it('every t("delivery....") key referenced by the detail route exists in both locales', () => {
+    // Regression: the Cancel pill called t("delivery.cancel"), a key that
+    // exists in neither locale file — i18next's missing-key fallback renders
+    // the raw key string on screen instead of a label.
+    const route = readSource(DELIVERY_DETAIL_ROUTE);
+    const en = JSON.parse(fs.readFileSync(path.resolve(ROOT, "src/locales/en.json"), "utf-8"));
+    const km = JSON.parse(fs.readFileSync(path.resolve(ROOT, "src/locales/km.json"), "utf-8"));
+    const keys = [...route.matchAll(/t\("(delivery\.[a-zA-Z0-9_.]+)"/g)].map((m) => m[1]!);
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) {
+      const segments = key.split(".");
+      const resolves = (root: unknown) =>
+        segments.reduce<unknown>(
+          (node, seg) => (node && typeof node === "object" ? (node as never)[seg] : undefined),
+          root,
+        ) !== undefined;
+      expect({ key, en: resolves(en), km: resolves(km) }).toEqual({ key, en: true, km: true });
+    }
+  });
+
+  it("cancel/mark-failed mutation failures surface inside their own reason sheet, not silently", () => {
+    // Regression: onTransitionError only refetched on a "stale" conflict;
+    // every other failure (forbidden, network, already-terminal) just
+    // stopped the spinner with the reason still typed in and nothing telling
+    // the merchant it did not go through.
+    const route = readSource(DELIVERY_DETAIL_ROUTE);
+    expect(route).toMatch(/failSheetError/);
+    expect(route).toMatch(/cancelSheetError/);
+    expect(route).toMatch(/error=\{failSheetError\}/);
+    expect(route).toMatch(/error=\{cancelSheetError\}/);
+
+    const sheet = readSource(REASON_SHEET);
+    expect(sheet).toMatch(/error\?:\s*string\s*\|\s*null/);
+    expect(sheet).toMatch(/role="alert"/);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

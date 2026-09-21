@@ -103,6 +103,42 @@ export function filterSmartActionSuggestion(
   return { ...suggestion, primary, secondary };
 }
 
+/** The six actions whose only effect is putting text in the composer. */
+const REPLY_ONLY_ACTIONS: ReadonlySet<SmartActionId> = new Set([
+  "check_stock",
+  "send_price",
+  "delivery_info",
+  "ask_quantity",
+  "ask_variant",
+  "ask_address",
+]);
+
+/**
+ * Drop every reply-only action on a conversation where sending is not wired
+ * up yet (every production/provider channel, until outbound sending ships —
+ * see the composer's own `isProductionId(id)` disable in
+ * src/routes/app.inbox.$id.tsx). Without this, a merchant could tap "Check
+ * stock" and watch text land in the composer with no way to actually send
+ * it — the chip visibly "does something" but never accomplishes what its
+ * label promises. Order/customer actions are unaffected: they open their own
+ * surface (Prepare Order, Customer detail) rather than depending on sending.
+ * Pure, and layered after filterSmartActionSuggestion rather than merged into
+ * it — this is a channel-capability question, not a member-permission one.
+ */
+export function filterUnsendableSmartActions(
+  suggestion: SmartActionSuggestion,
+  canSend: boolean,
+): SmartActionSuggestion {
+  if (canSend) return suggestion;
+  const allowed = [
+    ...(suggestion.primary ? [suggestion.primary] : []),
+    ...suggestion.secondary,
+  ].filter((action) => !REPLY_ONLY_ACTIONS.has(action));
+
+  const [primary = null, ...secondary] = allowed;
+  return { ...suggestion, primary, secondary };
+}
+
 /** One candidate line item, with its (possibly ambiguous) catalog match. */
 export interface ResolvedSmartOrderItem {
   candidate: LineItemCandidate;

@@ -371,7 +371,7 @@ function ProductDetailScreen() {
   const nameError = nameTouched && nameKm.trim() === "" ? t("catalog.detail.nameKmMissing") : null;
 
   return (
-    <ScreenBleed surface="raised">
+    <ScreenBleed surface="raised" bottom="none">
       <AppHeader
         title={product?.nameKm ?? t("catalog.detail.title")}
         onBack={() => void navigate({ to: "/app/products" })}

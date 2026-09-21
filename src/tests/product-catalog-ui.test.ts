@@ -1930,3 +1930,14 @@ describe("J. the new screens keep the server/browser boundary", () => {
     }
   });
 });
+
+describe("Product detail does not reserve dead space for a nav it never renders", () => {
+  // Regression: ScreenBleed defaults to bottom="nav" (~100px of reserved
+  // clearance for the floating BottomNav). This route is a pushed sub-route —
+  // BottomNav is never mounted here — so that clearance sat as dead space
+  // under the sticky Save button on every load, worst at 320-390px.
+  it('wraps its screen with bottom="none", matching Orders/Deliveries detail convention', () => {
+    const detail = read(DETAIL_ROUTE);
+    expect(detail).toMatch(/<ScreenBleed surface="raised" bottom="none">/);
+  });
+});

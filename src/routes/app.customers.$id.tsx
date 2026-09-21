@@ -127,11 +127,14 @@ function Customer360Screen() {
        * Refresh this customer's own cached profile — and only this principal's
        * copy of it. The optimistic prepend above keeps the new note on screen
        * meanwhile; the invalidation is what reconciles it with the server's
-       * authored/authored-by values.
+       * authored/authored-by values. The refetched payload will include this
+       * SAME note (same id), which is why `notes` below dedupes rather than
+       * concatenating the two sources outright.
        */
       void queryClient.invalidateQueries({ queryKey: detailKey });
     },
   });
+  const noteSaveFailed = noteMutation.isError;
 
   /*
    * Both answers must say yes, and this is why:
@@ -180,7 +183,8 @@ function Customer360Screen() {
   }
 
   const { customer, events, activeConversationId } = query.data!;
-  const notes = [...newNotes, ...query.data!.notes];
+  const serverNoteIds = new Set(query.data!.notes.map((n) => n.id));
+  const notes = [...newNotes.filter((n) => !serverNoteIds.has(n.id)), ...query.data!.notes];
   const displayName = localName(customer, language);
 
   /*
@@ -425,6 +429,11 @@ function Customer360Screen() {
               >
                 {noteMutation.isPending ? t("common.loading") : t("customer360.saveNote")}
               </Button>
+              {noteSaveFailed ? (
+                <p role="alert" className="text-body-sm text-status-danger-text">
+                  {t("customer360.saveNoteError")}
+                </p>
+              ) : null}
             </div>
 
             {notes.length === 0 ? (

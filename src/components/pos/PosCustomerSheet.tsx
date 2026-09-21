@@ -41,6 +41,7 @@ export function PosCustomerSheet({
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   /*
    * The CURRENT grant decides this search, in all three places it can matter.
@@ -141,12 +142,22 @@ export function PosCustomerSheet({
   async function quickCreate() {
     if (!name.trim() || !phone.trim()) return;
     setSaving(true);
-    const customer = await createQuickCustomer({ name: name.trim(), phone: phone.trim() });
-    setSaving(false);
-    setCreating(false);
-    setName("");
-    setPhone("");
-    onSelect(customer);
+    setSaveError(null);
+    try {
+      const customer = await createQuickCustomer({ name: name.trim(), phone: phone.trim() });
+      setCreating(false);
+      setName("");
+      setPhone("");
+      onSelect(customer);
+    } catch {
+      // The customer was NOT created — say so, and leave the form filled in
+      // so the cashier can retry without retyping. Letting this throw
+      // uncaught left `saving` stuck true forever with no way to tell the
+      // tap even registered.
+      setSaveError(t("pos.customer.saveError"));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -182,11 +193,19 @@ export function PosCustomerSheet({
               onChange={(e) => setPhone(e.target.value)}
             />
           </div>
+          {saveError ? (
+            <p role="alert" className="text-body-sm text-status-danger-text">
+              {saveError}
+            </p>
+          ) : null}
           <div className="flex gap-2">
             <Button
               variant="outline"
               className="tap-target flex-1"
-              onClick={() => setCreating(false)}
+              onClick={() => {
+                setCreating(false);
+                setSaveError(null);
+              }}
             >
               {t("common.cancel")}
             </Button>
@@ -195,7 +214,7 @@ export function PosCustomerSheet({
               disabled={saving || !name.trim() || !phone.trim()}
               onClick={() => void quickCreate()}
             >
-              {t("pos.customer.save")}
+              {saving ? t("pos.customer.saving") : t("pos.customer.save")}
             </Button>
           </div>
         </div>

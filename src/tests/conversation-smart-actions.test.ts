@@ -38,11 +38,13 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   buildSmartActionSuggestion,
+  filterUnsendableSmartActions,
   resolvedProductOf,
   toPrepareOrderItems,
   toRepeatOrderItems,
   SMART_ACTION_IDS,
   type SmartActionId,
+  type SmartActionSuggestion,
 } from "../lib/conversation/smart-actions";
 import { products as mockProducts } from "../lib/mock/products";
 import type { Product } from "../types";
@@ -671,5 +673,61 @@ describe("Test 21: regressions", () => {
     const source = readSource("src/components/inbox/PrepareOrderSheet.tsx");
     expect(source).not.toMatch(/from ["']@\/server\//);
     expect(source).not.toMatch(/from ["']@\/lib\/supabase\/server["']/);
+  });
+});
+
+describe("Test 22: reply-only Smart Actions never survive on a channel that cannot send yet", () => {
+  // Regression: the composer disables its own submit for a production
+  // conversation (isProductionId(id)) — outbound sending is not wired up for
+  // any provider channel yet. Before this filter, check_stock/send_price/
+  // delivery_info/ask_quantity/ask_variant/ask_address were still offered:
+  // tapping one filled the composer with text the merchant then had no way
+  // to send, with nothing about the chip itself signalling that.
+  const REPLY_ONLY: SmartActionId[] = [
+    "check_stock",
+    "send_price",
+    "delivery_info",
+    "ask_quantity",
+    "ask_variant",
+    "ask_address",
+  ];
+
+  it("drops every reply-only action when sending is unavailable", () => {
+    const suggestion = buildSmartActionSuggestion({
+      messages: [
+        { body: "black size M mean ot? tlai ponman? delivery ponman?", direction: "inbound" },
+      ],
+      hasCustomer: true,
+      products: catalog,
+    });
+    // Sanity: this message actually produces at least one reply-only action —
+    // otherwise the assertion below would pass vacuously.
+    const before = [...(suggestion.primary ? [suggestion.primary] : []), ...suggestion.secondary];
+    expect(before.some((a) => REPLY_ONLY.includes(a))).toBe(true);
+
+    const filtered = filterUnsendableSmartActions(suggestion, false);
+    const after = [...(filtered.primary ? [filtered.primary] : []), ...filtered.secondary];
+    for (const action of after) expect(REPLY_ONLY).not.toContain(action);
+  });
+
+  it("leaves the suggestion untouched when sending IS available (mock/local conversations)", () => {
+    const suggestion = buildSmartActionSuggestion({
+      messages: [{ body: "black size M mean ot?", direction: "inbound" }],
+      hasCustomer: true,
+      products: catalog,
+    });
+    expect(filterUnsendableSmartActions(suggestion, true)).toEqual(suggestion);
+  });
+
+  it("order/customer actions are unaffected and a dropped primary promotes a survivor", () => {
+    const base = buildSmartActionSuggestion({ messages: [], hasCustomer: true, products: catalog });
+    const suggestion: SmartActionSuggestion = {
+      ...base,
+      primary: "check_stock",
+      secondary: ["view_customer", "send_price"],
+    };
+    const filtered = filterUnsendableSmartActions(suggestion, false);
+    expect(filtered.primary).toBe("view_customer");
+    expect(filtered.secondary).toEqual([]);
   });
 });

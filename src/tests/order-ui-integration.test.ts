@@ -345,10 +345,19 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
 });
 
 describe("Create flow guardrails", () => {
-  it("a product with no resolved variantId cannot be submitted (disabled in the picker, guarded in submit)", () => {
+  it("a product with no sellable variant at all cannot even be picked", () => {
     const sheet = readSource(CREATE_SHEET);
-    expect(sheet).toMatch(/disabled=\{!item\.variantId\}/);
-    expect(sheet).toMatch(/if \(!product\?\.variantId\) return;/);
+    expect(sheet).toMatch(
+      /disabled=\{!item\.variantId && \(item\.productionVariants\?\.length \?\? 0\) === 0\}/,
+    );
+  });
+
+  it("submit is guarded on the CHOSEN variant, never on product.variantId", () => {
+    const sheet = readSource(CREATE_SHEET);
+    expect(sheet).toMatch(/if \(!product \|\| !variantId\) return;/);
+    // The first-ACTIVE-variant guess must not reach the submit path — see
+    // src/tests/create-real-order-variant.test.ts for the full rule.
+    expect(sheet).not.toMatch(/variantId: product\.variantId/);
   });
 
   it("a forbidden discount attempt surfaces the permission-specific copy, not the generic one", () => {
@@ -357,5 +366,21 @@ describe("Create flow guardrails", () => {
       /classifyOrderError\(error\) === "forbidden"\s*\?\s*"permission"\s*:\s*"generic"/,
     );
     expect(sheet).toMatch(/orderCreate\.permission\.title/);
+  });
+
+  it("uses a ref-based guard checked synchronously before any await, so a double tap cannot create two orders", () => {
+    // Mirrors PosCheckoutSheet.completeReal()'s guard (see
+    // pos-order-integration.test.ts's "Duplicate-submission protection" —
+    // `submitting` state alone does not block a second tap fired before
+    // React re-renders the disabled button).
+    const sheet = readSource(CREATE_SHEET);
+    expect(sheet).toMatch(/submittingRef\s*=\s*useRef\(false\)/);
+    const fn = sheet.slice(sheet.indexOf("async function submit("), sheet.indexOf("\n  return ("));
+    const guardIndex = fn.indexOf("if (submittingRef.current) return;");
+    const firstAwaitIndex = fn.indexOf("await ");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(firstAwaitIndex);
+    expect(fn).toMatch(/submittingRef\.current\s*=\s*true/);
+    expect(fn).toMatch(/submittingRef\.current\s*=\s*false/);
   });
 });

@@ -40,6 +40,8 @@ const signIn = read("src/routes/sign-in.tsx");
 const signUp = read("src/routes/sign-up.tsx");
 const verifyEmail = read("src/routes/verify-email.tsx");
 const accessDenied = read("src/routes/access-denied.tsx");
+const onboarding = read("src/routes/onboarding.tsx");
+const inviteToken = read("src/routes/invite.$token.tsx");
 const styles = read("src/styles.css");
 const bottomNav = read("src/design-system/BottomNav.tsx");
 
@@ -100,6 +102,8 @@ describe("the auth screens honour the APSA localization and mobile rules", () =>
     "sign-up.tsx": signUp,
     "verify-email.tsx": verifyEmail,
     "access-denied.tsx": accessDenied,
+    "onboarding.tsx": onboarding,
+    "invite.$token.tsx": inviteToken,
   };
 
   it("every auth screen frames itself with dvh, never vh", () => {
@@ -139,7 +143,7 @@ describe("the auth screens honour the APSA localization and mobile rules", () =>
   it("the primary auth controls clear the 44px touch target", () => {
     // The shadcn defaults are h-9 (36px), under the target the rest of APSA
     // holds itself to. Each interactive control opts back up explicitly.
-    for (const name of ["sign-in.tsx", "sign-up.tsx"] as const) {
+    for (const name of ["sign-in.tsx", "sign-up.tsx", "onboarding.tsx"] as const) {
       const source = screens[name];
       const inputs = source.match(/<Input\b/g) ?? [];
       const sized = source.match(/className="min-h-11"/g) ?? [];
@@ -155,6 +159,27 @@ describe("the auth screens honour the APSA localization and mobile rules", () =>
     for (const name of ["sign-in.tsx", "sign-up.tsx"] as const) {
       expect(screens[name]).toContain("aria-busy");
       expect(screens[name]).toContain("Spinner");
+    }
+  });
+});
+
+describe("a dead invite link is not a dead end", () => {
+  /*
+   * not_found/expired/already_used rendered an explanation with no control to
+   * press — no route to sign in, no route home. Unlike the sibling `error` and
+   * `unauthenticated` states on the same screen, a person landing here had to
+   * navigate away manually.
+   */
+  it("every terminal invite state offers a route back to sign in", () => {
+    for (const kind of ["not_found", "expired", "already_used"]) {
+      const marker = `preview.kind === "${kind}"`;
+      const start = inviteToken.indexOf(marker);
+      expect(start).toBeGreaterThan(-1);
+      const block = inviteToken.slice(start, inviteToken.indexOf("null;", start));
+      expect({ kind, hasSignInAction: block.includes('to="/sign-in"') }).toEqual({
+        kind,
+        hasSignInAction: true,
+      });
     }
   });
 });

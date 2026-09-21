@@ -671,3 +671,28 @@ describe("Test 13: listCustomers()/CustomerListItem — production rows map corr
     expect(call).not.toMatch(/phone|nameKm|nameEn/);
   });
 });
+
+describe("Customer 360 notes: no duplicate row, no silent save failure", () => {
+  const routePath = resolve(import.meta.dir, "../routes/app.customers.$id.tsx");
+  const src = readFileSync(routePath, "utf-8");
+
+  // Regression: onSuccess prepended the new note into local `newNotes` AND
+  // invalidated the detail query, whose refetch brings back that SAME note
+  // (addCustomerNote returns the DB row's own id). `notes` used to be a bare
+  // concat of the two arrays, so the note rendered twice — same id, same
+  // React key — once the refetch resolved.
+  it("the combined notes list dedupes newNotes against the server's own notes by id", () => {
+    const notesLine = src.slice(src.indexOf("const notes ="), src.indexOf("const displayName"));
+    expect(notesLine).toMatch(/serverNoteIds\.has\(n\.id\)/);
+    expect(src).toMatch(/new Set\(query\.data!\.notes\.map/);
+  });
+
+  // Regression: noteMutation had no onError and no error state at all — a
+  // failed save just let `saving` revert with zero indication anything went
+  // wrong, unlike every other mutation flow in this codebase.
+  it("a failed note save is shown inline, not swallowed", () => {
+    expect(src).toMatch(/noteSaveFailed/);
+    expect(src).toMatch(/noteMutation\.isError/);
+    expect(src).toMatch(/customer360\.saveNoteError/);
+  });
+});
