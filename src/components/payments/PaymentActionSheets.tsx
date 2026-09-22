@@ -90,6 +90,7 @@ export function PaymentVerifySheet({
         className="tap-target mt-5 h-12 w-full"
         variant={target === "mismatch" ? "destructive" : "default"}
         disabled={pending}
+        aria-busy={pending}
         onClick={() => onConfirm(trimmed.length > 0 ? trimmed : undefined)}
       >
         {pending ? t("payments.actions.working") : t(`payments.actions.verify.${target}.submit`)}
@@ -166,6 +167,7 @@ export function PaymentRefundSheet({
             className="tap-target h-12 w-full"
             variant="destructive"
             disabled={pending || !amountValid || trimmedReason.length === 0}
+            aria-busy={pending}
             onClick={() => {
               if (parsed === null) return;
               onConfirm(parsed, trimmedReason);
@@ -280,6 +282,7 @@ export function PaymentReverseSheet({
         className="tap-target mt-5 h-12 w-full"
         variant="destructive"
         disabled={pending || trimmed.length === 0}
+        aria-busy={pending}
         onClick={() => onConfirm(trimmed)}
       >
         {pending ? t("payments.actions.working") : t("payments.actions.reverse.submit")}
