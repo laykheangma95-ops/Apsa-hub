@@ -672,7 +672,14 @@ function ConversationScreen() {
           <ActionRow
             icon={MessageSquareQuote}
             label={t("conversation.savedReplies")}
-            description={t("conversation.actions.savedRepliesBody")}
+            description={
+              !canReply
+                ? t("capability.actionDenied")
+                : isProductionId(id)
+                  ? t("conversation.providerPending")
+                  : t("conversation.actions.savedRepliesBody")
+            }
+            disabled={!canReply || isProductionId(id)}
             onClick={() => {
               setActionsOpen(false);
               setSavedOpen(true);

@@ -37,6 +37,10 @@ export function SmartActionStrip({ suggestion, onAction }: SmartActionStripProps
           <Chip
             key={action}
             selected={index === 0}
+            // Emphasis only — every chip here fires a COMMAND, none of them
+            // stay "pressed". `null` omits aria-pressed entirely; `false`
+            // would still assert a (non-existent) toggle state.
+            ariaPressed={null}
             onClick={() => onAction(action)}
             ariaLabel={t(`conversation.intent.actions.${action}`)}
           >

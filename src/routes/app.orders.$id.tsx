@@ -540,6 +540,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         ) : null}
 
         {/*
+         * Rendered here, not after every section: confirm/cancel is triggered
+         * from the sticky action bar at the very bottom of the screen, so a
+         * failure needs to be visible without the merchant scrolling back up
+         * past Items/Customer/Payment/Delivery/History to find out it failed.
+         */}
+        {mutationErrorBanner}
+
+        {/*
          * One hero, one dominant reading: the money, then the lifecycle state
          * the merchant is asked about, then payment and fulfilment demoted to
          * supporting chips.
@@ -792,8 +800,6 @@ function RealOrderDetailScreen({ id }: { id: string }) {
             <Timeline items={historyItems} />
           )}
         </Section>
-
-        {mutationErrorBanner}
       </div>
 
       {hasActions ? (

@@ -263,6 +263,7 @@ function ProductListScreen() {
               {canManageCategories ? (
                 <Chip
                   onClick={() => setCategoriesOpen(true)}
+                  ariaPressed={null}
                   icon={<FolderTree className="size-4" aria-hidden />}
                 >
                   {t("catalog.list.manageCategories")}

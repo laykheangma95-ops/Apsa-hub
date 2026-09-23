@@ -597,6 +597,7 @@ function PaymentDetailScreen() {
                   icon={RotateCcw}
                   label={t("payments.actions.refund.label")}
                   description={t("payments.actions.refund.rowBody")}
+                  tone="danger"
                   disabled={pending}
                   onClick={() => {
                     setActionError(null);
@@ -610,6 +611,7 @@ function PaymentDetailScreen() {
                   icon={Undo2}
                   label={t("payments.actions.reverse.label")}
                   description={t("payments.actions.reverse.rowBody")}
+                  tone="danger"
                   disabled={pending}
                   onClick={() => {
                     setActionError(null);

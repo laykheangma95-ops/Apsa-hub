@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { BottomSheet, StatusChip } from "@/design-system";
+import { cn } from "@/lib/utils";
 import { OperationalState } from "@/components/common/OperationalState";
 import { INVITABLE_ROLES, RoleOption } from "@/components/team/RoleOption";
 import { useCapabilities } from "@/hooks/use-capabilities";
@@ -67,7 +68,7 @@ export function StaffDetailSheet({
   const canRemove = capabilities.can("team.remove");
   const [editingRole, setEditingRole] = useState(false);
   const [role, setRole] = useState<StaffRole>("sales");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -90,9 +91,9 @@ export function StaffDetailSheet({
       const updated = await changeStaffRole(member.id, role);
       onChanged(updated);
       setEditingRole(false);
-      setNotice(t("team.detail.roleUpdated"));
+      setNotice({ message: t("team.detail.roleUpdated"), tone: "success" });
     } catch (err) {
-      setNotice(teamActionErrorMessage(t, err));
+      setNotice({ message: teamActionErrorMessage(t, err), tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -106,7 +107,7 @@ export function StaffDetailSheet({
       onRemoved(member.id);
       onOpenChange(false);
     } catch (err) {
-      setNotice(teamActionErrorMessage(t, err));
+      setNotice({ message: teamActionErrorMessage(t, err), tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -118,9 +119,9 @@ export function StaffDetailSheet({
     try {
       const updated = await reactivateStaff(member.id);
       onChanged(updated);
-      setNotice(t("team.detail.reactivated"));
+      setNotice({ message: t("team.detail.reactivated"), tone: "success" });
     } catch (err) {
-      setNotice(teamActionErrorMessage(t, err));
+      setNotice({ message: teamActionErrorMessage(t, err), tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -133,14 +134,14 @@ export function StaffDetailSheet({
       if (kind === "resend") {
         const result = await resendInvite(member.id);
         setInviteLink(result.inviteLink ?? null);
-        setNotice(t("team.pending.resent"));
+        setNotice({ message: t("team.pending.resent"), tone: "success" });
       } else {
         await cancelInvite(member.id);
         onRemoved(member.id);
         onOpenChange(false);
       }
     } catch (err) {
-      setNotice(teamActionErrorMessage(t, err));
+      setNotice({ message: teamActionErrorMessage(t, err), tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -149,7 +150,7 @@ export function StaffDetailSheet({
   async function copyLink() {
     if (!inviteLink) return;
     const ok = await copyToClipboard(inviteLink);
-    if (ok) setNotice(t("team.pending.linkCopied"));
+    if (ok) setNotice({ message: t("team.pending.linkCopied"), tone: "success" });
   }
 
   return (
@@ -194,8 +195,14 @@ export function StaffDetailSheet({
           ) : null}
 
           {notice ? (
-            <p className="text-caption text-text-secondary" role="status">
-              {notice}
+            <p
+              className={cn(
+                "text-caption",
+                notice.tone === "error" ? "text-status-danger-text" : "text-text-secondary",
+              )}
+              role={notice.tone === "error" ? "alert" : "status"}
+            >
+              {notice.message}
             </p>
           ) : null}
 

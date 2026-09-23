@@ -1,9 +1,26 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { resolveChipAriaProps } from "@/design-system/chip-aria";
 
 interface ChipProps {
   children: ReactNode;
   selected?: boolean;
+  /**
+   * Overrides the aria-pressed/aria-selected state `selected` would otherwise
+   * set.
+   *
+   * - omitted (`undefined`): falls back to `selected` — the normal toggle
+   *   chip (filters, variants, categories), whose visual "selected" state IS
+   *   its pressed/selected semantics.
+   * - `null`: omits aria-pressed/aria-selected entirely. Use when `selected`
+   *   styles pure visual emphasis (e.g. "this is the primary suggestion")
+   *   rather than an actual toggled state — a command chip that fires an
+   *   action and never stays "pressed" must not carry aria-pressed at all,
+   *   and `ariaPressed={false}` still asserts one.
+   * - `boolean`: an explicit forced value, for the rare case neither of the
+   *   above fits.
+   */
+  ariaPressed?: boolean | null;
   disabled?: boolean;
   onClick?: () => void;
   count?: number | undefined;
@@ -20,6 +37,7 @@ interface ChipProps {
 export function Chip({
   children,
   selected = false,
+  ariaPressed,
   disabled = false,
   onClick,
   count,
@@ -28,8 +46,7 @@ export function Chip({
   ariaLabel,
   className,
 }: ChipProps) {
-  const selectionProps =
-    role === "tab" ? { "aria-selected": selected } : { "aria-pressed": selected };
+  const selectionProps = resolveChipAriaProps(role, ariaPressed, selected);
 
   return (
     <button
@@ -40,7 +57,7 @@ export function Chip({
       aria-label={ariaLabel}
       {...selectionProps}
       className={cn(
-        "text-label inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3.5 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
+        "tap-target text-label inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]",
         selected
           ? "border-action-primary-border bg-action-primary-soft text-status-info-text"
           : "border-border-default bg-surface-primary text-text-secondary hover:bg-surface-secondary",

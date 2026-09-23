@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { BottomSheet, QuantityStepper } from "@/design-system";
@@ -58,6 +59,25 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
       onOpenChange={onOpenChange}
       title={product ? localName(product, language) : undefined}
       snap="half"
+      // Pinned rather than the last thing in the scrollable body — same fix
+      // as CreateRealOrderSheet/PrepareOrderSheet: a production variant list
+      // plus quantity stepper is enough to push an inline "Add to cart" off a
+      // 320/360px screen.
+      footer={
+        product ? (
+          <Button
+            className="tap-target w-full"
+            disabled={hasProductionVariants && !selectedVariant}
+            onClick={() =>
+              hasProductionVariants && selectedVariant
+                ? onAdd(product, selectedVariant.name, quantity, selectedVariant.variantId)
+                : onAdd(product, variantLabel(selection), quantity, product.variantId)
+            }
+          >
+            {t("pos.addToCart")}
+          </Button>
+        ) : undefined
+      }
     >
       {product ? (
         <div className="space-y-5">
@@ -81,14 +101,17 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
                         aria-pressed={selected}
                         onClick={() => setSelectedVariantId(v.variantId)}
                         className={cn(
-                          "tap-target flex w-full items-center justify-between rounded-xl border px-4 py-2.5 text-left transition-colors",
+                          "tap-target flex w-full items-center gap-2 rounded-xl border px-4 py-2.5 text-left transition-colors",
                           selected
                             ? "border-action-primary bg-action-primary-soft text-action-primary"
                             : "border-border-strong bg-surface-primary text-text-primary",
                         )}
                       >
-                        <span className="min-w-0 flex-1 truncate text-label">{v.name}</span>
+                        <span className="chip-text min-w-0 flex-1 text-label">{v.name}</span>
                         <span className="text-financial shrink-0">{formatMoney(v.price)}</span>
+                        {selected ? (
+                          <Check className="size-4 shrink-0 text-action-primary" aria-hidden />
+                        ) : null}
                       </button>
                     </li>
                   );
@@ -109,13 +132,14 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
                         aria-pressed={selected}
                         onClick={() => setSelection((s) => ({ ...s, [option.name]: value }))}
                         className={cn(
-                          "tap-target rounded-full border px-4 text-label transition-colors",
+                          "tap-target inline-flex items-center gap-1.5 rounded-full border px-4 text-label transition-colors",
                           selected
                             ? "border-action-primary bg-action-primary text-text-on-action"
                             : "border-border-strong bg-surface-primary text-text-primary",
                         )}
                       >
                         <span className="chip-text">{value}</span>
+                        {selected ? <Check className="size-3.5 shrink-0" aria-hidden /> : null}
                       </button>
                     );
                   })}
@@ -132,18 +156,6 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
               max={Math.max(1, availableStock(product))}
             />
           </div>
-
-          <Button
-            className="tap-target w-full"
-            disabled={hasProductionVariants && !selectedVariant}
-            onClick={() =>
-              hasProductionVariants && selectedVariant
-                ? onAdd(product, selectedVariant.name, quantity, selectedVariant.variantId)
-                : onAdd(product, variantLabel(selection), quantity, product.variantId)
-            }
-          >
-            {t("pos.addToCart")}
-          </Button>
         </div>
       ) : null}
     </BottomSheet>

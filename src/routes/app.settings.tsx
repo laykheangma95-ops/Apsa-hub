@@ -104,6 +104,7 @@ function BusinessProfileRow() {
         description={secondary}
         descriptionClassName="truncate"
         disabled={view.kind === "loading"}
+        trailing={view.kind === "loading" ? <Spinner className="size-4" /> : undefined}
         onClick={() => setDetailOpen(true)}
       />
 
@@ -205,6 +206,7 @@ function AccountProfileRow() {
         description={secondary}
         descriptionClassName="truncate"
         disabled={query.isLoading}
+        trailing={query.isLoading ? <Spinner className="size-4" /> : undefined}
         onClick={() => setOpen(true)}
       />
 

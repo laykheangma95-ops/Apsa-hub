@@ -25,10 +25,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
+import { Spinner } from "@/design-system";
+import i18n from "@/lib/i18n";
 
 export const Route = createFileRoute("/invite/$token")({
   head: () => ({
-    meta: [{ title: "Team invite - APSA" }],
+    meta: [{ title: i18n.t("inviteAccept.head.title") }],
   }),
   component: InviteAcceptPage,
 });
@@ -156,7 +158,11 @@ function InviteAcceptPage() {
         </h1>
 
         {preview.kind === "loading" ? (
-          <p className="text-center text-sm text-muted-foreground" role="status">
+          <p
+            className="flex items-center justify-center gap-2 text-center text-sm text-muted-foreground"
+            role="status"
+          >
+            <Spinner className="size-4" />
             {t("inviteAccept.loading")}
           </p>
         ) : null}
@@ -276,8 +282,10 @@ function InviteAcceptPage() {
               <Button
                 className="h-12 w-full"
                 disabled={acceptState.kind === "accepting"}
+                aria-busy={acceptState.kind === "accepting"}
                 onClick={() => void accept()}
               >
+                {acceptState.kind === "accepting" ? <Spinner /> : null}
                 {acceptState.kind === "accepting"
                   ? t("inviteAccept.accepting")
                   : t("inviteAccept.accept")}

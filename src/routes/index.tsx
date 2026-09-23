@@ -694,26 +694,31 @@ function Landing() {
           <FooterColumn
             title={t("landing.footer.product")}
             items={[
-              t("landing.footer.inbox"),
-              t("landing.footer.orders"),
-              t("landing.footer.pos"),
-              t("landing.footer.delivery"),
+              { label: t("landing.footer.inbox"), to: "/app/inbox" },
+              { label: t("landing.footer.orders"), to: "/app/orders" },
+              { label: t("landing.footer.pos"), to: "/app/pos" },
+              { label: t("landing.footer.delivery"), to: "/app/deliveries" },
             ]}
           />
+          {/*
+           * Company/Support have no destination page in this app yet — the
+           * honest answer is plain text, not a link to nowhere or an invented
+           * page. See FooterColumn's own comment.
+           */}
           <FooterColumn
             title={t("landing.footer.company")}
             items={[
-              t("landing.footer.about"),
-              t("landing.footer.careers"),
-              t("landing.footer.contact"),
+              { label: t("landing.footer.about") },
+              { label: t("landing.footer.careers") },
+              { label: t("landing.footer.contact") },
             ]}
           />
           <FooterColumn
             title={t("landing.footer.support")}
             items={[
-              t("landing.footer.help"),
-              t("landing.footer.privacy"),
-              t("landing.footer.terms"),
+              { label: t("landing.footer.help") },
+              { label: t("landing.footer.privacy") },
+              { label: t("landing.footer.terms") },
             ]}
           />
         </div>
@@ -725,14 +730,30 @@ function Landing() {
   );
 }
 
-function FooterColumn({ title, items }: { title: string; items: string[] }) {
+interface FooterLink {
+  label: string;
+  /** Omitted when this app has no destination for it yet — rendered as plain
+   * text, never a link with nowhere to go. */
+  to?: "/app/inbox" | "/app/orders" | "/app/pos" | "/app/deliveries";
+}
+
+function FooterColumn({ title, items }: { title: string; items: FooterLink[] }) {
   return (
     <div>
       <p className="text-label">{title}</p>
       <ul className="mt-2.5 space-y-2">
         {items.map((item) => (
-          <li key={item}>
-            <span className="text-body-sm text-text-secondary">{item}</span>
+          <li key={item.label}>
+            {item.to ? (
+              <Link
+                to={item.to}
+                className="text-body-sm text-text-secondary underline-offset-2 hover:text-text-primary hover:underline"
+              >
+                {item.label}
+              </Link>
+            ) : (
+              <span className="text-body-sm text-text-secondary">{item.label}</span>
+            )}
           </li>
         ))}
       </ul>

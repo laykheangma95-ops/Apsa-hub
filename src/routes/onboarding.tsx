@@ -19,13 +19,13 @@ import { createOrganizationFn, slugSchema } from "@/api/org";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Apsi } from "@/design-system";
-import { useTranslation } from "@/lib/i18n";
+import { Apsi, Spinner } from "@/design-system";
+import i18n, { useTranslation } from "@/lib/i18n";
 import { slugify } from "@/lib/slug";
 
 export const Route = createFileRoute("/onboarding")({
   head: () => ({
-    meta: [{ title: "Create your business - APSA" }],
+    meta: [{ title: i18n.t("onboarding.head.title") }],
   }),
 
   // Server-side guard. Never move this into an effect: that would flash the
@@ -174,7 +174,11 @@ function OnboardingPage() {
               }
             />
             {fieldErrors.name ? (
-              <p id="organization-name-error" role="alert" className="text-sm text-destructive">
+              <p
+                id="organization-name-error"
+                role="alert"
+                className="text-sm text-status-danger-text"
+              >
                 {fieldErrors.name}
               </p>
             ) : (
@@ -204,7 +208,11 @@ function OnboardingPage() {
               }
             />
             {fieldErrors.slug ? (
-              <p id="organization-slug-error" role="alert" className="text-sm text-destructive">
+              <p
+                id="organization-slug-error"
+                role="alert"
+                className="text-sm text-status-danger-text"
+              >
                 {fieldErrors.slug}
               </p>
             ) : (
@@ -215,7 +223,7 @@ function OnboardingPage() {
           </div>
 
           {formError ? (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="text-sm text-status-danger-text">
               {formError}
             </p>
           ) : null}
@@ -226,6 +234,7 @@ function OnboardingPage() {
             disabled={submitting}
             aria-busy={submitting}
           >
+            {submitting ? <Spinner /> : null}
             {submitting ? t("onboarding.submitting") : t("onboarding.submit")}
           </Button>
         </form>

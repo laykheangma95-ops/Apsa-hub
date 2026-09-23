@@ -1,10 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getHomeSummary } from "@/lib/api";
 import { homeQueryKey } from "@/lib/home-query";
 import { attentionDestination, attentionNoticeKey } from "@/lib/home-attention";
+import { resolveHomeSummaryView } from "@/lib/home-summary-view";
 import { formatMoney } from "@/lib/money";
 import {
   AppHeader,
@@ -18,6 +19,7 @@ import {
   visibleQuickActions,
   ScreenBleed,
   SegmentedControl,
+  SkeletonBlock,
   type QuickActionId,
   type Segment,
 } from "@/design-system";
@@ -150,12 +152,34 @@ function BusinessHome() {
     queryFn: () => getHomeSummary(range),
   });
 
-  const summary = homeQuery.data;
+  // The one place allowed to decide whether fetched data may be shown as the
+  // CURRENT range's numbers — see src/lib/home-summary-view.ts. Switching
+  // Today/Week/Month keys a new query; until it resolves, `data` must never
+  // be read as this range's truth just because a query object happens to
+  // hold something (a previous range's placeholder data, or an error next to
+  // stale numbers).
+  const view = resolveHomeSummaryView({
+    range,
+    data: homeQuery.data,
+    isError: homeQuery.isError,
+  });
+  const summary = view.kind === "ready" ? view.summary : undefined;
   const attention = summary ? attentionItems(summary) : [];
   const metrics = summary ? metricItems(summary) : [];
   // An empty attention list is only reassuring when Home actually knows the
   // list is empty. Anything less says so rather than implying a settled zero.
   const noticeKey = summary ? attentionNoticeKey(summary, attention.length) : null;
+
+  // True only until Home has shown real data once in this mount. A later
+  // range switch or refetch failure keeps the shell — including the
+  // segmented control the merchant just tapped — mounted, and substitutes a
+  // smaller loading/error treatment in place of the numbers instead of
+  // blanking the whole screen. Derived during render, not an effect: it is a
+  // one-way flip read and written in the same pass, so it never schedules an
+  // extra render.
+  const everLoadedRef = useRef(false);
+  if (view.kind === "ready") everLoadedRef.current = true;
+  const isFirstLoad = view.kind === "loading" && !everLoadedRef.current;
 
   const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
     value,
@@ -214,6 +238,7 @@ function BusinessHome() {
   }
   const createActions: readonly CreateAction[] = (
     [
+      { key: "sendInvoice", to: null, available: true },
       { key: "newSale", to: "/app/pos", available: capabilities.can("orders.create") },
       { key: "newOrder", to: "/app/orders", available: capabilities.can("orders.read") },
       { key: "addProduct", to: "/app/products", available: capabilities.can("products.create") },
@@ -233,45 +258,48 @@ function BusinessHome() {
       </AppHeader>
 
       <main className="mx-auto max-w-[var(--screen-max)]">
-        {homeQuery.isPending ? <HomeSkeleton /> : null}
+        {isFirstLoad ? <HomeSkeleton /> : null}
 
-        {homeQuery.isError ? (
-          <ErrorState
-            showApsi
-            title={t("home.error.title")}
-            body={t("home.error.body")}
-            onRetry={() => void homeQuery.refetch()}
-          />
-        ) : null}
-
-        {summary ? (
+        {isFirstLoad ? null : (
           <div className="content-in stack-section screen-gutter pt-4">
             <section aria-labelledby="attention-heading">
               <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
                 {t("home.attention")}
               </h2>
-              {attention.length > 0 ? (
-                <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
-                  {attention.map((item) => {
-                    /*
-                     * A row is a link only when something owns that work AND
-                     * this member may enter the screen that does. capabilities
-                     * .can is fail-closed, so an unresolved snapshot renders a
-                     * plain card rather than a link into a refusal.
-                     */
-                    const to = attentionDestination(item.id, (key) => capabilities.can(key));
-                    return (
-                      <AttentionCard
-                        key={item.id}
-                        item={item}
-                        onClick={to ? () => void navigate({ to }) : undefined}
-                      />
-                    );
-                  })}
+              {summary ? (
+                <>
+                  {attention.length > 0 ? (
+                    <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
+                      {attention.map((item) => {
+                        /*
+                         * A row is a link only when something owns that work AND
+                         * this member may enter the screen that does. capabilities
+                         * .can is fail-closed, so an unresolved snapshot renders a
+                         * plain card rather than a link into a refusal.
+                         */
+                        const to = attentionDestination(item.id, (key) => capabilities.can(key));
+                        return (
+                          <AttentionCard
+                            key={item.id}
+                            item={item}
+                            onClick={to ? () => void navigate({ to }) : undefined}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {noticeKey ? (
+                    <p className="mt-2 px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
+                  ) : null}
+                </>
+              ) : view.kind === "loading" ? (
+                // Range switch in flight, or a same-range background refetch
+                // with nothing cached for this range yet. Never the previous
+                // range's cards — see resolveHomeSummaryView.
+                <div className="mt-2 grid gap-2 sm:grid-cols-2" aria-hidden="true">
+                  <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
+                  <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
                 </div>
-              ) : null}
-              {noticeKey ? (
-                <p className="mt-2 px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
               ) : null}
             </section>
 
@@ -280,6 +308,11 @@ function BusinessHome() {
                 {t("home.overview")}
               </h2>
 
+              {/*
+               * Always mounted and always reflecting `range` immediately on
+               * tap, whatever the fetch for that range is doing — the control
+               * the merchant just used must never disappear mid-interaction.
+               */}
               <SegmentedControl
                 segments={rangeSegments}
                 value={range}
@@ -287,61 +320,85 @@ function BusinessHome() {
                 label={t("home.overview")}
               />
 
-              {summary.finance.status === "available" ? (
-                <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-                  <p className="text-label text-text-secondary">{t("home.revenue")}</p>
-                  <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    {summary.finance.data.netCollectedForCreatedOrders.length > 0 ? (
-                      summary.finance.data.netCollectedForCreatedOrders.map((amount) => (
-                        <p
-                          key={amount.currency}
-                          className="text-financial-lg min-w-0 text-text-primary"
-                        >
-                          {formatMoney(amount)}
-                        </p>
-                      ))
-                    ) : (
-                      <p className="text-body-sm text-text-secondary">{t("home.noSettledSales")}</p>
-                    )}
-                  </div>
-                </section>
-              ) : (
-                <p className="px-1 text-body-sm text-text-secondary">
-                  {t(
-                    summary.finance.status === "permission_denied"
-                      ? "home.financialsUnavailable"
-                      : "home.financialsError",
-                  )}
-                </p>
-              )}
-
-              {metrics.length > 0 ? (
-                <div className="list-enter grid grid-cols-2 gap-2">
-                  {metrics.map((metric) => (
-                    <MetricTile
-                      key={metric.id}
-                      label={t(`home.metrics.${metric.id}`)}
-                      value={metric.value}
-                      deltaPercent={metric.deltaPercent}
-                      series={metric.series}
-                    />
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="space-y-1 px-1" aria-live="polite">
-                {(["orders", "payments", "inventory", "delivery"] as const).map((domain) => {
-                  const status = summary[domain].status;
-                  if (status === "available") return null;
-                  return (
-                    <p key={domain} className="text-caption text-text-secondary">
-                      {t(`home.sectionState.${status}`, {
-                        domain: t(`home.domains.${domain}`),
-                      })}
+              {summary ? (
+                <>
+                  {summary.finance.status === "available" ? (
+                    <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
+                      <p className="text-label text-text-secondary">{t("home.revenue")}</p>
+                      <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                        {summary.finance.data.netCollectedForCreatedOrders.length > 0 ? (
+                          summary.finance.data.netCollectedForCreatedOrders.map((amount) => (
+                            <p
+                              key={amount.currency}
+                              className="text-financial-lg min-w-0 text-text-primary"
+                            >
+                              {formatMoney(amount)}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-body-sm text-text-secondary">
+                            {t("home.noSettledSales")}
+                          </p>
+                        )}
+                      </div>
+                    </section>
+                  ) : (
+                    <p className="px-1 text-body-sm text-text-secondary">
+                      {t(
+                        summary.finance.status === "permission_denied"
+                          ? "home.financialsUnavailable"
+                          : "home.financialsError",
+                      )}
                     </p>
-                  );
-                })}
-              </div>
+                  )}
+
+                  {metrics.length > 0 ? (
+                    <div className="list-enter grid grid-cols-2 gap-2">
+                      {metrics.map((metric) => (
+                        <MetricTile
+                          key={metric.id}
+                          label={t(`home.metrics.${metric.id}`)}
+                          value={metric.value}
+                          deltaPercent={metric.deltaPercent}
+                          series={metric.series}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="space-y-1 px-1" aria-live="polite">
+                    {(["orders", "payments", "inventory", "delivery"] as const).map((domain) => {
+                      const status = summary[domain].status;
+                      if (status === "available") return null;
+                      return (
+                        <p key={domain} className="text-caption text-text-secondary">
+                          {t(`home.sectionState.${status}`, {
+                            domain: t(`home.domains.${domain}`),
+                          })}
+                        </p>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : view.kind === "loading" ? (
+                <div aria-hidden="true">
+                  <SkeletonBlock className="h-[108px] w-full rounded-2xl" />
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {[0, 1, 2, 3].map((i) => (
+                      <SkeletonBlock key={i} className="h-[104px] rounded-2xl" />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                // A failed fetch for the currently selected range. Stale data
+                // for another range never lands here — resolveHomeSummaryView
+                // only returns "error" when there is nothing safe to show.
+                <ErrorState
+                  title={t("home.error.title")}
+                  body={t("home.error.body")}
+                  onRetry={() => void homeQuery.refetch()}
+                />
+              )}
             </section>
 
             {hasQuickActions ? (
@@ -353,7 +410,7 @@ function BusinessHome() {
               </section>
             ) : null}
           </div>
-        ) : null}
+        )}
       </main>
 
       <BottomNav workspace="business" onCreate={() => setCreateOpen(true)} />

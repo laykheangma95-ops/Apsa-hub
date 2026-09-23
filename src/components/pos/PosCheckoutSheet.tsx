@@ -321,6 +321,40 @@ export function PosCheckoutSheet({
         title={sale || realDetail ? undefined : t("pos.checkout")}
         snap="full"
         className="lg:max-w-[520px]"
+        // Pinned rather than the last thing in the scrollable body — the cash
+        // path's own CurrencyInput scrolls itself into view on focus
+        // (BottomSheet's keyboard-safe-field behaviour), which could otherwise
+        // push "Complete Sale" off a 320/360px screen with the keyboard open.
+        // Same fix as CreateRealOrderSheet/PrepareOrderSheet/PosVariantSheet.
+        footer={
+          !sale && !realDetail && checkoutKind !== "unsellable" ? (
+            isRealCheckout ? (
+              <Button
+                className="tap-target w-full"
+                disabled={submitting || offline || lines.length === 0}
+                aria-busy={submitting}
+                onClick={() => void completeReal()}
+              >
+                {submitting ? <Spinner /> : null}
+                {submitting ? t("pos.confirming") : t("pos.confirmSale")}
+              </Button>
+            ) : (
+              <Button
+                className="tap-target w-full"
+                disabled={submitting || offline || shortfall || lines.length === 0}
+                aria-busy={submitting}
+                onClick={() => void complete()}
+              >
+                {submitting ? <Spinner /> : null}
+                {submitting
+                  ? t("pos.confirming")
+                  : method === "khqr" || method === "bank_transfer"
+                    ? t("pos.markPaid")
+                    : t("pos.completeSale")}
+              </Button>
+            )
+          ) : undefined
+        }
       >
         {sale ? (
           <motion.div
@@ -383,19 +417,20 @@ export function PosCheckoutSheet({
               <Button className="tap-target w-full" onClick={() => handleOpenChange(false)}>
                 {t("pos.success.newSale")}
               </Button>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  className="tap-target flex-1"
-                  aria-expanded={showReceipt}
-                  onClick={() => setShowReceipt((v) => !v)}
-                >
-                  {t("pos.success.viewReceipt")}
-                </Button>
-                <Button variant="outline" className="tap-target flex-1" disabled>
-                  {t("pos.success.viewOrder")}
-                </Button>
-              </div>
+              {/*
+               * No "View order" here: this is the prototype createSale() path
+               * (see classifyCheckout) — it never produces a real order id, so
+               * there is nothing to view. A permanently-disabled button with no
+               * explanation reads as broken; omitting it is the honest answer.
+               */}
+              <Button
+                variant="outline"
+                className="tap-target w-full"
+                aria-expanded={showReceipt}
+                onClick={() => setShowReceipt((v) => !v)}
+              >
+                {t("pos.success.viewReceipt")}
+              </Button>
             </div>
           </motion.div>
         ) : realDetail ? (
@@ -601,16 +636,6 @@ export function PosCheckoutSheet({
                 onRetry={() => void completeReal()}
               />
             ) : null}
-
-            <Button
-              className="tap-target w-full"
-              disabled={submitting || offline || lines.length === 0}
-              aria-busy={submitting}
-              onClick={() => void completeReal()}
-            >
-              {submitting ? <Spinner /> : null}
-              {submitting ? t("pos.confirming") : t("pos.confirmSale")}
-            </Button>
           </div>
         ) : (
           <div className="space-y-5">
@@ -669,13 +694,14 @@ export function PosCheckoutSheet({
                     aria-pressed={method === value}
                     onClick={() => setMethod(value)}
                     className={cn(
-                      "press tap-target rounded-xl border px-3 text-label transition-colors",
+                      "press tap-target inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 text-label transition-colors",
                       method === value
                         ? "border-action-primary bg-action-primary-soft text-action-primary"
                         : "border-border-strong bg-surface-primary text-text-primary",
                     )}
                   >
                     <span className="chip-text">{t(`pos.method.${value}`)}</span>
+                    {method === value ? <Check className="size-3.5 shrink-0" aria-hidden /> : null}
                   </button>
                 ))}
               </div>
@@ -732,20 +758,6 @@ export function PosCheckoutSheet({
                 onRetry={() => void complete()}
               />
             ) : null}
-
-            <Button
-              className="tap-target w-full"
-              disabled={submitting || offline || shortfall || lines.length === 0}
-              aria-busy={submitting}
-              onClick={() => void complete()}
-            >
-              {submitting ? <Spinner /> : null}
-              {submitting
-                ? t("pos.confirming")
-                : method === "khqr" || method === "bank_transfer"
-                  ? t("pos.markPaid")
-                  : t("pos.completeSale")}
-            </Button>
           </div>
         )}
       </BottomSheet>

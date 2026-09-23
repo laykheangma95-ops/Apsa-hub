@@ -121,6 +121,25 @@ export function ReceiveStockSheet({
       description={variantLabel}
       snap="full"
       className="lg:max-w-[520px]"
+      // Pinned rather than the last thing in the scrollable body — same fix
+      // as AdjustStockSheet/CreateRealOrderSheet.
+      footer={
+        <div>
+          {formError ? (
+            <p className="text-caption mb-2 text-status-danger-text" role="alert">
+              {formError}
+            </p>
+          ) : null}
+          <Button
+            className="tap-target h-12 w-full"
+            disabled={saving || !quantityValid}
+            aria-busy={saving}
+            onClick={() => void submit()}
+          >
+            {saving ? t("inventory.saving") : t("receiveStock.confirm")}
+          </Button>
+        </div>
+      }
     >
       <div className="space-y-4">
         <ChipRow label={t("receiveStock.movementType")} className="mx-0 px-0">
@@ -180,20 +199,6 @@ export function ReceiveStockSheet({
             className="mx-0 px-0"
           />
         ) : null}
-
-        {formError ? (
-          <p className="text-caption text-status-danger-text" role="alert">
-            {formError}
-          </p>
-        ) : null}
-
-        <Button
-          className="tap-target h-12 w-full"
-          disabled={saving || !quantityValid}
-          onClick={() => void submit()}
-        >
-          {saving ? t("inventory.saving") : t("receiveStock.confirm")}
-        </Button>
       </div>
     </BottomSheet>
   );
