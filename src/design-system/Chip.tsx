@@ -1,20 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-
-/**
- * What `role` and `ariaPressed`/`selected` resolve to on the rendered
- * button — the actual accessibility decision, factored out so it is testable
- * without rendering. See `ariaPressed` on `ChipProps` for the three cases.
- */
-export function resolveChipAriaProps(
-  role: "tab" | undefined,
-  ariaPressed: boolean | null | undefined,
-  selected: boolean,
-): Record<string, boolean> {
-  const pressedState = ariaPressed === undefined ? selected : ariaPressed;
-  if (pressedState === null) return {};
-  return role === "tab" ? { "aria-selected": pressedState } : { "aria-pressed": pressedState };
-}
+import { resolveChipAriaProps } from "@/design-system/chip-aria";
 
 interface ChipProps {
   children: ReactNode;

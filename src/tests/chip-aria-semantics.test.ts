@@ -1,22 +1,23 @@
 /**
- * Chip aria-pressed/aria-selected semantics — regression coverage for the P2
- * finding that SmartActionStrip's command chips rendered `aria-pressed="false"`.
- * A Smart Action chip fires a one-shot COMMAND (send this reply, open this
- * sheet) — it never stays "pressed" — so per WAI-ARIA a command button must
- * carry no aria-pressed attribute at all, not an explicit "not pressed".
+ * Chip aria-pressed/aria-selected semantics — regression coverage for two P2
+ * findings where a command chip rendered `aria-pressed="false"`: SmartActionStrip's
+ * suggestion chips, and app.products.tsx's "Manage categories" chip. A command
+ * chip fires a one-shot action (send this reply, open this sheet) — it never
+ * stays "pressed" — so per WAI-ARIA a command button must carry no aria-pressed
+ * attribute at all, not an explicit "not pressed".
  *
- * `resolveChipAriaProps` (src/design-system/Chip.tsx) is the one place that
- * decides which aria attribute, if any, a chip renders. These tests drive it
- * directly, and also scan the two call sites so a regression — SmartActionStrip
- * going back to `ariaPressed={false}`, or a real toggle chip losing its
- * selected semantics — fails here without a render harness.
+ * `resolveChipAriaProps` (src/design-system/chip-aria.ts) is the one place
+ * that decides which aria attribute, if any, a chip renders. These tests drive
+ * it directly, and also scan the call sites so a regression — either command
+ * chip going back to a default/`ariaPressed={false}`, or a real toggle chip
+ * losing its selected semantics — fails here without a render harness.
  *
  * Run: bun test src/tests/chip-aria-semantics.test.ts
  */
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
-import { resolveChipAriaProps } from "@/design-system/Chip";
+import { resolveChipAriaProps } from "@/design-system/chip-aria";
 
 const ROOT = process.cwd();
 const readSource = (rel: string) => fs.readFileSync(path.resolve(ROOT, rel), "utf-8");
@@ -61,7 +62,6 @@ describe("legitimate Chip toggle/selection usage keeps working", () => {
     "src/routes/app.inbox.tsx",
     "src/routes/app.pos.tsx",
     "src/routes/app.deliveries.tsx",
-    "src/routes/app.products.tsx",
     "src/routes/app.products.$id.tsx",
     "src/routes/app.inventory.tsx",
     "src/routes/app.payments.tsx",
@@ -86,5 +86,28 @@ describe("legitimate Chip toggle/selection usage keeps working", () => {
   it("Chip itself still supports an explicit boolean ariaPressed for a real forced state", () => {
     const source = readSource("src/design-system/Chip.tsx");
     expect(source).toContain("ariaPressed?: boolean | null");
+  });
+});
+
+describe("app.products.tsx mixes real toggle chips with one command chip correctly", () => {
+  const FILE = "src/routes/app.products.tsx";
+
+  it("status and category filter chips still drive selected with no ariaPressed override", () => {
+    const source = readSource(FILE);
+    expect(source).toContain("selected={status === option}");
+    expect(source).toContain("selected={categoryId === category.id}");
+    expect(source).toContain("selected={categoryId === null}");
+  });
+
+  it("the 'Manage categories' chip is a command — it opens a sheet and never toggles — so it must carry ariaPressed={null} and no selected/pressed state at all", () => {
+    const source = readSource(FILE);
+    const manageChipMatch = source.match(
+      /<Chip\s+onClick={\(\) => setCategoriesOpen\(true\)}[\s\S]*?<\/Chip>/,
+    );
+    expect(manageChipMatch).not.toBeNull();
+    const manageChipSource = manageChipMatch![0];
+    expect(manageChipSource).toContain("ariaPressed={null}");
+    expect(manageChipSource).not.toContain("ariaPressed={false}");
+    expect(manageChipSource).not.toContain("selected=");
   });
 });
