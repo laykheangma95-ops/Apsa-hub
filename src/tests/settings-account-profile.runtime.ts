@@ -177,7 +177,12 @@ describe("settings account profile + sign-out audit runtime", () => {
     // Revocation and cookie-clearing must never be skipped because the
     // (later, best-effort) audit step failed.
     expect(signOutCalled).toBe(true);
-    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+    expect(deletedCookies.sort()).toEqual([
+      "sb-access-token",
+      "sb-recovery-access-token",
+      "sb-recovery-refresh-token",
+      "sb-refresh-token",
+    ]);
   });
 
   it("signOutFn calls client.auth.signOut() and clears cookies when the user has no active organization membership (onboarding-only account)", async () => {
@@ -228,7 +233,12 @@ describe("settings account profile + sign-out audit runtime", () => {
     const { signOutFn } = await import("@/api/auth");
     await expect(signOutFn()).resolves.toBeUndefined();
     expect(signOutCalled).toBe(true);
-    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+    expect(deletedCookies.sort()).toEqual([
+      "sb-access-token",
+      "sb-recovery-access-token",
+      "sb-recovery-refresh-token",
+      "sb-refresh-token",
+    ]);
   });
 
   it("signOutFn still calls client.auth.signOut() even when getUser() itself throws (user identification failure never blocks revocation)", async () => {
@@ -263,7 +273,12 @@ describe("settings account profile + sign-out audit runtime", () => {
     const { signOutFn } = await import("@/api/auth");
     await expect(signOutFn()).resolves.toBeUndefined();
     expect(signOutCalled).toBe(true);
-    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+    expect(deletedCookies.sort()).toEqual([
+      "sb-access-token",
+      "sb-recovery-access-token",
+      "sb-recovery-refresh-token",
+      "sb-refresh-token",
+    ]);
   });
 
   it("signOutFn does not hang indefinitely when the audit write never resolves (bounded timeout)", async () => {
@@ -312,7 +327,12 @@ describe("settings account profile + sign-out audit runtime", () => {
     const elapsedMs = Date.now() - start;
     // Cookies must already be cleared (steps 1-3 complete) well before the
     // bounded audit timeout elapses.
-    expect(deletedCookies.sort()).toEqual(["sb-access-token", "sb-refresh-token"]);
+    expect(deletedCookies.sort()).toEqual([
+      "sb-access-token",
+      "sb-recovery-access-token",
+      "sb-recovery-refresh-token",
+      "sb-refresh-token",
+    ]);
     // The audit step is capped — signOutFn must still resolve in a bounded
     // time, not hang forever on the never-resolving membership lookup.
     expect(elapsedMs).toBeLessThan(4000);

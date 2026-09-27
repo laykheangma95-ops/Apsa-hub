@@ -16,6 +16,7 @@
       "submitting": "Signing in",
       "noAccount": "New to APSA?",
       "createAccount": "Create an account",
+      "forgotPassword": "Forgot password?",
       "errors": {
         "invalidCredentials": "That email and password do not match. Please try again.",
         "generic": "We could not sign you in right now. Please try again."
@@ -38,6 +39,51 @@
       "errors": {
         "emailTaken": "That email is already registered. Try signing in instead.",
         "generic": "We could not create your account right now. Please try again."
+      }
+    },
+    "forgotPassword": {
+      "head": { "title": "Reset your password — APSA" },
+      "title": "Reset your password",
+      "subtitle": "Enter the email you use for APSA. We'll send you a link to choose a new password.",
+      "emailLabel": "Email",
+      "emailPlaceholder": "you@business.com",
+      "submit": "Send reset link",
+      "submitting": "Sending",
+      "resend": "Send the link again",
+      "resendIn": "Send again in {{seconds}}s",
+      "sentTitle": "Check your email",
+      "sentBody": "If an account exists for this email, we've sent password reset instructions. The link can take a minute to arrive — remember to look in your spam folder.",
+      "backToSignIn": "Back to sign in",
+      "errors": {
+        "invalidEmail": "Enter a valid email address.",
+        "unavailable": "We could not send the reset link right now. Check your connection and try again."
+      }
+    },
+    "resetPassword": {
+      "head": { "title": "Choose a new password — APSA" },
+      "checking": "Checking your reset link…",
+      "title": "Choose a new password",
+      "subtitle": "Use at least {{min}} characters. You'll sign in with this password from now on.",
+      "newPasswordLabel": "New password",
+      "confirmPasswordLabel": "Confirm new password",
+      "submit": "Save new password",
+      "submitting": "Saving",
+      "invalidTitle": "This reset link can't be used",
+      "invalidBody": "The link is invalid, has already been used, or has expired. Request a new link to reset your password.",
+      "unavailableTitle": "We couldn't check your reset link",
+      "unavailableBody": "Something went wrong on our side or your connection dropped. Request a new link and try again.",
+      "requestNewLink": "Request a new link",
+      "doneTitle": "Password updated",
+      "doneBody": "Your password has been changed and you've been signed out everywhere. Sign in with your new password.",
+      "doneBodyUnconfirmedSignOut": "Your password has been changed, but we couldn't confirm that your other devices were signed out — they may still be signed in. Sign in with your new password. If you think someone else had access, reset your password again.",
+      "goToSignIn": "Go to sign in",
+      "errors": {
+        "tooShort": "Your password must be at least {{min}} characters.",
+        "tooLong": "Your password is too long. Use 72 characters or fewer.",
+        "mismatch": "The two passwords don't match.",
+        "weak": "This password is too easy to guess. Choose a stronger one.",
+        "samePassword": "Your new password must be different from your old one.",
+        "generic": "We could not update your password right now. Please try again."
       }
     },
     "verifyEmail": {
@@ -1368,9 +1414,26 @@
     "verifying": "Verifying your email…",
     "success": "Email verified. Taking you to your account…",
     "missingParams": "This verification link is missing or incomplete. Please use the link from your email, or sign up again.",
-    "invalidToken": "This verification link is invalid or has expired. Please sign up again to get a new one.",
+    "invalidToken": "This verification link is invalid or has expired. Send yourself a new link below.",
     "unexpectedError": "We could not verify your email right now. Please try again.",
-    "backToSignUp": "Back to sign up"
+    "backToSignUp": "Back to sign up",
+    "checkInboxTitle": "Check your email",
+    "checkInboxBody": "We sent a confirmation link to your email address. Open it to activate your APSA account. Didn't get it? Send a new one below.",
+    "resend": {
+      "emailLabel": "Email",
+      "emailPlaceholder": "you@business.com",
+      "sendingTo": "We'll send the link to {{email}}.",
+      "submit": "Resend confirmation email",
+      "submitting": "Sending",
+      "cooldown": "Resend in {{seconds}}s",
+      "sent": "If this email is waiting for confirmation, a new link is on its way. It can take a minute to arrive.",
+      "alreadyVerified": "This email is already confirmed.",
+      "signIn": "Sign in",
+      "rateLimited": "Too many emails requested. Please wait a minute before trying again.",
+      "unavailable": "We could not send the email right now. Check the address and your connection, then try again.",
+      "emailRequired": "Enter the email you signed up with.",
+      "backToSignIn": "Back to sign in"
+    }
   },
   "inviteAccept": {
     "head": { "title": "Team invite — APSA" },

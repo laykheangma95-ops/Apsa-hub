@@ -100,7 +100,15 @@ function SignInPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="password">{t("auth.signIn.passwordLabel")}</Label>
+            <div className="flex flex-wrap items-center justify-between gap-x-3">
+              <Label htmlFor="password">{t("auth.signIn.passwordLabel")}</Label>
+              <Link
+                to="/forgot-password"
+                className="tap-target text-body-sm inline-flex items-center font-medium text-action-primary underline underline-offset-4"
+              >
+                {t("auth.signIn.forgotPassword")}
+              </Link>
+            </div>
             <Input
               id="password"
               type="password"

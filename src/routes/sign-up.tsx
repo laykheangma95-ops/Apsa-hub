@@ -64,7 +64,13 @@ function SignUpPage() {
         return;
       }
 
-      await navigate({ to: result.emailVerificationRequired ? "/verify-email" : "/onboarding" });
+      if (result.emailVerificationRequired) {
+        // The address is carried so /verify-email can offer a resend; it is
+        // the same shape the confirmation link itself uses.
+        await navigate({ to: "/verify-email", search: { email: email.trim() } });
+      } else {
+        await navigate({ to: "/onboarding" });
+      }
     } catch {
       setError(t("auth.signUp.errors.generic"));
     } finally {
