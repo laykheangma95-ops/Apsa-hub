@@ -54,6 +54,7 @@ import { conversationKeys } from "@/lib/inbox-query";
 import { catalogKeys } from "@/lib/catalog";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
+import { inventoryKeys } from "@/lib/inventory";
 import { initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -129,6 +130,10 @@ function ConversationScreen() {
       queryKey: ordersKeys.principal(userId, routeOrganizationId),
     });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    // Confirming (and cancel-to-edit) writes stock movements server-side.
+    void queryClient.invalidateQueries({
+      queryKey: inventoryKeys.principal(userId, routeOrganizationId),
+    });
   }
 
   const [operationError, setOperationError] = useState(false);

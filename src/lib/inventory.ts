@@ -145,6 +145,13 @@ export const MOVEMENT_PAGE_SIZE = 20;
 const MOVEMENTS_SEGMENT = "movements";
 
 export const inventoryKeys = {
+  /**
+   * Every inventory entry for one principal. Order confirm/cancel (Order
+   * detail, POS, Prepare Order) writes stock movements server-side, so those
+   * flows invalidate this — never another principal's entries.
+   */
+  principal: (userId: string, organizationId: string) =>
+    [INVENTORY_QUERY_ROOT, userId, organizationId] as const,
   stockList: (userId: string, organizationId: string) =>
     [INVENTORY_QUERY_ROOT, userId, organizationId, "stock-list"] as const,
   variantStock: (userId: string, organizationId: string, variantId: string) =>

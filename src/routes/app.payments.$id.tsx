@@ -70,6 +70,8 @@ import {
   reverseRealPayment,
   verifyRealPayment,
 } from "@/lib/api";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { ordersKeys } from "@/lib/orders-query";
 import { notifyError, notifySuccess } from "@/lib/feedback";
 import { fullTimestamp } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -181,11 +183,22 @@ function PaymentDetailScreen() {
   const [reverseOpen, setReverseOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  /** Every payments cache entry for THIS principal, and nothing else. */
+  /**
+   * Everything a verification, refund or reversal makes stale for THIS
+   * principal: every payments entry, the order this payment settles (its
+   * payment/refund status is derived from settlement), and Home — whose
+   * payment-review count and net-collected figure move with every one of
+   * these actions. Previously only the payments entries were refreshed, so
+   * Home kept showing a verified payment as review work.
+   */
   function invalidatePayments() {
     void queryClient.invalidateQueries({
       queryKey: ["payments", userId, routeOrganizationId],
     });
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.principal(userId, routeOrganizationId),
+    });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
   }
 
   function handleActionError(err: unknown) {

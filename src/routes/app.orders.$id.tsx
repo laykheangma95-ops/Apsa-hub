@@ -77,6 +77,7 @@ import {
 } from "@/lib/payments";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
+import { inventoryKeys } from "@/lib/inventory";
 import { fullTimestamp, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { addMoney, formatMoney, subtractMoney, usd } from "@/lib/money";
@@ -334,6 +335,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       queryKey: ordersKeys.list(userId, routeOrganizationId),
     });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    // Confirm and cancel write stock movements server-side.
+    void queryClient.invalidateQueries({
+      queryKey: inventoryKeys.principal(userId, routeOrganizationId),
+    });
   }
 
   const confirmMutation = useMutation({

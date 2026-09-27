@@ -50,6 +50,7 @@ import {
 } from "@/lib/deliveries";
 import { fullTimestamp, localName } from "@/lib/format";
 import { deliveryKeys } from "@/lib/deliveries-query";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
@@ -199,6 +200,9 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     void queryClient.invalidateQueries({
       queryKey: deliveryKeys.lists(userId, routeOrganizationId),
     });
+    // Home's delivery-attention count is derived from delivery status; a
+    // transition must not leave it showing work that is already done.
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
   }
 
   function onTransitionError(error: unknown) {

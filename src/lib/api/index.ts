@@ -27,6 +27,7 @@ import {
   type UiPaymentReconciliation,
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
+import { assertPrototypeFixturesAllowed, isDemoModeError } from "@/lib/api/prototype-gate";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
 import { products } from "@/lib/mock/products";
@@ -168,6 +169,7 @@ export async function getConversationCounts(): Promise<Record<string, number>> {
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
   if (!isProductionId(id)) {
+    assertPrototypeFixturesAllowed();
     // Non-UUID mock ID — use in-memory mock data. The server function UUID
     // validator is not weakened; mock IDs never reach it (see isProductionId's
     // own comment).
@@ -295,6 +297,7 @@ export async function getCustomers(
 
 export async function getCustomer(id: string): Promise<Customer> {
   if (!isProductionId(id)) {
+    assertPrototypeFixturesAllowed();
     // Non-UUID mock ID — use in-memory mock data; see isProductionId's own comment.
     const customer = customers.find((c) => c.id === id);
     if (!customer) throw new Error(`Customer ${id} not found`);
@@ -403,30 +406,6 @@ function mapServerProductToUi(p: ServerProductItem): Product {
   return mapped;
 }
 
-/**
- * Returns true ONLY for errors that are structurally impossible in production:
- *   - TanStack Start runtime not found: server function called outside the HTTP
- *     runtime (e.g. bun test, Storybook). This never occurs in production
- *     because the server function middleware is always active there.
- *
- * UnauthorizedError (no session) is NOT a demo-mode fallback: a real auth or
- * backend outage can produce it in production, so it must propagate as an error
- * rather than be silently hidden behind mock data.
- *
- * All other errors — DB failures, ForbiddenError, UnauthorizedError, 5xx — must
- * propagate so production failures are visible rather than silently hidden
- * behind mock data.
- */
-function isDemoModeError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  // TanStack Start server function called outside its runtime (test / Storybook).
-  // This is structurally impossible in production where the middleware is always active.
-  if (err.message.includes("No Start context") || err.message.includes("AsyncLocalStorage")) {
-    return true;
-  }
-  return false;
-}
-
 export async function getProducts(): Promise<Product[]> {
   try {
     const { listProductsFn } = await import("@/api/products");
@@ -440,6 +419,7 @@ export async function getProducts(): Promise<Product[]> {
 
 /** Recently sold products, shown first in the product picker. */
 export async function getRecentProducts(): Promise<Product[]> {
+  assertPrototypeFixturesAllowed();
   const recentIds = ["prd-3", "prd-2", "prd-1"];
   const ranked = [...products].sort(
     (a, b) =>
@@ -450,19 +430,23 @@ export async function getRecentProducts(): Promise<Product[]> {
 }
 
 export async function getCouriers(): Promise<Courier[]> {
+  assertPrototypeFixturesAllowed();
   return resolve(couriers);
 }
 
 export async function getShops(): Promise<Shop[]> {
+  assertPrototypeFixturesAllowed();
   return resolve(shops);
 }
 
 export async function getActiveShop(): Promise<Shop> {
+  assertPrototypeFixturesAllowed();
   const shop = shops.find((s) => s.id === activeShopId) ?? shops[0]!;
   return resolve(shop);
 }
 
 export async function getStaff(): Promise<Staff[]> {
+  assertPrototypeFixturesAllowed();
   return resolve(staff);
 }
 
@@ -503,6 +487,7 @@ export const PERMISSION_DENIED = "permission_denied";
  * which is precisely how this hole was opened the first time.
  */
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
+  assertPrototypeFixturesAllowed();
   const productionItem = input.items.find((item) => isProductionId(item.productId));
   if (productionItem) {
     throw new Error(
@@ -819,6 +804,7 @@ export interface CreateSaleInput {
  * so that it STAYS unreachable if that classification is ever weakened.
  */
 export async function createSale(input: CreateSaleInput): Promise<Sale> {
+  assertPrototypeFixturesAllowed();
   const productionItem = input.items.find((item) => isProductionId(item.productId));
   if (productionItem) {
     throw new Error(
@@ -860,6 +846,7 @@ export interface OrderDetail {
 }
 
 export async function getOrderDetail(id: string): Promise<OrderDetail> {
+  assertPrototypeFixturesAllowed();
   const order = orders.find((o) => o.id === id || o.code === id);
   if (!order) throw new Error(`Order ${id} not found`);
   if (order.restricted) {
@@ -878,6 +865,7 @@ export async function getOrderDetail(id: string): Promise<OrderDetail> {
 }
 
 export async function getOrders(): Promise<Order[]> {
+  assertPrototypeFixturesAllowed();
   return resolve([...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 }
 
@@ -1149,6 +1137,7 @@ export interface DeliveryDetail {
 }
 
 export async function getDeliveryDetail(id: string): Promise<DeliveryDetail> {
+  assertPrototypeFixturesAllowed();
   const delivery = deliveries.find((d) => d.id === id || d.trackingNumber === id);
   if (!delivery) throw new Error(`Delivery ${id} not found`);
   if (delivery.restricted) {
@@ -1172,6 +1161,7 @@ export interface Customer360 {
 
 export async function getCustomer360(id: string): Promise<Customer360> {
   if (!isProductionId(id)) {
+    assertPrototypeFixturesAllowed();
     // Non-UUID mock ID (e.g. "cus-1") — use in-memory mock data.
     // The server function UUID validator is not weakened; mock IDs never reach it.
     // This bridge exists until Inbox/Orders are productionized and emit real UUIDs.
@@ -1194,6 +1184,7 @@ export async function getCustomer360(id: string): Promise<Customer360> {
 
 export async function addCustomerNote(customerId: string, body: string): Promise<CustomerNote> {
   if (!isProductionId(customerId)) {
+    assertPrototypeFixturesAllowed();
     // Non-UUID mock ID — return an in-memory note; not persisted.
     return resolve(
       {
@@ -1220,6 +1211,7 @@ export interface RecordPaymentInput {
 
 /** Manual confirmation only — APSA never claims a provider verified the money. */
 export async function recordPayment(input: RecordPaymentInput): Promise<PaymentRecord> {
+  assertPrototypeFixturesAllowed();
   return resolve(
     {
       id: `pay-new-${Date.now()}`,
@@ -1242,6 +1234,7 @@ export interface ReturnInput {
 
 /** Return moves goods. It never moves money — refund is a separate decision. */
 export async function createReturn(input: ReturnInput): Promise<OrderEvent> {
+  assertPrototypeFixturesAllowed();
   return resolve(
     {
       id: `oe-new-${Date.now()}`,
@@ -1263,6 +1256,7 @@ export interface RefundInput {
 
 /** Refund moves money. It never assumes the goods came back. */
 export async function createRefund(input: RefundInput): Promise<PaymentRecord> {
+  assertPrototypeFixturesAllowed();
   if (input.amount.amount <= 0) throw new Error("invalid_amount");
   return resolve(
     {
@@ -1284,6 +1278,7 @@ export interface ArrangeDeliveryInput {
 
 /** Mock delivery request. No courier API is contacted. */
 export async function arrangeDelivery(input: ArrangeDeliveryInput): Promise<Delivery> {
+  assertPrototypeFixturesAllowed();
   const order = orders.find((o) => o.id === input.orderId);
   const courier = couriers.find((c) => c.id === input.courierId) ?? couriers[0]!;
   return resolve(
@@ -1310,6 +1305,7 @@ export async function applyDeliveryAction(
   deliveryId: string,
   action: DeliveryAction,
 ): Promise<DeliveryStatus> {
+  assertPrototypeFixturesAllowed();
   const next: DeliveryStatus =
     action === "mark_delivered"
       ? "delivered"
@@ -1329,10 +1325,12 @@ let teamMembers: Staff[] = [...staff];
 let workspaceList: WorkspaceSummary[] = workspaces.map((w) => ({ ...w }));
 
 export async function getWorkspaces(): Promise<WorkspaceSummary[]> {
+  assertPrototypeFixturesAllowed();
   return resolve(workspaceList.map((w) => ({ ...w })));
 }
 
 export async function switchWorkspace(id: string): Promise<WorkspaceSummary> {
+  assertPrototypeFixturesAllowed();
   workspaceList = workspaceList.map((w) => ({ ...w, active: w.id === id }));
   const next = workspaceList.find((w) => w.id === id) ?? workspaceList[0]!;
   return resolve({ ...next }, 220);

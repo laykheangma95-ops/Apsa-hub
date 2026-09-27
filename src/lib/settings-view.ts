@@ -16,6 +16,7 @@
  * place that decides what to render for every query state, so this can't
  * regress silently.
  */
+import { createQueryPartition } from "@/lib/query-principal";
 import { isPermissionDeniedError } from "@/lib/team-errors";
 import type { OrganizationProfile } from "@/api/org";
 
@@ -27,6 +28,22 @@ import type { OrganizationProfile } from "@/api/org";
  * stale business name after save.
  */
 export const ORGANIZATION_PROFILE_QUERY_KEY = ["settings", "organization-profile"] as const;
+
+/**
+ * Principal isolation for every `["settings", …]` entry — the signed-in
+ * member's account profile (email, display name) and the business profile.
+ *
+ * Those keys carry no principal, and the only thing that dropped them was
+ * Settings' own explicit sign-out (`queryClient.clear()`). A session that
+ * expired or was revoked redirects to /sign-in without running that purge,
+ * so the next member to sign in on the same tab was served the previous
+ * member's email and business name from cache until a refetch landed.
+ * Enforced once in the /app layout (src/routes/app.tsx), exactly like the
+ * other domain partitions; a no-op while the principal is unchanged.
+ */
+const settingsPartition = createQueryPartition("settings");
+export const enforceSettingsCachePrincipal = settingsPartition.enforce;
+export const clearSettingsQueries = settingsPartition.clear;
 
 export type BusinessSectionView =
   | { kind: "loading" }
