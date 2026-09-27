@@ -7,7 +7,9 @@
  * recovery session in HttpOnly cookies this page never sees. The token is then
  * scrubbed from the address bar (replace navigation) so it does not linger in
  * history. completePasswordRecoveryFn changes the password, revokes every
- * session and clears all auth cookies — the member then signs in afresh.
+ * session and clears all auth cookies — the member then signs in afresh. If
+ * the global sign-out is not confirmed, the done state says so honestly
+ * instead of claiming every device was signed out.
  *
  * Supported link shapes (see beginPasswordRecoveryFn):
  *   /reset-password?token_hash=…&type=recovery
@@ -55,7 +57,7 @@ type PageState =
   | { kind: "form" }
   | { kind: "invalid" }
   | { kind: "unavailable" }
-  | { kind: "done" };
+  | { kind: "done"; otherSessionsRevoked: boolean };
 
 function ResetPasswordPage() {
   const { t } = useTranslation();
@@ -154,7 +156,9 @@ function ResetPasswordPage() {
             <div role="status">
               <h1 className="text-h1 text-text-primary">{t("auth.resetPassword.doneTitle")}</h1>
               <p className="text-body-sm mt-2 text-text-secondary">
-                {t("auth.resetPassword.doneBody")}
+                {state.otherSessionsRevoked
+                  ? t("auth.resetPassword.doneBody")
+                  : t("auth.resetPassword.doneBodyUnconfirmedSignOut")}
               </p>
             </div>
             <Button asChild className="min-h-11 w-full">
@@ -165,7 +169,7 @@ function ResetPasswordPage() {
 
         {state.kind === "form" ? (
           <NewPasswordForm
-            onDone={() => setState({ kind: "done" })}
+            onDone={(otherSessionsRevoked) => setState({ kind: "done", otherSessionsRevoked })}
             onExpired={() => setState({ kind: "invalid" })}
           />
         ) : null}
@@ -174,7 +178,13 @@ function ResetPasswordPage() {
   );
 }
 
-function NewPasswordForm({ onDone, onExpired }: { onDone: () => void; onExpired: () => void }) {
+function NewPasswordForm({
+  onDone,
+  onExpired,
+}: {
+  onDone: (otherSessionsRevoked: boolean) => void;
+  onExpired: () => void;
+}) {
   const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -204,7 +214,7 @@ function NewPasswordForm({ onDone, onExpired }: { onDone: () => void; onExpired:
     try {
       const result = await completePasswordRecoveryFn({ data: { password, confirmPassword } });
       if (result.ok) {
-        onDone();
+        onDone(result.otherSessionsRevoked);
         return;
       }
       if (result.code === "recovery_expired") {

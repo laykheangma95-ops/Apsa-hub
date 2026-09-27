@@ -164,7 +164,10 @@ describe("U5: sign-out keeps its hardened behaviour", () => {
   it("signOutFn still revokes the session before the best-effort audit", () => {
     const source = read("src/api/auth.ts");
     const revokeIdx = source.indexOf("await client.auth.signOut()");
-    const clearIdx = source.indexOf("await clearSessionCookies();\n\n  // 4.");
+    // Sign-out clears the app session AND any pending password recovery.
+    const clearIdx = source.indexOf(
+      "await clearSessionCookies();\n  await clearRecoveryCookies();\n\n  // 4.",
+    );
     const auditIdx = source.indexOf("auditSignOutBestEffort(userId)");
     expect(revokeIdx).toBeGreaterThan(-1);
     expect(revokeIdx).toBeLessThan(clearIdx);

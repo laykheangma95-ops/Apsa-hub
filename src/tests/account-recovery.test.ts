@@ -10,13 +10,15 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { AuthApiError, AuthRetryableFetchError } from "@supabase/auth-js";
 import {
-  classifyPasswordResetRequest,
+  classifyOwnVerificationResend,
   classifyPasswordUpdate,
-  classifyResendVerification,
   PASSWORD_MIN_LENGTH,
+  resolveAppBaseUrl,
   validateNewPassword,
 } from "@/lib/auth-recovery";
+import { claimAuthEmailSlot, resetAuthEmailThrottle } from "@/lib/auth-email-throttle";
 import en from "../locales/en.json";
 import km from "../locales/km.json";
 
@@ -49,24 +51,22 @@ describe("recovery policy", () => {
     expect(validateNewPassword("long-enough-1", "long-enough-1")).toBeNull();
   });
 
-  it("collapses every provider answer to a reset request into the neutral result", () => {
-    expect(classifyPasswordResetRequest(null)).toBe("sent");
-    expect(classifyPasswordResetRequest({ status: 400, code: "user_not_found" })).toBe("sent");
-    expect(classifyPasswordResetRequest({ status: 429 })).toBe("sent");
-    expect(classifyPasswordResetRequest({ status: 500 })).toBe("sent");
-    expect(classifyPasswordResetRequest({ name: "AuthRetryableFetchError" })).toBe(
+  it("classifies an own-address resend honestly, with real supabase-js error shapes", () => {
+    expect(classifyOwnVerificationResend(null)).toBe("sent");
+    expect(
+      classifyOwnVerificationResend(
+        new AuthApiError("email rate limit exceeded", 429, "over_email_send_rate_limit"),
+      ),
+    ).toBe("rate_limited");
+    expect(
+      classifyOwnVerificationResend(new AuthRetryableFetchError("Error sending email", 500)),
+    ).toBe("service_unavailable");
+    expect(classifyOwnVerificationResend(new AuthRetryableFetchError("fetch failed", 0))).toBe(
       "service_unavailable",
     );
-  });
-
-  it("classifies resend outcomes honestly", () => {
-    expect(classifyResendVerification(null)).toBe("sent");
-    expect(classifyResendVerification({ status: 429 })).toBe("rate_limited");
-    expect(classifyResendVerification({ status: 400, code: "over_email_send_rate_limit" })).toBe(
-      "rate_limited",
-    );
-    expect(classifyResendVerification({ status: 503 })).toBe("service_unavailable");
-    expect(classifyResendVerification({ status: 400, code: "user_not_found" })).toBe("sent");
+    expect(
+      classifyOwnVerificationResend(new AuthApiError("Email already confirmed", 422, "conflict")),
+    ).toBe("sent");
   });
 
   it("classifies password update failures", () => {
@@ -75,6 +75,84 @@ describe("recovery policy", () => {
     expect(classifyPasswordUpdate({ status: 401 })).toBe("recovery_expired");
     expect(classifyPasswordUpdate({ name: "AuthSessionMissingError" })).toBe("recovery_expired");
     expect(classifyPasswordUpdate({ status: 500 })).toBe("unexpected_error");
+  });
+});
+
+describe("app base URL validation", () => {
+  it("accepts a bare https origin and normalises a trailing slash", () => {
+    expect(resolveAppBaseUrl("https://app.apsa.test/", true)).toEqual({
+      ok: true,
+      origin: "https://app.apsa.test",
+    });
+    expect(resolveAppBaseUrl(" https://app.apsa.test:8443 ", true)).toEqual({
+      ok: true,
+      origin: "https://app.apsa.test:8443",
+    });
+  });
+
+  it("treats unset as the documented Supabase Site URL fallback", () => {
+    expect(resolveAppBaseUrl(undefined, true)).toEqual({ ok: true, origin: undefined });
+    expect(resolveAppBaseUrl("   ", true)).toEqual({ ok: true, origin: undefined });
+  });
+
+  it("allows http only for localhost, and never in production", () => {
+    expect(resolveAppBaseUrl("http://localhost:3000", false)).toEqual({
+      ok: true,
+      origin: "http://localhost:3000",
+    });
+    expect(resolveAppBaseUrl("http://127.0.0.1:3000", false).ok).toBe(true);
+    expect(resolveAppBaseUrl("http://localhost:3000", true)).toEqual({
+      ok: false,
+      reason: "scheme",
+    });
+    expect(resolveAppBaseUrl("http://app.apsa.test", false)).toEqual({
+      ok: false,
+      reason: "scheme",
+    });
+  });
+
+  it("rejects unsafe or malformed values", () => {
+    const cases: Array<[string, string]> = [
+      ["javascript:alert(1)", "scheme"],
+      ["data:text/html,x", "scheme"],
+      ["file:///etc/passwd", "scheme"],
+      ["ftp://app.apsa.test", "scheme"],
+      ["https://user:pass@app.apsa.test", "credentials"],
+      ["https://user@app.apsa.test", "credentials"],
+      ["https://app.apsa.test/?a=1", "not_origin"],
+      ["https://app.apsa.test?", "not_origin"],
+      ["https://app.apsa.test/#x", "not_origin"],
+      ["https://app.apsa.test/app", "not_origin"],
+      ["app.apsa.test", "malformed"],
+      ["//evil.test", "malformed"],
+      ["https://", "malformed"],
+    ];
+    for (const [value, reason] of cases) {
+      expect({ value, result: resolveAppBaseUrl(value, true) }).toEqual({
+        value,
+        result: { ok: false, reason },
+      });
+    }
+  });
+});
+
+describe("server-side auth email throttle", () => {
+  it("allows one email per address and purpose per cooldown window", async () => {
+    resetAuthEmailThrottle();
+    const t0 = 1_000_000;
+    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", " A@Example.com ", t0 + 59_000)).toBe(false);
+    expect(await claimAuthEmailSlot("verification_resend", "a@example.com", t0)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", "b@example.com", t0)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0 + 60_000)).toBe(true);
+    resetAuthEmailThrottle();
+  });
+
+  it("is not the only guard: the client cooldown is documented as UX", () => {
+    expect(read("src/lib/auth-recovery.ts")).toMatch(/React countdown is\s+\* UX only/);
+    const throttle = read("src/lib/auth-email-throttle.ts");
+    expect(throttle).toContain("NOT a distributed limiter");
+    expect(throttle).toContain("remain the hard, provider-side limit");
   });
 });
 
@@ -130,6 +208,21 @@ describe("recovery screens", () => {
     const reset = screens["reset-password.tsx"];
     expect(reset).toMatch(/if \(started\.current\) return;/);
     expect(reset).toMatch(/navigate\(\{ to: "\/reset-password", search: \{\}, replace: true \}\)/);
+  });
+
+  it("/verify-email never forwards a recovery token to the server", async () => {
+    const { VERIFY_EMAIL_OTP_TYPES } = await import("@/api/auth");
+    expect([...VERIFY_EMAIL_OTP_TYPES]).not.toContain("recovery");
+    const verify = screens["verify-email.tsx"];
+    expect(verify).not.toMatch(/z\.enum\(\[[^\]]*"recovery"/);
+    expect(verify).toMatch(/if \(!token \|\| !email \|\| !typeAllowed\) return;/);
+  });
+
+  it("the done state does not claim a global sign-out that was not confirmed", () => {
+    expect(screens["reset-password.tsx"]).toMatch(
+      /state\.otherSessionsRevoked\s*\?\s*t\("auth\.resetPassword\.doneBody"\)\s*:\s*t\("auth\.resetPassword\.doneBodyUnconfirmedSignOut"\)/,
+    );
+    expect(en.auth.resetPassword.doneBodyUnconfirmedSignOut).not.toMatch(/signed out everywhere/);
   });
 
   it("the invalid-link state offers a new link", () => {

@@ -75,6 +75,7 @@
       "requestNewLink": "Request a new link",
       "doneTitle": "Password updated",
       "doneBody": "Your password has been changed and you've been signed out everywhere. Sign in with your new password.",
+      "doneBodyUnconfirmedSignOut": "Your password has been changed, but we couldn't confirm that your other devices were signed out — they may still be signed in. Sign in with your new password. If you think someone else had access, reset your password again.",
       "goToSignIn": "Go to sign in",
       "errors": {
         "tooShort": "Your password must be at least {{min}} characters.",

@@ -12,6 +12,11 @@
  * an actually invalid/expired token — both are surfaced as a visible,
  * recoverable state, never an infinite spinner.
  *
+ * Only email-verification link types (VERIFY_EMAIL_OTP_TYPES) are exchanged
+ * here. A recovery link rewritten to /verify-email?…&type=recovery is shown
+ * as an invalid link and never reaches the server: recovery tokens are handled
+ * only by /reset-password, and never become a normal APSA session.
+ *
  * Without a token (straight after sign-up, or sent here by the /app guard)
  * and after a failed link, the page offers a real resend through
  * resendVerificationFn. A signed-in, unverified member can only resend to
@@ -22,7 +27,12 @@ import { CheckCircle2, MailCheck } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import i18n, { useTranslation } from "@/lib/i18n";
-import { getPendingVerificationFn, resendVerificationFn, verifyEmailFn } from "@/api/auth";
+import {
+  getPendingVerificationFn,
+  resendVerificationFn,
+  VERIFY_EMAIL_OTP_TYPES,
+  verifyEmailFn,
+} from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,7 +44,7 @@ import { Spinner } from "@/design-system";
 const verifyEmailSearchSchema = z.object({
   token: z.string().optional(),
   email: z.string().optional(),
-  type: z.enum(["signup", "recovery", "invite"]).optional(),
+  type: z.string().optional(),
 });
 
 export const Route = createFileRoute("/verify-email")({
@@ -56,12 +66,18 @@ function VerifyEmailPage() {
   const navigate = useNavigate();
   const { token, email, type } = Route.useSearch();
 
+  const typeAllowed = !type || (VERIFY_EMAIL_OTP_TYPES as readonly string[]).includes(type);
+
   const [state, setState] = useState<VerifyState>(
-    token && email ? { kind: "verifying" } : { kind: "missing_params" },
+    !token || !email
+      ? { kind: "missing_params" }
+      : typeAllowed
+        ? { kind: "verifying" }
+        : { kind: "error", code: "invalid_token" },
   );
 
   useEffect(() => {
-    if (!token || !email) return;
+    if (!token || !email || !typeAllowed) return;
 
     let cancelled = false;
 
@@ -92,7 +108,7 @@ function VerifyEmailPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, email, type]);
+  }, [token, email, type, typeAllowed]);
 
   return (
     <div className="flex min-h-dvh flex-col justify-center bg-surface-page px-4 py-10">

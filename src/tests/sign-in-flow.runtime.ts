@@ -198,7 +198,16 @@ process.env["VITE_SUPABASE_ANON_KEY"] = "anon-test-key";
 const authModule = await import("@/api/auth");
 const appGuardModule = await import("@/api/app-guard");
 
-const { COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN, signInFn } = authModule;
+const {
+  COOKIE_ACCESS_TOKEN,
+  COOKIE_REFRESH_TOKEN,
+  COOKIE_RECOVERY_ACCESS_TOKEN,
+  COOKIE_RECOVERY_REFRESH_TOKEN,
+  signInFn,
+} = authModule;
+// A successful sign-in is an identity transition: any pending password
+// recovery in this browser is always dropped first.
+const RECOVERY_COOKIES = [COOKIE_RECOVERY_ACCESS_TOKEN, COOKIE_RECOVERY_REFRESH_TOKEN];
 const { checkAppGuardFn } = appGuardModule;
 
 beforeEach(() => {
@@ -218,7 +227,7 @@ describe("sign-in flow runtime", () => {
     expect(requestCookies.has(COOKIE_ACCESS_TOKEN)).toBe(false);
     expect(requestCookies.has(COOKIE_REFRESH_TOKEN)).toBe(false);
     expect(getCookieCalls).toBe(0);
-    expect(deleteCookieCalls).toHaveLength(0);
+    expect(deleteCookieCalls).toEqual(RECOVERY_COOKIES);
   });
 
   it("redirects a verified user with no memberships to /onboarding", async () => {
@@ -269,7 +278,11 @@ describe("sign-in flow runtime", () => {
     });
 
     expect(result).toEqual({ ok: true, redirectTo: "/access-denied" });
-    expect(deleteCookieCalls).toEqual([COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN]);
+    expect(deleteCookieCalls).toEqual([
+      ...RECOVERY_COOKIES,
+      COOKIE_ACCESS_TOKEN,
+      COOKIE_REFRESH_TOKEN,
+    ]);
     expect(responseSetCookies.has(COOKIE_ACCESS_TOKEN)).toBe(false);
     expect(responseSetCookies.has(COOKIE_REFRESH_TOKEN)).toBe(false);
   });
@@ -325,6 +338,10 @@ describe("sign-in flow runtime", () => {
       message: "Membership service unavailable",
     });
     expect(setCookieCalls).toHaveLength(0);
-    expect(deleteCookieCalls).toEqual([COOKIE_ACCESS_TOKEN, COOKIE_REFRESH_TOKEN]);
+    expect(deleteCookieCalls).toEqual([
+      ...RECOVERY_COOKIES,
+      COOKIE_ACCESS_TOKEN,
+      COOKIE_REFRESH_TOKEN,
+    ]);
   });
 });

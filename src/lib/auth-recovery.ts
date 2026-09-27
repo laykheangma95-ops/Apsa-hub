@@ -5,14 +5,18 @@
  * screens so the password rule and the provider-error mapping live in one
  * place. Nothing here touches Supabase, cookies or tokens.
  *
- * Anti-enumeration contract:
- *   - A password-reset request answers the same way whether or not the email
- *     has an account. Supabase only sends mail (and can only fail to send, or
- *     rate-limit per user) for an existing account, so every provider-side
- *     answer collapses to the neutral "sent" result. Only a transport failure
- *     — which happens identically for any email — is reported as an error.
- *   - Verification resend reports a provider rate limit honestly (the product
- *     requirement) but never "no such account" / "already confirmed".
+ * Anti-enumeration contract (public, email-addressed requests):
+ *   - A password-reset request and a signed-out verification resend answer
+ *     the same way whether or not the email has an account. Supabase only
+ *     sends mail — and so can only fail to send, rate-limit per user, or hit
+ *     an SMTP/5xx error — for an existing account, and supabase-js surfaces a
+ *     5xx as an AuthRetryableFetchError. Every provider answer, including
+ *     transport-shaped ones, therefore collapses to the neutral "sent" result.
+ *   - Only account-independent failures (a misconfigured app URL, checked
+ *     before any provider call) are reported to a public caller.
+ *   - A signed-in, unverified member resending to their OWN session address
+ *     may see an honest rate-limit / outage answer: it discloses nothing about
+ *     any other account.
  */
 
 /** Matches signUpFn's server policy (src/api/auth.ts) — keep the two in step. */
@@ -20,7 +24,10 @@ export const PASSWORD_MIN_LENGTH = 8;
 /** bcrypt, which Supabase Auth uses, ignores everything past 72 bytes. */
 export const PASSWORD_MAX_LENGTH = 72;
 
-/** Client cooldown between resend / reset-request submissions. */
+/**
+ * Cooldown between resend / reset-request submissions. The React countdown is
+ * UX only; the server enforces the same window (src/lib/auth-email-throttle.ts).
+ */
 export const AUTH_EMAIL_COOLDOWN_SECONDS = 60;
 
 /** Lifetime of the HttpOnly recovery cookie — the window to choose a new password. */
@@ -64,27 +71,21 @@ export function isRateLimited(error: ProviderAuthError): boolean {
   );
 }
 
-export type PasswordResetRequestOutcome = "sent" | "service_unavailable";
-
-export function classifyPasswordResetRequest(
-  error: ProviderAuthError | null,
-): PasswordResetRequestOutcome {
-  if (!error) return "sent";
-  // Every provider-side answer — unknown user, rate limit, SMTP failure —
-  // is indistinguishable to the caller. See the contract at the top.
-  return isTransportFailure(error) ? "service_unavailable" : "sent";
-}
-
 export type ResendVerificationOutcome = "sent" | "rate_limited" | "service_unavailable";
 
-export function classifyResendVerification(
+/**
+ * Only for a resend addressed to the caller's own session email — see the
+ * contract at the top. Public, email-addressed requests never call this.
+ */
+export function classifyOwnVerificationResend(
   error: ProviderAuthError | null,
 ): ResendVerificationOutcome {
   if (!error) return "sent";
   if (isRateLimited(error)) return "rate_limited";
-  if (isTransportFailure(error)) return "service_unavailable";
-  // Unknown or already-confirmed email: answered with the same neutral copy
-  // as a real send ("if this email is waiting for confirmation…").
+  if (isTransportFailure(error) || (error.status !== undefined && error.status >= 500)) {
+    return "service_unavailable";
+  }
+  // Already-confirmed or otherwise refused: the neutral "sent" copy fits.
   return "sent";
 }
 
@@ -107,4 +108,39 @@ export function classifyPasswordUpdate(error: ProviderAuthError): PasswordUpdate
     return "recovery_expired";
   }
   return "unexpected_error";
+}
+
+// ── Auth email redirect base (VITE_APP_URL) ─────────────────────────────────
+
+export type AppBaseUrl =
+  | { ok: true; origin: string | undefined }
+  | { ok: false; reason: "malformed" | "scheme" | "credentials" | "not_origin" };
+
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Validates the configured canonical app URL before it is used to build an
+ * auth-email redirect. Unset → `origin: undefined` (Supabase then falls back
+ * to the project's Site URL). Anything set must be a bare absolute origin:
+ * https (http only for localhost outside production), no credentials, no
+ * path, query or fragment.
+ */
+export function resolveAppBaseUrl(raw: string | undefined, isProduction: boolean): AppBaseUrl {
+  const value = raw?.trim() ?? "";
+  if (!value) return { ok: true, origin: undefined };
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+
+  const localHttp = !isProduction && url.protocol === "http:" && LOCAL_HOSTNAMES.has(url.hostname);
+  if (url.protocol !== "https:" && !localHttp) return { ok: false, reason: "scheme" };
+  if (url.username || url.password) return { ok: false, reason: "credentials" };
+  if (value.includes("?") || value.includes("#") || url.pathname.replace(/\/+$/, "") !== "") {
+    return { ok: false, reason: "not_origin" };
+  }
+  return { ok: true, origin: url.origin };
 }
