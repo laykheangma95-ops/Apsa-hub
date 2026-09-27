@@ -109,14 +109,24 @@ export interface CreateOrderInput {
    * table exists yet. Never the conversation content.
    */
   source_conversation_ref?: string | null | undefined;
+  /**
+   * Delivery fee the merchant charges the customer, integer minor units in the
+   * order's (= organization's) currency. Bounded and added into the total by
+   * create_order_v2 (migration 044) — never the courier's cost.
+   */
+  delivery_minor?: number | undefined;
+  /** One logical creation attempt. Required by create_order_v2. */
+  idempotency_key: string;
 }
 
-/** Result envelope returned by the create_order_v1 RPC. */
+/** Result envelope returned by the create_order_v2 RPC (migration 044). */
 export interface CreateOrderRpcResult {
   status: string;
   order_id?: string;
   order_number?: string;
   variant_id?: string;
+  /** true when an earlier request with the same key created this order. */
+  replayed?: boolean;
 }
 
 /** Result envelope returned by the transition_order_status_v1 RPC. */

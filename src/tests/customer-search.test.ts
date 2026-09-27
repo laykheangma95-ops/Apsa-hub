@@ -738,10 +738,12 @@ describe("No migration was required, and the schema says why", () => {
     const migrations = fs.readdirSync(path.join(ROOT, "supabase/migrations"));
     // 043 is an unrelated Payments fix (see
     // supabase/migrations/043_payment_referenceless_duplicate.sql), not
-    // anything this customer-search phase added. A migration numbered 044 or
-    // higher would mean THIS phase silently changed the schema — which it
-    // must not do without first proving the change is required and
-    // reporting it.
-    expect(migrations.filter((f) => /^04[4-9]|^0[5-9]\d/.test(f))).toEqual([]);
+    // anything this customer-search phase added, and neither is 044 (Order
+    // idempotency + delivery fee — see
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql). A
+    // migration numbered 045 or higher would mean THIS phase silently changed
+    // the schema — which it must not do without first proving the change is
+    // required and reporting it.
+    expect(migrations.filter((f) => /^04[5-9]|^0[5-9]\d/.test(f))).toEqual([]);
   });
 });

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, ErrorState, QuantityStepper } from "@/design-system";
+import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
 import {
   createOrder,
   createRealOrder,
@@ -13,7 +14,9 @@ import {
   isProductionId,
   PERMISSION_DENIED,
 } from "@/lib/api";
+import { parseDeliveryFee } from "@/lib/delivery-fee";
 import { localName } from "@/lib/format";
+import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { useLanguage } from "@/lib/i18n";
 import {
   classifyOrderError,
@@ -132,7 +135,16 @@ export function PrepareOrderSheet({
   const [discarding, setDiscarding] = useState(false);
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
+  const [deliveryFeeText, setDeliveryFeeText] = useState("");
   const submittingRef = useRef(false);
+  /*
+   * One idempotency key per logical order attempt (src/lib/idempotency.ts).
+   * A retry of the same request re-sends the same key, so a create whose
+   * response was lost is replayed by the server rather than duplicated. It is
+   * released once the order exists, so "Edit" (cancel the draft, rebuild)
+   * creates a genuinely new order even from identical lines.
+   */
+  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
 
   function reset() {
     setLines((initialItems.length > 0 ? initialItems : [{ quantity: 1 }]).map(toEditableLine));
@@ -141,6 +153,7 @@ export function PrepareOrderSheet({
     setConfirming(false);
     setFailure(null);
     setBlocker(null);
+    setDeliveryFeeText("");
     submittingRef.current = false;
   }
 
@@ -167,7 +180,9 @@ export function PrepareOrderSheet({
     });
   }
 
-  const readyToSubmit =
+  const realCustomer = isProductionId(customer.id);
+
+  const itemsReady =
     lines.length > 0 &&
     lines.every(
       (line) =>
@@ -183,6 +198,18 @@ export function PrepareOrderSheet({
       ),
     [lines],
   );
+
+  /*
+   * The delivery fee is a real Order amount only on the production path
+   * (migration 044); the prototype path has no server to charge it.
+   */
+  const deliveryMinor = realCustomer
+    ? parseDeliveryFee(deliveryFeeText, estimatedTotal.currency)
+    : 0;
+  const deliveryFee: Money = { amount: deliveryMinor ?? 0, currency: estimatedTotal.currency };
+  const previewTotal = addMoney(estimatedTotal, deliveryFee);
+
+  const readyToSubmit = itemsReady && deliveryMinor !== null;
 
   /** The chosen lines, for naming the ones that blocked the order. */
   const readyLinesForDisplay = useMemo(
@@ -245,6 +272,9 @@ export function PrepareOrderSheet({
           })),
           customerId: customer.id,
           ...(sourceConversationRef ? { sourceConversationRef } : {}),
+          // readyToSubmit guarantees a parsed fee on this (production) path.
+          ...(deliveryMinor! > 0 ? { deliveryMinor: deliveryMinor! } : {}),
+          idempotency: idempotencyKeys.current,
         });
         setStep({ name: "created-real", detail });
         onCreated(detail.order);
@@ -349,7 +379,7 @@ export function PrepareOrderSheet({
                       : "conversation.prepareOrder.createOrder",
                   )}
             </Button>
-            {!readyToSubmit ? (
+            {!itemsReady ? (
               <p className="text-caption mt-2 text-center text-text-muted">
                 {t("conversation.prepareOrder.resolveItemsFirst")}
               </p>
@@ -535,13 +565,28 @@ export function PrepareOrderSheet({
             </section>
           ))}
 
+          {realCustomer ? (
+            <DeliveryFeeField
+              id="prepare-order-delivery-fee"
+              value={deliveryFeeText}
+              onChange={setDeliveryFeeText}
+              currency={estimatedTotal.currency}
+            />
+          ) : null}
+
           <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
+            {deliveryFee.amount > 0 ? (
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
+                <span className="text-data text-text-primary">+{formatMoney(deliveryFee)}</span>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between">
               <span className="text-label text-text-primary">
                 {t("conversation.prepareOrder.estimatedTotal")}
               </span>
               <span className="text-financial-lg text-text-primary">
-                {formatMoney(estimatedTotal)}
+                {formatMoney(previewTotal)}
               </span>
             </div>
             <p className="text-caption mt-1 text-text-muted">

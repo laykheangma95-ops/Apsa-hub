@@ -22,6 +22,9 @@ import { BottomSheet, CurrencyInput } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { createRealDelivery, type CreateRealDeliveryInput } from "@/lib/api";
 import { classifyDeliveryError, type RealDeliveryDetail } from "@/lib/deliveries";
+import { codDiffersFromTotal } from "@/lib/delivery-fee";
+import { formatMoney } from "@/lib/money";
+import type { Money } from "@/types";
 import { cn } from "@/lib/utils";
 
 type CreateFailure = "permission" | "invalidOrder" | "duplicateActive" | "generic";
@@ -38,6 +41,12 @@ interface CreateDeliverySheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   orderId: string;
+  /**
+   * The order's server-derived total (goods - discount + delivery fee), shown
+   * beside a COD amount that differs from it. Display only — COD is never
+   * derived from, or written back into, the order's money.
+   */
+  orderTotal?: Money;
   onCreated: (delivery: RealDeliveryDetail) => void;
 }
 
@@ -45,6 +54,7 @@ export function CreateDeliverySheet({
   open,
   onOpenChange,
   orderId,
+  orderTotal,
   onCreated,
 }: CreateDeliverySheetProps) {
   const { t } = useTranslation();
@@ -186,6 +196,16 @@ export function CreateDeliverySheet({
                 onChange={setCodCents}
               />
               <p className="text-caption text-text-muted">{t("delivery.create.codHint")}</p>
+              {orderTotal &&
+              codCents > 0 &&
+              codDiffersFromTotal(
+                { amount: codCents, currency: orderTotal.currency },
+                orderTotal,
+              ) ? (
+                <p className="text-caption text-status-warning-text">
+                  {t("deliveryFee.codDiffers", { total: formatMoney(orderTotal) })}
+                </p>
+              ) : null}
             </>
           ) : null}
         </div>

@@ -63,16 +63,20 @@ function errMessage(error: unknown): string {
 /**
  * Create an order and all of its lines in ONE database transaction.
  *
- * organizationId and createdBy are server-supplied. Note that no monetary value
- * is passed except `discount_minor`, which is an input to the calculation and
- * is bounded by the RPC (0 ≤ discount ≤ subtotal) — never a total.
+ * organizationId and createdBy are server-supplied. The only monetary values
+ * passed are `discount_minor` and `delivery_minor` — inputs to the calculation,
+ * each bounded by the RPC — never a total.
+ *
+ * create_order_v2 (migration 044) is idempotent on (organization, key): a
+ * replay of the same request by the same principal returns the order the first
+ * attempt created, with `replayed: true`, and writes nothing.
  */
 export async function createOrder(
   organizationId: string,
   createdBy: string | null,
   input: CreateOrderInput,
 ): Promise<CreateOrderRpcResult> {
-  const { data, error } = await db.rpc("create_order_v1", {
+  const { data, error } = await db.rpc("create_order_v2", {
     p_organization_id: organizationId,
     p_created_by: createdBy,
     p_source: input.source,
@@ -84,7 +88,9 @@ export async function createOrder(
     p_customer_id: input.customer_id ?? null,
     p_location_id: input.location_id ?? null,
     p_discount_minor: input.discount_minor ?? 0,
+    p_delivery_minor: input.delivery_minor ?? 0,
     p_source_conversation_ref: input.source_conversation_ref ?? null,
+    p_idempotency_key: input.idempotency_key,
   });
 
   if (error) throw new Error(`createOrder: ${errMessage(error)}`);

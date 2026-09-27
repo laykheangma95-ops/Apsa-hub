@@ -144,6 +144,8 @@ const OTHER_PRODUCT_ID = "eeeeeeee-0000-0000-0000-000000000001";
 const CUSTOMER_ID = "99999999-0000-0000-0000-000000000001";
 const LOCATION_ID = "ffffffff-0000-0000-0000-000000000001";
 const ORDER_ID = "11111111-0000-0000-0000-000000000001";
+/** create_order_v2 (migration 044) requires one; its behaviour is proven in order-money-stock-safety.runtime.ts. */
+const TEST_IDEMPOTENCY_KEY = "test-idempotency-key-0001";
 /** A plausible-looking id that belongs to Org B — the IDOR probe. */
 const ORG_B_ORDER_ID = "22222222-0000-0000-0000-000000000002";
 
@@ -352,7 +354,7 @@ describe("Test 1: Successful order creation", () => {
           audit_logs: { data: null, error: null },
         },
         rpc: {
-          create_order_v1: {
+          create_order_v2: {
             data: { status: "success", order_id: ORDER_ID, order_number: "APSA-2026-000001" },
             error: null,
           },
@@ -360,6 +362,7 @@ describe("Test 1: Successful order creation", () => {
       },
       () =>
         createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
         }),
@@ -384,13 +387,18 @@ describe("Test 1: Successful order creation", () => {
           order_status_history: itemRows([]),
         },
         rpc: {
-          create_order_v1: {
+          create_order_v2: {
             data: { status: "success", order_id: ORDER_ID },
             error: null,
           },
         },
       },
-      () => createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 1 }] }),
+      () =>
+        createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
+          source: "POS",
+          items: [{ variantId: VARIANT_ID, quantity: 1 }],
+        }),
     );
 
     expect(detail.lifecycleStatus).toBe("draft");
@@ -402,7 +410,11 @@ describe("Test 1: Successful order creation", () => {
     const { createOrder } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read"]);
     await expectForbidden(() =>
-      createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 1 }] }),
+      createOrder(ctx, {
+        idempotencyKey: TEST_IDEMPOTENCY_KEY,
+        source: "POS",
+        items: [{ variantId: VARIANT_ID, quantity: 1 }],
+      }),
     );
   });
 
@@ -424,10 +436,11 @@ describe("Test 2: Multi-item order", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v1: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [
             { variantId: VARIANT_ID, quantity: 2 },
@@ -457,7 +470,11 @@ describe("Test 3: Quantity must be a positive integer", () => {
       const { createOrder } = await import("../server/orders/service");
       const calls = await withOrderDb({}, async (recorded) => {
         const err = await expectRejects(() =>
-          createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity }] }),
+          createOrder(ctx, {
+            idempotencyKey: TEST_IDEMPOTENCY_KEY,
+            source: "POS",
+            items: [{ variantId: VARIANT_ID, quantity }],
+          }),
         );
         expect(err.message).toContain("positive integer");
         return recorded;
@@ -490,10 +507,14 @@ describe("Test 4: Server-authoritative pricing", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v1: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
-        await createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 2 }] });
+        await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
+          source: "POS",
+          items: [{ variantId: VARIANT_ID, quantity: 2 }],
+        });
         return recorded;
       },
     );
@@ -510,8 +531,12 @@ describe("Test 4: Server-authoritative pricing", () => {
     ]) {
       expect(serialized).not.toContain(forbidden);
     }
-    // The only monetary parameter is the discount input.
-    expect(Object.keys(args).filter((k) => k.includes("minor"))).toEqual(["p_discount_minor"]);
+    // The only monetary parameters are the discount and delivery-fee inputs
+    // (migration 044) — both bounded inputs to the RPC's own calculation.
+    expect(Object.keys(args).filter((k) => k.includes("minor"))).toEqual([
+      "p_discount_minor",
+      "p_delivery_minor",
+    ]);
   });
 
   it("SQL: the line price is read from product_variants inside the RPC", () => {
@@ -582,6 +607,7 @@ describe("Test 5: Client cannot inject totals", () => {
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.create", "orders.read"]);
     await expectForbidden(() =>
       createOrder(ctx, {
+        idempotencyKey: TEST_IDEMPOTENCY_KEY,
         source: "POS",
         items: [{ variantId: VARIANT_ID, quantity: 1 }],
         discountMinor: 500,
@@ -637,10 +663,14 @@ describe("Test 6: Client cannot inject organization_id or user_id", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v1: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
-        await createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 1 }] });
+        await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
+          source: "POS",
+          items: [{ variantId: VARIANT_ID, quantity: 1 }],
+        });
         return recorded;
       },
     );
@@ -679,6 +709,7 @@ describe("Test 7: Cross-org customer rejected", () => {
       async (recorded) => {
         const err = await expectRejects(() =>
           createOrder(ctx, {
+            idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "FACEBOOK",
             items: [{ variantId: VARIANT_ID, quantity: 1 }],
             customerId: CUSTOMER_ID,
@@ -715,6 +746,7 @@ describe("Test 8: Cross-org product rejected", () => {
       async (recorded) => {
         const err = await expectRejects(() =>
           createOrder(ctx, {
+            idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "POS",
             // The variant really belongs to PRODUCT_ID; claiming another product
             // is how a caller would try to attach a line to a foreign product.
@@ -746,7 +778,11 @@ describe("Test 9: Cross-org variant rejected", () => {
 
     const calls = await withOrderDb({ tables: { product_variants: noRow } }, async (recorded) => {
       const err = await expectRejects(() =>
-        createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 1 }] }),
+        createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
+          source: "POS",
+          items: [{ variantId: VARIANT_ID, quantity: 1 }],
+        }),
       );
       expect(err.message).toBe("Product variant not found");
       expect((err as Error & { statusCode?: number }).statusCode).toBe(404);
@@ -807,9 +843,14 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
       withOrderDb(
         {
           tables: { product_variants: variantRow },
-          rpc: { create_order_v1: { data: { status: "variant_not_found" }, error: null } },
+          rpc: { create_order_v2: { data: { status: "variant_not_found" }, error: null } },
         },
-        () => createOrder(ctx, { source: "POS", items: [{ variantId: VARIANT_ID, quantity: 1 }] }),
+        () =>
+          createOrder(ctx, {
+            idempotencyKey: TEST_IDEMPOTENCY_KEY,
+            source: "POS",
+            items: [{ variantId: VARIANT_ID, quantity: 1 }],
+          }),
       ),
     );
     expect(err.message).toBe("Product variant not found");
@@ -827,10 +868,11 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v1: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [
             { variantId: VARIANT_ID, quantity: 1 },
@@ -842,7 +884,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
     );
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.fn).toBe("create_order_v1");
+    expect(calls[0]!.fn).toBe("create_order_v2");
   });
 });
 
@@ -1370,10 +1412,11 @@ describe("Test 18: Server-authorized write path", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v1: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async () => {
         const created = await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           customerId: CUSTOMER_ID,
@@ -1447,7 +1490,7 @@ describe("Test 19: No arbitrary-update escape hatch", () => {
   it("all writes flow through the two transactional RPCs", () => {
     const src = readSource("src/server/orders/repository.ts");
     const rpcNames = [...src.matchAll(/db\.rpc\("(\w+)"/g)].map((m) => m[1]);
-    expect(rpcNames.sort()).toEqual(["create_order_v1", "transition_order_status_v1"]);
+    expect(rpcNames.sort()).toEqual(["create_order_v2", "transition_order_status_v1"]);
   });
 });
 
@@ -1673,9 +1716,15 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
   });
 
   it("the two granted functions are exactly the two the repository calls", () => {
-    const sql = executableSql(rpcMigration());
+    // Migration 044 supersedes create_order_v1 with create_order_v2. v1 stays
+    // granted only so a build predating 044 keeps working during a rolling
+    // deploy; the repository no longer calls it.
+    const sql =
+      executableSql(rpcMigration()) +
+      executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql"));
     const granted = [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
       .map((m) => m[1])
+      .filter((name) => name !== "create_order_v1")
       .sort();
     const called = [...readSource("src/server/orders/repository.ts").matchAll(/db\.rpc\("(\w+)"/g)]
       .map((m) => m[1])

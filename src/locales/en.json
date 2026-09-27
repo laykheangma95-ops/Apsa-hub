@@ -2040,5 +2040,12 @@
       "identifier": "No order, payment, delivery or customer carries this ID.",
       "search": "No delivery, SKU or barcode matched “{{query}}”. Open a workspace below to keep looking."
     }
+  },
+  "deliveryFee": {
+    "label": "Delivery fee ({{currency}})",
+    "hint": "What you charge the customer for delivery. It is added to the order total.",
+    "invalid": "Enter a delivery fee such as 1.50 — no more than {{max}}.",
+    "codAmount": "Cash on delivery to collect: {{amount}}",
+    "codDiffers": "This is not the order total ({{total}}). The courier collects the COD amount, not the order total."
   }
 }

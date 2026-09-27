@@ -50,6 +50,9 @@ import { products as mockProducts } from "../lib/mock/products";
 import type { Product } from "../types";
 import { usd } from "../lib/money";
 
+/** create_order_v2 (migration 044) requires one; its behaviour is proven in order-money-stock-safety.runtime.ts. */
+const TEST_IDEMPOTENCY_KEY = "test-idempotency-key-0001";
+
 function readSource(relPath: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
 }
@@ -507,7 +510,7 @@ describe("Test 17: sourceConversationRef reaches the create RPC unchanged", () =
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v1: {
+          create_order_v2: {
             data: {
               status: "success",
               order_id: orderRow().data && "11111111-0000-0000-0000-000000000001",
@@ -519,11 +522,12 @@ describe("Test 17: sourceConversationRef reaches the create RPC unchanged", () =
       },
       async (calls) => {
         await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           sourceConversationRef: "  con-1  ",
         });
-        const call = calls.find((c) => c.fn === "create_order_v1");
+        const call = calls.find((c) => c.fn === "create_order_v2");
         expect(call?.args["p_source_conversation_ref"]).toBe("con-1");
       },
     );
@@ -544,7 +548,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v1: {
+          create_order_v2: {
             data: {
               status: "success",
               order_id: "11111111-0000-0000-0000-000000000001",
@@ -556,11 +560,12 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
       },
       async (calls) => {
         await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           sourceConversationRef: "   ",
         });
-        const call = calls.find((c) => c.fn === "create_order_v1");
+        const call = calls.find((c) => c.fn === "create_order_v2");
         expect(call?.args["p_source_conversation_ref"]).toBeNull();
       },
     );
@@ -579,7 +584,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v1: {
+          create_order_v2: {
             data: {
               status: "success",
               order_id: "11111111-0000-0000-0000-000000000001",
@@ -591,10 +596,11 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
       },
       async (calls) => {
         await createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
         });
-        const call = calls.find((c) => c.fn === "create_order_v1");
+        const call = calls.find((c) => c.fn === "create_order_v2");
         expect(call?.args["p_source_conversation_ref"]).toBeNull();
       },
     );
@@ -609,6 +615,7 @@ describe("Test 19: an overly long conversation ref is rejected before any DB cal
     await withOrderDb({}, async (calls) => {
       await expect(
         createOrder(ctx, {
+          idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           sourceConversationRef: "x".repeat(201),

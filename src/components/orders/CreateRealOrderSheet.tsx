@@ -11,7 +11,12 @@
  *
  * Client never supplies organization_id, user_id, a price, a subtotal or a
  * total — createRealOrder()'s input (src/lib/api/index.ts) has no field for
- * any of them.
+ * any of them. The delivery fee is an integer minor-unit INPUT the server
+ * bounds and adds into the total itself (migration 044).
+ *
+ * Retry safety: every submit of the same request sends the same idempotency
+ * key (src/lib/idempotency.ts), so a retry after a lost response returns the
+ * order the first attempt created instead of a second one.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Check, Search } from "lucide-react";
@@ -22,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
+import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import {
   createRealOrder,
@@ -31,11 +37,13 @@ import {
   type OrderCustomerOption,
 } from "@/lib/api";
 import { classifyOrderError } from "@/lib/orders";
+import { parseDeliveryFee } from "@/lib/delivery-fee";
+import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { catalogKeys } from "@/lib/catalog";
 import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
+import { addMoney, formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
 import {
   defaultProductVariantId,
   needsVariantChoice,
@@ -101,6 +109,7 @@ export function CreateRealOrderSheet({
   const [source, setSource] = useState<OrderSourceDb>("POS");
   const [discountEnabled, setDiscountEnabled] = useState(false);
   const [discountCents, setDiscountCents] = useState(0);
+  const [deliveryFeeText, setDeliveryFeeText] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
   const [customer, setCustomer] = useState<OrderCustomerOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -113,6 +122,13 @@ export function CreateRealOrderSheet({
    * ref, checked synchronously before any await.
    */
   const submittingRef = useRef(false);
+  /*
+   * One key per logical order attempt. Survives a failed submit and a sheet
+   * close (reset() deliberately leaves it alone), so re-sending the same
+   * request can only ever replay the order that request created. Released
+   * once an order exists, so the next order — even an identical one — is new.
+   */
+  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
 
   /*
    * Both reads are organization data — the catalog with its prices, and a
@@ -255,7 +271,9 @@ export function CreateRealOrderSheet({
   const subtotal = multiplyMoney(unitPrice, Math.max(1, quantity));
   const discount =
     discountEnabled && discountCents > 0 ? usd(Math.min(discountCents, subtotal.amount)) : usd(0);
-  const total = subtractMoney(subtotal, discount);
+  const deliveryMinor = parseDeliveryFee(deliveryFeeText, subtotal.currency);
+  const deliveryFee = { amount: deliveryMinor ?? 0, currency: subtotal.currency };
+  const total = addMoney(subtractMoney(subtotal, discount), deliveryFee);
 
   function reset() {
     setProductQuery("");
@@ -265,6 +283,7 @@ export function CreateRealOrderSheet({
     setSource("POS");
     setDiscountEnabled(false);
     setDiscountCents(0);
+    setDeliveryFeeText("");
     setCustomerQuery("");
     setCustomer(null);
     setSubmitting(false);
@@ -283,10 +302,11 @@ export function CreateRealOrderSheet({
    * product that means an EXPLICIT choice; `product.variantId` is deliberately
    * not consulted here, so restoring it would fail the regression tests.
    */
-  const readyToSubmit = Boolean(product) && Boolean(variantId);
+  const readyToSubmit = Boolean(product) && Boolean(variantId) && deliveryMinor !== null;
 
   async function submit() {
     if (!product || !variantId) return;
+    if (deliveryMinor === null) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -297,6 +317,8 @@ export function CreateRealOrderSheet({
         items: [{ variantId, quantity, productId: product.id }],
         customerId: customer?.id ?? null,
         ...(discountEnabled && discount.amount > 0 ? { discountMinor: discount.amount } : {}),
+        ...(deliveryMinor > 0 ? { deliveryMinor } : {}),
+        idempotency: idempotencyKeys.current,
       });
       /*
        * The order is real from here on, so the list is told immediately
@@ -342,7 +364,7 @@ export function CreateRealOrderSheet({
             >
               {submitting ? t("orderCreate.creating") : t("orderCreate.submit")}
             </Button>
-            {!readyToSubmit ? (
+            {!variantId ? (
               <p className="text-caption mt-2 text-center text-text-muted">
                 {t("orderCreate.chooseVariantFirst")}
               </p>
@@ -530,6 +552,13 @@ export function CreateRealOrderSheet({
             ) : null}
           </div>
 
+          <DeliveryFeeField
+            id="order-create-delivery-fee"
+            value={deliveryFeeText}
+            onChange={setDeliveryFeeText}
+            currency={subtotal.currency}
+          />
+
           <div>
             <p className="text-label text-text-secondary">{t("orderCreate.customer")}</p>
             {customer ? (
@@ -636,6 +665,12 @@ export function CreateRealOrderSheet({
                   {t("orderCreate.discount")}
                 </span>
                 <span className="text-data text-text-primary">-{formatMoney(discount)}</span>
+              </div>
+            ) : null}
+            {deliveryFee.amount > 0 ? (
+              <div className="flex items-center justify-between">
+                <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
+                <span className="text-data text-text-primary">+{formatMoney(deliveryFee)}</span>
               </div>
             ) : null}
             <div className="mt-2 flex items-end justify-between border-t border-border-default pt-2">

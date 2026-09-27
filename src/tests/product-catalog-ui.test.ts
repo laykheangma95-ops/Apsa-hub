@@ -1915,12 +1915,13 @@ describe("J. the new screens keep the server/browser boundary", () => {
       .readdirSync(path.resolve(ROOT, "supabase/migrations"))
       .filter((name) => name.endsWith(".sql"))
       .sort();
-    // 043 is the migration head this phase inherited (bumped by migration 043,
-    // an unrelated Payments fix — see supabase/migrations/043_payment_referenceless_duplicate.sql).
+    // 044 is the migration head this phase inherited (bumped by migration 044,
+    // the unrelated Order idempotency + delivery fee change — see
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql).
     // The Product Catalog UI is built entirely on migrations 017-019, which
     // already exist; adding a new file here would move this pin and fail the
     // test on purpose.
-    expect(migrations.at(-1)).toBe("043_payment_referenceless_duplicate.sql");
+    expect(migrations.at(-1)).toBe("044_order_idempotency_delivery_fee.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",
