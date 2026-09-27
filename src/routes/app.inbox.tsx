@@ -18,7 +18,7 @@ import {
   type Segment,
 } from "@/design-system";
 
-import { getConversationCounts, getConversationPage, getCustomers, getStaff } from "@/api/inbox";
+import { getConversationCounts, getConversationPage, getCustomers } from "@/api/inbox";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { customerKeys } from "@/lib/customers-query";
@@ -136,7 +136,6 @@ function InboxLayout() {
     queryFn: () => getCustomers(),
     enabled: canReadCustomers,
   });
-  const staffQuery = useQuery({ queryKey: ["staff"], queryFn: getStaff });
 
   const refresh = useCallback(async () => {
     await Promise.all([conversationsQuery.refetch(), countsQuery.refetch()]);
@@ -335,9 +334,6 @@ function InboxLayout() {
                   : undefined;
                 const customerName =
                   conversation.customerName ?? (customer ? localName(customer, language) : "—");
-                const assigned = staffQuery.data?.find(
-                  (s) => s.id === conversation.assignedStaffId,
-                );
                 const active = pathname === `/app/inbox/${conversation.id}`;
                 return (
                   <li key={conversation.id}>
@@ -351,7 +347,6 @@ function InboxLayout() {
                         conversation={conversation}
                         customerName={customerName}
                         companion={customer?.companion ?? "nilo"}
-                        assignedStaff={assigned}
                         className={active ? "bg-surface-secondary" : undefined}
                       />
                     </Link>

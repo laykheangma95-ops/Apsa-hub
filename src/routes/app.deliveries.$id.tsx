@@ -49,7 +49,7 @@ import {
   type RealDeliveryStatus,
 } from "@/lib/deliveries";
 import { fullTimestamp, localName } from "@/lib/format";
-import { deliveryKeys } from "@/lib/deliveries-query";
+import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
 import { ordersKeys } from "@/lib/orders-query";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
@@ -184,21 +184,28 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
         ? t("delivery.actionDoneStatus", { status: t(`status.${detail.status}`) })
         : t("delivery.actionDone"),
     );
-    void queryClient.invalidateQueries({
-      queryKey: ordersKeys.detail(userId, routeOrganizationId, detail?.orderId ?? "none"),
-    });
     /*
-     * The Deliveries list shows this order's latest attempt — a transition
-     * changes it, so refresh rather than relying on the default staleTime.
+     * A transition changes more than this screen: the order's fulfillment axis
+     * (its own detail AND its row in the Orders list, plus the bottom nav's
+     * order count), every filtered Deliveries list this principal holds, and
+     * Home's delivery-attention count.
      *
-     * Every filtered list this principal holds, and nothing else: the old bare
-     * `["deliveries","real"]` root reached every principal's entries in the
-     * tab, which is both wrong and, after the partition above, no longer the
-     * shape any Delivery screen reads.
+     * The set lives in the Delivery domain as
+     * `deliveryTransitionInvalidationKeys` (src/lib/deliveries-query.ts) rather
+     * than as four literal calls here, so it is one auditable contract that a
+     * test can assert by value — the Orders-list entry was missing from this
+     * list and no test could see it, because there was no list to look at.
+     *
+     * Each key is scoped to the acting principal from the /app guard's
+     * server-derived context, so nothing reaches another tenant.
      */
-    void queryClient.invalidateQueries({
-      queryKey: deliveryKeys.lists(userId, routeOrganizationId),
-    });
+    for (const queryKeyToInvalidate of deliveryTransitionInvalidationKeys(
+      userId,
+      routeOrganizationId,
+      detail?.orderId ?? null,
+    )) {
+      void queryClient.invalidateQueries({ queryKey: queryKeyToInvalidate });
+    }
   }
 
   function onTransitionError(error: unknown) {

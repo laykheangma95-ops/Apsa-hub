@@ -62,6 +62,7 @@ import {
   type InventoryMovement,
   type InventoryLocation,
 } from "@/lib/inventory";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 
 export const Route = createFileRoute("/app/inventory/$variantId")({
   head: () => ({
@@ -215,6 +216,8 @@ function InventoryDetailScreen() {
     void queryClient.invalidateQueries({
       queryKey: [INVENTORY_QUERY_ROOT, userId, organizationId],
     });
+    // Home's out-of-stock count is computed from the same ledger.
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
     notifySuccess(t("inventory.movementRecorded"));
   }
 

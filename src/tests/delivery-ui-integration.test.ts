@@ -19,7 +19,15 @@ import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
 
+import { deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
+import { ordersKeys } from "@/lib/orders-query";
+
 const ROOT = process.cwd();
+
+/** Any principal — these assertions are about key shape, not a real tenant. */
+const USER = "11111111-1111-1111-1111-111111111111";
+const ORG = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const ORDER_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
 function readSource(relPath: string): string {
   return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8").replace(/\r\n/g, "\n");
@@ -247,15 +255,30 @@ describe("Cancellation drives order fulfillment via the server only, never reset
   });
 
   it("cancelling invalidates the linked order's query so the authoritative unfulfilled state is re-read", () => {
-    const route = readSource(DELIVERY_DETAIL_ROUTE);
-    // The Order domain's cache is principal-partitioned (src/lib/orders-query.ts).
-    // This screen writes into an ORDER entry, so it must build the key with
-    // the Order domain's own helper and the server-derived principal —
-    // otherwise the invalidation would target an entry no Order screen reads.
-    expect(route).toMatch(
-      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(userId, routeOrganizationId, detail\?\.orderId \?\? "none"\),\s*\}\)/,
-    );
-    expect(route).not.toContain('["order", "real"');
+    /*
+     * The Order domain's cache is principal-partitioned (src/lib/orders-query.ts).
+     * This screen invalidates an ORDER entry, so the key must come from the
+     * Order domain's own helper with the server-derived principal — otherwise
+     * the invalidation targets an entry no Order screen reads.
+     *
+     * Asserted against the transition's invalidation contract by VALUE rather
+     * than by matching the call site's source text: the route now derives its
+     * invalidations from deliveryTransitionInvalidationKeys
+     * (src/lib/deliveries-query.ts), and comparing to ordersKeys.detail itself
+     * is what actually proves the two agree. The full contract, its effect on a
+     * real QueryClient and its tenant scope are covered in
+     * src/tests/delivery-orders-invalidation.test.ts.
+     */
+    const keys = deliveryTransitionInvalidationKeys(USER, ORG, ORDER_ID) as readonly unknown[][];
+    expect(keys).toContainEqual([...ordersKeys.detail(USER, ORG, ORDER_ID)]);
+    // Before the order id is known the screen reads, and so invalidates, the
+    // same "none" sentinel.
+    expect(
+      deliveryTransitionInvalidationKeys(USER, ORG, null) as readonly unknown[][],
+    ).toContainEqual([...ordersKeys.detail(USER, ORG, "none")]);
+    // Never the pre-partition shape, which no Order screen reads.
+    expect(keys).not.toContainEqual(["order", "real", ORDER_ID]);
+    expect(readSource(DELIVERY_DETAIL_ROUTE)).not.toContain('["order", "real"');
   });
 
   it("the Order screen lists deliveries by order id so a cancelled+replaced delivery both stay visible in history", () => {

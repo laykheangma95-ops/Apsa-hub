@@ -29,6 +29,7 @@ import { enforceDeliveryCachePrincipal } from "@/lib/deliveries-query";
 import { enforceConversationCachePrincipal } from "@/lib/inbox-query";
 import { enforceOrderCachePrincipal } from "@/lib/orders-query";
 import { enforceTeamCachePrincipal } from "@/lib/team-query";
+import { enforceSettingsCachePrincipal } from "@/lib/settings-view";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -116,6 +117,11 @@ function AppLayout() {
   enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
   enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId);
   enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
+  /*
+   * Account and business profile (Settings, and the Team header's business
+   * name) — keyed without a principal, so partitioned here by prefix.
+   */
+  enforceSettingsCachePrincipal(queryClient, session.userId, organizationId);
   /*
    * The Apsi console lives in the bottom nav, so it is mounted on every
    * signed-in screen and its answers — customer names, order codes, payment

@@ -133,6 +133,11 @@ export function PosCheckoutSheet({
     void queryClient.invalidateQueries({ queryKey: ordersKeys.principal(userId, organizationId) });
     void queryClient.invalidateQueries({ queryKey: ["payments", userId, organizationId] });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    // The confirmed sale wrote stock movements; Inventory must not serve
+    // pre-sale stock. Literal key (= inventoryKeys.principal in
+    // src/lib/inventory.ts): that module's dynamic server-function imports
+    // must not be pulled into the POS sheet's bundle.
+    void queryClient.invalidateQueries({ queryKey: ["inventory", userId, organizationId] });
   }
 
   const recordPaymentMutation = useMutation({

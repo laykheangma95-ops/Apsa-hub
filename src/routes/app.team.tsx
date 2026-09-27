@@ -8,14 +8,14 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { StaffRow } from "@/components/team/StaffRow";
 import { InviteStaffSheet } from "@/components/team/InviteStaffSheet";
 import { StaffDetailSheet } from "@/components/team/StaffDetailSheet";
-import { WorkspaceSwitcherSheet } from "@/components/team/WorkspaceSwitcherSheet";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { getTeam, getWorkspaces } from "@/lib/api";
-import { localName } from "@/lib/format";
-import { useLanguage } from "@/lib/i18n";
+import { getOrganizationProfileFn } from "@/api/org";
+import { getTeam } from "@/lib/api";
+import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
 import { isPermissionDeniedError } from "@/lib/team-errors";
 import { teamKeys } from "@/lib/team-query";
+import { TEAM_IDENTITY_SUBTITLE_KEY, resolveTeamIdentityView } from "@/lib/team-view";
 import type { Staff } from "@/types";
 
 export const Route = createFileRoute("/app/team")({
@@ -40,7 +40,6 @@ export const Route = createFileRoute("/app/team")({
 
 function TeamScreen() {
   const { t } = useTranslation();
-  const { language } = useLanguage();
   const capabilities = useCapabilities();
   const queryClient = useQueryClient();
 
@@ -63,7 +62,6 @@ function TeamScreen() {
   const canReadTeam = capabilities.can("team.read");
   const canInvite = capabilities.can("team.invite");
 
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [selected, setSelected] = useState<Staff | null>(null);
   const [extra, setExtra] = useState<Staff[]>([]);
@@ -89,10 +87,33 @@ function TeamScreen() {
   function invalidateRoster() {
     void queryClient.invalidateQueries({ queryKey: rosterKey });
   }
-  const workspaceQuery = useQuery({ queryKey: ["workspaces"], queryFn: getWorkspaces });
-
-  const activeWorkspace = workspaceQuery.data?.find((w) => w.active);
-  const workspaceName = activeWorkspace ? localName(activeWorkspace, language) : "";
+  /*
+   * The header names the business from the real Organization profile — the
+   * same read, cache entry and organization.read gate as Settings' Business
+   * row, so an edit there is reflected here. It used to read the in-memory
+   * workspace fixture (src/lib/mock/shop.ts), so every production merchant's
+   * Team screen was titled with a fixture shop name, and the switcher listed
+   * fixture shops whose "switch" changed nothing on the server. There is no
+   * organization-switch backend, so the switcher is not offered.
+   *
+   * What the subtitle says for each outcome is decided by
+   * resolveTeamIdentityView (src/lib/team-view.ts). Until then, in flight,
+   * without the grant, denied by the server and failed outright all rendered
+   * the same empty subtitle, so none of them was distinguishable from any
+   * other. No state below invents a business name.
+   */
+  const canReadOrganization = capabilities.can("organization.read");
+  const organizationQuery = useQuery({
+    queryKey: ORGANIZATION_PROFILE_QUERY_KEY,
+    queryFn: () => getOrganizationProfileFn(),
+    retry: false,
+    enabled: canReadOrganization,
+  });
+  const identityView = resolveTeamIdentityView(canReadOrganization, organizationQuery);
+  const workspaceName =
+    identityView.kind === "ready"
+      ? identityView.organizationName
+      : t(TEAM_IDENTITY_SUBTITLE_KEY[identityView.kind]);
 
   const members = useMemo(() => {
     /*
@@ -120,8 +141,14 @@ function TeamScreen() {
        */}
       <AppHeader
         title={t("team.title")}
-        subtitle={workspaceName || undefined}
-        onShopSwitch={() => setSwitcherOpen(true)}
+        /*
+         * Always a string now — the real organization name, or honest copy for
+         * loading / denied / error. Passed straight through rather than
+         * `workspaceName || undefined`: that fallback is what turned all three
+         * non-ready states into the same absent subtitle, and a missing
+         * translation should show its key rather than silently collapse.
+         */
+        subtitle={workspaceName}
         {...(canInvite
           ? {
               action: (
@@ -180,12 +207,6 @@ function TeamScreen() {
           )}
         </div>
       </main>
-
-      <WorkspaceSwitcherSheet
-        open={switcherOpen}
-        onOpenChange={setSwitcherOpen}
-        onSwitched={() => void workspaceQuery.refetch()}
-      />
 
       <InviteStaffSheet
         open={inviteOpen}
