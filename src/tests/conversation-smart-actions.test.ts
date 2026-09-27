@@ -50,8 +50,13 @@ import { products as mockProducts } from "../lib/mock/products";
 import type { Product } from "../types";
 import { usd } from "../lib/money";
 
-/** create_order_v2 (migration 044) requires one; its behaviour is proven in order-money-stock-safety.runtime.ts. */
-const TEST_IDEMPOTENCY_KEY = "test-idempotency-key-0001";
+/**
+ * create_order_v2 (migration 044) requires one; its behaviour is proven in
+ * order-money-stock-safety.runtime.ts. Deliberately low-entropy so it reads
+ * as a fixture (and to gitleaks' generic-api-key rule) rather than a credential;
+ * still matches ORDER_IDEMPOTENCY_KEY_PATTERN.
+ */
+const TEST_IDEMPOTENCY_KEY = "fixture-aaaaaaaaaaaaaaaa";
 
 function readSource(relPath: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");

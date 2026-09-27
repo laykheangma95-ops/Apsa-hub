@@ -144,8 +144,13 @@ const OTHER_PRODUCT_ID = "eeeeeeee-0000-0000-0000-000000000001";
 const CUSTOMER_ID = "99999999-0000-0000-0000-000000000001";
 const LOCATION_ID = "ffffffff-0000-0000-0000-000000000001";
 const ORDER_ID = "11111111-0000-0000-0000-000000000001";
-/** create_order_v2 (migration 044) requires one; its behaviour is proven in order-money-stock-safety.runtime.ts. */
-const TEST_IDEMPOTENCY_KEY = "test-idempotency-key-0001";
+/**
+ * create_order_v2 (migration 044) requires one; its behaviour is proven in
+ * order-money-stock-safety.runtime.ts. Deliberately low-entropy so it reads
+ * as a fixture (and to gitleaks' generic-api-key rule) rather than a credential;
+ * still matches ORDER_IDEMPOTENCY_KEY_PATTERN.
+ */
+const TEST_IDEMPOTENCY_KEY = "fixture-aaaaaaaaaaaaaaaa";
 /** A plausible-looking id that belongs to Org B — the IDOR probe. */
 const ORG_B_ORDER_ID = "22222222-0000-0000-0000-000000000002";
 

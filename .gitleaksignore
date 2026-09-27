@@ -1,0 +1,13 @@
+# Commit-pinned false positives only (gitleaks fingerprint = commit:file:rule:line).
+# Each entry matches exactly one finding in one historical commit and can never
+# match a later commit, another file, or another line; every rule and path is
+# still scanned. Do not add path-wide or rule-wide exclusions here.
+#
+# 2d0b3f2 (PR #77) added the order-idempotency test fixture constant
+# TEST_IDEMPOTENCY_KEY in the two files below — a synthetic, public test
+# string, not a credential. generic-api-key flagged it (identifier contains
+# "KEY", value entropy 3.67). The fixture was replaced with a low-entropy value in the
+# following commit; these entries only cover the already-pushed history, which
+# is not rewritten.
+2d0b3f2264bc882a9847974a561db18ae15b9e0f:src/tests/conversation-smart-actions.test.ts:generic-api-key:54
+2d0b3f2264bc882a9847974a561db18ae15b9e0f:src/tests/order-domain.test.ts:generic-api-key:148
