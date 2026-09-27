@@ -20,6 +20,17 @@
 import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import {
+  classifyPasswordResetRequest,
+  classifyPasswordUpdate,
+  classifyResendVerification,
+  isTransportFailure,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  RECOVERY_WINDOW_SECONDS,
+  type PasswordUpdateIssue,
+  type ProviderAuthError,
+} from "@/lib/auth-recovery";
 
 // ── Cookie constants — defined inline to avoid importing @/lib/supabase/server ─
 // Keeping these here means auth.ts carries no static dependency on the admin module.
@@ -509,4 +520,280 @@ export const verifyEmailFn = createServerFn()
     await writeSessionCookies(authData.session.access_token, authData.session.refresh_token);
 
     return { ok: true };
+  });
+
+// ── Account recovery ─────────────────────────────────────────────────────────
+//
+// Recovery session architecture:
+//   - A valid recovery link is exchanged server-side (verifyOtp, type
+//     "recovery"). The resulting Supabase session is written to two SEPARATE
+//     HttpOnly cookies (sb-recovery-*) that getSessionFn and the /app guard
+//     never read — opening a reset link does not sign anyone into APSA.
+//   - The recovery cookies live for RECOVERY_WINDOW_SECONDS at most and are
+//     only accepted by completePasswordRecoveryFn.
+//   - Any APSA session already in the browser is cleared when the recovery
+//     begins, so two principals never share one browser session.
+//   - After the password is changed, every session for that user is revoked
+//     (scope "global") and all auth cookies are cleared; the member signs in
+//     again with the new password. Nothing recovery-related survives.
+//   - Tokens and email addresses are never logged or returned to the client.
+
+export const COOKIE_RECOVERY_ACCESS_TOKEN = "sb-recovery-access-token";
+export const COOKIE_RECOVERY_REFRESH_TOKEN = "sb-recovery-refresh-token";
+
+function createAnonAuthClient() {
+  const url = process.env["VITE_SUPABASE_URL"]!;
+  const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
+  return createClient(url, anonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+/**
+ * Where an auth email link should land. Built only from the configured
+ * canonical URL — never from the request Host header, which an attacker can
+ * set to point a genuine reset email at their own domain. When unset,
+ * Supabase falls back to the project's Site URL.
+ */
+function appRedirectUrl(pathname: string): string | undefined {
+  const base = process.env["VITE_APP_URL"]?.trim().replace(/\/+$/, "");
+  return base ? `${base}${pathname}` : undefined;
+}
+
+function logProviderFailure(operation: string, error: ProviderAuthError): void {
+  // Status and code only — never the message (it can echo the email) or tokens.
+  console.error(`[APSA] ${operation} failed`, { status: error.status, code: error.code });
+}
+
+async function writeRecoveryCookies(accessToken: string, refreshToken: string): Promise<void> {
+  const { setCookie } = await import("@tanstack/react-start/server");
+  const options = { ...COOKIE_OPTIONS, maxAge: RECOVERY_WINDOW_SECONDS };
+  setCookie(COOKIE_RECOVERY_ACCESS_TOKEN, accessToken, options);
+  setCookie(COOKIE_RECOVERY_REFRESH_TOKEN, refreshToken, options);
+}
+
+async function clearRecoveryCookies(): Promise<void> {
+  const { deleteCookie } = await import("@tanstack/react-start/server");
+  deleteCookie(COOKIE_RECOVERY_ACCESS_TOKEN, { path: "/" });
+  deleteCookie(COOKIE_RECOVERY_REFRESH_TOKEN, { path: "/" });
+}
+
+async function readRecoveryCookies(): Promise<{
+  accessToken: string;
+  refreshToken: string;
+} | null> {
+  const { getCookie } = await import("@tanstack/react-start/server");
+  const accessToken = getCookie(COOKIE_RECOVERY_ACCESS_TOKEN);
+  const refreshToken = getCookie(COOKIE_RECOVERY_REFRESH_TOKEN);
+  return accessToken && refreshToken ? { accessToken, refreshToken } : null;
+}
+
+// ── requestPasswordResetFn ───────────────────────────────────────────────────
+
+const RequestPasswordResetInput = z.object({
+  email: z.string().trim().email(),
+});
+
+export type RequestPasswordResetResult = { ok: true } | { ok: false; code: "service_unavailable" };
+
+export const requestPasswordResetFn = createServerFn()
+  .validator((data: unknown) => RequestPasswordResetInput.parse(data))
+  .handler(async ({ data }): Promise<RequestPasswordResetResult> => {
+    const client = createAnonAuthClient();
+    let providerError: ProviderAuthError | null;
+    try {
+      const redirectTo = appRedirectUrl("/reset-password");
+      const { error } = await client.auth.resetPasswordForEmail(
+        data.email,
+        redirectTo ? { redirectTo } : {},
+      );
+      providerError = error;
+    } catch {
+      providerError = { name: "AuthRetryableFetchError" };
+    }
+
+    if (providerError) logProviderFailure("auth.password_reset_request", providerError);
+
+    return classifyPasswordResetRequest(providerError) === "sent"
+      ? { ok: true }
+      : { ok: false, code: "service_unavailable" };
+  });
+
+// ── beginPasswordRecoveryFn ──────────────────────────────────────────────────
+//
+// Accepts either link shape Supabase email templates can produce:
+//   token_hash (recommended: {{ .TokenHash }}) or token + email
+//   ({{ .Token }} / {{ .Email }} — the shape /verify-email already uses).
+
+const BeginPasswordRecoveryInput = z.union([
+  z.object({ tokenHash: z.string().min(1) }),
+  z.object({ token: z.string().min(1), email: z.string().email() }),
+]);
+
+export type BeginPasswordRecoveryResult =
+  { ok: true } | { ok: false; code: "invalid_link" | "service_unavailable" };
+
+export const beginPasswordRecoveryFn = createServerFn()
+  .validator((data: unknown) => BeginPasswordRecoveryInput.parse(data))
+  .handler(async ({ data }): Promise<BeginPasswordRecoveryResult> => {
+    const client = createAnonAuthClient();
+    let result: Awaited<ReturnType<typeof client.auth.verifyOtp>>;
+    try {
+      result = await client.auth.verifyOtp(
+        "tokenHash" in data
+          ? { token_hash: data.tokenHash, type: "recovery" }
+          : { email: data.email, token: data.token, type: "recovery" },
+      );
+    } catch {
+      return { ok: false, code: "service_unavailable" };
+    }
+
+    const { data: authData, error } = result;
+    if (error || !authData.session) {
+      if (error && isTransportFailure(error)) {
+        logProviderFailure("auth.password_recovery_verify", error);
+        return { ok: false, code: "service_unavailable" };
+      }
+      return { ok: false, code: "invalid_link" };
+    }
+
+    // One principal per browser: a recovery for this account must not sit
+    // next to another account's live APSA session.
+    await clearSessionCookies();
+    await writeRecoveryCookies(authData.session.access_token, authData.session.refresh_token);
+    return { ok: true };
+  });
+
+// ── getPasswordRecoveryStatusFn ──────────────────────────────────────────────
+//
+// Lets /reset-password survive a reload without the (single-use) link token.
+
+export const getPasswordRecoveryStatusFn = createServerFn().handler(
+  async (): Promise<{ active: boolean }> => {
+    const recovery = await readRecoveryCookies();
+    if (!recovery) return { active: false };
+
+    try {
+      const { data, error } = await createAnonAuthClient().auth.getUser(recovery.accessToken);
+      if (!error && data.user) return { active: true };
+    } catch {
+      return { active: false };
+    }
+
+    await clearRecoveryCookies();
+    return { active: false };
+  },
+);
+
+// ── completePasswordRecoveryFn ───────────────────────────────────────────────
+
+const CompletePasswordRecoveryInput = z
+  .object({
+    password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
+    confirmPassword: z.string(),
+  })
+  .refine((value) => value.password === value.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"],
+  });
+
+export type CompletePasswordRecoveryResult =
+  { ok: true } | { ok: false; code: PasswordUpdateIssue };
+
+export const completePasswordRecoveryFn = createServerFn()
+  .validator((data: unknown) => CompletePasswordRecoveryInput.parse(data))
+  .handler(async ({ data }): Promise<CompletePasswordRecoveryResult> => {
+    const recovery = await readRecoveryCookies();
+    if (!recovery) return { ok: false, code: "recovery_expired" };
+
+    const client = createAnonAuthClient();
+    try {
+      const { error: sessionError } = await client.auth.setSession({
+        access_token: recovery.accessToken,
+        refresh_token: recovery.refreshToken,
+      });
+      if (sessionError) {
+        const issue = classifyPasswordUpdate(sessionError);
+        if (issue === "recovery_expired") await clearRecoveryCookies();
+        else logProviderFailure("auth.password_recovery_session", sessionError);
+        return { ok: false, code: issue === "recovery_expired" ? issue : "unexpected_error" };
+      }
+
+      const { error: updateError } = await client.auth.updateUser({ password: data.password });
+      if (updateError) {
+        const issue = classifyPasswordUpdate(updateError);
+        if (issue === "recovery_expired") await clearRecoveryCookies();
+        if (issue === "unexpected_error") logProviderFailure("auth.password_update", updateError);
+        return { ok: false, code: issue };
+      }
+    } catch {
+      return { ok: false, code: "unexpected_error" };
+    }
+
+    // The password is changed. Revoke every session for this user — including
+    // the recovery session and any other device — then clear every auth cookie.
+    try {
+      await client.auth.signOut({ scope: "global" });
+    } catch {
+      // Best-effort: the cookies below are cleared regardless.
+    }
+    await clearRecoveryCookies();
+    await clearSessionCookies();
+    return { ok: true };
+  });
+
+// ── Verification resend ──────────────────────────────────────────────────────
+
+/**
+ * The email of the signed-in, not-yet-verified member, if any — so
+ * /verify-email can offer a one-tap resend. Returns nothing for anyone else.
+ */
+export const getPendingVerificationFn = createServerFn().handler(
+  async (): Promise<{ email: string } | null> => {
+    const session = await getSessionFn();
+    if (!session || session.emailVerified || !session.email) return null;
+    return { email: session.email };
+  },
+);
+
+const ResendVerificationInput = z.object({
+  email: z.string().trim().email().optional(),
+});
+
+export type ResendVerificationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "rate_limited" | "service_unavailable" | "already_verified" | "email_required";
+    };
+
+export const resendVerificationFn = createServerFn()
+  .validator((data: unknown) => ResendVerificationInput.parse(data))
+  .handler(async ({ data }): Promise<ResendVerificationResult> => {
+    // A signed-in member can only resend to their own address — the typed
+    // email is ignored whenever a session exists.
+    const session = await getSessionFn();
+    if (session?.emailVerified) return { ok: false, code: "already_verified" };
+
+    const email = session?.email || data.email;
+    if (!email) return { ok: false, code: "email_required" };
+
+    let providerError: ProviderAuthError | null;
+    try {
+      const emailRedirectTo = appRedirectUrl("/verify-email");
+      const { error } = await createAnonAuthClient().auth.resend({
+        type: "signup",
+        email,
+        options: emailRedirectTo ? { emailRedirectTo } : {},
+      });
+      providerError = error;
+    } catch {
+      providerError = { name: "AuthRetryableFetchError" };
+    }
+
+    const outcome = classifyResendVerification(providerError);
+    if (providerError && outcome !== "rate_limited") {
+      logProviderFailure("auth.verification_resend", providerError);
+    }
+    return outcome === "sent" ? { ok: true } : { ok: false, code: outcome };
   });
