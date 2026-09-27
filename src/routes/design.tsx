@@ -1,10 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { customers } from "@/lib/mock/customers";
 import { conversations } from "@/lib/mock/conversations";
 import { staff } from "@/lib/mock/shop";
+import { prototypeFixturesAllowed } from "@/lib/api/prototype-gate";
 import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
 import { UI_PERMISSION_KEYS } from "@/lib/capabilities";
 import { localName } from "@/lib/format";
@@ -34,6 +35,35 @@ import {
 import type { AttentionItem, Metric, StatusKey } from "@/types";
 
 export const Route = createFileRoute("/design")({
+  /*
+   * The component gallery below renders fixture business identities — named
+   * customers from src/lib/mock/customers, a conversation from
+   * src/lib/mock/conversations and a staff member from src/lib/mock/shop. They
+   * exist so every component can be reviewed in every state; none of them is a
+   * real person, and none of them may appear on a production deployment.
+   *
+   * Nothing linked here, so this was only ever reachable by typing the URL —
+   * which is exactly how it stayed reachable: hiding the nav entry would not
+   * have closed it, and a production visitor to /design got a full gallery of
+   * fabricated customers, messages and staff.
+   *
+   * This is the same gate the fixture-backed API paths already use
+   * (src/lib/api/prototype-gate.ts): `import.meta.env.PROD` is statically
+   * replaced by Vite with `true` in a production build, client and SSR bundles
+   * alike, so in production this route resolves to the root 404
+   * (src/routes/__root.tsx) and the gallery component is never invoked.
+   *
+   * `beforeLoad` rather than a check inside the component on purpose. It runs
+   * before the route loads on the server during SSR and before navigation on
+   * the client, so no fixture identity is ever rendered and then hidden — the
+   * screen the visitor gets is an honest "this page does not exist".
+   *
+   * Dev and test are unaffected: the gate is open there, and the gallery works
+   * exactly as before.
+   */
+  beforeLoad: () => {
+    if (!prototypeFixturesAllowed()) throw notFound();
+  },
   head: () => ({
     meta: [
       { title: "Design system — APSA" },

@@ -15,6 +15,7 @@ import { getTeam } from "@/lib/api";
 import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
 import { isPermissionDeniedError } from "@/lib/team-errors";
 import { teamKeys } from "@/lib/team-query";
+import { TEAM_IDENTITY_SUBTITLE_KEY, resolveTeamIdentityView } from "@/lib/team-view";
 import type { Staff } from "@/types";
 
 export const Route = createFileRoute("/app/team")({
@@ -93,8 +94,13 @@ function TeamScreen() {
    * workspace fixture (src/lib/mock/shop.ts), so every production merchant's
    * Team screen was titled with a fixture shop name, and the switcher listed
    * fixture shops whose "switch" changed nothing on the server. There is no
-   * organization-switch backend, so the switcher is not offered; without the
-   * grant, or on a failed read, the subtitle is simply absent.
+   * organization-switch backend, so the switcher is not offered.
+   *
+   * What the subtitle says for each outcome is decided by
+   * resolveTeamIdentityView (src/lib/team-view.ts). Until then, in flight,
+   * without the grant, denied by the server and failed outright all rendered
+   * the same empty subtitle, so none of them was distinguishable from any
+   * other. No state below invents a business name.
    */
   const canReadOrganization = capabilities.can("organization.read");
   const organizationQuery = useQuery({
@@ -103,7 +109,11 @@ function TeamScreen() {
     retry: false,
     enabled: canReadOrganization,
   });
-  const workspaceName = canReadOrganization ? (organizationQuery.data?.displayName ?? "") : "";
+  const identityView = resolveTeamIdentityView(canReadOrganization, organizationQuery);
+  const workspaceName =
+    identityView.kind === "ready"
+      ? identityView.organizationName
+      : t(TEAM_IDENTITY_SUBTITLE_KEY[identityView.kind]);
 
   const members = useMemo(() => {
     /*
@@ -131,7 +141,14 @@ function TeamScreen() {
        */}
       <AppHeader
         title={t("team.title")}
-        subtitle={workspaceName || undefined}
+        /*
+         * Always a string now — the real organization name, or honest copy for
+         * loading / denied / error. Passed straight through rather than
+         * `workspaceName || undefined`: that fallback is what turned all three
+         * non-ready states into the same absent subtitle, and a missing
+         * translation should show its key rather than silently collapse.
+         */
+        subtitle={workspaceName}
         {...(canInvite
           ? {
               action: (

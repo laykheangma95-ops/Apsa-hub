@@ -1252,6 +1252,11 @@
     "title": "Team",
     "subtitle": "Who works in this shop and what they can do.",
     "inviteAction": "Invite staff",
+    "identity": {
+      "loading": "Loading…",
+      "denied": "Hidden for your role",
+      "error": "Business name unavailable"
+    },
     "role": {
       "owner": "Owner",
       "manager": "Manager",

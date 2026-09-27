@@ -51,6 +51,7 @@ import {
 import {
   clearDeliveryQueries,
   deliveryKeys,
+  deliveryTransitionInvalidationKeys,
   enforceDeliveryCachePrincipal,
   DELIVERIES_QUERY_ROOT,
 } from "@/lib/deliveries-query";
@@ -1084,9 +1085,29 @@ describe("G. the Delivery domain fails closed across principals", () => {
 
     const detail = stripComments(readSource("src/routes/app.deliveries.$id.tsx"));
     expect(detail).toContain("deliveryKeys.detail(userId, routeOrganizationId, id)");
-    expect(detail).toContain("deliveryKeys.lists(userId, routeOrganizationId)");
     // The Orders cross-reference fixed earlier in this PR must stay partitioned.
     expect(detail).toContain("ordersKeys.detail(userId, routeOrganizationId");
+
+    /*
+     * A transition's invalidations now come from the Delivery domain's own
+     * contract (deliveryTransitionInvalidationKeys) rather than four literal
+     * calls in the route, so the partition guarantee is asserted against the
+     * keys themselves: every one of them is scoped to this principal.
+     *
+     * HOME_QUERY_PREFIX is the documented exception — Home is partitioned by
+     * enforceHomeCachePrincipal at the /app layout, which drops the root on a
+     * principal change rather than invalidating it.
+     */
+    const transitionKeys = deliveryTransitionInvalidationKeys(
+      USER_A,
+      ORG_A,
+      "dddddddd-0000-0000-0000-00000000000e",
+    ) as readonly unknown[][];
+    expect(transitionKeys).toContainEqual([...deliveryKeys.lists(USER_A, ORG_A)]);
+    for (const key of transitionKeys) {
+      if (key[0] === "home") continue;
+      expect(key.slice(0, 3)).toEqual([key[0], USER_A, ORG_A]);
+    }
 
     // And sign-out purges the new root like the others.
     expect(readSource("src/routes/app.settings.tsx")).toContain(

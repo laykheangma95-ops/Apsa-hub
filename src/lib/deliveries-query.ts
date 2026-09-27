@@ -37,6 +37,8 @@
  * Safe to bundle for the browser: no Supabase, no server imports, no secrets.
  */
 import { createQueryPartition } from "@/lib/query-principal";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { ordersKeys } from "@/lib/orders-query";
 
 export const DELIVERIES_QUERY_ROOT = "deliveries";
 
@@ -75,3 +77,50 @@ export const deliveryKeys = {
 export const DELIVERIES_QUERY_PREFIX = partition.prefix;
 export const clearDeliveryQueries = partition.clear;
 export const enforceDeliveryCachePrincipal = partition.enforce;
+
+/**
+ * Every cache entry a successful delivery transition makes stale.
+ *
+ * A delivery transition is not confined to the Delivery domain. Moving a parcel
+ * to `in_transit`, `delivered`, `failed` or `cancelled` moves the ORDER's
+ * fulfillment axis with it, and the Orders list renders that axis on every row
+ * (`order.fulfillmentStatus`, src/routes/app.orders.tsx). The transition used
+ * to refresh this delivery's detail, this principal's delivery lists, the
+ * order's OWN detail and Home — but not the Orders list, so a merchant who
+ * marked a parcel delivered and went back to Orders was shown the previous
+ * fulfillment state until that list happened to refetch. Same for the bottom
+ * nav's order count, which reads `ordersKeys.list` (src/design-system/BottomNav.tsx).
+ *
+ * Returned as data, rather than invalidated here, so the set is a contract that
+ * can be asserted by value instead of by reading the call site's source
+ * (src/tests/delivery-orders-invalidation.test.ts). The caller is
+ * src/routes/app.deliveries.$id.tsx.
+ *
+ * Every key is scoped to the acting principal — the user id and organization id
+ * the /app guard resolved server-side — so invalidation cannot reach another
+ * member's or another organization's entries. `HOME_QUERY_PREFIX` is the one
+ * unpartitioned entry, and it is pre-existing reviewed behaviour: Home is
+ * partitioned instead at the /app layout by `enforceHomeCachePrincipal`, which
+ * drops the whole root the moment the principal changes.
+ *
+ * `orderId` is null only before this delivery's detail has loaded, in which
+ * case the order keys fall back to the same `"none"` sentinel the screen reads
+ * with — never a real order belonging to someone else.
+ */
+export function deliveryTransitionInvalidationKeys(
+  userId: string,
+  organizationId: string,
+  orderId: string | null,
+): readonly (readonly unknown[])[] {
+  const order = orderId ?? "none";
+  return [
+    // This order's own detail — its fulfillment status and delivery sub-entry.
+    ordersKeys.detail(userId, organizationId, order),
+    // The Orders list and the bottom nav's order count both read this key.
+    ordersKeys.list(userId, organizationId),
+    // Every filtered delivery list this principal holds, and nothing else.
+    deliveryKeys.lists(userId, organizationId),
+    // Home's delivery-attention count is derived from delivery status.
+    HOME_QUERY_PREFIX,
+  ];
+}

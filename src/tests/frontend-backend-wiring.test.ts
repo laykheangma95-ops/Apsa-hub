@@ -27,7 +27,11 @@ import {
   prototypeFixturesAllowed,
 } from "@/lib/api/prototype-gate";
 import { ORGANIZATION_PROFILE_QUERY_KEY, enforceSettingsCachePrincipal } from "@/lib/settings-view";
+import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
+import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { inventoryKeys } from "@/lib/inventory";
+import { ordersKeys } from "@/lib/orders-query";
+import { TEAM_IDENTITY_SUBTITLE_KEY, resolveTeamIdentityView } from "@/lib/team-view";
 import { usd } from "@/lib/money";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
@@ -153,6 +157,31 @@ describe("2. Team names the real business", () => {
     expect(team).toContain("queryKey: ORGANIZATION_PROFILE_QUERY_KEY");
     expect(team).toContain('capabilities.can("organization.read")');
   });
+
+  it("tells loading, denied, error and success apart instead of blanking the subtitle", () => {
+    /*
+     * The real-organization fix above left all three non-success outcomes
+     * computing to "" and rendering as an absent subtitle. Four distinct,
+     * non-empty states in both locales — and the refusal to invent a business
+     * name — are covered in src/tests/team-identity-view.test.ts; this binds
+     * that helper to this screen.
+     */
+    expect(team).toContain("resolveTeamIdentityView(canReadOrganization, organizationQuery)");
+    expect(team).not.toContain("workspaceName || undefined");
+
+    const idle = { isLoading: false, isError: false, error: null, data: undefined };
+    const views = [
+      resolveTeamIdentityView(true, { ...idle, isLoading: true }),
+      resolveTeamIdentityView(false, idle),
+      resolveTeamIdentityView(true, { ...idle, isError: true, error: new Error("boom") }),
+    ];
+    expect(views.map((view) => view.kind)).toEqual(["loading", "denied", "error"]);
+    // Each gets its own copy, and none of them names a business.
+    const copy = views.map((view) =>
+      view.kind === "ready" ? view.organizationName : TEAM_IDENTITY_SUBTITLE_KEY[view.kind],
+    );
+    expect(new Set(copy).size).toBe(3);
+  });
 });
 
 describe("3. Inbox list has no fixture staff read", () => {
@@ -209,11 +238,28 @@ describe("5. mutations refresh every screen they make stale", () => {
     expect(fn).toContain("HOME_QUERY_PREFIX");
   });
 
-  it("delivery transitions refresh Home's delivery-attention count", () => {
+  it("delivery transitions refresh Home's delivery-attention count AND the Orders list", () => {
+    /*
+     * Asserted against the transition's invalidation contract by value. The
+     * previous version of this test read the route's source for the string
+     * "HOME_QUERY_PREFIX", which passed while the Orders-list key was missing
+     * from the very same function — the P2 defect it was meant to cover.
+     * src/tests/delivery-orders-invalidation.test.ts covers the full set, its
+     * effect on a real QueryClient and its tenant scope.
+     */
+    const keys = deliveryTransitionInvalidationKeys(
+      "user-a",
+      "org-a",
+      "order-1",
+    ) as readonly unknown[][];
+    expect(keys).toContainEqual([...HOME_QUERY_PREFIX]);
+    expect(keys).toContainEqual([...ordersKeys.list("user-a", "org-a")]);
+    expect(keys).toContainEqual([...deliveryKeys.lists("user-a", "org-a")]);
+    // And the screen delegates to it rather than keeping a second list.
     const source = code("src/routes/app.deliveries.$id.tsx");
     const body = source.slice(source.indexOf("function onTransitionSuccess("));
     const fn = body.slice(0, body.indexOf("\n  }\n"));
-    expect(fn).toContain("HOME_QUERY_PREFIX");
+    expect(fn).toContain("deliveryTransitionInvalidationKeys(");
   });
 
   it("stock movements refresh Home's out-of-stock count", () => {
