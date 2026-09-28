@@ -111,9 +111,8 @@ export function buildParcelLabel(
       paid: input.payment.paid,
       // Formatted from the authoritative Money value only. When paid, there is
       // nothing to collect — the amount is intentionally null, never printed.
-      collectFormatted: input.payment.paid || !input.payment.collect
-        ? null
-        : formatMoney(input.payment.collect),
+      collectFormatted:
+        input.payment.paid || !input.payment.collect ? null : formatMoney(input.payment.collect),
     },
     delivery: input.delivery,
     qr: { payload, svg: renderQrSvg(payload, { moduleSize: 4, quietModules: 3, ecLevel: "M" }) },

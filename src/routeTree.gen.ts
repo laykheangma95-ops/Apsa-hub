@@ -27,6 +27,7 @@ import { Route as AppDeliveriesRouteImport } from './routes/app.deliveries'
 import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppInventoryRouteImport } from './routes/app.inventory'
 import { Route as AppOrdersRouteImport } from './routes/app.orders'
+import { Route as AppPackRouteImport } from './routes/app.pack'
 import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppProductsRouteImport } from './routes/app.products'
@@ -132,6 +133,11 @@ const AppOrdersRoute = AppOrdersRouteImport.update({
   path: '/orders',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPackRoute = AppPackRouteImport.update({
+  id: '/pack',
+  path: '/pack',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppPaymentsRoute = AppPaymentsRouteImport.update({
   id: '/payments',
   path: '/payments',
@@ -221,6 +227,7 @@ export interface FileRoutesByFullPath {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/pack': typeof AppPackRoute
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
@@ -254,6 +261,7 @@ export interface FileRoutesByTo {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/pack': typeof AppPackRoute
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
@@ -289,6 +297,7 @@ export interface FileRoutesById {
   '/app/inbox': typeof AppInboxRouteWithChildren
   '/app/inventory': typeof AppInventoryRouteWithChildren
   '/app/orders': typeof AppOrdersRouteWithChildren
+  '/app/pack': typeof AppPackRoute
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
@@ -325,6 +334,7 @@ export interface FileRouteTypes {
     | '/app/inbox'
     | '/app/inventory'
     | '/app/orders'
+    | '/app/pack'
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
@@ -358,6 +368,7 @@ export interface FileRouteTypes {
     | '/app/inbox'
     | '/app/inventory'
     | '/app/orders'
+    | '/app/pack'
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
@@ -392,6 +403,7 @@ export interface FileRouteTypes {
     | '/app/inbox'
     | '/app/inventory'
     | '/app/orders'
+    | '/app/pack'
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
@@ -551,6 +563,13 @@ declare module '@tanstack/react-router' {
       path: '/orders'
       fullPath: '/app/orders'
       preLoaderRoute: typeof AppOrdersRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/pack': {
+      id: '/app/pack'
+      path: '/pack'
+      fullPath: '/app/pack'
+      preLoaderRoute: typeof AppPackRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/payments': {
@@ -732,6 +751,7 @@ interface AppRouteChildren {
   AppInboxRoute: typeof AppInboxRouteWithChildren
   AppInventoryRoute: typeof AppInventoryRouteWithChildren
   AppOrdersRoute: typeof AppOrdersRouteWithChildren
+  AppPackRoute: typeof AppPackRoute
   AppPaymentsRoute: typeof AppPaymentsRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppProductsRoute: typeof AppProductsRouteWithChildren
@@ -748,6 +768,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppInboxRoute: AppInboxRouteWithChildren,
   AppInventoryRoute: AppInventoryRouteWithChildren,
   AppOrdersRoute: AppOrdersRouteWithChildren,
+  AppPackRoute: AppPackRoute,
   AppPaymentsRoute: AppPaymentsRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppProductsRoute: AppProductsRouteWithChildren,

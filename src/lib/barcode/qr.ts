@@ -151,10 +151,7 @@ function utf8Bytes(text: string): number[] {
 }
 
 /** Choose the smallest supported version that fits, then build interleaved codewords. */
-function buildCodewords(
-  text: string,
-  ec: QrEcLevel,
-): { version: number; codewords: number[] } {
+function buildCodewords(text: string, ec: QrEcLevel): { version: number; codewords: number[] } {
   const data = utf8Bytes(text);
 
   let version = 0;
@@ -268,7 +265,7 @@ function placeFinder(grid: Grid, row: number, col: number): void {
       if (rr < 0 || rr >= grid.size || cc < 0 || cc >= grid.size) continue;
       const isBorder = r === 0 || r === 6 || c === 0 || c === 6;
       const isCore = r >= 2 && r <= 4 && c >= 2 && c <= 4;
-      const dark = (r >= 0 && r <= 6 && c >= 0 && c <= 6) && (isBorder || isCore);
+      const dark = r >= 0 && r <= 6 && c >= 0 && c <= 6 && (isBorder || isCore);
       setModule(grid, rr, cc, dark, true);
     }
   }
@@ -366,15 +363,24 @@ function placeData(grid: Grid, codewords: number[]): void {
 
 function maskFn(mask: number, r: number, c: number): boolean {
   switch (mask) {
-    case 0: return (r + c) % 2 === 0;
-    case 1: return r % 2 === 0;
-    case 2: return c % 3 === 0;
-    case 3: return (r + c) % 3 === 0;
-    case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
-    case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
-    case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
-    case 7: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
-    default: throw new Error(`QR: invalid mask ${mask}`);
+    case 0:
+      return (r + c) % 2 === 0;
+    case 1:
+      return r % 2 === 0;
+    case 2:
+      return c % 3 === 0;
+    case 3:
+      return (r + c) % 3 === 0;
+    case 4:
+      return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+    case 5:
+      return ((r * c) % 2) + ((r * c) % 3) === 0;
+    case 6:
+      return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
+    case 7:
+      return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
+    default:
+      throw new Error(`QR: invalid mask ${mask}`);
   }
 }
 
@@ -494,7 +500,7 @@ function penalty(matrix: boolean[][]): number {
   for (let r = 0; r < n; r += 1) for (let c = 0; c < n; c += 1) if (matrix[r]![c]) dark += 1;
   const percent = (dark * 100) / (n * n);
   const prev5 = Math.floor(percent / 5) * 5;
-  score += Math.min(Math.abs(prev5 - 50), Math.abs(prev5 + 5 - 50)) / 5 * 10;
+  score += (Math.min(Math.abs(prev5 - 50), Math.abs(prev5 + 5 - 50)) / 5) * 10;
 
   return score;
 }

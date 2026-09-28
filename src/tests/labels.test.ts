@@ -85,9 +85,12 @@ describe("buildParcelLabel", () => {
       productName: `Item ${i}`,
       variantName: null,
     }));
-    const vm = buildParcelLabel(parcelInput({ order: { ...parcelInput().order, items, itemCount: 12 } }), {
-      maxItemLines: 8,
-    });
+    const vm = buildParcelLabel(
+      parcelInput({ order: { ...parcelInput().order, items, itemCount: 12 } }),
+      {
+        maxItemLines: 8,
+      },
+    );
     expect(vm.items).toHaveLength(8);
     expect(vm.overflowCount).toBe(4);
   });
@@ -127,8 +130,14 @@ describe("buildParcelLabel", () => {
 
   it("passes delivery info through when present", () => {
     const vm = buildParcelLabel(
-      parcelInput({ delivery: { providerName: "VET Express", trackingNumber: "VET-99", status: "ready" } }),
+      parcelInput({
+        delivery: { providerName: "VET Express", trackingNumber: "VET-99", status: "ready" },
+      }),
     );
-    expect(vm.delivery).toEqual({ providerName: "VET Express", trackingNumber: "VET-99", status: "ready" });
+    expect(vm.delivery).toEqual({
+      providerName: "VET Express",
+      trackingNumber: "VET-99",
+      status: "ready",
+    });
   });
 });

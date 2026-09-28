@@ -8,11 +8,7 @@
  * Run: bun test src/tests/barcode-encoding.test.ts
  */
 import { describe, it, expect } from "bun:test";
-import {
-  encodeCode128B,
-  code128Modules,
-  renderCode128Svg,
-} from "../lib/barcode/code128";
+import { encodeCode128B, code128Modules, renderCode128Svg } from "../lib/barcode/code128";
 import {
   APSA_BARCODE_LENGTH,
   formatApsaBarcode,
@@ -21,11 +17,7 @@ import {
   luhnCheckDigit,
   orgBarcodePrefix,
 } from "../lib/barcode/apsa-code";
-import {
-  orderQrPayload,
-  parseApsaQrPayload,
-  variantQrPayload,
-} from "../lib/barcode/payload";
+import { orderQrPayload, parseApsaQrPayload, variantQrPayload } from "../lib/barcode/payload";
 import { qrMatrix, renderQrSvg } from "../lib/barcode/qr";
 
 const ORG_A = "11111111-1111-4111-8111-111111111111";
@@ -142,7 +134,9 @@ describe("QR encoder", () => {
   });
 
   it("is deterministic (same text → same matrix)", () => {
-    expect(qrMatrix(orderQrPayload(ORDER_ID), "M")).toEqual(qrMatrix(orderQrPayload(ORDER_ID), "M"));
+    expect(qrMatrix(orderQrPayload(ORDER_ID), "M")).toEqual(
+      qrMatrix(orderQrPayload(ORDER_ID), "M"),
+    );
   });
 
   it("grows the version to fit a longer payload", () => {

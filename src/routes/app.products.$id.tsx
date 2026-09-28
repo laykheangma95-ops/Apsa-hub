@@ -605,6 +605,7 @@ function ProductDetailScreen() {
           }}
           productId={product.id}
           variant={editingVariant}
+          productName={product.nameEn ?? product.nameKm}
           permissions={{
             canCreate: canCreateProduct,
             canUpdateBasic,

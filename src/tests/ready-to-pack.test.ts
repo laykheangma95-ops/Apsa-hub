@@ -52,10 +52,18 @@ describe("isReadyToPackEligible (pure)", () => {
   });
 
   it("excludes cancelled, completed, and already-processing orders", () => {
-    expect(isReadyToPackEligible({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" })).toBe(false);
-    expect(isReadyToPackEligible({ lifecycleStatus: "completed", fulfillmentStatus: "unfulfilled" })).toBe(false);
-    expect(isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" })).toBe(false);
-    expect(isReadyToPackEligible({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(false);
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" }),
+    ).toBe(false);
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "completed", fulfillmentStatus: "unfulfilled" }),
+    ).toBe(false);
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" }),
+    ).toBe(false);
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" }),
+    ).toBe(false);
   });
 });
 
@@ -174,7 +182,10 @@ describe("listReadyToPack", () => {
     const { listReadyToPack } = await import("../server/fulfillment/service");
     const rows = await withDb(
       {
-        orders: [orderRow({ fulfillment_status: "fulfilled" }), orderRow({ lifecycle_status: "cancelled" })],
+        orders: [
+          orderRow({ fulfillment_status: "fulfilled" }),
+          orderRow({ lifecycle_status: "cancelled" }),
+        ],
         order_items: [],
         customers: [],
         deliveries: [],
@@ -196,9 +207,9 @@ describe("getParcelLabelData", () => {
   it("requires customers.view_sensitive on top of orders.read", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
     await withDb({ orders: orderRow() }, async () => {
-      await expect(
-        getParcelLabelData(makeCtx(["orders.read"]), ORDER_ID),
-      ).rejects.toBeInstanceOf(ForbiddenError);
+      await expect(getParcelLabelData(makeCtx(["orders.read"]), ORDER_ID)).rejects.toBeInstanceOf(
+        ForbiddenError,
+      );
     });
   });
 
@@ -224,7 +235,17 @@ describe("getParcelLabelData", () => {
         ],
         customers: { display_name: "Sokha", primary_phone: "012345678" },
         customer_addresses: [
-          { house_no: "12", street: "St 240", sangkat: "Boeng Keng Kang", khan: "Chamkarmon", city: "Phnom Penh", province: null, country: "KH", landmark: null, is_default: true },
+          {
+            house_no: "12",
+            street: "St 240",
+            sangkat: "Boeng Keng Kang",
+            khan: "Chamkarmon",
+            city: "Phnom Penh",
+            province: null,
+            country: "KH",
+            landmark: null,
+            is_default: true,
+          },
         ],
         organizations: { display_name: "Dara Shop" },
         deliveries: [],

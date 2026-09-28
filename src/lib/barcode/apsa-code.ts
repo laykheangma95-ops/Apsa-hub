@@ -32,8 +32,7 @@ const PREFIX_LENGTH = 4;
 const SERIAL_LENGTH = 8;
 
 /** Full length of a well-formed APSA barcode. */
-export const APSA_BARCODE_LENGTH =
-  APSA_BARCODE_PREFIX.length + PREFIX_LENGTH + SERIAL_LENGTH + 1;
+export const APSA_BARCODE_LENGTH = APSA_BARCODE_PREFIX.length + PREFIX_LENGTH + SERIAL_LENGTH + 1;
 
 /**
  * A stable, non-reversible 4-char prefix derived from the organization id.

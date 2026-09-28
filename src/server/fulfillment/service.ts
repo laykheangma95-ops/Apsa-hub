@@ -85,7 +85,9 @@ export async function listReadyToPack(
   if (eligible.length === 0) return [];
 
   const orderIds = eligible.map((r) => r.id);
-  const customerIds = [...new Set(eligible.map((r) => r.customer_id).filter((id): id is string => !!id))];
+  const customerIds = [
+    ...new Set(eligible.map((r) => r.customer_id).filter((id): id is string => !!id)),
+  ];
 
   const [itemCounts, customerNames, deliveryStatuses] = await Promise.all([
     repo.itemCountsByOrder(ctx.organizationId, orderIds),
@@ -136,7 +138,9 @@ export async function getParcelLabelData(
 
   const [items, contact, address, businessName, delivery] = await Promise.all([
     ordersRepo.listOrderItems(ctx.organizationId, orderId),
-    order.customer_id ? repo.customerContact(ctx.organizationId, order.customer_id) : Promise.resolve(null),
+    order.customer_id
+      ? repo.customerContact(ctx.organizationId, order.customer_id)
+      : Promise.resolve(null),
     order.customer_id
       ? repo.customerDefaultAddress(ctx.organizationId, order.customer_id)
       : Promise.resolve(null),

@@ -321,7 +321,6 @@ export async function generateVariantBarcode(
   let code: string | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const candidate = formatApsaBarcode(ctx.organizationId, serialFactory());
-    // eslint-disable-next-line no-await-in-loop
     const taken = await repo.barcodeExistsForOrg(ctx.organizationId, candidate);
     if (!taken) {
       code = candidate;

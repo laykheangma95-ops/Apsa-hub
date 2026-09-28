@@ -630,10 +630,12 @@ export interface ReadyToPackRow {
  * and permission-gated server-side. No mock fallback: a failure surfaces as a
  * failure, an empty queue means nothing needs packing.
  */
-export async function listReadyToPack(options: {
-  limit?: number;
-  offset?: number;
-} = {}): Promise<ReadyToPackRow[]> {
+export async function listReadyToPack(
+  options: {
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<ReadyToPackRow[]> {
   const { listReadyToPackFn } = await import("@/api/fulfillment");
   const data: { limit?: number; offset?: number } = {};
   if (options.limit !== undefined) data.limit = options.limit;
