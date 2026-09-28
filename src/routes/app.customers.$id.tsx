@@ -1,7 +1,8 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useCanGoBack, useNavigate, useRouter } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -22,9 +23,11 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
+import { EditCustomerSheet } from "@/components/customers/EditCustomerSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
 import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
+import { classifyCustomerError } from "@/lib/customers-view";
 import { fullTimestamp, initials, localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney, usd } from "@/lib/money";
@@ -80,7 +83,11 @@ function Customer360Screen() {
   const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
   const userId = session.userId;
 
+  const router = useRouter();
+  const canGoBack = useCanGoBack();
+
   const [tab, setTab] = useState<Tab>("overview");
+  const [editOpen, setEditOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [newNotes, setNewNotes] = useState<CustomerNote[]>([]);
 
@@ -158,7 +165,24 @@ function Customer360Screen() {
     capabilities.canSensitive("customers.view_sensitive"),
   );
 
-  const back = () => navigate({ to: "/app/inbox" });
+  /*
+   * Back returns to wherever the merchant came from — the Customer directory,
+   * an Inbox conversation, an order. Opened directly (a pasted link, a fresh
+   * tab), there is no "from", and the Customer directory is this record's own
+   * list.
+   */
+  const back = () => {
+    if (canGoBack) router.history.back();
+    else void navigate({ to: "/app/customers" });
+  };
+
+  /*
+   * Edit is offered only for a production customer and only to a member who
+   * holds customers.update_basic. That is a courtesy — updateCustomer()
+   * re-checks it, and re-checks customers.view_sensitive before any phone
+   * write — so a grant revoked mid-session fails honestly, never silently.
+   */
+  const canEdit = isProductionId(id) && capabilities.can("customers.update_basic");
 
   if (query.isLoading) {
     return (
@@ -170,13 +194,29 @@ function Customer360Screen() {
   }
 
   if (query.isError) {
+    /*
+     * Three different answers, never one. A member without customers.read who
+     * opens this URL directly is refused by the server (403) and told so — not
+     * that the customer "no longer exists". A customer outside this
+     * organization is indistinguishable from a missing one (404). Anything
+     * else is a failure, which says nothing about the customer at all.
+     */
+    const loadError = classifyCustomerError(query.error);
+    const copy =
+      loadError === "forbidden"
+        ? { title: t("capability.denied.title"), body: t("capability.denied.body") }
+        : loadError === "not_found"
+          ? { title: t("customer360.notFound"), body: t("customer360.notFoundBody") }
+          : { title: t("customer360.loadError"), body: t("customer360.loadErrorBody") };
     return (
       <Screen bottom="none" contentClassName="!px-0">
         <AppHeader title={t("customer360.title")} onBack={back} />
         <OperationalState
-          title={t("customer360.notFound")}
-          body={t("customer360.notFoundBody")}
-          onRetry={() => query.refetch()}
+          {...(loadError === "forbidden" || loadError === "not_found"
+            ? {}
+            : { tone: "danger" as const, onRetry: () => void query.refetch() })}
+          title={copy.title}
+          body={copy.body}
         />
       </Screen>
     );
@@ -233,7 +273,25 @@ function Customer360Screen() {
 
   return (
     <div className="min-h-dvh bg-surface-page">
-      <AppHeader title={displayName} subtitle={t("customer360.title")} onBack={back} />
+      <AppHeader
+        title={displayName}
+        subtitle={t("customer360.title")}
+        onBack={back}
+        {...(canEdit
+          ? {
+              action: (
+                <button
+                  type="button"
+                  onClick={() => setEditOpen(true)}
+                  aria-label={t("customerEdit.open")}
+                  className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full"
+                >
+                  <Pencil className="size-5" aria-hidden />
+                </button>
+              ),
+            }
+          : {})}
+      />
 
       <div className="stack-section mx-auto max-w-[var(--screen-max)] px-4 pt-4 pb-[var(--space-screen-bottom)] lg:max-w-[var(--screen-max-wide)]">
         {/*
@@ -455,6 +513,33 @@ function Customer360Screen() {
           </Section>
         ) : null}
       </div>
+
+      {canEdit ? (
+        <EditCustomerSheet
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          customerId={customer.id}
+          currentName={customer.nameEn}
+          currentPhone={sensitiveVisible ? customer.phone : ""}
+          canEditPhone={sensitiveVisible}
+          onSaved={() => {
+            /*
+             * This principal's whole customer partition: the profile, the
+             * directory, every cached search (a renamed customer must be found
+             * by the new name and not the old one) and the pickers. No other
+             * member's or organization's entries — and Home/Analytics hold no
+             * customer names, so they are left alone.
+             */
+            void queryClient.invalidateQueries({
+              queryKey: customerKeys.principal(userId, routeOrganizationId),
+            });
+          }}
+          onSettled={() => {
+            // Success or failure, show what the server now holds.
+            void queryClient.invalidateQueries({ queryKey: detailKey });
+          }}
+        />
+      ) : null}
 
       <StickyActionBar
         {...(activeConversationId

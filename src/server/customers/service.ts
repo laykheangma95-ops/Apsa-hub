@@ -14,7 +14,7 @@
  * Never import this file from browser-bundled code.
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
-import { auditLogRequired } from "@/server/auth/audit";
+import { auditLog, auditLogRequired } from "@/server/auth/audit";
 import {
   CUSTOMER_SEARCH_MAX_QUERY_LENGTH,
   escapeLikePattern,
@@ -437,33 +437,101 @@ export async function createCustomer(
   return customer;
 }
 
+/**
+ * The customer columns whose VALUE `customers.view_sensitive` gates.
+ *
+ * PERMISSIONS_MATRIX.md §8 names phone, email and full address as the
+ * sensitive customer fields; the address lives in customer_addresses and has no
+ * write path here at all. These two are the ones `updateCustomer` can touch.
+ */
+const SENSITIVE_CUSTOMER_COLUMNS = ["primary_phone", "primary_email"] as const;
+
+export type CustomerUpdatePatch = Partial<{
+  display_name: string;
+  primary_phone: string | null;
+  primary_email: string | null;
+  language: string | null;
+  status: "active" | "archived";
+}>;
+
+/**
+ * Edit a customer's basic record.
+ *
+ * ── WRITING A SENSITIVE FIELD REQUIRES BEING ABLE TO READ IT ────────────────
+ *
+ * `customers.update_basic` is seeded to every staff role (migration 016), and
+ * `customers.view_sensitive` only to Owner and Manager. Before this rule, a
+ * Cashier/Sales/Customer Service member — who is shown "Hidden for your role"
+ * in place of a customer's phone — could still overwrite that phone blind
+ * through this function. So a patch that touches `primary_phone` or
+ * `primary_email` now requires `customers.view_sensitive` as well, checked
+ * BEFORE any read or write. A member who cannot see the value cannot replace
+ * it; the name (and language) stay editable on `customers.update_basic` alone.
+ * This only narrows who may write; it grants nothing new.
+ *
+ * ── THE RESPONSE IS PII-GATED LIKE EVERY OTHER CUSTOMER READ ─────────────────
+ *
+ * This used to return the raw updated `CustomerRow`, `primary_phone` and
+ * `primary_email` included, to any caller holding `customers.update_basic`. A
+ * member without `customers.view_sensitive` could rename a customer and read
+ * that customer's phone number straight out of the response — the same
+ * disclosure getCustomer360/listCustomers/searchCustomers withhold. It now
+ * returns the same `CustomerListItem` shape the list returns, built by the same
+ * `toCustomerListItem` gate.
+ *
+ * A customer id from another organization matches no row (the repository
+ * filters on the caller's own organization) and is reported as not found —
+ * indistinguishable from an id that does not exist.
+ */
 export async function updateCustomer(
   ctx: AuthorizationContext,
   customerId: string,
-  patch: Partial<{
-    display_name: string;
-    primary_phone: string | null;
-    primary_email: string | null;
-    language: string | null;
-    status: "active" | "archived";
-  }>,
-): Promise<CustomerRow> {
+  patch: CustomerUpdatePatch,
+): Promise<CustomerListItem> {
   ctx.require("customers.update_basic");
 
   if (patch.status === "archived") {
     ctx.require("customers.archive");
   }
 
-  if (patch.display_name !== undefined && !patch.display_name?.trim()) {
-    throw Object.assign(new Error("display_name cannot be empty"), { statusCode: 400 });
+  if (SENSITIVE_CUSTOMER_COLUMNS.some((column) => patch[column] !== undefined)) {
+    ctx.require("customers.view_sensitive");
   }
 
-  const updated = await repo.updateCustomer(ctx.organizationId, customerId, patch);
+  const clean: CustomerUpdatePatch = {};
+  if (patch.display_name !== undefined) {
+    const name = patch.display_name.trim();
+    if (!name) {
+      throw Object.assign(new Error("display_name cannot be empty"), { statusCode: 400 });
+    }
+    clean.display_name = name;
+  }
+  // An emptied contact field is a removal, stored as NULL — never as "".
+  if (patch.primary_phone !== undefined) clean.primary_phone = patch.primary_phone?.trim() || null;
+  if (patch.primary_email !== undefined) clean.primary_email = patch.primary_email?.trim() || null;
+  if (patch.language !== undefined) clean.language = patch.language;
+  if (patch.status !== undefined) clean.status = patch.status;
+
+  const changedFields = Object.keys(clean);
+  if (changedFields.length === 0) {
+    throw Object.assign(new Error("Nothing to update"), { statusCode: 400 });
+  }
+
+  const updated = await repo.updateCustomer(ctx.organizationId, customerId, clean);
   if (!updated) {
     throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
   }
 
-  return updated;
+  // Which fields changed, never their values: the audit trail must not become
+  // a second, less protected copy of the customer's phone number.
+  await auditLog(ctx, {
+    action: "customers.update",
+    resourceType: "customer",
+    resourceId: customerId,
+    afterJson: { fields: changedFields },
+  });
+
+  return toCustomerListItem(updated, ctx.can("customers.view_sensitive"));
 }
 
 export async function addCustomerNote(
@@ -508,6 +576,12 @@ export async function addIdentityToCustomer(
   },
 ): Promise<CustomerIdentityRow> {
   ctx.require("customers.update_basic");
+
+  // A phone number or email address is a sensitive value whichever column it
+  // is stored in — same rule as updateCustomer's primary_phone/primary_email.
+  if (input.provider === "PHONE" || input.provider === "EMAIL") {
+    ctx.require("customers.view_sensitive");
+  }
 
   const customer = await repo.findCustomerById(ctx.organizationId, customerId);
   if (!customer) {

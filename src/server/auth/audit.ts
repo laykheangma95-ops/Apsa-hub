@@ -43,6 +43,7 @@ export type AuditAction =
   | "products.price_change"
   | "products.delete"
   | "customers.export"
+  | "customers.update"
   | "team.invite"
   | "team.invite_resend"
   | "team.invite_cancel"

@@ -214,7 +214,9 @@ export async function updateCustomer(
     .eq("id", customerId)
     .eq("organization_id", organizationId)
     .select()
-    .single();
+    // maybeSingle, not single: zero matching rows (an unknown id, or another
+    // organization's) is `null` -> the service's 404, not a PostgREST error.
+    .maybeSingle();
 
   if (error) throw new Error(`updateCustomer: ${(error as { message: string }).message}`);
   return data ? (data as CustomerRow) : null;

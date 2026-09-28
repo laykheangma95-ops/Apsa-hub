@@ -68,6 +68,24 @@ export const customerKeys = {
   options: (userId: string, organizationId: string) =>
     [CUSTOMERS_QUERY_ROOT, userId, organizationId, "options"] as const,
   /**
+   * The Customer directory's browse list (/app/customers) — an infinite query,
+   * so the entry holds `{ pages, pageParams }`, not a `CustomerListPage`. A key
+   * of its own for that reason: sharing `list` above with the Inbox's
+   * single-page read would hand one of them a shape it cannot read.
+   *
+   * Phones inside it are whatever the server returned at fetch time; every row
+   * still renders its phone through `visibleCustomerPhone` below, so a grant
+   * revoked since the fetch hides the number on the next render.
+   */
+  directory: (userId: string, organizationId: string) =>
+    [CUSTOMERS_QUERY_ROOT, userId, organizationId, "directory"] as const,
+  /**
+   * The Customer directory's server search, paged. `sensitive` is part of the
+   * identity for exactly the reason given on `search` below.
+   */
+  directorySearch: (userId: string, organizationId: string, term: string, sensitive: boolean) =>
+    [CUSTOMERS_QUERY_ROOT, userId, organizationId, "directory-search", sensitive, term] as const,
+  /**
    * A customer-picker search term's results (POS, order create).
    *
    * `sensitive` is part of the identity, not decoration. A result set matched

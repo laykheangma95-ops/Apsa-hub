@@ -164,7 +164,8 @@
     "salesGroups": {
       "start": "Start a transaction",
       "manage": "Manage sales activity",
-      "catalogue": "Catalogue and stock"
+      "catalogue": "Catalogue and stock",
+      "insights": "Understand the business"
     },
     "salesActions": {
       "newSale": {
@@ -198,6 +199,14 @@
       "productsStock": {
         "label": "Products / Stock",
         "description": "How much of each item you have on hand."
+      },
+      "customers": {
+        "label": "Customers",
+        "description": "Every customer, their profile and order history."
+      },
+      "analytics": {
+        "label": "Analytics",
+        "description": "Sales, collection, top sellers and customers."
       }
     },
     "tabWithCount": "{{tab}}, {{count}} need attention",
@@ -211,7 +220,7 @@
     "askActions": {
       "findCustomer": {
         "label": "Find customer",
-        "description": "Open Inbox and search by customer name or phone."
+        "description": "Search customers by name — or by phone if your role allows."
       },
       "findOrder": {
         "label": "Find order",
@@ -1203,7 +1212,11 @@
       "duplicateActive": {
         "title": "This order already has an active delivery",
         "body": "Cancel or complete the existing delivery before creating another."
-      }
+      },
+      "codAmount": "Amount to collect ({{currency}})",
+      "codReadback": "The courier collects {{amount}}",
+      "codInvalidWhole": "Enter a whole amount in {{currency}}, with no decimals.",
+      "codInvalidDecimal": "Enter an amount in {{currency}} with at most two decimal places."
     },
     "error": {
       "stale": {
@@ -1292,7 +1305,9 @@
       "delivery_created": "Delivery arranged",
       "delivered": "Delivered",
       "note_added": "Note added"
-    }
+    },
+    "loadError": "Could not load this customer",
+    "loadErrorBody": "The profile could not be loaded. This is not a statement about whether the customer exists."
   },
   "team": {
     "title": "Team",
@@ -2047,5 +2062,138 @@
     "invalid": "Enter a delivery fee such as 1.50 — no more than {{max}}.",
     "codAmount": "Cash on delivery to collect: {{amount}}",
     "codDiffers": "This is not the order total ({{total}}). The courier collects the COD amount, not the order total."
+  },
+  "customerList": {
+    "title": "Customers",
+    "subtitle": "Everyone who buys from you",
+    "searchPlaceholder": "Search by name or phone",
+    "searchPlaceholderNameOnly": "Search by name",
+    "listScope": "Active customers, newest first.",
+    "searchScope": "Searching all active customers of this business.",
+    "phonesHidden": "Phone numbers are hidden for your role.",
+    "noPhone": "No phone on file",
+    "partial": "The phone search covers your most recent customers only. An older customer with this number may not be listed — search by name to be sure.",
+    "loadMore": "Show more customers",
+    "loadingMore": "Loading more…",
+    "denied": {
+      "title": "You cannot view customers",
+      "body": "Your role does not include access to customer records. Ask an owner or manager if you need it."
+    },
+    "error": {
+      "title": "Could not load customers",
+      "body": "The customer list could not be loaded. This is not a statement about who your customers are."
+    },
+    "phoneDenied": {
+      "title": "Searching by phone is not available for your role",
+      "body": "Nothing was searched. Search by the customer's name, or ask an owner or manager to look up the number."
+    },
+    "partialEmpty": {
+      "title": "No match among recent customers",
+      "body": "The phone search only covers your most recent customers, so this customer may still exist. Search by name to be sure."
+    },
+    "noResults": {
+      "title": "No customer matched",
+      "body": "Check the spelling, or try part of the name.",
+      "clear": "Clear search"
+    },
+    "empty": {
+      "title": "No customers yet",
+      "body": "Customers appear here when they message you or when you add them to a sale."
+    }
+  },
+  "customerEdit": {
+    "open": "Edit customer",
+    "title": "Edit customer",
+    "description": "Changes are saved for your whole team.",
+    "name": "Name",
+    "phone": "Phone number",
+    "phoneHint": "Saved exactly as typed. Leave it empty to remove the number.",
+    "phoneHidden": "Hidden for your role. An owner or manager can change this customer's phone number.",
+    "nameRequired": "Enter the customer's name.",
+    "nameTooLong": "Use {{max}} characters or fewer.",
+    "phoneTooLong": "Use {{max}} characters or fewer.",
+    "save": "Save changes",
+    "saving": "Saving…",
+    "confirmRemovePhone": "Remove phone and save",
+    "removePhoneWarning": "This removes the customer's phone number. Tap again to confirm.",
+    "error": {
+      "unauthorized": "Your session has ended. Sign in again, then retry.",
+      "forbidden": "You do not have permission to make this change. Nothing was saved.",
+      "notFound": "This customer no longer exists in this business.",
+      "invalid": "Check the details and try again. Nothing was saved.",
+      "generic": "Could not confirm the change was saved. The profile is being reloaded — check it before trying again."
+    }
+  },
+  "analytics": {
+    "title": "Analytics",
+    "subtitle": "How the business is doing",
+    "range": {
+      "today": "Today",
+      "week": "This week",
+      "month": "This month",
+      "label": "Time range"
+    },
+    "period": "{{period}} · Cambodia time",
+    "periodPending": "Loading period…",
+    "date": "{{day}} {{month}} {{year}}",
+    "months": {
+      "1": "Jan",
+      "2": "Feb",
+      "3": "Mar",
+      "4": "Apr",
+      "5": "May",
+      "6": "Jun",
+      "7": "Jul",
+      "8": "Aug",
+      "9": "Sep",
+      "10": "Oct",
+      "11": "Nov",
+      "12": "Dec"
+    },
+    "error": {
+      "title": "Could not load analytics",
+      "body": "Nothing is shown rather than a number that might be wrong. Try again."
+    },
+    "empty": {
+      "title": "No confirmed orders in this period",
+      "body": "Sales, top sellers and customers appear once an order is confirmed. Draft and cancelled orders are not counted."
+    },
+    "sectionError": "This section could not be loaded.",
+    "money": {
+      "hidden": "Hidden for your role",
+      "partial": "Incomplete — not shown",
+      "error": "Money totals could not be loaded"
+    },
+    "sales": {
+      "title": "Sales",
+      "orders": "Confirmed orders",
+      "gross": "Order value",
+      "average": "Average order",
+      "averageMixed": "Not shown for mixed currencies",
+      "note": "Confirmed and completed orders created in this period. Order value is each order's total after discounts, including delivery fees — it counts orders, not payments. Orders refunded later stay counted here; refunds are shown under Collection. Draft and cancelled orders are excluded."
+    },
+    "collection": {
+      "title": "Collection",
+      "collected": "Received",
+      "outstanding": "Still owed",
+      "refunded": "Refunded",
+      "note": "For the orders above, as of now. Received counts payments confirmed as paid — pending payments are not included. Refunds are shown separately and are not subtracted from Received."
+    },
+    "topSellers": {
+      "title": "Top sellers",
+      "empty": "Nothing sold in this period.",
+      "sold": "{{count}} sold",
+      "note": "Ranked by units sold on confirmed and completed orders. Amounts are line totals before order discounts and exclude delivery fees."
+    },
+    "customers": {
+      "title": "Customers",
+      "total": "Customers who ordered",
+      "new": "New customers",
+      "returning": "Returning customers",
+      "repeatRate": "Orders from returning customers",
+      "percent": "{{value}}%",
+      "walkIn": "Orders with no customer",
+      "note": "New means the customer's first confirmed order is in this period; returning means they had one before it. Orders with no customer attached are not counted as customers."
+    }
   }
 }

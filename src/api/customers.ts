@@ -165,6 +165,11 @@ export const createCustomerFn = createServerFn()
   });
 
 // ── updateCustomerFn ───────────────────────────────────────────────────────────
+//
+// Returns the PII-gated CustomerListItem shape, never the raw row: phone comes
+// back as "" to a caller without customers.view_sensitive, exactly like the
+// list and Customer 360. Writing primary_phone/primary_email additionally
+// requires customers.view_sensitive (src/server/customers/service.ts).
 
 export const updateCustomerFn = createServerFn()
   .validator((data: unknown) =>
