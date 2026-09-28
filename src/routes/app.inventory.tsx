@@ -19,11 +19,13 @@
  * Negative quantities are rendered exactly as the ledger reports them. Nothing
  * on this screen clamps a negative on-hand figure to zero.
  */
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Boxes, PackageX, Search, TriangleAlert } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { lookupVariantByBarcode } from "@/lib/api";
+import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
 import { Input } from "@/components/ui/input";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -222,6 +224,8 @@ function InventoryListScreen() {
 
   const [filter, setFilter] = useState<StockFilter>("all");
   const [search, setSearch] = useState("");
+  const [scanNotFound, setScanNotFound] = useState(false);
+  const navigate = useNavigate();
 
   /*
    * inventory.read is what listOrganizationStock requires; products.read is
@@ -232,6 +236,40 @@ function InventoryListScreen() {
   const canReadProducts = identityOk && capabilities.can("products.read");
 
   const organizationId = routeOrganizationId;
+
+  /*
+   * Barcode scan → variant → its stock detail (§10). Resolution is a read only:
+   * it navigates to the variant's inventory page and never mutates stock, which
+   * stays exclusively the ledger/domain's job. A code that matches nothing shows
+   * a non-destructive notice.
+   */
+  useBarcodeScanner({
+    enabled: !detailOpen && canReadStock && canReadProducts,
+    onScan: (code) => {
+      void (async () => {
+        try {
+          const result = await lookupVariantByBarcode(code.trim());
+          if (result) {
+            setScanNotFound(false);
+            void navigate({
+              to: "/app/inventory/$variantId",
+              params: { variantId: result.variant.id },
+            });
+          } else {
+            setScanNotFound(true);
+          }
+        } catch {
+          setScanNotFound(true);
+        }
+      })();
+    },
+  });
+
+  useEffect(() => {
+    if (!scanNotFound) return;
+    const timer = setTimeout(() => setScanNotFound(false), 2600);
+    return () => clearTimeout(timer);
+  }, [scanNotFound]);
 
   const stockQuery = useQuery({
     queryKey: inventoryKeys.stockList(userId, organizationId),
@@ -325,6 +363,13 @@ function InventoryListScreen() {
               <span id="inventory-search-scope" className="text-caption px-1 text-text-secondary">
                 {t("inventoryList.searchScope")}
               </span>
+              <div role="status" aria-live="polite">
+                {scanNotFound ? (
+                  <span className="text-caption px-1 text-status-warning-text">
+                    {t("inventory.scanNotFound")}
+                  </span>
+                ) : null}
+              </div>
             </div>
 
             {stockTruncated ? (
