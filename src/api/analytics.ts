@@ -19,26 +19,13 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
     const { UnauthorizedError } = await import("@/server/auth/authorization");
     throw new UnauthorizedError("Not authenticated");
   }
-  const { supabaseAdmin } = await import("@/lib/supabase/server");
   const { AuthorizationService, ForbiddenError } = await import("@/server/auth/authorization");
-  // organization_id is derived from active membership, never client input.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabaseAdmin as any)
-    .from("memberships")
-    .select("organization_id")
-    .eq("user_id", session.userId)
-    .eq("status", "active")
-    .order("joined_at", { ascending: true })
-    .limit(1)
-    .single();
-  if (error && (error as { code?: string }).code !== "PGRST116") {
-    throw new Error("Unable to resolve active organization membership");
-  }
-  if (!data) throw new ForbiddenError("No active organization membership");
-  return AuthorizationService.forRequest(
-    session.userId,
-    (data as { organization_id: string }).organization_id,
-  );
+  // organization_id is derived from the canonical active membership
+  // (src/lib/active-organization.ts), never client input.
+  const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+  const organizationId = await resolveActiveOrganizationId(session.userId);
+  if (!organizationId) throw new ForbiddenError("No active organization membership");
+  return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
 export const getBusinessSummaryFn = createServerFn()

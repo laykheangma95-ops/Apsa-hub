@@ -73,9 +73,17 @@ export const UI_PERMISSION_KEYS = [
   "payments.refund",
   "payments.reverse",
   "payments.reconcile",
-  // Customers — src/server/customers/service.ts
+  // Customers — src/server/customers/service.ts. update_basic gates the
+  // Customer 360 "Edit" affordance (updateCustomer requires it); editing the
+  // phone additionally needs view_sensitive, which updateCustomer re-checks.
   "customers.read",
   "customers.view_sensitive",
+  "customers.update_basic",
+  // Analytics — src/server/analytics/service.ts. Every export requires it
+  // (migration 003 seeds it to OWNER/MANAGER/SALES). It admits a member to the
+  // Analytics screen only: money inside it sits behind the Home financial
+  // boundary, which the SERVER applies and reports as a withheld section.
+  "analytics.read",
   // Products — src/server/products/service.ts. Every key here is required or
   // checked there (getProductCatalog/getProductDetail, createProduct,
   // updateProduct, updateVariant, archiveProduct, createCategory,

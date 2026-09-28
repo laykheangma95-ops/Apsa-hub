@@ -26,26 +26,17 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
     throw new UnauthorizedError("Not authenticated");
   }
 
-  const { supabaseAdmin } = await import("@/lib/supabase/server");
   const { AuthorizationService } = await import("@/server/auth/authorization");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: rawMembership } = await (supabaseAdmin as any)
-    .from("memberships")
-    .select("organization_id")
-    .eq("user_id", session.userId)
-    .eq("status", "active")
-    .order("joined_at", { ascending: false })
-    .limit(1)
-    .single();
+  // organization_id is derived from the canonical active membership
+  // (src/lib/active-organization.ts), never client input.
+  const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+  const organizationId = await resolveActiveOrganizationId(session.userId);
 
-  if (!rawMembership) {
+  if (!organizationId) {
     const { ForbiddenError } = await import("@/server/auth/authorization");
     throw new ForbiddenError("No active organization membership");
   }
-  return AuthorizationService.forRequest(
-    session.userId,
-    (rawMembership as { organization_id: string }).organization_id,
-  );
+  return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
 export const createDeliveryFn = createServerFn()

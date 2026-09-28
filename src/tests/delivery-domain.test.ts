@@ -690,7 +690,9 @@ describe("RLS, RPC and browser boundary", () => {
     const api = source("src/api/deliveries.ts");
     expect(api).not.toMatch(/^import .*@\/lib\/supabase\/server/m);
     expect(api).not.toMatch(/^import .*@\/server\/deliveries\/service/m);
-    expect(api).toContain('await import("@/lib/supabase/server")');
+    // The membership read (and its service-role client) sits behind the
+    // canonical resolver, itself imported inside the handler body.
+    expect(api).toContain('await import("@/server/auth/active-organization")');
     expect(api).toContain('await import("@/server/deliveries/service")');
   });
 

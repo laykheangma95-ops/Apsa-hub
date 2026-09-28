@@ -26,26 +26,19 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
     throw new UnauthorizedError("Not authenticated");
   }
 
-  const { supabaseAdmin } = await import("@/lib/supabase/server");
   const { AuthorizationService } = await import("@/server/auth/authorization");
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: rawMembership } = await (supabaseAdmin as any)
-    .from("memberships")
-    .select("organization_id")
-    .eq("user_id", session.userId)
-    .eq("status", "active")
-    .order("joined_at", { ascending: false })
-    .limit(1)
-    .single();
+  // organization_id is derived from the canonical active membership
+  // (src/lib/active-organization.ts), never client input.
+  const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+  const organizationId = await resolveActiveOrganizationId(session.userId);
 
-  if (!rawMembership) {
+  if (!organizationId) {
     const { ForbiddenError } = await import("@/server/auth/authorization");
     throw new ForbiddenError("No active organization membership");
   }
 
-  const membership = rawMembership as { organization_id: string };
-  return AuthorizationService.forRequest(session.userId, membership.organization_id);
+  return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
 // ── getCustomer360Fn ───────────────────────────────────────────────────────────
@@ -165,6 +158,11 @@ export const createCustomerFn = createServerFn()
   });
 
 // ── updateCustomerFn ───────────────────────────────────────────────────────────
+//
+// Returns the PII-gated CustomerListItem shape, never the raw row: phone comes
+// back as "" to a caller without customers.view_sensitive, exactly like the
+// list and Customer 360. Writing primary_phone/primary_email additionally
+// requires customers.view_sensitive (src/server/customers/service.ts).
 
 export const updateCustomerFn = createServerFn()
   .validator((data: unknown) =>

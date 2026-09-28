@@ -37,26 +37,20 @@ export const getActiveMemberCapabilitiesFn = createServerFn().handler(
     // 2. Email verification, enforced here as well as in the /app guard.
     if (!session.emailVerified) return { status: "email_unverified" };
 
-    // 3. Active organization from the caller's own membership rows.
-    //
-    //    joined_at DESC + status='active' deliberately matches the
-    //    resolveAuthContext() helper used by every domain API in src/api/*, so
-    //    the snapshot describes the same organization those actions will act
-    //    on. If it ever diverged, the UI would advertise one organization's
-    //    access while the server applied another's.
-    const { supabaseAdmin } = await import("@/lib/supabase/server");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: rawMembership } = await (supabaseAdmin as any)
-      .from("memberships")
-      .select("organization_id")
-      .eq("user_id", session.userId)
-      .eq("status", "active")
-      .order("joined_at", { ascending: false })
-      .limit(1)
-      .single();
-
-    if (!rawMembership) return { status: "no_membership" };
-    const membership = rawMembership as { organization_id: string };
+    // 3. Active organization from the caller's own membership rows, through
+    //    the ONE canonical resolver every domain API in src/api/* and the /app
+    //    guard use (src/lib/active-organization.ts), so the snapshot describes
+    //    the same organization those actions will act on. If it ever diverged,
+    //    the UI would advertise one organization's access while the server
+    //    applied another's. A failed read fails closed as no_membership.
+    const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+    let activeOrganizationId: string | null;
+    try {
+      activeOrganizationId = await resolveActiveOrganizationId(session.userId);
+    } catch {
+      return { status: "no_membership" };
+    }
+    if (!activeOrganizationId) return { status: "no_membership" };
 
     // 4. Real permission resolution — the same path every server action uses.
     const { AuthorizationService } = await import("@/server/auth/authorization");
@@ -65,10 +59,7 @@ export const getActiveMemberCapabilitiesFn = createServerFn().handler(
     let role: string | null;
     let organizationId: string;
     try {
-      const authCtx = await AuthorizationService.forRequest(
-        session.userId,
-        membership.organization_id,
-      );
+      const authCtx = await AuthorizationService.forRequest(session.userId, activeOrganizationId);
       permissions = UI_PERMISSION_KEYS.filter((key) => authCtx.can(key));
       role = authCtx.systemRole;
       organizationId = authCtx.organizationId;

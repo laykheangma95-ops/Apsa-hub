@@ -81,12 +81,20 @@ function mockEnvironment(options: {
             call.filters[column] = value;
             return builder;
           },
-          order: () => builder,
-          limit: () => builder,
-          single: async () =>
-            options.membershipOrgId
-              ? { data: { organization_id: options.membershipOrgId }, error: null }
-              : { data: null, error: { message: "no rows" } },
+          // Terminal read of the canonical resolver
+          // (src/server/auth/active-organization.ts): every active row.
+          order: async () => ({
+            data: options.membershipOrgId
+              ? [
+                  {
+                    organization_id: options.membershipOrgId,
+                    status: "active",
+                    joined_at: "2026-01-01T00:00:00.000Z",
+                  },
+                ]
+              : [],
+            error: null,
+          }),
         };
         return builder;
       },

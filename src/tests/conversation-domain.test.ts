@@ -189,8 +189,12 @@ describe("Test 3: No server function validator accepts organization_id or user_i
   });
 
   it("resolveAuthContext derives organization_id from active DB membership, never from a parameter", () => {
-    expect(src).toContain('.eq("user_id", session.userId)');
-    expect(src).toContain('.eq("status", "active")');
+    expect(src).toContain("resolveActiveOrganizationId(session.userId)");
+    const resolver = readFileSync(
+      resolve(import.meta.dir, "../server/auth/active-organization.ts"),
+      "utf-8",
+    );
+    expect(resolver).toContain('.eq("status", "active")');
     expect(src).not.toMatch(/resolveAuthContext\([^)]+\)/); // takes no arguments
   });
 });

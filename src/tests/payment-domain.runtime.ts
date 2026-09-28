@@ -1489,7 +1489,7 @@ describe("Test 29: src/api/payments.ts respects the server/browser boundary", ()
     const src = paymentsApiSource();
     expect(src).toMatch(/await import\(["']@\/server\/payments\/service["']\)/);
     expect(src).toMatch(/await import\(["']@\/server\/payments\/reconciliation["']\)/);
-    expect(src).toMatch(/await import\(["']@\/lib\/supabase\/server["']\)/);
+    expect(src).toMatch(/await import\(["']@\/server\/auth\/active-organization["']\)/);
   });
 });
 
@@ -1502,8 +1502,8 @@ describe("Test 30: No client-trusted organizationId or userId parameter", () => 
 
   it("resolveAuthContext derives organization from DB membership, never from input", () => {
     const src = paymentsApiSource();
-    expect(src).toMatch(/\.from\("memberships"\)/);
-    expect(src).toMatch(/\.eq\("user_id", session\.userId\)/);
+    // Through the canonical resolver (src/server/auth/active-organization.ts).
+    expect(src).toMatch(/resolveActiveOrganizationId\(session\.userId\)/);
   });
 
   it("no route or component imports the Payment server domain directly", () => {

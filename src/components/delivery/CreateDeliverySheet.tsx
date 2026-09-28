@@ -18,12 +18,12 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { BottomSheet, CurrencyInput } from "@/design-system";
+import { BottomSheet } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { createRealDelivery, type CreateRealDeliveryInput } from "@/lib/api";
 import { classifyDeliveryError, type RealDeliveryDetail } from "@/lib/deliveries";
-import { codDiffersFromTotal } from "@/lib/delivery-fee";
-import { formatMoney } from "@/lib/money";
+import { codDiffersFromTotal, parseCodAmount } from "@/lib/delivery-fee";
+import { MINOR_UNIT_DIGITS, formatMoney } from "@/lib/money";
 import type { Money } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -45,8 +45,12 @@ interface CreateDeliverySheetProps {
    * The order's server-derived total (goods - discount + delivery fee), shown
    * beside a COD amount that differs from it. Display only — COD is never
    * derived from, or written back into, the order's money.
+   *
+   * Required: its CURRENCY is the COD amount's currency. The server stores
+   * cod_currency as the order's currency, so the amount must be typed in it —
+   * there is no honest COD field without knowing which currency that is.
    */
-  orderTotal?: Money;
+  orderTotal: Money;
   onCreated: (delivery: RealDeliveryDetail) => void;
 }
 
@@ -63,7 +67,9 @@ export function CreateDeliverySheet({
   const [providerKey, setProviderKey] = useState("");
   const [trackingNumber, setTrackingNumber] = useState("");
   const [codEnabled, setCodEnabled] = useState(false);
-  const [codCents, setCodCents] = useState(0);
+  // Kept as text so a half-typed "1." is never rounded; parsed on use, in the
+  // order's own currency.
+  const [codText, setCodText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<CreateFailure | null>(null);
 
@@ -72,7 +78,7 @@ export function CreateDeliverySheet({
     setProviderKey("");
     setTrackingNumber("");
     setCodEnabled(false);
-    setCodCents(0);
+    setCodText("");
     setSubmitting(false);
     setFailure(null);
   }
@@ -82,9 +88,13 @@ export function CreateDeliverySheet({
     onOpenChange(next);
   }
 
+  const codCurrency = orderTotal.currency;
+  const codMinor = codEnabled ? parseCodAmount(codText, codCurrency) : 0;
+  const codInvalid = codEnabled && codMinor === null;
+
   async function submit() {
     const name = providerName.trim();
-    if (!name) return;
+    if (!name || codInvalid) return;
     setSubmitting(true);
     setFailure(null);
     try {
@@ -93,7 +103,7 @@ export function CreateDeliverySheet({
       if (key) input.providerKey = key;
       const tracking = trackingNumber.trim();
       if (tracking) input.externalTrackingNumber = tracking;
-      if (codEnabled && codCents > 0) input.codAmountMinor = codCents;
+      if (codEnabled && codMinor !== null && codMinor > 0) input.codAmountMinor = codMinor;
       const detail = await createRealDelivery(input);
       onCreated(detail);
       handleOpenChange(false);
@@ -189,19 +199,50 @@ export function CreateDeliverySheet({
           </div>
           {codEnabled ? (
             <>
-              <CurrencyInput
-                id="delivery-create-cod"
-                label={t("delivery.create.cod")}
-                value={codCents}
-                onChange={setCodCents}
-              />
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="delivery-create-cod" className="text-label text-text-secondary">
+                  {t("delivery.create.codAmount", { currency: codCurrency })}
+                </Label>
+                <Input
+                  id="delivery-create-cod"
+                  inputMode={MINOR_UNIT_DIGITS[codCurrency] === 0 ? "numeric" : "decimal"}
+                  autoComplete="off"
+                  className="text-financial h-12"
+                  value={codText}
+                  placeholder={MINOR_UNIT_DIGITS[codCurrency] === 0 ? "0" : "0.00"}
+                  aria-invalid={codInvalid ? true : undefined}
+                  aria-describedby={
+                    codInvalid ? "delivery-create-cod-error" : "delivery-create-cod-readback"
+                  }
+                  onChange={(e) => setCodText(e.target.value)}
+                />
+                {codInvalid ? (
+                  <p
+                    id="delivery-create-cod-error"
+                    role="alert"
+                    className="text-caption text-status-danger-text"
+                  >
+                    {t(
+                      MINOR_UNIT_DIGITS[codCurrency] === 0
+                        ? "delivery.create.codInvalidWhole"
+                        : "delivery.create.codInvalidDecimal",
+                      { currency: codCurrency },
+                    )}
+                  </p>
+                ) : codMinor !== null && codMinor > 0 ? (
+                  // Read back in the order's currency, with its own symbol, so a
+                  // decimal-place or currency mistake is visible before submit.
+                  <p id="delivery-create-cod-readback" className="text-caption text-text-secondary">
+                    {t("delivery.create.codReadback", {
+                      amount: formatMoney({ amount: codMinor, currency: codCurrency }),
+                    })}
+                  </p>
+                ) : null}
+              </div>
               <p className="text-caption text-text-muted">{t("delivery.create.codHint")}</p>
-              {orderTotal &&
-              codCents > 0 &&
-              codDiffersFromTotal(
-                { amount: codCents, currency: orderTotal.currency },
-                orderTotal,
-              ) ? (
+              {codMinor !== null &&
+              codMinor > 0 &&
+              codDiffersFromTotal({ amount: codMinor, currency: codCurrency }, orderTotal) ? (
                 <p className="text-caption text-status-warning-text">
                   {t("deliveryFee.codDiffers", { total: formatMoney(orderTotal) })}
                 </p>
@@ -220,7 +261,7 @@ export function CreateDeliverySheet({
 
         <Button
           className="tap-target h-12 w-full"
-          disabled={submitting || providerName.trim().length === 0}
+          disabled={submitting || providerName.trim().length === 0 || codInvalid}
           onClick={() => void submit()}
         >
           {submitting ? t("delivery.create.creating") : t("delivery.create.submit")}

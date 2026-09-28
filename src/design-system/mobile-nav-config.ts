@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  BarChart3,
   Boxes,
   CreditCard,
   Home,
@@ -69,6 +70,8 @@ export type MobileNavRoute =
   | "/app/inventory"
   | "/app/deliveries"
   | "/app/payments"
+  | "/app/customers"
+  | "/app/analytics"
   | "/app/settings";
 
 export interface MobileNavTabConfig extends MobileNavRequirement {
@@ -129,13 +132,16 @@ const ASK_GROUPS: readonly MobileNavSheetGroup[] = [
     titleKey: "nav.askGroups.find",
     actions: [
       {
+        // The Customer directory is a real, server-searched finder (name, or
+        // phone for members who hold customers.view_sensitive) — no longer the
+        // Inbox standing in for one.
         id: "find-customer",
         labelKey: "nav.askActions.findCustomer.label",
         descriptionKey: "nav.askActions.findCustomer.description",
         icon: Users,
-        availability: "assistive",
-        to: "/app/inbox",
-        requiresAll: ["messages.read"],
+        availability: "live",
+        to: "/app/customers",
+        requiresAll: ["customers.read"],
       },
       {
         id: "find-order",
@@ -263,6 +269,16 @@ const SALES_GROUPS: readonly MobileNavSheetGroup[] = [
         requiresAll: ["delivery.read"],
       },
       {
+        // listCustomers/searchCustomers require customers.read.
+        id: "customers",
+        labelKey: "nav.salesActions.customers.label",
+        descriptionKey: "nav.salesActions.customers.description",
+        icon: Users,
+        availability: "live",
+        to: "/app/customers",
+        requiresAll: ["customers.read"],
+      },
+      {
         id: "returns-refunds",
         labelKey: "nav.salesActions.returnsRefunds.label",
         descriptionKey: "nav.salesActions.returnsRefunds.description",
@@ -303,6 +319,27 @@ const SALES_GROUPS: readonly MobileNavSheetGroup[] = [
         availability: "live",
         to: "/app/inventory",
         requiresAll: ["inventory.read"],
+      },
+    ],
+  },
+  {
+    /*
+     * Reading the business, not operating it. Gated on analytics.read — the
+     * key every src/server/analytics/service.ts export requires. Money inside
+     * the screen is further withheld by the server for members outside the
+     * financial boundary; that is not a nav decision.
+     */
+    id: "sales-insights",
+    titleKey: "nav.salesGroups.insights",
+    actions: [
+      {
+        id: "analytics",
+        labelKey: "nav.salesActions.analytics.label",
+        descriptionKey: "nav.salesActions.analytics.description",
+        icon: BarChart3,
+        availability: "live",
+        to: "/app/analytics",
+        requiresAll: ["analytics.read"],
       },
     ],
   },
@@ -441,9 +478,10 @@ export function resolveMobileNavActiveTab(
     pathname.startsWith("/app/deliveries") ||
     pathname.startsWith("/app/products") ||
     pathname.startsWith("/app/inventory") ||
-    // Customer 360 is reached from an order or a conversation; it belongs to
-    // the operational family, not to account settings.
-    pathname.startsWith("/app/customers")
+    // The Customer directory and Customer 360 belong to the operational
+    // family, not to account settings.
+    pathname.startsWith("/app/customers") ||
+    pathname.startsWith("/app/analytics")
   ) {
     return "sales";
   }

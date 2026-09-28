@@ -28,6 +28,7 @@ import {
   type UiPaymentReconciliation,
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
+import type { BusinessSummary, CustomerSummary, TopSellersPage } from "@/lib/analytics-view";
 import { assertPrototypeFixturesAllowed, isDemoModeError } from "@/lib/api/prototype-gate";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
 import { customers } from "@/lib/mock/customers";
@@ -728,6 +729,41 @@ export async function searchRealCustomers(
   };
 }
 
+/* ------------- Analytics (production Analytics domain) --------------------------
+ *
+ * Thin wrappers over src/api/analytics.ts. No mock branch and no demo-mode
+ * fallback on any of them: a failure is thrown for the screen to show as a
+ * failure, never answered with fixture numbers or zeros. Organization and user
+ * are never parameters — the server resolves both from the session, and
+ * requires `analytics.read` on every call.
+ */
+
+/** Orders, money (or its withheld state) and status mixes for one range. */
+export async function getAnalyticsBusinessSummary(range: MetricRange): Promise<BusinessSummary> {
+  const { getBusinessSummaryFn } = await import("@/api/analytics");
+  return getBusinessSummaryFn({ data: { range } });
+}
+
+/**
+ * Top sellers for one range, tagged with the range they were ASKED for — the
+ * server's list carries none, and the screen must be able to refuse showing
+ * one range's list under another range's label.
+ */
+export async function getAnalyticsTopSellers(
+  range: MetricRange,
+  limit: number,
+): Promise<TopSellersPage> {
+  const { getTopSellingItemsFn } = await import("@/api/analytics");
+  const items = await getTopSellingItemsFn({ data: { range, limit } });
+  return { range, items };
+}
+
+/** New / returning customer cohort for one range. Counts only — no customer PII. */
+export async function getAnalyticsCustomerSummary(range: MetricRange): Promise<CustomerSummary> {
+  const { getCustomerSummaryFn } = await import("@/api/analytics");
+  return getCustomerSummaryFn({ data: { range } });
+}
+
 export interface QuickCustomerInput {
   name: string;
   phone: string;
@@ -775,6 +811,55 @@ export async function createQuickCustomer(input: QuickCustomerInput): Promise<Cu
     companion: "nilo",
   };
   return resolve(customer, 200);
+}
+
+/**
+ * What Customer edit may change. Deliberately two fields, not the server's six:
+ *
+ *   - `name` — `customers.update_basic`.
+ *   - `phone` — additionally `customers.view_sensitive`, re-checked by
+ *     updateCustomer() before anything is read or written. `null` removes it.
+ *
+ * Email and language are not surfaced anywhere in the merchant UI today (the
+ * Customer 360 payload does not carry them), so an edit form for them would be
+ * editing a value the merchant cannot see. Status (archive) is a separate
+ * `customers.archive` decision with no V1 surface.
+ *
+ * Omitted means unchanged: only what the merchant actually changed is sent.
+ */
+export interface CustomerEditInput {
+  name?: string;
+  phone?: string | null;
+}
+
+/**
+ * Save a customer edit through the production Customer domain.
+ *
+ * No mock branch and no demo-mode fallback: a failure (permission, not found,
+ * validation, network) is thrown for the caller to show, never answered with
+ * an invented success. The server returns the PII-gated list shape — the phone
+ * is "" to a caller without `customers.view_sensitive` — and that is what comes
+ * back from here.
+ */
+export async function updateRealCustomer(
+  customerId: string,
+  input: CustomerEditInput,
+): Promise<OrderCustomerOption> {
+  if (!isProductionId(customerId)) throw new Error("invalid_reference");
+  const data: { customerId: string; display_name?: string; primary_phone?: string | null } = {
+    customerId,
+  };
+  if (input.name !== undefined) data.display_name = input.name;
+  if (input.phone !== undefined) data.primary_phone = input.phone;
+  const { updateCustomerFn } = await import("@/api/customers");
+  const row = await updateCustomerFn({ data });
+  return {
+    id: row.id,
+    nameKm: row.nameKm,
+    nameEn: row.nameEn,
+    phone: row.phone,
+    sensitiveVisible: row.sensitiveVisible,
+  };
 }
 
 export interface CreateSaleInput {

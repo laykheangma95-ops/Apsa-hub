@@ -34,3 +34,21 @@ export function parseDeliveryFee(text: string, currency: Currency): number | nul
 export function codDiffersFromTotal(cod: Money, orderTotal: Money): boolean {
   return cod.currency !== orderTotal.currency || cod.amount !== orderTotal.amount;
 }
+
+/**
+ * Typed COD text -> integer minor units IN THE ORDER'S OWN CURRENCY, or null
+ * when it is not a valid amount. Empty text is 0 (= "no COD amount").
+ *
+ * The server stores `cod_currency` as the order's currency (create_delivery,
+ * migration 027) and takes `codAmountMinor` as-is, so the amount MUST be typed
+ * and parsed in that currency. The previous USD-only field read "40000" on a
+ * riel order as $40,000.00 and sent 4,000,000 — a courier told to collect one
+ * hundred times the order. Integer parsing only (parseMinorUnits): KHR accepts
+ * whole riel, USD at most two decimals; never `parseFloat(x) * 100`.
+ */
+export function parseCodAmount(text: string, currency: Currency): number | null {
+  if (text.trim() === "") return 0;
+  const minor = parseMinorUnits(text, currency);
+  if (minor === null || minor < 0) return null;
+  return minor;
+}

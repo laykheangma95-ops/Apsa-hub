@@ -271,9 +271,13 @@ describe("D. the real reads keep their server-side gates", () => {
 
   it("the customer server function derives the organization from the membership row", () => {
     const api = readSource("src/api/customers.ts");
-    expect(api).toContain('.from("memberships")');
-    expect(api).toContain('.eq("user_id", session.userId)');
-    expect(api).toContain('.eq("status", "active")');
+    // Through the ONE canonical resolver, keyed on the session user only.
+    expect(api).toContain('await import("@/server/auth/active-organization")');
+    expect(api).toContain("resolveActiveOrganizationId(session.userId)");
+    const resolver = readSource("src/server/auth/active-organization.ts");
+    expect(resolver).toContain('.from("memberships")');
+    expect(resolver).toContain('.eq("user_id", userId)');
+    expect(resolver).toContain('.eq("status", "active")');
     // Stated as a rule in the file itself, and true in the code above it.
     expect(api).toContain("organizationId is NEVER accepted from the caller");
   });

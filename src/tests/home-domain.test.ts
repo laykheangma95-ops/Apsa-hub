@@ -220,7 +220,7 @@ describe("Home tenant and cache isolation", () => {
   it("keeps client organization IDs out of the API and scopes every repository source", () => {
     const api = source("src/api/home.ts");
     const repository = source("src/server/home/repository.ts");
-    expect(api).toContain('.eq("user_id", session.userId)');
+    expect(api).toContain("resolveActiveOrganizationId(session.userId)");
     expect(api).toContain("AuthorizationService.forRequest");
     expect(api).not.toMatch(/z\.object\(\{[^}]*organizationId/s);
     expect(repository.match(/\.eq\("organization_id", organizationId\)/g)?.length).toBeGreaterThan(

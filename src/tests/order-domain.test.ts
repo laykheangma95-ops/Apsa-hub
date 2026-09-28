@@ -652,8 +652,11 @@ describe("Test 6: Client cannot inject organization_id or user_id", () => {
 
   it("the API resolves the organization from DB membership", () => {
     const src = readSource("src/api/orders.ts");
-    expect(src).toMatch(/from\("memberships"\)/);
-    expect(src).toMatch(/\.eq\("status", "active"\)/);
+    // Through the canonical resolver, keyed on the session user only.
+    expect(src).toContain("resolveActiveOrganizationId(session.userId)");
+    const resolver = readSource("src/server/auth/active-organization.ts");
+    expect(resolver).toMatch(/from\("memberships"\)/);
+    expect(resolver).toMatch(/\.eq\("status", "active"\)/);
   });
 
   it("the service passes ctx.organizationId and ctx.userId to the repository", async () => {
