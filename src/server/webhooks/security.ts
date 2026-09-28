@@ -30,7 +30,7 @@
  */
 import { serverLog } from "@/server/observability/logger";
 import { checkRateLimits } from "@/server/rate-limit/limiter";
-import { RATE_LIMITS } from "@/server/rate-limit/policies";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { WebhookReceiptStore } from "./receipts";
 
 // ── Encoding helpers ──────────────────────────────────────────────────────────
@@ -265,6 +265,7 @@ export async function verifyWebhookRequest(
   const limit = await checkRateLimits(
     [{ rule: RATE_LIMITS.webhookIp, parts: [provider, options.clientIp] }],
     options.nowMs,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.webhook },
   );
   if (!limit.allowed) return reject(provider, "rate_limited");
 

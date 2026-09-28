@@ -5,10 +5,15 @@
  * Cloudflare sets `cf-connecting-ip`, Vercel overwrites `x-forwarded-for` /
  * `x-real-ip` at its edge, but a server reachable directly accepts whatever a
  * client sends. So:
- *   - every IP-keyed limit is paired with an identity-keyed one (email digest,
- *     member, organization) that does not depend on headers at all;
- *   - RATE_LIMIT_CLIENT_IP_HEADER pins the ONE header the deployment's proxy
- *     guarantees, when the operator sets it;
+ *   - NO forwarding header is trusted by default. Only when the operator sets
+ *     RATE_LIMIT_CLIENT_IP_HEADER to the ONE header the deployment's proxy
+ *     overwrites is that header read; `x-forwarded-for`, `x-real-ip` and
+ *     `cf-connecting-ip` are otherwise ignored for security decisions and the
+ *     client IP is "unknown" (docs/OPERABILITY.md §4 — deployment requirement);
+ *   - every auth limit that has an IP bucket also has an identity- or
+ *     token-derived bucket (email digest, recovery-session digest, link-token
+ *     digest) that does not depend on headers at all, so a missing or spoofed
+ *     IP never removes meaningful protection;
  *   - when no usable IP is found the IP bucket is SKIPPED, never collapsed into
  *     one shared "unknown" bucket (which would let one abuser lock everyone
  *     out).
@@ -22,8 +27,6 @@
  */
 
 type HeaderGetter = (name: string) => string | null | undefined;
-
-const DEFAULT_HEADER_ORDER = ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] as const;
 
 const IPV4_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const IPV6_CHARS_RE = /^[0-9a-f:]{2,39}$/i;
@@ -57,17 +60,15 @@ export function clientIpFromHeaders(
   getHeader: HeaderGetter,
   trustedHeader: string | undefined = process.env["RATE_LIMIT_CLIENT_IP_HEADER"],
 ): string | null {
-  const names = trustedHeader ? [trustedHeader.toLowerCase()] : DEFAULT_HEADER_ORDER;
-  for (const name of names) {
-    const raw = getHeader(name);
-    if (!raw) continue;
-    // x-forwarded-for: "client, proxy1, proxy2" — the left-most is the client
-    // as seen by the first proxy.
-    const first = name === "x-forwarded-for" ? raw.split(",")[0] : raw;
-    const ip = normalizeClientIp(first);
-    if (ip) return ip;
-  }
-  return null;
+  // Not configured → no header is trusted: the IP is unknown.
+  const name = trustedHeader?.trim().toLowerCase();
+  if (!name) return null;
+  const raw = getHeader(name);
+  if (!raw) return null;
+  // x-forwarded-for: "client, proxy1, proxy2" — the left-most is the client
+  // as seen by the first proxy (only meaningful when that proxy overwrites it).
+  const first = name === "x-forwarded-for" ? raw.split(",")[0] : raw;
+  return normalizeClientIp(first);
 }
 
 /**

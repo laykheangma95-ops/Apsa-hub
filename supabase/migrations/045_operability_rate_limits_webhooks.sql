@@ -2,12 +2,15 @@
 -- Purpose: (1) A durable, instance-shared rate-limit counter store.
 --          (2) A durable webhook-event receipt store for replay protection /
 --              provider-event idempotency (no provider is wired yet).
---          (3) A server-only probe that reports this schema's operability
---              level, for readiness verification.
+--          (3) Server-only readiness probes: the Supabase CLI migration
+--              history (contiguous-application proof) and a convenience
+--              marker for this migration's own objects.
 -- Touches: public.rate_limit_buckets (NEW), public.consume_rate_limit (NEW),
 --          public.prune_rate_limit_buckets (NEW),
 --          public.webhook_event_receipts (NEW), public.claim_webhook_event (NEW),
 --          public.release_webhook_event (NEW),
+--          public.prune_webhook_event_receipts (NEW),
+--          public.apsa_migration_history (NEW),
 --          public.apsa_schema_level (NEW)
 -- Classification: platform-internal. Neither table holds tenant business data
 --   or PII: rate-limit keys are HMAC-SHA256 digests computed server-side (the
@@ -248,14 +251,110 @@ COMMENT ON FUNCTION public.release_webhook_event(TEXT, TEXT) IS
 REVOKE EXECUTE ON FUNCTION public.release_webhook_event(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.release_webhook_event(TEXT, TEXT) TO service_role;
 
--- ── 3. Schema operability level ─────────────────────────────────────────────
+-- Retention. A receipt only has to outlive every legitimate redelivery of its
+-- event: the signed-timestamp tolerance (±300 s, src/server/webhooks/security.ts)
+-- plus provider retry schedules (hours to ~3 days for payment providers).
+-- Receipts older than the retention period (default 30 days, never less than
+-- 7) are pruned in BOUNDED batches (default 5 000, at most 50 000 rows per
+-- call) so a maintenance run never holds a long lock. Younger receipts — the
+-- active replay records — are never touched. No cron is deployed by this
+-- migration; docs/OPERABILITY.md names the maintenance call.
+
+CREATE FUNCTION public.prune_webhook_event_receipts(
+  p_retention_days INTEGER DEFAULT 30,
+  p_batch_size     INTEGER DEFAULT 5000
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_deleted INTEGER;
+BEGIN
+  IF p_retention_days IS NULL OR p_retention_days < 7 OR p_retention_days > 3650 THEN
+    RAISE EXCEPTION 'prune_webhook_event_receipts: retention must be 7..3650 days'
+      USING ERRCODE = '22023';
+  END IF;
+  IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 50000 THEN
+    RAISE EXCEPTION 'prune_webhook_event_receipts: batch size must be 1..50000'
+      USING ERRCODE = '22023';
+  END IF;
+
+  DELETE FROM public.webhook_event_receipts r
+  USING (
+    SELECT provider, event_id
+    FROM public.webhook_event_receipts
+    WHERE received_at < now() - make_interval(days => p_retention_days)
+    ORDER BY received_at
+    LIMIT p_batch_size
+  ) old
+  WHERE r.provider = old.provider AND r.event_id = old.event_id;
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+COMMENT ON FUNCTION public.prune_webhook_event_receipts(INTEGER, INTEGER) IS
+  'Deletes at most p_batch_size webhook receipts older than p_retention_days (default 30, minimum 7); returns the count (migration 045). Server-only maintenance.';
+
+REVOKE EXECUTE ON FUNCTION public.prune_webhook_event_receipts(INTEGER, INTEGER)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.prune_webhook_event_receipts(INTEGER, INTEGER)
+  TO service_role;
+
+-- ── 3. Readiness probes ─────────────────────────────────────────────────────
 --
--- Lets readiness tooling prove, over the service-role REST API and without
--- executing anything that writes, that THIS migration is applied. It reports a
--- constant: the number of the migration that created it. It says nothing about
--- migrations 009–044 on its own — scripts/verify-readiness.ts derives the
--- contiguous applied level from table and function presence, and uses this
--- probe as the positive witness for 045.
+-- 3a. Migration history — the PROOF of contiguous application.
+--
+-- `supabase db push` / `supabase migration up` record every migration file
+-- they apply, one row per file, in supabase_migrations.schema_migrations
+-- (version = the file's numeric prefix, e.g. '001'). That ledger is written by
+-- the migration TOOL at the moment each file runs, so a clean environment
+-- applying 001 → 045 produces a truthful, complete history without any
+-- historical migration file having to record itself, and without this
+-- migration asserting anything about 001–044.
+--
+-- PostgREST does not expose the supabase_migrations schema, so this
+-- SECURITY DEFINER, STABLE, read-only function returns it to the service
+-- role: {"available": bool, "versions": ["001", …]}. "available": false means
+-- the ledger does not exist (migrations applied by hand in the SQL editor) —
+-- readiness treats that as NOT READY, never as "probably fine".
+-- scripts/lib/migration-history.ts compares the versions with this checkout's
+-- migration files: every file present, nothing missing, nothing unknown.
+
+CREATE FUNCTION public.apsa_migration_history()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_versions JSONB;
+BEGIN
+  IF to_regclass('supabase_migrations.schema_migrations') IS NULL THEN
+    RETURN jsonb_build_object('available', false, 'versions', '[]'::jsonb);
+  END IF;
+  EXECUTE 'SELECT COALESCE(jsonb_agg(version::text ORDER BY version::text), ''[]''::jsonb)
+             FROM supabase_migrations.schema_migrations'
+    INTO v_versions;
+  RETURN jsonb_build_object('available', true, 'versions', v_versions);
+END;
+$$;
+
+COMMENT ON FUNCTION public.apsa_migration_history() IS
+  'Read-only view of the Supabase CLI migration ledger for readiness verification (migration 045). Server-only.';
+
+REVOKE EXECUTE ON FUNCTION public.apsa_migration_history() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.apsa_migration_history() TO service_role;
+
+-- 3b. apsa_schema_level() — a CONVENIENCE marker only.
+--
+-- A constant: 45 means "migration 045's own objects exist". It proves
+-- NOTHING about migrations 001–044 (a database can answer 45 with an earlier
+-- ALTER-only migration missing). Readiness never treats it as migration
+-- proof; apsa_migration_history() above is the proof.
 
 CREATE FUNCTION public.apsa_schema_level()
 RETURNS INTEGER
@@ -266,7 +365,7 @@ SET search_path = public
 AS $$ SELECT 45 $$;
 
 COMMENT ON FUNCTION public.apsa_schema_level() IS
-  'Constant operability-schema marker: 45 once migration 045 is applied. Read-only. Server-only.';
+  'Convenience marker: 45 once migration 045''s objects exist. NOT proof of migrations 001-044 (see apsa_migration_history). Read-only. Server-only.';
 
 REVOKE EXECUTE ON FUNCTION public.apsa_schema_level() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apsa_schema_level() TO service_role;

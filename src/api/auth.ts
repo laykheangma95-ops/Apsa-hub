@@ -355,7 +355,7 @@ export const signUpFn = createServerFn()
   .validator((data: unknown) => SignUpInput.parse(data))
   .handler(async ({ data }): Promise<SignUpResult | SignUpError> => {
     const { allowSignUpAttempt } = await import("@/server/rate-limit/auth-limits");
-    if (!(await allowSignUpAttempt())) return { ok: false, code: "rate_limited" };
+    if (!(await allowSignUpAttempt(data.email))) return { ok: false, code: "rate_limited" };
 
     const url = process.env["VITE_SUPABASE_URL"]!;
     const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
@@ -438,8 +438,10 @@ async function auditSignOutBestEffort(userId: string): Promise<void> {
     const { auditLog } = await import("@/server/auth/audit");
     await auditLog(authCtx, { action: "auth.sign_out", resourceType: "session" });
   } catch (err) {
-    // Best-effort only — never block sign-out on audit failure.
-    console.error("[APSA] auth.sign_out audit log failed (best-effort):", err);
+    // Best-effort only — never block sign-out on audit failure. Structured and
+    // redacted: never the raw error or its cause chain.
+    const { reportServerError } = await import("@/server/observability/errors");
+    reportServerError(err, { event: "auth.sign_out.audit_failed" });
   }
 }
 
@@ -635,7 +637,9 @@ function appRedirectUrl(
   );
   if (!base.ok) {
     // The reason only — the configured value is not echoed.
-    console.error("[APSA] VITE_APP_URL is invalid; auth email not sent", { reason: base.reason });
+    void import("@/server/observability/logger").then(({ serverLog }) =>
+      serverLog.error("auth.app_url_invalid", { reason: base.reason }),
+    );
     return { ok: false };
   }
   return { ok: true, redirectTo: base.origin ? `${base.origin}${pathname}` : undefined };
@@ -727,10 +731,18 @@ export const beginPasswordRecoveryFn = createServerFn()
     // checked: if this link fails, no older recovery may remain usable.
     await clearRecoveryCookies();
 
-    // Bounded per address (token + email links carry a guessable code) and
-    // per client IP, after the old recovery is already gone.
+    // Bounded per address (token + email links carry a guessable code), per
+    // link token (token_hash links), and per client IP when a trusted header
+    // is configured — after the old recovery is already gone.
     const { allowOtpVerification } = await import("@/server/rate-limit/auth-limits");
-    if (!(await allowOtpVerification("email" in data ? data.email : null))) {
+    if (
+      !(await allowOtpVerification(
+        "email" in data ? data.email : null,
+        undefined,
+        undefined,
+        "tokenHash" in data ? data.tokenHash : null,
+      ))
+    ) {
       return { ok: false, code: "rate_limited" };
     }
 
@@ -811,7 +823,9 @@ export const completePasswordRecoveryFn = createServerFn()
     if (!recovery) return { ok: false, code: "recovery_expired" };
 
     const { allowRecoveryCompletion } = await import("@/server/rate-limit/auth-limits");
-    if (!(await allowRecoveryCompletion())) return { ok: false, code: "unexpected_error" };
+    if (!(await allowRecoveryCompletion(recovery.refreshToken))) {
+      return { ok: false, code: "unexpected_error" };
+    }
 
     const client = createAnonAuthClient();
     try {

@@ -1471,7 +1471,7 @@ describe("E. duplicate SKU and barcode reach the merchant as themselves", () => 
     const source = read("src/server/products/service.ts");
     expect(source).toContain("uniq_product_variants_sku_per_org");
     expect(source).toContain("uniq_product_variants_barcode_per_org");
-    expect(source).toContain("statusCode: 409");
+    expect(source).toContain('organization", 409)');
   });
 
   it("a denial, a missing row and an invalid amount are not reported as duplicates", () => {

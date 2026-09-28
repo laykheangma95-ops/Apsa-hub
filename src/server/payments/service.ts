@@ -41,10 +41,12 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
+import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog, auditLogRequired } from "@/server/auth/audit";
 import { enforceRateLimits } from "@/server/rate-limit/limiter";
-import { RATE_LIMITS } from "@/server/rate-limit/policies";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { Money, Currency } from "@/types";
 import * as repo from "./repository";
 import {
@@ -344,15 +346,15 @@ function mapEvidence(row: PaymentEvidenceRow, canViewReference: boolean): Paymen
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 function badRequest(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 400 });
+  return publicError(message, 400);
 }
 
 function notFound(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 404 });
+  return publicError(message, 404);
 }
 
 function conflict(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 409 });
+  return publicError(message, 409);
 }
 
 /**
@@ -368,11 +370,11 @@ async function bestEffortAudit(
   try {
     await auditLog(ctx, payload);
   } catch (err) {
-    console.error(
-      "[APSA] payment audit_log write failed (best-effort):",
-      err instanceof Error ? err.message : String(err),
-      { action: payload.action, organizationId: ctx.organizationId },
-    );
+    reportServerError(err, {
+      event: "payments.best_effort_audit_failed",
+      action: payload.action,
+      organizationId: ctx.organizationId,
+    });
   }
 }
 
@@ -485,18 +487,29 @@ export interface RecordPaymentServiceInput {
 // the 403, not a 429. Money-moving-back-out actions (reverse, refund, correct)
 // share a second, tighter bucket. Idempotency keys and the payment state
 // machine remain the protection against duplicates; this is volume only.
+//
+// Backend-failure policy (policies.ts#BACKEND_FAILURE_POLICY): routine
+// record/verify/attach degrade to the per-instance store; reverse, refund and
+// correct FAIL CLOSED — with the durable limiter unreachable they throw a
+// retryable 503 here, before any read, write, payment event or audit row.
 
 async function enforcePaymentMutationLimit(ctx: AuthorizationContext): Promise<void> {
-  await enforceRateLimits([
-    { rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] },
-  ]);
+  await enforceRateLimits(
+    [{ rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] }],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.paymentMutation },
+  );
 }
 
 async function enforcePaymentReversalLimit(ctx: AuthorizationContext): Promise<void> {
-  await enforceRateLimits([
-    { rule: RATE_LIMITS.paymentReversalMember, parts: [ctx.organizationId, ctx.userId] },
-    { rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] },
-  ]);
+  await enforceRateLimits(
+    [
+      { rule: RATE_LIMITS.paymentReversalMember, parts: [ctx.organizationId, ctx.userId] },
+      { rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] },
+    ],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.financialReversal },
+  );
 }
 
 /**

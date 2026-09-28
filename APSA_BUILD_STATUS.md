@@ -76,7 +76,7 @@ staging rehearsal has happened (see *Staging* and *Hosted migrations* below).
 | **Customer 360** | BUILT IN CODE (real customer, orders, notes; PII-gated) | BEHAVIORALLY TESTED — `customer-merchant-completeness`, `customer-order-history-lifecycle`, `customer-pii-cache-eviction` | REQUIRES STAGING | |
 | **Team / Staff invite** | BUILT IN CODE (041–042, CORRECTION-001) | BEHAVIORALLY TESTED — `team-*` | REQUIRES STAGING | Invitation email delivery depends on Supabase SMTP configuration. |
 | **Public mini-store / storefront** | **NOT BUILT** | — | — | Separate workstream. |
-| **Operability** (logging, request IDs, error boundary, rate limits, webhook primitives, readiness) | BUILT IN CODE (migration 045) | BEHAVIORALLY TESTED — `observability`, `rate-limit`, `webhook-security`, `readiness`, `operability-limits`, `operability-sql` (PGlite) | REQUIRES STAGING (limits are durable only once 045 is applied) | External error-monitoring provider: NOT BUILT (interface only). Details: docs/OPERABILITY.md. |
+| **Operability** (logging, request IDs, error boundary, rate limits, webhook primitives, readiness) | BUILT IN CODE (migration 045) | BEHAVIORALLY TESTED — `observability`, `rate-limit`, `webhook-security`, `readiness`, `operability-limits`, `operability-sql` (PGlite) | REQUIRES STAGING (limits are durable only once 045 is applied; migration-history readiness proof is tested against PGlite but has not run against staging) | External error-monitoring provider: NOT BUILT (interface only). Webhook receipt pruning built, no scheduler deployed. `RATE_LIMIT_CLIENT_IP_HEADER` must be set for IP limits to apply. Details: docs/OPERABILITY.md. |
 | **Staging** | Tooling BUILT IN CODE (`check:staging-readiness`, `verify:staging`, `verify:readiness`) | Tooling tested offline | **NOT DONE** — no staging project, no rehearsal | |
 | **Production** | — | — | **NOT READY** — hosted at `008`; no backup/restore drill; no linked deployment | See blockers below. |
 
@@ -117,8 +117,11 @@ testing the whole business OS.
 1. **Dedicated staging Supabase project** created by the owner, with `STAGING_*`
    credentials (docs/STAGING_BOOTSTRAP.md).
 2. **Migration rehearsal `009` → `045`** on staging, as the separate approved
-   phase (docs/RELEASE_CHECKLIST.md §2), then `bun run verify:staging` and
-   `bun run verify:readiness` passing with **EXPECTED = HOSTED**.
+   phase (docs/RELEASE_CHECKLIST.md §2), **applied with `supabase db push`** so
+   the CLI ledger records every file, then `bun run verify:staging` and
+   `bun run verify:readiness` passing — including the contiguous
+   migration-history proof (every repository migration recorded, none
+   missing / out of order / unknown). No readiness claim before that run.
 3. **Staging deployment** of this app (hosting project linked, server env set:
    `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
    `VITE_APP_URL`; optionally `RATE_LIMIT_KEY_SECRET`,
@@ -147,6 +150,13 @@ external error-monitoring provider, courier integrations, Google OAuth.
   failure copy without the reference (`supportReferenceOf()` is ready for them).
 - No alerting; the on-call person reads logs during Alpha.
 - Rate limiting degrades to per-instance memory if the database limiter is
-  unreachable (logged; readiness fails while migration 045 is absent).
+  unreachable for auth, order creation and routine payments (logged; readiness
+  fails while migration 045 is absent). Refund / reversal / correction fail
+  closed with a retryable 503 instead.
+- Without `RATE_LIMIT_CLIENT_IP_HEADER` no forwarding header is trusted and IP
+  buckets are skipped; auth keeps its identity/token buckets.
+- Production's `001`–`008` history is recorded by the lock file; how it is
+  evidenced in the CLI ledger for a production readiness run is an open owner
+  decision.
 - Lint baseline: pre-existing `react-refresh` / `exhaustive-deps` warnings
   (docs/RELEASE_CHECKLIST.md §1).

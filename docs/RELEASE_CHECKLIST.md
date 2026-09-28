@@ -105,9 +105,15 @@ credentials exist and application is explicitly authorized.
   - `043`: payment referenceless-duplicate handling (depends on `034`–`035`)
   - `044`: order idempotency + delivery fee, `create_order_v2` (depends on
     `023`–`026`)
-  - `045`: operability — rate-limit buckets, webhook event receipts,
-    `apsa_schema_level()` (no dependency on tenant tables; see
-    `docs/OPERABILITY.md`)
+  - `045`: operability — rate-limit buckets, webhook event receipts and their
+    pruning, `apsa_migration_history()` (readiness proof) and
+    `apsa_schema_level()` (convenience marker only) (no dependency on tenant
+    tables; see `docs/OPERABILITY.md`)
+- **Apply with the Supabase CLI (`supabase db push`), not the SQL editor.**
+  Readiness proves contiguous application from the CLI's
+  `supabase_migrations.schema_migrations` ledger; files run by hand leave no
+  ledger and readiness cannot pass. Never use `supabase migration repair
+  --status applied` to satisfy readiness — it records a file without running it.
 - RLS: every migration from `011` onward enables RLS in the same file it
   creates its table(s) in — there is no separate "enable RLS later" pass, so
   applying in numeric order never leaves a tenant table briefly unprotected.
@@ -281,8 +287,12 @@ Still to confirm before real merchant traffic (dashboard checks, no code):
 
 - [ ] `bun run verify:readiness --app-url=<staging deployment> --check-app-env`
       exits 0: server boots (`/api/health`), required env present (names only),
-      database reachable, **EXPECTED = HOSTED** migration level, every RPC the
-      server calls exists, `apsa_schema_level() = 45`.
+      database reachable, **every repository migration recorded in the Supabase
+      CLI ledger — none missing, none out of order, none unknown**
+      (`apsa_migration_history()`), migration objects present (cross-check),
+      every RPC the server calls exists, and the `apsa_schema_level() = 45`
+      marker. The marker alone is never migration proof. Not claimed until
+      this has passed against staging.
 - [ ] `docs/BACKUP_RESTORE.md` §2 fully ticked for the project that will hold
       merchant data, including a completed restore drill into a disposable
       project. No "backup verified" claim without that evidence.

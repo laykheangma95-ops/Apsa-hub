@@ -15,16 +15,23 @@
  *   2. Required environment  names only, from the shell this runs in (e.g. a
  *                            pulled deployment env) — values never read out
  *   3. Database reachable    service-role HEAD count on organizations
- *   4. Migration level       EXPECTED (this checkout) vs HOSTED (evidence from
- *                            the PostgREST OpenAPI surface) — see
- *                            scripts/lib/migration-level.ts
- *   5. Critical RPCs         every `.rpc("…")` the server code calls exists
- *   6. Operability schema    apsa_schema_level() (migration 045, STABLE,
- *                            read-only) answers 45
+ *   4. Migration history     PROOF that every repository migration 001…N is
+ *                            recorded in the Supabase CLI ledger — none
+ *                            missing, none out of order, none unknown — via
+ *                            apsa_migration_history() (migration 045, STABLE,
+ *                            read-only); see scripts/lib/migration-history.ts
+ *   5. Migration objects     cross-check: EXPECTED vs HOSTED from the PostgREST
+ *                            OpenAPI surface (scripts/lib/migration-level.ts).
+ *                            Can only veto; never proof on its own, because
+ *                            ALTER-only migrations leave no objects
+ *   6. Critical RPCs         every `.rpc("…")` the server code calls exists
+ *   7. Operability marker    apsa_schema_level() answers 45 — a convenience
+ *                            marker that 045's objects exist, NOT migration
+ *                            proof
  *
  * SAFETY CONTRACT
- *   · Read-only: one OpenAPI GET, one HEAD count, one call to a STABLE
- *     constant function, one GET of /api/health. Nothing is written, no
+ *   · Read-only: one OpenAPI GET, one HEAD count, two calls to STABLE
+ *     read-only functions, one GET of /api/health. Nothing is written, no
  *     migration is applied, no configuration is changed.
  *   · Staging only: the same production-witness gate as verify-staging.ts —
  *     the run refuses unless a production URL is supplied AND differs from the
@@ -58,6 +65,12 @@ import {
   formatMigrationNumber,
   parseOpenApiSurface,
 } from "./lib/migration-level.ts";
+import {
+  evaluateMigrationHistory,
+  migrationsReady,
+  repositoryMigrationVersions,
+  type MigrationHistoryReport,
+} from "./lib/migration-history.ts";
 import { OPTIONAL_SERVER_ENV, missingServerEnv } from "../src/server/observability/env-check.ts";
 
 const ROOT = process.cwd();
@@ -189,14 +202,67 @@ try {
   fail(`Database request did not complete (${error instanceof Error ? error.name : "error"}).`);
 }
 
-// ── 4. Migration level ───────────────────────────────────────────────────────
-
-section("4. Migration level — EXPECTED vs HOSTED");
-
 const migrationFiles = fs
   .readdirSync(MIGRATIONS_DIR)
   .filter((f) => /^\d+_.*\.sql$/.test(f))
   .sort((a, b) => Number(a.split("_")[0]) - Number(b.split("_")[0]));
+
+// ── 4. Migration history (the proof) ─────────────────────────────────────────
+
+section("4. Migration history — every repository migration applied, in order");
+
+let historyReport: MigrationHistoryReport | null = null;
+try {
+  const { data, error } = await admin.rpc("apsa_migration_history");
+  if (error) {
+    fail(
+      `apsa_migration_history() unavailable (code ${error.code ?? "unknown"}) — migration 045 is ` +
+        `not applied, so contiguous application cannot be proven.`,
+    );
+  } else {
+    historyReport = evaluateMigrationHistory(repositoryMigrationVersions(migrationFiles), data);
+    console.log(
+      `\n  EXPECTED: ${historyReport.expectedLatest ?? "none"} (${migrationFiles.length} migration files)`,
+    );
+    console.log(
+      `  HOSTED:   contiguous through ${historyReport.contiguousThrough ?? "none"} (Supabase CLI ledger)\n`,
+    );
+    if (historyReport.ready) {
+      pass(`All ${migrationFiles.length} repository migrations are recorded, none unknown.`);
+    } else {
+      for (const reason of historyReport.reasons) {
+        if (reason === "malformed") fail("apsa_migration_history() returned an unexpected shape.");
+        else if (reason === "history_unavailable")
+          fail(
+            "No Supabase CLI migration ledger exists on the target (migrations applied by hand?). " +
+              "Contiguous application cannot be proven — re-run the rehearsal with `supabase db push`.",
+          );
+        else if (reason === "behind")
+          fail(`Hosted is BEHIND this checkout — not applied: ${historyReport.missing.join(", ")}`);
+        else if (reason === "out_of_order")
+          fail(
+            `Applied OUT OF ORDER — missing ${historyReport.missing.join(", ")} while later ` +
+              `migration(s) ${historyReport.presentAfterGap.join(", ")} are recorded.`,
+          );
+        else if (reason === "unknown_versions")
+          fail(
+            `Hosted records migration(s) this checkout does not have: ${historyReport.unknown.join(", ")}`,
+          );
+      }
+      info(
+        "Nothing is applied by this tool. Apply pending migrations only through the approved rehearsal.",
+      );
+    }
+  }
+} catch (error) {
+  unclear(
+    `apsa_migration_history() request did not complete (${error instanceof Error ? error.name : "error"}).`,
+  );
+}
+
+// ── 5. Migration objects (cross-check) ───────────────────────────────────────
+
+section("5. Migration objects — cross-check only (never proof on its own)");
 const footprints = collectMigrationFootprints(
   migrationFiles,
   migrationFiles.map((f) => fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8")),
@@ -222,7 +288,7 @@ try {
       `  HOSTED:   ${formatMigrationNumber(report.hosted?.number)} (${report.hosted?.file ?? "no migration footprint present"})\n`,
     );
     if (report.atExpected) {
-      pass("Hosted database has reached the migration level this checkout expects.");
+      pass("Every table/RPC the migrations create is present (objects only; not history proof).");
     } else {
       fail(
         "Hosted database is BEHIND this checkout" +
@@ -243,18 +309,26 @@ try {
     }
     if (report.unobservable.length > 0) {
       info(
-        `${report.unobservable.length} ALTER-only migration(s) have no observable footprint and are ` +
-          `not proven by this check: ${report.unobservable.join(", ")}`,
+        `${report.unobservable.length} ALTER-only migration(s) have no observable footprint; only ` +
+          `the history check (4) proves them: ${report.unobservable.join(", ")}`,
       );
+    }
+    if (historyReport) {
+      const combined = migrationsReady({
+        history: historyReport,
+        objectsAtExpected: report.atExpected,
+        objectsOutOfOrder: report.presentBeyondGap.length > 0,
+      });
+      info(`Migration readiness (history AND objects): ${combined ? "PROVEN" : "NOT PROVEN"}`);
     }
   }
 } catch (error) {
   unclear(`OpenAPI request did not complete (${error instanceof Error ? error.name : "error"}).`);
 }
 
-// ── 5. Critical RPCs ─────────────────────────────────────────────────────────
+// ── 6. Critical RPCs ─────────────────────────────────────────────────────────
 
-section("5. Critical RPCs called by the application");
+section("6. Critical RPCs called by the application");
 
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -284,14 +358,14 @@ if (!hostedFunctions) {
     );
 }
 
-// ── 6. Operability schema witness ────────────────────────────────────────────
+// ── 7. Operability marker ────────────────────────────────────────────────────
 
-section("6. Operability schema (migration 045)");
+section("7. Operability marker (migration 045 objects only — not migration proof)");
 
 try {
   const { data, error } = await admin.rpc("apsa_schema_level");
   if (!error && data === 45)
-    pass("apsa_schema_level() = 45 — rate-limit and webhook stores exist.");
+    pass("apsa_schema_level() = 45 — 045's rate-limit and webhook stores exist.");
   else if (error)
     fail(
       `apsa_schema_level() unavailable (code ${error.code ?? "unknown"}) — migration 045 not applied.`,

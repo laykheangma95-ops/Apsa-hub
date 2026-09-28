@@ -11,7 +11,16 @@
  *   2. VALUE-based: every remaining string is scrubbed of things that look like
  *      credentials or contact details even when they arrive under an innocent
  *      key (a PostgREST message quoting `Key (email)=(a@b.c)`, a JWT pasted into
- *      a reason field, a phone number inside an error message).
+ *      a reason field, a phone number inside an error message, "password:
+ *      hunter2" inside a message, a short webhook secret after a `secret=`
+ *      label, a Cookie/Authorization header line, a known provider token
+ *      format, a street address or Cambodian sangkat/khan/phum place name).
+ *
+ * Free-form content keys (message, body, content, text, payload, raw, note,
+ * comment, caption, …) are redacted wholesale by layer 1: conversation
+ * messages and provider payloads are never logged, even scrubbed. The
+ * operational `errorMessage` field is the one deliberate exception — it is an
+ * Error's scrubbed message, capped at 300 characters.
  *
  * The contract is "prefer IDs and codes over payloads". This module is the
  * backstop for when a payload slips through anyway — it is not a licence to
@@ -56,6 +65,20 @@ const SENSITIVE_KEY_PARTS = [
   "text",
   "note",
   "name",
+  // Free-form customer/provider content under generic keys: a conversation
+  // message, a webhook payload, a raw provider response. Never logged.
+  "message",
+  "msg",
+  "payload",
+  "raw",
+  "caption",
+  "comment",
+  "transcript",
+  "snippet",
+  "preview",
+  "street",
+  "pin",
+  "pwd",
 ] as const;
 
 /**
@@ -124,7 +147,34 @@ export function isSensitiveKey(key: string): boolean {
 
 // ── Value scrubbing ───────────────────────────────────────────────────────────
 
+/**
+ * Labels that announce a credential in free text. "password: hunter2",
+ * "webhook_secret=abc", "api-key \"k1\"", "token: t" — the VALUE is redacted
+ * whatever its length, because short secrets are still secrets.
+ */
+const CREDENTIAL_LABEL =
+  "(?:password|passwd|pwd|passcode|pin|otp|secret|client[_-]?secret|webhook[_-]?secret|signing[_-]?secret|app[_-]?secret|token|access[_-]?token|refresh[_-]?token|id[_-]?token|bot[_-]?token|api[_-]?key|apikey|private[_-]?key|service[_-]?role(?:[_-]?key)?|credentials?)";
+
 const VALUE_PATTERNS: Array<[RegExp, string]> = [
+  // Cookie / Set-Cookie / Authorization header lines: everything after the
+  // label to the end of the line is credential material.
+  [
+    /\b(set-cookie|cookie|proxy-authorization|authorization)(\s*[:=]\s*)[^\r\n]+/gi,
+    "$1$2[REDACTED]",
+  ],
+  // label: value / label=value / "label": "value" credential pairs, any length.
+  [
+    new RegExp(
+      `(["']?\\b${CREDENTIAL_LABEL}\\b["']?)(\\s*[:=]\\s*|\\s+is\\s+)("[^"]*"|'[^']*'|[^\\s,;&"'}\\]]+)`,
+      "gi",
+    ),
+    "$1$2[REDACTED]",
+  ],
+  // Known token formats that may appear with no label at all.
+  [
+    /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b|\bwhsec_[A-Za-z0-9+/=]{8,}|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bsb_(?:secret|publishable)_[A-Za-z0-9_-]{8,}|\bsbp_[A-Za-z0-9]{20,}\b|\bEAA[A-Za-z0-9]{20,}\b|\b\d{8,10}:[A-Za-z0-9_-]{30,}\b/g,
+    "[REDACTED_TOKEN]",
+  ],
   // JWTs (Supabase access/refresh tokens, provider tokens).
   [/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g, "[REDACTED_JWT]"],
   // Authorization header values.
@@ -143,6 +193,22 @@ const VALUE_PATTERNS: Array<[RegExp, string]> = [
   ],
   // Long opaque secrets (service keys, webhook secrets): 40+ chars of base64/hex.
   [/\b[A-Za-z0-9_+/=-]{40,}\b/g, "[REDACTED_SECRET]"],
+  // Street addresses in customer content: "#12, St. 271", "No. 5 Street 63",
+  // "Road 2004", Khmer "ផ្ទះលេខ ១២ ផ្លូវ ២៧១". Conservative: a street keyword
+  // must be followed by a number, so prose like "street food" is untouched.
+  [
+    /(?:(?:#|\bno\.?\s*|\bhouse\s*)\s*\d+[A-Za-z]?\s*,?\s*)?\b(?:st\.?|street|road|rd\.?|blvd\.?|boulevard)\s*#?\d+[A-Za-z]?\b/gi,
+    "[REDACTED_ADDRESS]",
+  ],
+  [/(?:ផ្ទះ(?:លេខ)?|ផ្លូវ(?:លេខ)?)\s*[#]?[0-9០-៩]+[A-Za-z]?/g, "[REDACTED_ADDRESS]"],
+  // Cambodian administrative place names that follow a customer's address:
+  // "Sangkat Boeung Keng Kang", "Khan Chamkarmon", "Phum Thmey", Khmer
+  // សង្កាត់/ខណ្ឌ/ភូមិ/ឃុំ. The keyword and the next word are redacted.
+  [
+    /\b(?:[Ss]angkat|[Kk]han|[Pp]hum|[Kk]rong)\s+[A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,2}/g,
+    "[REDACTED_ADDRESS]",
+  ],
+  [/(?:សង្កាត់|ខណ្ឌ|ភូមិ|ឃុំ|ក្រុង|ស្រុក)\s*[^\s,;.]+/g, "[REDACTED_ADDRESS]"],
 ];
 
 /**

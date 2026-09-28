@@ -20,6 +20,7 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
 import * as repo from "./repository";
@@ -209,7 +210,7 @@ export async function getProductDetail(
   ]);
 
   if (!product) {
-    throw Object.assign(new Error("Product not found"), { statusCode: 404 });
+    throw publicError("Product not found", 404);
   }
 
   return mapProduct(product, variants, canViewCost);
@@ -273,20 +274,14 @@ export async function createProduct(
 
   // Validate money: price_amount must be a non-negative integer.
   if (!Number.isInteger(initialVariant.price_amount) || initialVariant.price_amount < 0) {
-    throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
-      statusCode: 400,
-    });
+    throw publicError("price_amount must be a non-negative integer (minor units)", 400);
   }
   if (initialVariant.cost_amount != null) {
     if (!Number.isInteger(initialVariant.cost_amount) || initialVariant.cost_amount < 0) {
-      throw Object.assign(new Error("cost_amount must be a non-negative integer (minor units)"), {
-        statusCode: 400,
-      });
+      throw publicError("cost_amount must be a non-negative integer (minor units)", 400);
     }
     if (!initialVariant.cost_currency) {
-      throw Object.assign(new Error("cost_currency is required when cost_amount is set"), {
-        statusCode: 400,
-      });
+      throw publicError("cost_currency is required when cost_amount is set", 400);
     }
   }
 
@@ -302,14 +297,10 @@ export async function createProduct(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("uniq_product_variants_sku_per_org")) {
-      throw Object.assign(new Error("SKU already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("SKU already exists in this organization", 409);
     }
     if (msg.includes("uniq_product_variants_barcode_per_org")) {
-      throw Object.assign(new Error("Barcode already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("Barcode already exists in this organization", 409);
     }
     throw err;
   }
@@ -326,12 +317,12 @@ export async function updateProduct(
 
   const existing = await repo.findProductById(ctx.organizationId, productId);
   if (!existing) {
-    throw Object.assign(new Error("Product not found"), { statusCode: 404 });
+    throw publicError("Product not found", 404);
   }
 
   const updated = await repo.updateProduct(ctx.organizationId, productId, patch);
   if (!updated) {
-    throw Object.assign(new Error("Product not found"), { statusCode: 404 });
+    throw publicError("Product not found", 404);
   }
 
   const canViewCost = ctx.can("products.view_cost");
@@ -349,7 +340,7 @@ export async function archiveProduct(
     status: "ARCHIVED",
   });
   if (!updated) {
-    throw Object.assign(new Error("Product not found"), { statusCode: 404 });
+    throw publicError("Product not found", 404);
   }
 
   const canViewCost = ctx.can("products.view_cost");
@@ -367,13 +358,11 @@ export async function createVariant(
   // Validate product belongs to this org.
   const product = await repo.findProductById(ctx.organizationId, productId);
   if (!product) {
-    throw Object.assign(new Error("Product not found"), { statusCode: 404 });
+    throw publicError("Product not found", 404);
   }
 
   if (!Number.isInteger(input.price_amount) || input.price_amount < 0) {
-    throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
-      statusCode: 400,
-    });
+    throw publicError("price_amount must be a non-negative integer (minor units)", 400);
   }
 
   const canViewCost = ctx.can("products.view_cost");
@@ -384,14 +373,10 @@ export async function createVariant(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("uniq_product_variants_sku_per_org")) {
-      throw Object.assign(new Error("SKU already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("SKU already exists in this organization", 409);
     }
     if (msg.includes("uniq_product_variants_barcode_per_org")) {
-      throw Object.assign(new Error("Barcode already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("Barcode already exists in this organization", 409);
     }
     throw err;
   }
@@ -415,14 +400,12 @@ export async function updateVariant(
 
   const existing = await repo.findVariantById(ctx.organizationId, variantId);
   if (!existing) {
-    throw Object.assign(new Error("Variant not found"), { statusCode: 404 });
+    throw publicError("Variant not found", 404);
   }
 
   if (patch.price_amount !== undefined) {
     if (!Number.isInteger(patch.price_amount) || patch.price_amount < 0) {
-      throw Object.assign(new Error("price_amount must be a non-negative integer (minor units)"), {
-        statusCode: 400,
-      });
+      throw publicError("price_amount must be a non-negative integer (minor units)", 400);
     }
   }
 
@@ -451,20 +434,16 @@ export async function updateVariant(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("uniq_product_variants_sku_per_org")) {
-      throw Object.assign(new Error("SKU already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("SKU already exists in this organization", 409);
     }
     if (msg.includes("uniq_product_variants_barcode_per_org")) {
-      throw Object.assign(new Error("Barcode already exists in this organization"), {
-        statusCode: 409,
-      });
+      throw publicError("Barcode already exists in this organization", 409);
     }
     throw err;
   }
 
   if (!updated) {
-    throw Object.assign(new Error("Variant not found"), { statusCode: 404 });
+    throw publicError("Variant not found", 404);
   }
 
   return mapVariant(updated, canViewCost);
@@ -488,7 +467,7 @@ export async function createCategory(
   ctx.require("products.manage_categories");
 
   if (!input.name_km || !input.name_km.trim()) {
-    throw Object.assign(new Error("name_km is required"), { statusCode: 400 });
+    throw publicError("name_km is required", 400);
   }
 
   const row = await repo.createCategory(ctx.organizationId, {
@@ -507,12 +486,12 @@ export async function updateCategory(
 
   const existing = await repo.findCategoryById(ctx.organizationId, categoryId);
   if (!existing) {
-    throw Object.assign(new Error("Category not found"), { statusCode: 404 });
+    throw publicError("Category not found", 404);
   }
 
   const updated = await repo.updateCategory(ctx.organizationId, categoryId, patch);
   if (!updated) {
-    throw Object.assign(new Error("Category not found"), { statusCode: 404 });
+    throw publicError("Category not found", 404);
   }
 
   return mapCategory(updated);

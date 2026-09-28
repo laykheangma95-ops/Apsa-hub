@@ -6,11 +6,14 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
   try {
     return await next();
   } catch (error) {
-    if (error != null && typeof error === "object" && "statusCode" in error) {
-      throw error;
-    }
+    // Only TanStack control flow and APSA public domain errors (provenance
+    // marked, src/server/public-domain-error.ts) propagate. A provider or
+    // framework error that merely carries a numeric `statusCode` is treated as
+    // unexpected: logged redacted, rendered as the generic error page.
+    const { isControlFlowThrow, isPublicDomainError, reportServerError } =
+      await import("./server/observability/errors");
+    if (isControlFlowThrow(error) || isPublicDomainError(error)) throw error;
     // Structured, redacted, with the same reporter as server functions.
-    const { reportServerError } = await import("./server/observability/errors");
     reportServerError(error, { event: "ssr.unhandled_error" });
     return new Response(renderErrorPage(), {
       status: 500,

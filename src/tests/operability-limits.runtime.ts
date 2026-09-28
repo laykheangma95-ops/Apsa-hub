@@ -29,9 +29,10 @@ function createServerFnMock() {
 
 // ── Request / cookies ────────────────────────────────────────────────────────
 let clientIp: string | undefined = "203.0.113.10";
+const cookies = new Map<string, string>();
 mock.module("@tanstack/react-start", () => ({ createServerFn: createServerFnMock() }));
 mock.module("@tanstack/react-start/server", () => ({
-  getCookie: () => undefined,
+  getCookie: (name: string) => cookies.get(name),
   setCookie: () => {},
   deleteCookie: () => {},
   getRequestHeader: (name: string) => (name === "cf-connecting-ip" ? clientIp : undefined),
@@ -65,14 +66,32 @@ mock.module("@supabase/supabase-js", () => ({
         providerCalls.push({ op: "verifyOtp", email: email ?? "" });
         return { data: { session: null }, error: { status: 400, message: "Token has expired" } };
       },
+      setSession: async ({ refresh_token }: { refresh_token: string }) => {
+        providerCalls.push({ op: "setSession", email: refresh_token });
+        return { data: {}, error: null };
+      },
+      // Reaching the password update is what the recovery test observes.
+      updateUser: async () => ({ data: {}, error: { code: "same_password", status: 422 } }),
+      signOut: async () => ({ error: null }),
     },
   }),
 }));
 
+// Every service-role call (audit_logs inserts included) is recorded.
+const adminCalls: string[] = [];
 mock.module("@/lib/supabase/server", () => ({
   createServerClient: () => ({ auth: { getUser: async () => ({ data: { user: null } }) } }),
   createRefreshClient: () => ({}),
-  supabaseAdmin: {},
+  supabaseAdmin: {
+    from: (table: string) => {
+      adminCalls.push(`from:${table}`);
+      return { insert: async () => ({ error: null }) };
+    },
+    rpc: async (fn: string) => {
+      adminCalls.push(`rpc:${fn}`);
+      return { data: null, error: { code: "PGRST202", message: "not in this fake" } };
+    },
+  },
 }));
 
 // ── Fake order / payment repositories ───────────────────────────────────────
@@ -92,17 +111,26 @@ mock.module("@/server/orders/repository", () => ({
   },
 }));
 
+// Every payment repository export is counted: reads, RPC mutations, events.
 let paymentRepoCalls = 0;
-mock.module("@/server/payments/repository", () => ({
-  findOrderForOrg: async () => {
-    paymentRepoCalls++;
-    return null;
-  },
-  findPaymentById: async () => {
-    paymentRepoCalls++;
-    return null;
-  },
-}));
+const paymentRepoCallNames: string[] = [];
+const PAYMENT_REPO_EXPORTS = [
+  ...(await Bun.file("src/server/payments/repository.ts").text()).matchAll(
+    /^export (?:async )?function (\w+)/gm,
+  ),
+].map((m) => m[1]!);
+mock.module("@/server/payments/repository", () =>
+  Object.fromEntries(
+    PAYMENT_REPO_EXPORTS.map((name) => [
+      name,
+      async () => {
+        paymentRepoCalls++;
+        paymentRepoCallNames.push(name);
+        return null;
+      },
+    ]),
+  ),
+);
 
 // ── Log capture ─────────────────────────────────────────────────────────────
 const { setLogSink } = await import("@/server/observability/logger");
@@ -114,11 +142,15 @@ console.error = (...args: unknown[]) => logLines.push(args.map(String).join(" ")
 process.env["VITE_SUPABASE_URL"] = "https://apsa.test.supabase.co";
 process.env["VITE_SUPABASE_ANON_KEY"] = "anon-test-key";
 process.env["VITE_APP_URL"] = "https://app.apsa.test/";
+// The deployment pins its proxy header explicitly; without it NO header is trusted.
+process.env["RATE_LIMIT_CLIENT_IP_HEADER"] = "cf-connecting-ip";
 
 const auth = await import("@/api/auth");
 const { setPrimaryRateLimitStore, resetRateLimitFallbackStore } =
   await import("@/server/rate-limit/limiter");
-const { MemoryRateLimitStore } = await import("@/server/rate-limit/store");
+const { MemoryRateLimitStore, PostgresRateLimitStore } = await import("@/server/rate-limit/store");
+const { RateLimitUnavailableError } = await import("@/server/rate-limit/errors");
+const { COOKIE_RECOVERY_ACCESS_TOKEN, COOKIE_RECOVERY_REFRESH_TOKEN } = auth;
 const { RATE_LIMITS } = await import("@/server/rate-limit/policies");
 const { RateLimitedError } = await import("@/server/rate-limit/errors");
 const { AuthorizationContext } = await import("@/server/auth/authorization");
@@ -137,6 +169,9 @@ beforeEach(() => {
   providerCalls.length = 0;
   orderRpcCalls = 0;
   paymentRepoCalls = 0;
+  paymentRepoCallNames.length = 0;
+  adminCalls.length = 0;
+  cookies.clear();
   existingOrderKeys.clear();
   clientIp = "203.0.113.10";
   advance(24 * 3600); // every test starts in fresh windows
@@ -263,6 +298,58 @@ describe("OTP / recovery-link verification limits", () => {
       auth.beginPasswordRecoveryFn({ data: { email, token } } as never);
     for (let i = 0; i < RATE_LIMITS.otpVerifyIdentity.limit; i++) await begin(KNOWN, `${i}`);
     expect(await begin(KNOWN, "x")).toEqual({ ok: false, code: "rate_limited" });
+  });
+});
+
+describe("header-independent auth dimensions (no trusted client IP)", () => {
+  it("sign-up: repeated attempts for one address are bounded with no IP, identically for a taken or free address", async () => {
+    clientIp = undefined;
+    const signUp = (email: string) =>
+      auth.signUpFn({ data: { email, password: "long-enough-1", displayName: "N" } } as never);
+    const known: unknown[] = [];
+    const unknown: unknown[] = [];
+    for (let i = 0; i < RATE_LIMITS.signUpIdentity.limit + 1; i++) {
+      known.push(await signUp(KNOWN));
+      unknown.push(await signUp(UNKNOWN));
+    }
+    expect(known).toEqual(unknown);
+    expect(known.at(-1)).toEqual({ ok: false, code: "rate_limited" });
+    expect(providerCalls.filter((c) => c.op === "signUp" && c.email === KNOWN)).toHaveLength(
+      RATE_LIMITS.signUpIdentity.limit,
+    );
+  });
+
+  it("token_hash recovery links (no email) are bounded per link token with no IP", async () => {
+    clientIp = undefined;
+    const begin = (tokenHash: string) =>
+      auth.beginPasswordRecoveryFn({ data: { tokenHash } } as never);
+    for (let i = 0; i < RATE_LIMITS.otpVerifyToken.limit; i++) {
+      expect(await begin("replayed-link-token-hash")).toEqual({ ok: false, code: "invalid_link" });
+    }
+    expect(await begin("replayed-link-token-hash")).toEqual({ ok: false, code: "rate_limited" });
+    // A different link is its own bucket.
+    expect(await begin("another-link-token-hash")).toEqual({ ok: false, code: "invalid_link" });
+  });
+
+  it("recovery completion is bounded per recovery session with no IP; sessions are isolated", async () => {
+    clientIp = undefined;
+    const complete = () =>
+      auth.completePasswordRecoveryFn({
+        data: { password: "long-enough-2", confirmPassword: "long-enough-2" },
+      } as never);
+    cookies.set(COOKIE_RECOVERY_ACCESS_TOKEN, "recovery-access-a");
+    cookies.set(COOKIE_RECOVERY_REFRESH_TOKEN, "recovery-refresh-a");
+    for (let i = 0; i < RATE_LIMITS.recoveryCompleteSession.limit; i++) {
+      expect(await complete()).toEqual({ ok: false, code: "same_password" });
+    }
+    expect(await complete()).toEqual({ ok: false, code: "unexpected_error" });
+    expect(providerCalls.filter((c) => c.op === "setSession")).toHaveLength(
+      RATE_LIMITS.recoveryCompleteSession.limit,
+    );
+    // Another recovery session is unaffected by the first one's bucket.
+    cookies.set(COOKIE_RECOVERY_ACCESS_TOKEN, "recovery-access-b");
+    cookies.set(COOKIE_RECOVERY_REFRESH_TOKEN, "recovery-refresh-b");
+    expect(await complete()).toEqual({ ok: false, code: "same_password" });
   });
 });
 
@@ -433,6 +520,85 @@ describe("payment mutation limits", () => {
     expect(await reverse(ctx)).toBe("rate_limited");
     // Ordinary recording still has headroom.
     expect(await record(ctx)).toBe("reached_repo");
+  });
+});
+
+// ── Financial mutations: durable limiter unavailable ────────────────────────
+
+describe("financial mutations FAIL CLOSED when the durable limiter is unavailable", () => {
+  const unavailableStore = () =>
+    new PostgresRateLimitStore(
+      {
+        rpc: (() =>
+          Promise.resolve({
+            data: null,
+            error: { code: "PGRST202", message: "function consume_rate_limit does not exist" },
+          })) as never,
+      },
+      50,
+    );
+  const PAYMENT = "00000000-0000-4000-8000-0000000000d9";
+  const outcome = (p: Promise<unknown>) =>
+    p.then(
+      () => "ok",
+      (e: unknown) =>
+        e instanceof RateLimitUnavailableError
+          ? "unavailable"
+          : e instanceof RateLimitedError
+            ? "rate_limited"
+            : "reached_repo",
+    );
+  const cases: Array<[string, (ctx: ReturnType<typeof ctxFor>) => Promise<unknown>]> = [
+    [
+      "REFUND",
+      (ctx) =>
+        payments.refundPayment(ctx, PAYMENT, 100, "customer refund", "idem-key-refund-000001"),
+    ],
+    ["REVERSAL", (ctx) => payments.reversePayment(ctx, PAYMENT, "customer returned goods")],
+    [
+      "CORRECTION",
+      (ctx) => payments.correctPayment(ctx, PAYMENT, "typo in reference", { reference: "ABA-1" }),
+    ],
+  ];
+
+  for (const [label, run] of cases) {
+    it(`${label}: refused with a retryable public 503, nothing read, mutated, evented or audited`, async () => {
+      setPrimaryRateLimitStore(unavailableStore());
+      const ctx = ctxFor(ORG_A, "aaaaaaaa-0000-4000-8000-0000000000f1");
+      let thrown: unknown;
+      try {
+        await run(ctx);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(RateLimitUnavailableError);
+      expect(thrown).toMatchObject({ statusCode: 503, code: "rate_limit_unavailable" });
+      expect(paymentRepoCallNames).toEqual([]);
+      expect(adminCalls).toEqual([]);
+      // Well past the reversal limit: every attempt still fails closed, so the
+      // per-instance memory store was never consulted (it would have allowed 20).
+      const results: string[] = [];
+      for (let i = 0; i < RATE_LIMITS.paymentReversalMember.limit + 5; i++) {
+        results.push(await outcome(run(ctx)));
+      }
+      expect(new Set(results)).toEqual(new Set(["unavailable"]));
+      expect(paymentRepoCalls).toBe(0);
+      expect(adminCalls).toEqual([]);
+      expect(logLines.join("\n")).toContain("rate_limit.backend_unavailable_fail_closed");
+    });
+  }
+
+  it("routine recording keeps its documented per-instance fallback in the same outage", async () => {
+    setPrimaryRateLimitStore(unavailableStore());
+    const ctx = ctxFor(ORG_A, "aaaaaaaa-0000-4000-8000-0000000000f2");
+    const result = await outcome(
+      payments.recordPayment(ctx, {
+        orderId: "00000000-0000-4000-8000-0000000000c9",
+        method: "cash",
+        amountMinor: 100,
+      }),
+    );
+    expect(result).toBe("reached_repo");
   });
 });
 

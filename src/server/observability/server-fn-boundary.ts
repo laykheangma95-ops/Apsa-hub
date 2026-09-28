@@ -7,9 +7,11 @@
  *   1. opens a request context with a fresh random request ID
  *      (src/server/observability/request-id.ts), the server function's name
  *      as `operation` and its API file as `domain`;
- *   2. lets domain errors (numeric statusCode, service-authored message) and
- *      TanStack control flow (redirect / notFound / Response) through
- *      unchanged — the UI's error classifiers depend on those messages;
+ *   2. lets APSA public domain errors (provenance-marked by
+ *      src/server/public-domain-error.ts — NOT any error with a numeric
+ *      statusCode), real ZodErrors and TanStack control flow (redirect /
+ *      notFound / Response) through unchanged — the UI's error classifiers
+ *      depend on those messages;
  *   3. for anything else — the unexpected failures — writes ONE structured,
  *      redacted log line (and forwards it to the registered ErrorReporter, if
  *      any), then throws a PUBLIC error instead: a fixed message plus
@@ -52,12 +54,17 @@ export async function runServerFnBoundary<T>(
 ): Promise<T> {
   // Nested call on the server: the outermost boundary owns logging and
   // sanitization for this request.
-  if (currentRequestContext()) return next();
+  const outer = currentRequestContext();
+  if (outer?.serverFnBoundary) return next();
 
-  const requestId = newRequestId();
+  // Inside an HTTP request context (src/server.ts) the server function keeps
+  // that request's ID and capture slot, so one request has one reference.
+  const requestId = outer?.requestId ?? newRequestId();
   const domain = domainFromFilename(meta?.filename);
   const context = {
+    ...(outer?.capture ? { capture: outer.capture } : {}),
     requestId,
+    serverFnBoundary: true,
     ...(meta?.name ? { operation: meta.name } : {}),
     ...(domain ? { domain } : {}),
   };

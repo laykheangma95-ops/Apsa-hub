@@ -28,6 +28,10 @@ import {
   supportReferenceOf,
 } from "@/lib/public-error";
 import { RateLimitedError } from "@/server/rate-limit/errors";
+import { markPublicDomainError, publicError } from "@/server/public-domain-error";
+import { ForbiddenError, UnauthorizedError } from "@/server/auth/authorization";
+import { TeamError } from "@/server/team/errors";
+import { ConversationError } from "@/server/conversations/errors";
 import { classifyOrderError } from "@/lib/orders";
 import { classifyPaymentError } from "@/lib/payments";
 import { classifyCustomerError } from "@/lib/customers-view";
@@ -56,12 +60,14 @@ describe("log redaction", () => {
   const SENSITIVE = {
     password: "hunter2-password",
     newPassword: "another-pass",
-    access_token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJlLXZhbHVl",
+    // Synthetic credential shapes are assembled at runtime so the source holds
+    // no scanner-matching literal (gitleaks); the redactor sees the full value.
+    access_token: ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjMifQ", "c2lnbmF0dXJlLXZhbHVl"].join("."),
     refreshToken: "refresh-token-value-123",
     recoveryToken: "recovery-token-xyz",
     cookie: "sb-access-token=abc; sb-refresh-token=def",
     authorization: "Bearer abcdefghijklmnop",
-    apiKey: "sk_live_1234567890",
+    apiKey: ["sk", "live", "1234567890"].join("_"),
     customerEmail: "customer@example.com",
     customerPhone: "+855 12 345 678",
     cardNumber: "4111 1111 1111 1111",
@@ -349,18 +355,18 @@ describe("server-function boundary", () => {
     });
   });
 
-  it("passes domain errors through with their exact, service-authored message", async () => {
+  it("passes APSA public domain errors through with their exact, service-authored message", async () => {
     const { lines, restore } = captureLogs();
     const cases = [
-      Object.assign(new Error("Missing permission: orders.create"), { statusCode: 403 }),
+      new ForbiddenError("Missing permission: orders.create"),
       Object.assign(
-        new Error("This idempotency key was already used for a different order request"),
-        { statusCode: 409, code: "idempotency_conflict" },
+        publicError("This idempotency key was already used for a different order request", 409),
+        { code: "idempotency_conflict" },
       ),
-      Object.assign(new Error("Cannot move order lifecycle from 'completed' to 'draft'"), {
-        statusCode: 409,
-      }),
-      Object.assign(new Error("Customer not found"), { statusCode: 404 }),
+      publicError("Cannot move order lifecycle from 'completed' to 'draft'", 409),
+      publicError("Customer not found", 404),
+      new TeamError("duplicate_invitation"),
+      new ConversationError("stale_state"),
       new RateLimitedError(30),
     ];
     for (const domainError of cases) {
@@ -379,6 +385,98 @@ describe("server-function boundary", () => {
     for (const line of lines) {
       expect(line.record["event"]).toBe("server_fn.rejected");
       expect(line.record["errorMessage"]).toBeUndefined();
+    }
+  });
+
+  it("BLOCKER regression: an arbitrary Error with statusCode 409 is sanitized, not passed through", async () => {
+    const { lines, restore } = captureLogs();
+    const raw = Object.assign(
+      new Error("duplicate key constraint customers_email_key for victim@example.com"),
+      { statusCode: 409 },
+    );
+    let thrown: unknown;
+    try {
+      await runServerFnBoundary(meta, async () => {
+        throw raw;
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    restore();
+    expect(thrown).not.toBe(raw);
+    const message = (thrown as Error).message;
+    expect(message.startsWith(INTERNAL_ERROR_MESSAGE)).toBe(true);
+    expect(isRequestId(supportReferenceOf(thrown))).toBe(true);
+    for (const leak of ["duplicate key", "customers_email_key", "victim@example.com", "409"]) {
+      expect({ leak, found: message.includes(leak) }).toEqual({ leak, found: false });
+    }
+    // The log line is redacted too: no email, but the status survives as metadata.
+    const logged = lines.find((l) => l.record["event"] === "server_fn.unexpected_error");
+    expect(logged?.record["statusCode"]).toBe(409);
+    expect(JSON.stringify(logged?.record)).not.toContain("victim@example.com");
+  });
+
+  it("sanitizes provider/framework-shaped errors whatever status fields they carry", async () => {
+    const shapes = [
+      Object.assign(new Error('relation "orders" does not exist'), { statusCode: 400 }),
+      Object.assign(new Error("Database error saving new user a@b.co"), {
+        status: 500,
+        statusCode: 500,
+      }),
+      Object.assign(new Error("HTTPError"), { name: "HTTPError", statusCode: 404, code: "E_NF" }),
+      // Copying a public error's fields onto a new object does NOT copy provenance.
+      Object.assign(new Error("secret row value"), { ...publicError("x", 409) }),
+      Object.assign(new Error("forged zod"), { name: "ZodError", issues: [] }),
+    ];
+    for (const shape of shapes) {
+      expect(isPublicDomainError(shape)).toBe(false);
+      const { restore } = captureLogs();
+      let thrown: unknown;
+      try {
+        await runServerFnBoundary(meta, async () => {
+          throw shape;
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      restore();
+      expect((thrown as Error).message.startsWith(INTERNAL_ERROR_MESSAGE)).toBe(true);
+    }
+  });
+
+  it("every production domain-error constructor produces a provenance-marked public error", async () => {
+    const audit = publicError("Audit record could not be persisted", 503, "audit_unavailable");
+    expect(isPublicDomainError(audit)).toBe(true);
+    expect(audit.statusCode).toBe(503);
+    expect(audit.code).toBe("audit_unavailable");
+    for (const err of [
+      new ForbiddenError(),
+      new UnauthorizedError(),
+      new TeamError("invitation_not_found"),
+      new ConversationError("permission_denied"),
+      new RateLimitedError(5),
+      markPublicDomainError(Object.assign(new Error("m"), { statusCode: 400 })),
+    ]) {
+      expect(isPublicDomainError(err)).toBe(true);
+    }
+    // A mark on an out-of-range status is still not public.
+    expect(
+      isPublicDomainError(
+        markPublicDomainError(Object.assign(new Error("m"), { statusCode: 200 })),
+      ),
+    ).toBe(false);
+    // No service module still builds ad-hoc statusCode errors.
+    for (const file of [
+      "src/server/auth/audit.ts",
+      "src/server/customers/service.ts",
+      "src/server/deliveries/service.ts",
+      "src/server/inventory/service.ts",
+      "src/server/orders/service.ts",
+      "src/server/payments/service.ts",
+      "src/server/payments/reconciliation.ts",
+      "src/server/products/service.ts",
+    ]) {
+      expect({ file, adHoc: /statusCode:\s*\d/.test(read(file)) }).toEqual({ file, adHoc: false });
     }
   });
 
@@ -485,11 +583,188 @@ describe("public error shape", () => {
 
   it("the audit-blocked refusal is public, classifiable and carries no database text", () => {
     const audit = read("src/server/auth/audit.ts");
-    expect(audit).toContain('{ statusCode: 503, code: "audit_unavailable" }');
+    expect(audit).toContain('"audit_unavailable",');
     expect(audit).not.toContain("audit trail. (${msg})");
     const wire = new Error(
       "Audit record could not be persisted for action 'inventory.adjust'. The operation was blocked to preserve the audit trail.",
     );
     expect(classifyInventoryError(wire)).toBe("audit_blocked");
+  });
+});
+
+// ── Redaction hardening ─────────────────────────────────────────────────────
+
+describe("redaction of generic fields and free text", () => {
+  // Credential-shaped fixtures are assembled at runtime: no scanner-matching
+  // literal in source (gitleaks), the full value at runtime.
+  const j = (sep: string, ...parts: string[]) => parts.join(sep);
+
+  it("generic message / payload / content keys are redacted wholesale", () => {
+    const out = redact({
+      message: "Hi, I live at #12, St. 271 — call 012 345 678",
+      msg: "free text",
+      payload: { update_id: 1, text: "hello" },
+      raw: "provider raw body",
+      content: "conversation body",
+      caption: "photo caption",
+      comment: "note",
+    }) as Record<string, unknown>;
+    for (const key of ["message", "msg", "payload", "raw", "content", "caption", "comment"]) {
+      expect({ key, value: out[key] }).toEqual({ key, value: REDACTED });
+    }
+  });
+
+  it("credential key:value pairs inside free text are redacted, however short", () => {
+    const cases = [
+      "login failed password: hunter2",
+      "password=hunter2",
+      'config {"password": "hunter2"}',
+      "webhook_secret=ab12",
+      "client-secret: s3",
+      "the secret is x9",
+      "token: t0",
+      "api_key='k1'",
+      "pin: 1234",
+    ];
+    for (const text of cases) {
+      const out = scrubString(text);
+      expect({
+        text,
+        out,
+        leaked: /hunter2|ab12|\bs3\b|x9|\bt0\b|k1|1234/.test(out),
+      }).toMatchObject({
+        leaked: false,
+      });
+      expect(out).toContain("[REDACTED]");
+    }
+  });
+
+  it("Cookie / Set-Cookie / Authorization header lines are redacted to end of line", () => {
+    expect(scrubString("Cookie: sb-access=abc; sb-refresh=def\nnext line")).toBe(
+      "Cookie: [REDACTED]\nnext line",
+    );
+    expect(scrubString("set-cookie: sid=1; Path=/")).toBe("set-cookie: [REDACTED]");
+    expect(scrubString("Authorization: token abc")).toBe("Authorization: [REDACTED]");
+  });
+
+  it("known provider token formats are redacted with no label", () => {
+    const tokens = [
+      j("_", "sk", "live", "0a1b2c3d4e5f"),
+      j("_", "whsec", "0a1b2c3d4e5f"),
+      j("_", "ghp", "0a1b2c3d4e5f6a7b8c9d0e1f"),
+      j("-", "xoxb", "0a1b2c3d4e5f"),
+      j("", "AKIA", "0A1B2C3D4E5F6A7B"),
+      j(":", "123456789", "AAF0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d"),
+    ];
+    for (const token of tokens) {
+      const out = scrubString(`provider said ${token} end`);
+      expect({ token, leaked: out.includes(token) }).toEqual({ token, leaked: false });
+    }
+  });
+
+  it("street addresses and Cambodian place names in customer content are redacted", () => {
+    const out = scrubString(
+      "Deliver to #12, St. 271, Sangkat Boeung Keng Kang, Khan Chamkarmon; ផ្ទះលេខ ១២ ផ្លូវ ២៧១ សង្កាត់ទួលទំពូង",
+    );
+    for (const leak of ["271", "Boeung", "Chamkarmon", "២៧១", "ទួលទំពូង"]) {
+      expect({ leak, found: out.includes(leak) }).toEqual({ leak, found: false });
+    }
+  });
+
+  it("does not over-redact harmless identifiers and operational text", () => {
+    const text =
+      "order 1f0e2d3c-aaaa-4bbb-8ccc-123456789012 req_0123456789abcdef0123 rule auth.sign_in.identity status 409 retry 30 s at 2026-09-28T10:00:00Z; street food order";
+    expect(scrubString(text)).toBe(text);
+    expect(redact({ orderId: "o-1", statusCode: 409, ruleId: "orders.create.member" })).toEqual({
+      orderId: "o-1",
+      statusCode: 409,
+      ruleId: "orders.create.member",
+    });
+  });
+});
+
+// ── Request-local error capture (no process-global slot) ───────────────────
+
+describe("request-local error capture", () => {
+  it("the console wrapper redacts Errors and never prints the cause chain", async () => {
+    const { sanitizeConsoleArg } = await import("@/lib/error-capture");
+    const cause = new Error("SELECT * FROM customers WHERE email = 'victim@example.com'");
+    const error = new Error("insert failed for victim@example.com password: hunter2", { cause });
+    const out = String(sanitizeConsoleArg(error));
+    expect(out).not.toContain("victim@example.com");
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("SELECT * FROM customers");
+    expect(JSON.parse(out)).toMatchObject({ errorClass: "Error" });
+    expect(sanitizeConsoleArg({ token: "t", nested: { email: "a@b.co" } })).toEqual({
+      token: REDACTED,
+      nested: { email: REDACTED },
+    });
+    // Structured logger lines pass untouched.
+    const line = '{"ts":"2026-09-28T00:00:00.000Z","level":"error","event":"x"}';
+    expect(sanitizeConsoleArg(line)).toBe(line);
+  });
+
+  it("two overlapping requests each consume ONLY their own captured error, under their own request ID", async () => {
+    const { consumeCapturedError } = await import("@/lib/error-capture");
+    const { lines, restore } = captureLogs();
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const run = (requestId: string, delayBefore: number, delayAfter: number) =>
+      runWithRequestContext({ requestId, capture: {} }, async () => {
+        await wait(delayBefore);
+        const own = new Error(`failure of ${requestId}`);
+        console.error(own); // what h3 does when it swallows an SSR throw
+        await wait(delayAfter);
+        const captured = consumeCapturedError();
+        reportServerError(captured ?? new Error("none"), { event: "ssr.swallowed_error" });
+        return { own, captured, again: consumeCapturedError() };
+      });
+    const originalError = console.error;
+    const [a, b] = await Promise.all([
+      run("req_aaaaaaaaaaaaaaaaaaaa", 0, 30), // records first, consumes last
+      run("req_bbbbbbbbbbbbbbbbbbbb", 10, 0), // records second, consumes first
+    ]);
+    console.error = originalError;
+    restore();
+    expect(a.captured).toBe(a.own);
+    expect(b.captured).toBe(b.own);
+    expect(a.again).toBeUndefined();
+    expect(b.again).toBeUndefined();
+    const swallowed = lines.filter((l) => l.record["event"] === "ssr.swallowed_error");
+    expect(swallowed.map((l) => [l.record["requestId"], l.record["errorMessage"]]).sort()).toEqual([
+      ["req_aaaaaaaaaaaaaaaaaaaa", "failure of req_aaaaaaaaaaaaaaaaaaaa"],
+      ["req_bbbbbbbbbbbbbbbbbbbb", "failure of req_bbbbbbbbbbbbbbbbbbbb"],
+    ]);
+  });
+
+  it("an error outside any request is not captured anywhere (no global fallback slot)", async () => {
+    const { consumeCapturedError } = await import("@/lib/error-capture");
+    console.error(new Error("module-init failure"));
+    expect(consumeCapturedError()).toBeUndefined();
+    const inRequest = await runWithRequestContext(
+      { requestId: "req_cccccccccccccccccccc", capture: {} },
+      async () => consumeCapturedError(),
+    );
+    expect(inRequest).toBeUndefined();
+    expect(read("src/lib/error-capture.ts")).not.toMatch(/^let\s/m);
+  });
+
+  it("a server function inside an HTTP request context keeps that request's ID and is still sanitized", async () => {
+    const { restore } = captureLogs();
+    const requestId = "req_dddddddddddddddddddd";
+    let thrown: unknown;
+    await runWithRequestContext({ requestId, capture: {} }, async () => {
+      try {
+        await runServerFnBoundary(
+          { name: "createOrderFn", filename: "src/api/orders.ts" },
+          async () => {
+            throw Object.assign(new Error("constraint orders_pkey a@b.co"), { statusCode: 409 });
+          },
+        );
+      } catch (error) {
+        thrown = error;
+      }
+    });
+    restore();
+    expect((thrown as Error).message).toBe(formatInternalErrorMessage(requestId));
   });
 });

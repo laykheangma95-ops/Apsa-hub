@@ -19,13 +19,16 @@
 import { currentClientIp } from "./client-ip";
 import { normalizeEmailForKey } from "./keys";
 import { checkRateLimits, resetRateLimitFallbackStore } from "./limiter";
-import { RATE_LIMITS } from "./policies";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "./policies";
 
 export type AuthEmailPurpose = "password_reset" | "verification_resend";
 
 async function resolveIp(clientIp: string | null | undefined): Promise<string | null> {
   return clientIp === undefined ? currentClientIp() : clientIp;
 }
+
+/** Every auth limit degrades to memory when the durable backend is down. */
+const AUTH_OPTIONS = { onBackendFailure: BACKEND_FAILURE_POLICY.auth } as const;
 
 /**
  * Returns true — and records the attempt — when an auth email may be sent
@@ -49,11 +52,12 @@ export async function claimAuthEmailSlot(
       { rule: RATE_LIMITS.authEmailIp, parts: [await resolveIp(clientIp)] },
     ],
     nowMs,
+    AUTH_OPTIONS,
   );
   return decision.allowed;
 }
 
-/** Sign-in: per normalized email AND per client IP. */
+/** Sign-in: per normalized email AND per client IP (IP skipped when unknown). */
 export async function allowSignInAttempt(
   email: string,
   nowMs?: number,
@@ -65,49 +69,73 @@ export async function allowSignInAttempt(
       { rule: RATE_LIMITS.signInIp, parts: [await resolveIp(clientIp)] },
     ],
     nowMs,
+    AUTH_OPTIONS,
   );
   return decision.allowed;
 }
 
-/** Sign-up: per client IP (skipped when no IP is known; Supabase limits remain). */
+/**
+ * Sign-up: per normalized email (header-independent; every attempt counts
+ * whether or not the address is taken) AND per client IP when known.
+ * Supabase's own sign-up limits remain behind both.
+ */
 export async function allowSignUpAttempt(
+  email: string,
   nowMs?: number,
   clientIp?: string | null,
 ): Promise<boolean> {
   const decision = await checkRateLimits(
-    [{ rule: RATE_LIMITS.signUpIp, parts: [await resolveIp(clientIp)] }],
+    [
+      { rule: RATE_LIMITS.signUpIdentity, parts: [normalizeEmailForKey(email)] },
+      { rule: RATE_LIMITS.signUpIp, parts: [await resolveIp(clientIp)] },
+    ],
     nowMs,
+    AUTH_OPTIONS,
   );
   return decision.allowed;
 }
 
 /**
  * OTP / recovery-link verification: per normalized email when the link
- * carries one (a 6-digit code is guessable), and always per client IP.
+ * carries one (a 6-digit code is guessable), per link token (token_hash) when
+ * it carries that instead, and per client IP when known. The email/token
+ * dimension never depends on a header.
  */
 export async function allowOtpVerification(
   email: string | null,
   nowMs?: number,
   clientIp?: string | null,
+  tokenHash?: string | null,
 ): Promise<boolean> {
   const decision = await checkRateLimits(
     [
       { rule: RATE_LIMITS.otpVerifyIdentity, parts: [email ? normalizeEmailForKey(email) : null] },
+      { rule: RATE_LIMITS.otpVerifyToken, parts: [tokenHash ?? null] },
       { rule: RATE_LIMITS.otpVerifyIp, parts: [await resolveIp(clientIp)] },
     ],
     nowMs,
+    AUTH_OPTIONS,
   );
   return decision.allowed;
 }
 
-/** New-password submission during recovery: per client IP. */
+/**
+ * New-password submission during recovery: per recovery session (HMAC digest
+ * of its refresh token — header-independent; one session cannot affect
+ * another) AND per client IP when known.
+ */
 export async function allowRecoveryCompletion(
+  recoverySessionToken: string,
   nowMs?: number,
   clientIp?: string | null,
 ): Promise<boolean> {
   const decision = await checkRateLimits(
-    [{ rule: RATE_LIMITS.recoveryCompleteIp, parts: [await resolveIp(clientIp)] }],
+    [
+      { rule: RATE_LIMITS.recoveryCompleteSession, parts: [recoverySessionToken] },
+      { rule: RATE_LIMITS.recoveryCompleteIp, parts: [await resolveIp(clientIp)] },
+    ],
     nowMs,
+    AUTH_OPTIONS,
   );
   return decision.allowed;
 }

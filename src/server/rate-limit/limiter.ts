@@ -11,21 +11,28 @@
  * pooled into a shared bucket.
  *
  * Backend: PostgreSQL (consume_rate_limit, migration 045) — shared by every
- * instance. If that call fails (network, migration 045 not applied, missing
- * server env) the limiter DEGRADES to a per-process memory store for that hit
- * and logs `rate_limit.backend_degraded`. It fails OPEN in that sense on
- * purpose: a database blip must not lock merchants out of sign-in or the POS,
- * and every protected action still has its own authorization, idempotency and
- * provider-side limits behind it. Readiness (scripts/verify-readiness.ts)
- * fails while consume_rate_limit is absent, so a degraded limiter is never
- * mistaken for a working one.
+ * instance. What happens when that call fails (network, migration 045 not
+ * applied, missing server env) is the caller's explicit BackendFailurePolicy
+ * (policies.ts#BACKEND_FAILURE_POLICY):
+ *
+ *   memory_fallback (default; auth, order creation, routine payments) — the
+ *     limiter DEGRADES to a per-process memory store for that hit and logs
+ *     `rate_limit.backend_degraded`: a database blip must not lock merchants
+ *     out of sign-in or the POS.
+ *   fail_closed (refund / reversal / correction) — the limiter throws
+ *     RateLimitUnavailableError (public 503) before the caller mutates
+ *     anything, logs `rate_limit.backend_unavailable_fail_closed`, and never
+ *     consults the memory store.
+ *
+ * Readiness (scripts/verify-readiness.ts) fails while consume_rate_limit is
+ * absent, so a degraded limiter is never mistaken for a working one.
  *
  * Server-only.
  */
 import { serverLog } from "@/server/observability/logger";
-import { RateLimitedError } from "./errors";
+import { RateLimitedError, RateLimitUnavailableError } from "./errors";
 import { bucketKey } from "./keys";
-import type { RateLimitRule } from "./policies";
+import type { BackendFailurePolicy, RateLimitRule } from "./policies";
 import {
   MemoryRateLimitStore,
   PostgresRateLimitStore,
@@ -81,10 +88,17 @@ function logDegraded(error: unknown, ruleId: string): void {
   });
 }
 
+export interface RateLimitOptions {
+  /** What to do when the durable backend fails. Default: memory_fallback. */
+  onBackendFailure?: BackendFailurePolicy;
+}
+
 export async function checkRateLimits(
   checks: readonly RateLimitCheck[],
   nowMs?: number,
+  options: RateLimitOptions = {},
 ): Promise<RateLimitDecision> {
+  const policy = options.onBackendFailure ?? "memory_fallback";
   let degraded = false;
   for (const check of checks) {
     if (check.parts.length === 0 || check.parts.some((part) => !part)) continue;
@@ -94,6 +108,13 @@ export async function checkRateLimits(
     try {
       hit = await primaryStore.hit(key, check.rule, nowMs);
     } catch (error) {
+      if (policy === "fail_closed") {
+        serverLog.error("rate_limit.backend_unavailable_fail_closed", {
+          ruleId: check.rule.id,
+          reason: error instanceof RateLimitBackendError ? error.reason : "backend_error",
+        });
+        throw new RateLimitUnavailableError();
+      }
       degraded = true;
       logDegraded(error, check.rule.id);
       hit = await fallbackStore.hit(key, check.rule, nowMs);
@@ -118,11 +139,15 @@ export async function checkRateLimits(
   return { allowed: true, retryAfterSeconds: 0, degraded };
 }
 
-/** Throws RateLimitedError (429) when any bucket is full. */
+/**
+ * Throws RateLimitedError (429) when any bucket is full, and
+ * RateLimitUnavailableError (503) when the backend is down under fail_closed.
+ */
 export async function enforceRateLimits(
   checks: readonly RateLimitCheck[],
   nowMs?: number,
+  options: RateLimitOptions = {},
 ): Promise<void> {
-  const decision = await checkRateLimits(checks, nowMs);
+  const decision = await checkRateLimits(checks, nowMs, options);
   if (!decision.allowed) throw new RateLimitedError(decision.retryAfterSeconds);
 }

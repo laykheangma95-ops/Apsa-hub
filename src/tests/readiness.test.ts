@@ -21,6 +21,12 @@ import {
   parseOpenApiSurface,
   type HostedSurface,
 } from "../../scripts/lib/migration-level.ts";
+import {
+  evaluateMigrationHistory,
+  migrationsReady,
+  parseMigrationHistory,
+  repositoryMigrationVersions,
+} from "../../scripts/lib/migration-history.ts";
 
 const ROOT = process.cwd();
 const MIGRATIONS = path.join(ROOT, "supabase/migrations");
@@ -111,10 +117,12 @@ describe("migration level evidence", () => {
     const f045 = footprints.find((f) => f.file.startsWith("045_"))!;
     expect(f045.tables.sort()).toEqual(["rate_limit_buckets", "webhook_event_receipts"]);
     expect(f045.functions.sort()).toEqual([
+      "apsa_migration_history",
       "apsa_schema_level",
       "claim_webhook_event",
       "consume_rate_limit",
       "prune_rate_limit_buckets",
+      "prune_webhook_event_receipts",
       "release_webhook_event",
     ]);
   });
@@ -149,6 +157,123 @@ describe("migration level evidence", () => {
     expect(called.filter((name) => !created.has(name))).toEqual([]);
     expect(called).toContain("consume_rate_limit");
     expect(called).toContain("create_order_v2");
+  });
+});
+
+// ── Migration HISTORY: the contiguous-application proof ─────────────────────
+
+describe("migration history proof (readiness false-positive repair)", () => {
+  const expected = repositoryMigrationVersions(files);
+  const ledger = (versions: string[], available = true) => ({ available, versions });
+  const without = (...drop: string[]) => expected.filter((v) => !drop.includes(v));
+  const allObjects = computeMigrationLevel(footprints, surfaceUpTo(Number.POSITIVE_INFINITY));
+  const combined = (history: ReturnType<typeof evaluateMigrationHistory>) =>
+    migrationsReady({
+      history,
+      objectsAtExpected: allObjects.atExpected,
+      objectsOutOfOrder: allObjects.presentBeyondGap.length > 0,
+    });
+
+  it("derives the repository chain from the files: every file, in order, gaps in numbering kept", () => {
+    expect(expected[0]).toBe("001");
+    expect(expected.at(-1)).toBe(files.at(-1)!.slice(0, 3));
+    expect(expected).toHaveLength(files.length);
+    // 028/029 were never files — the chain is the files, not 1..N arithmetic.
+    expect(expected).not.toContain("028");
+    expect(() => repositoryMigrationVersions(["001_a.sql", "001_b.sql"])).toThrow();
+  });
+
+  it("an ALTER-only earlier migration exists in the chain (the case object evidence cannot see)", () => {
+    const report = computeMigrationLevel(footprints, surfaceUpTo(Number.POSITIVE_INFINITY));
+    expect(report.unobservable.length).toBeGreaterThan(0);
+  });
+
+  it("FALSE-POSITIVE REPAIR: latest objects all exist but one earlier migration is missing → NOT READY", () => {
+    // Pick an ALTER-only migration: its absence is invisible to object evidence.
+    const alterOnly = allObjects.unobservable[0]!.slice(0, 3);
+    // The old readiness signal said "ready" for this database …
+    expect(allObjects.atExpected).toBe(true);
+    // … the history proof does not.
+    const history = evaluateMigrationHistory(expected, ledger(without(alterOnly)));
+    expect(history.ready).toBe(false);
+    expect(history.reasons).toEqual(["out_of_order"]);
+    expect(history.missing).toEqual([alterOnly]);
+    expect(combined(history)).toBe(false);
+    // And an earlier object-creating migration missing is caught the same way.
+    const h9 = evaluateMigrationHistory(expected, ledger(without("009")));
+    expect(h9.ready).toBe(false);
+    expect(h9.contiguousThrough).toBe("008");
+  });
+
+  it("complete contiguous chain → READY (history and objects agree)", () => {
+    const history = evaluateMigrationHistory(expected, ledger([...expected].reverse()));
+    expect(history).toMatchObject({
+      ready: true,
+      reasons: ["complete"],
+      contiguousThrough: expected.at(-1),
+      missing: [],
+      presentAfterGap: [],
+      unknown: [],
+    });
+    expect(combined(history)).toBe(true);
+  });
+
+  it("out-of-order state (a gap below later applied migrations) → NOT READY", () => {
+    const history = evaluateMigrationHistory(expected, ledger(without("043")));
+    expect(history.ready).toBe(false);
+    expect(history.reasons).toContain("out_of_order");
+    expect(history.presentAfterGap).toEqual(expected.slice(expected.indexOf("043") + 1));
+  });
+
+  it("hosted behind repo (a strict prefix) → NOT READY, reporting how far it got", () => {
+    const history = evaluateMigrationHistory(expected, ledger(expected.slice(0, 8)));
+    expect(history.ready).toBe(false);
+    expect(history.reasons).toEqual(["behind"]);
+    expect(history.contiguousThrough).toBe("008");
+    expect(history.missing[0]).toBe("009");
+    // Even missing only the very latest migration is not ready.
+    const oneBehind = evaluateMigrationHistory(expected, ledger(expected.slice(0, -1)));
+    expect(oneBehind).toMatchObject({ ready: false, reasons: ["behind"] });
+  });
+
+  it("an unknown hosted migration (ahead of / diverged from this checkout) → NOT READY", () => {
+    const history = evaluateMigrationHistory(expected, ledger([...expected, "999"]));
+    expect(history).toMatchObject({
+      ready: false,
+      reasons: ["unknown_versions"],
+      unknown: ["999"],
+    });
+  });
+
+  it("no ledger (applied by hand) or a malformed answer → NOT READY, never 'probably fine'", () => {
+    expect(evaluateMigrationHistory(expected, ledger([], false))).toMatchObject({
+      ready: false,
+      reasons: ["history_unavailable"],
+    });
+    for (const bad of [
+      null,
+      45,
+      "045",
+      { versions: expected },
+      { available: true, versions: [1] },
+    ]) {
+      expect(parseMigrationHistory(bad)).toBeNull();
+      expect(evaluateMigrationHistory(expected, bad).ready).toBe(false);
+    }
+  });
+
+  it("objects can veto a complete history, but never replace it", () => {
+    const history = evaluateMigrationHistory(expected, ledger(expected));
+    expect(migrationsReady({ history, objectsAtExpected: false, objectsOutOfOrder: false })).toBe(
+      false,
+    );
+    expect(migrationsReady({ history, objectsAtExpected: true, objectsOutOfOrder: true })).toBe(
+      false,
+    );
+    const incomplete = evaluateMigrationHistory(expected, ledger(expected.slice(0, -1)));
+    expect(
+      migrationsReady({ history: incomplete, objectsAtExpected: true, objectsOutOfOrder: false }),
+    ).toBe(false);
   });
 });
 
@@ -191,7 +316,7 @@ describe("readiness tooling", () => {
     const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
     expect(code).not.toMatch(/\.(insert|update|upsert|delete)\(/);
     const rpcCalls = [...code.matchAll(/\.rpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    expect(rpcCalls).toEqual(["apsa_schema_level"]);
+    expect(rpcCalls).toEqual(["apsa_migration_history", "apsa_schema_level"]);
     expect(code).toContain("evaluateProbeGate");
   });
 });

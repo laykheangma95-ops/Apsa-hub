@@ -1,3 +1,5 @@
+import { markPublicDomainError } from "@/server/public-domain-error";
+
 export type TeamErrorCode =
   | "membership_not_found"
   | "invitation_not_found"
@@ -30,5 +32,6 @@ export class TeamError extends Error {
               code === "invitation_email_mismatch"
             ? 410
             : 400;
+    markPublicDomainError(this);
   }
 }

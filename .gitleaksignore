@@ -11,3 +11,13 @@
 # is not rewritten.
 2d0b3f2264bc882a9847974a561db18ae15b9e0f:src/tests/conversation-smart-actions.test.ts:generic-api-key:54
 2d0b3f2264bc882a9847974a561db18ae15b9e0f:src/tests/order-domain.test.ts:generic-api-key:148
+#
+# d33b7d8 (PR #79) added synthetic credential-shaped redaction fixtures in
+# src/tests/observability.test.ts: a fake JWT under `access_token` (line 59,
+# generic-api-key) and a fake Stripe-format key under `apiKey` (line 64,
+# stripe-access-token). Neither is a real credential. The following commit
+# assembles both at runtime so no scanner-matching literal remains; these two
+# commit-pinned fingerprints only cover the already-pushed commit, which is
+# not rewritten.
+d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:generic-api-key:59
+d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:stripe-access-token:64

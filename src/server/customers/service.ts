@@ -13,6 +13,7 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog, auditLogRequired } from "@/server/auth/audit";
 import {
@@ -123,7 +124,7 @@ export async function getCustomer360(
   ]);
 
   if (!customer) {
-    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
+    throw publicError("Customer not found", 404);
   }
 
   // Sensitive fields (phone, address) are only returned to callers with customers.view_sensitive.
@@ -426,7 +427,7 @@ export async function createCustomer(
   ctx.require("customers.create");
 
   if (!input.display_name || !input.display_name.trim()) {
-    throw Object.assign(new Error("display_name is required"), { statusCode: 400 });
+    throw publicError("display_name is required", 400);
   }
 
   const customer = await repo.createCustomer(ctx.organizationId, {
@@ -502,7 +503,7 @@ export async function updateCustomer(
   if (patch.display_name !== undefined) {
     const name = patch.display_name.trim();
     if (!name) {
-      throw Object.assign(new Error("display_name cannot be empty"), { statusCode: 400 });
+      throw publicError("display_name cannot be empty", 400);
     }
     clean.display_name = name;
   }
@@ -514,12 +515,12 @@ export async function updateCustomer(
 
   const changedFields = Object.keys(clean);
   if (changedFields.length === 0) {
-    throw Object.assign(new Error("Nothing to update"), { statusCode: 400 });
+    throw publicError("Nothing to update", 400);
   }
 
   const updated = await repo.updateCustomer(ctx.organizationId, customerId, clean);
   if (!updated) {
-    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
+    throw publicError("Customer not found", 404);
   }
 
   // Which fields changed, never their values: the audit trail must not become
@@ -543,13 +544,13 @@ export async function addCustomerNote(
 
   const trimmed = body.trim();
   if (!trimmed) {
-    throw Object.assign(new Error("Note body cannot be empty"), { statusCode: 400 });
+    throw publicError("Note body cannot be empty", 400);
   }
 
   // Verify the customer belongs to this org before inserting.
   const customer = await repo.findCustomerById(ctx.organizationId, customerId);
   if (!customer) {
-    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
+    throw publicError("Customer not found", 404);
   }
 
   const note = await repo.createCustomerNote(ctx.organizationId, customerId, ctx.userId, trimmed);
@@ -585,7 +586,7 @@ export async function addIdentityToCustomer(
 
   const customer = await repo.findCustomerById(ctx.organizationId, customerId);
   if (!customer) {
-    throw Object.assign(new Error("Customer not found"), { statusCode: 404 });
+    throw publicError("Customer not found", 404);
   }
 
   return repo.addCustomerIdentity(ctx.organizationId, customerId, input);

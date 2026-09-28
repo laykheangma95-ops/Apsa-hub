@@ -10,7 +10,12 @@
  *   - anon / authenticated can neither execute the functions nor touch the
  *     tables; service_role can;
  *   - claim/release_webhook_event give first-sight-wins replay protection;
- *   - apsa_schema_level() answers 45;
+ *   - apsa_schema_level() answers 45 (a convenience marker only);
+ *   - apsa_migration_history() reports the Supabase CLI ledger truthfully: a
+ *     clean CLI-style rehearsal 001 → 045 is READY; a skipped earlier
+ *     migration, a partial rehearsal or no ledger at all is NOT READY;
+ *   - prune_webhook_event_receipts removes only receipts past retention, in
+ *     bounded batches, and refuses an unsafe retention;
  *   - the application's PostgresRateLimitStore drives the real function
  *     end-to-end through an rpc() adapter.
  */
@@ -20,6 +25,12 @@ import { financialFixture } from "./helpers/payment-order-fixture";
 import { PostgresRateLimitStore } from "@/server/rate-limit/store";
 import { PostgresWebhookReceiptStore } from "@/server/webhooks/receipts";
 import { bucketKey } from "@/server/rate-limit/keys";
+import { PGlite as PGliteCtor } from "@electric-sql/pglite";
+import { readFileSync, readdirSync } from "node:fs";
+import {
+  evaluateMigrationHistory,
+  repositoryMigrationVersions,
+} from "../../scripts/lib/migration-history.ts";
 
 let fixture: Awaited<ReturnType<typeof financialFixture>>;
 let db: PGlite;
@@ -152,6 +163,8 @@ describe("access model", () => {
         "select claim_webhook_event('telegram','1')",
         "select release_webhook_event('telegram','1')",
         "select apsa_schema_level()",
+        "select apsa_migration_history()",
+        "select prune_webhook_event_receipts()",
         "select * from rate_limit_buckets",
         "select * from webhook_event_receipts",
         `insert into rate_limit_buckets values ('${key(9)}','x',1,now(),now()+interval '1 minute')`,
@@ -210,6 +223,188 @@ describe("webhook receipts", () => {
   });
 });
 
+describe("webhook receipt retention", () => {
+  const ageReceipt = (provider: string, eventId: string, days: number) =>
+    db.query(
+      `update webhook_event_receipts set received_at = now() - make_interval(days => $3)
+        where provider = $1 and event_id = $2`,
+      [provider, eventId, days],
+    );
+  const present = async (provider: string, eventId: string) =>
+    (
+      await db.query("select 1 from webhook_event_receipts where provider = $1 and event_id = $2", [
+        provider,
+        eventId,
+      ])
+    ).rows.length === 1;
+  const prune = async (args = "") =>
+    (await db.query<{ n: number }>(`select prune_webhook_event_receipts(${args}) as n`)).rows[0]!.n;
+
+  it("prunes receipts past the 30-day default retention and keeps active replay records", async () => {
+    await db.query("delete from webhook_event_receipts");
+    for (const id of ["old-1", "old-2", "edge-29d", "fresh"]) {
+      await db.query("select claim_webhook_event('telegram', $1)", [id]);
+    }
+    await ageReceipt("telegram", "old-1", 45);
+    await ageReceipt("telegram", "old-2", 31);
+    await ageReceipt("telegram", "edge-29d", 29);
+    expect(await prune()).toBe(2);
+    expect(await present("telegram", "old-1")).toBe(false);
+    expect(await present("telegram", "old-2")).toBe(false);
+    expect(await present("telegram", "edge-29d")).toBe(true);
+    expect(await present("telegram", "fresh")).toBe(true);
+    // A kept receipt still refuses its replay.
+    const replay = await db.query<{ r: boolean }>(
+      "select claim_webhook_event('telegram','edge-29d') as r",
+    );
+    expect(replay.rows[0]!.r).toBe(false);
+  });
+
+  it("is bounded per call and oldest-first", async () => {
+    await db.query("delete from webhook_event_receipts");
+    for (let i = 0; i < 5; i++) {
+      await db.query("select claim_webhook_event('meta', $1)", [`b-${i}`]);
+      await ageReceipt("meta", `b-${i}`, 40 + i);
+    }
+    expect(await prune("30, 2")).toBe(2);
+    expect(await present("meta", "b-4")).toBe(false);
+    expect(await present("meta", "b-3")).toBe(false);
+    expect(await present("meta", "b-0")).toBe(true);
+    expect(await prune("30, 50000")).toBe(3);
+    expect(await prune()).toBe(0);
+  });
+
+  it("refuses a retention short enough to drop live replay records, or an unbounded batch", async () => {
+    await expect(prune("6")).rejects.toThrow(/retention must be 7\.\.3650 days/);
+    await expect(prune("null")).rejects.toThrow(/retention/);
+    await expect(prune("30, 0")).rejects.toThrow(/batch size/);
+    await expect(prune("30, 50001")).rejects.toThrow(/batch size/);
+  });
+});
+
+describe("migration history proof (Supabase CLI ledger)", () => {
+  const files = readdirSync("supabase/migrations")
+    .filter((n) => /^\d+_.*\.sql$/.test(n))
+    .sort();
+  const expected = repositoryMigrationVersions(files);
+  const LEDGER_DDL = `
+    CREATE SCHEMA supabase_migrations;
+    CREATE TABLE supabase_migrations.schema_migrations (
+      version text PRIMARY KEY, statements text[], name text
+    );`;
+
+  async function base(): Promise<PGlite> {
+    const fresh = new PGliteCtor();
+    await fresh.exec(`
+      CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
+      CREATE SCHEMA auth;
+      CREATE TABLE auth.users(id uuid primary key,email text,raw_user_meta_data jsonb default '{}');
+      CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS $$
+        SELECT nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
+      GRANT USAGE ON SCHEMA public,auth TO anon,authenticated,service_role;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+    `);
+    return fresh;
+  }
+
+  /** What `supabase db push` does: run each file, then record its version. */
+  async function cliRehearsal(skip: readonly string[] = [], stopAfter?: string) {
+    const fresh = await base();
+    await fresh.exec(LEDGER_DDL);
+    for (const file of files) {
+      const version = file.slice(0, file.indexOf("_"));
+      if (skip.includes(version)) continue;
+      await fresh.exec(readFileSync(`supabase/migrations/${file}`, "utf8"));
+      await fresh.query(
+        "insert into supabase_migrations.schema_migrations(version, name) values ($1, $2)",
+        [version, file.slice(file.indexOf("_") + 1, -4)],
+      );
+      if (version === stopAfter) break;
+    }
+    return fresh;
+  }
+
+  async function historyOf(target: PGlite) {
+    await target.exec("set role service_role");
+    try {
+      return (await target.query<{ h: unknown }>("select apsa_migration_history() as h")).rows[0]!
+        .h;
+    } finally {
+      await target.exec("reset role");
+    }
+  }
+
+  it("clean CLI rehearsal 001 → latest: every version recorded contiguously → READY", async () => {
+    const fresh = await cliRehearsal();
+    try {
+      const history = await historyOf(fresh);
+      expect(history).toEqual({ available: true, versions: expected });
+      const report = evaluateMigrationHistory(expected, history);
+      expect(report).toMatchObject({ ready: true, contiguousThrough: expected.at(-1) });
+      // The convenience marker agrees but is not what proved it.
+      const level = await fresh.query<{ l: number }>("select apsa_schema_level() as l");
+      expect(level.rows[0]!.l).toBe(45);
+    } finally {
+      await fresh.close();
+    }
+  }, 120_000);
+
+  it("an earlier ALTER-only migration skipped: 045 objects and schema level present, but NOT READY", async () => {
+    // 042_team_permissions only seeds grants (no table/RPC); 043+ still apply.
+    const skipped = "042";
+    expect(files.some((f) => f.startsWith(`${skipped}_`))).toBe(true);
+    const fresh = await cliRehearsal([skipped]);
+    try {
+      const level = await fresh.query<{ l: number }>("select apsa_schema_level() as l");
+      expect(level.rows[0]!.l).toBe(45); // the old "ready" signal
+      const report = evaluateMigrationHistory(expected, await historyOf(fresh));
+      expect(report.ready).toBe(false);
+      expect(report.reasons).toEqual(["out_of_order"]);
+      expect(report.missing).toEqual([skipped]);
+    } finally {
+      await fresh.close();
+    }
+  }, 120_000);
+
+  it("the fixture database (files run with no migration tool) has no ledger → NOT READY", async () => {
+    await db.exec("set role service_role");
+    let history: unknown;
+    try {
+      history = (await db.query<{ h: unknown }>("select apsa_migration_history() as h")).rows[0]!.h;
+    } finally {
+      await db.exec("reset role");
+    }
+    expect(history).toEqual({ available: false, versions: [] });
+    expect(evaluateMigrationHistory(expected, history)).toMatchObject({
+      ready: false,
+      reasons: ["history_unavailable"],
+    });
+  });
+
+  it("a ledger that is behind the checkout is NOT READY", async () => {
+    await db.exec(LEDGER_DDL);
+    try {
+      for (const v of expected.slice(0, 8)) {
+        await db.query("insert into supabase_migrations.schema_migrations(version) values ($1)", [
+          v,
+        ]);
+      }
+      await db.exec("set role service_role");
+      const history = (await db.query<{ h: unknown }>("select apsa_migration_history() as h"))
+        .rows[0]!.h;
+      await db.exec("reset role");
+      expect(evaluateMigrationHistory(expected, history)).toMatchObject({
+        ready: false,
+        reasons: ["behind"],
+        contiguousThrough: "008",
+      });
+    } finally {
+      await db.exec("reset role");
+      await db.exec("DROP SCHEMA supabase_migrations CASCADE");
+    }
+  });
+});
+
 describe("schema level witness", () => {
   it("apsa_schema_level() is 45", async () => {
     const r = await db.query<{ l: number }>("select apsa_schema_level() as l");
@@ -233,5 +428,17 @@ describe("application stores against the real SQL", () => {
     expect(await store.claim("telegram", "evt-store")).toBe(false);
     await store.release("telegram", "evt-store");
     expect(await store.claim("telegram", "evt-store")).toBe(true);
+  });
+
+  it("PostgresWebhookReceiptStore.prune drives the real bounded retention function", async () => {
+    const store = new PostgresWebhookReceiptStore(rpcAdapter());
+    await store.claim("telegram", "evt-prune-old");
+    await store.claim("telegram", "evt-prune-new");
+    await db.query(
+      "update webhook_event_receipts set received_at = now() - interval '60 days' where event_id = 'evt-prune-old'",
+    );
+    expect(await store.prune()).toBe(1);
+    expect(await store.claim("telegram", "evt-prune-new")).toBe(false);
+    await expect(store.prune(1)).rejects.toThrow(/webhook receipt store unavailable/);
   });
 });

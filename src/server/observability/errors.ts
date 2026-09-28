@@ -16,7 +16,12 @@
  *
  * Server-only. Never import this from browser-bundled code.
  */
+import { ZodError } from "zod";
 import { formatInternalErrorMessage } from "@/lib/public-error";
+import {
+  PublicDomainError,
+  isPublicDomainError as isApsaPublicDomainError,
+} from "@/server/public-domain-error";
 import { serverLog, type LogFields } from "./logger";
 import { scrubString } from "./redact";
 import { currentRequestContext } from "./request-context";
@@ -55,6 +60,21 @@ function stackFramesOf(error: unknown): string | undefined {
   return frames.length ? scrubString(frames.join(" | "), 1500) : undefined;
 }
 
+/**
+ * The text of an error-like value: an Error's message, a thrown string, or a
+ * provider error object's `message` (PostgrestError / AuthError are plain
+ * objects in some code paths). Always scrubbed by the caller before logging.
+ */
+function messageOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error != null && typeof error === "object") {
+    const { message } = error as { message?: unknown };
+    if (typeof message === "string") return message;
+  }
+  return "";
+}
+
 export interface ErrorDescription {
   errorClass: string;
   errorCode?: string;
@@ -76,10 +96,7 @@ export function describeErrorForLog(error: unknown): ErrorDescription {
     ...(errorCode ? { errorCode } : {}),
     ...(statusCode !== undefined ? { statusCode } : {}),
     retryable: isRetryable(statusCode),
-    errorMessage: scrubString(
-      error instanceof Error ? error.message : typeof error === "string" ? error : "",
-      300,
-    ),
+    errorMessage: scrubString(messageOf(error), 300),
     ...(stack ? { stack } : {}),
   };
 }
@@ -160,34 +177,31 @@ export function isControlFlowThrow(error: unknown): boolean {
 }
 
 /**
- * A domain error whose message was written by APSA service code for the
- * caller: every service/authorization/team/conversation error carries a
- * numeric statusCode. Validation failures (ZodError) describe the caller's own
- * input and are passed through as before.
+ * An error whose message and status may reach the browser verbatim:
  *
- * Anything else — a repository error quoting PostgREST/SQL text, a thrown
- * string, a TypeError — is NOT public.
+ *   - an APSA public domain error — created deliberately by APSA service code
+ *     through src/server/public-domain-error.ts (publicError(), a
+ *     PublicDomainError, or a domain error class that marks itself). Provenance
+ *     is a registry membership, NOT the presence of a numeric `statusCode`;
+ *   - a zod validation failure (a real ZodError instance) raised by an APSA
+ *     input validator — it describes the caller's own input.
+ *
+ * Anything else — a repository error quoting PostgREST/SQL text, a supabase-js
+ * AuthError, an h3/fetch/provider error that carries `statusCode`/`status`/
+ * `code`, a thrown string, a TypeError — is NOT public, whatever fields it has.
  */
 export function isPublicDomainError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error.name === "ZodError") return true;
-  // `statusCode` only — NOT `status`: provider errors (supabase-js AuthError,
-  // PostgrestError) carry `status` with provider-authored text that must not
-  // reach the browser verbatim.
-  const status = (error as { statusCode?: unknown }).statusCode;
-  return typeof status === "number" && status >= 400 && status <= 599;
+  if (error instanceof ZodError) return true;
+  return isApsaPublicDomainError(error);
 }
 
 /**
  * The error the browser receives for an unexpected failure: a fixed message
  * plus the support reference. No stack, no SQL, no table/constraint names, no
- * secret names. statusCode 500 is set so an enclosing boundary treats it as
- * already public.
+ * secret names. Marked public so an enclosing boundary passes it unchanged.
  */
 export function toPublicInternalError(requestId: string): Error {
-  return Object.assign(new Error(formatInternalErrorMessage(requestId)), {
-    name: "InternalServerError",
-    statusCode: 500,
-    requestId,
-  });
+  const error = new PublicDomainError(formatInternalErrorMessage(requestId), 500, "internal_error");
+  error.name = "InternalServerError";
+  return Object.assign(error, { requestId });
 }

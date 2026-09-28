@@ -273,15 +273,47 @@ describe("client IP for IP-scoped limits", () => {
     (name: string): string | undefined =>
       values[name];
 
-  it("prefers the platform header, then x-real-ip, then the left-most forwarded hop", () => {
+  it("trusts NO forwarding header when RATE_LIMIT_CLIENT_IP_HEADER is not configured", () => {
+    const spoofable = headers({
+      "cf-connecting-ip": "203.0.113.7",
+      "x-real-ip": "198.51.100.2",
+      "x-forwarded-for": "198.51.100.1, 10.0.0.1",
+    });
+    // Unset and blank both mean "unknown": the IP bucket is skipped, never trusted.
+    expect(clientIpFromHeaders(spoofable, undefined)).toBeNull();
+    expect(clientIpFromHeaders(spoofable, "")).toBeNull();
+    expect(clientIpFromHeaders(spoofable, "   ")).toBeNull();
+    // Also through the environment default.
+    const previous = process.env["RATE_LIMIT_CLIENT_IP_HEADER"];
+    delete process.env["RATE_LIMIT_CLIENT_IP_HEADER"];
+    try {
+      expect(clientIpFromHeaders(spoofable)).toBeNull();
+    } finally {
+      if (previous !== undefined) process.env["RATE_LIMIT_CLIENT_IP_HEADER"] = previous;
+    }
+  });
+
+  it("an unknown IP skips only the IP bucket: the identity bucket still enforces", async () => {
+    const identity = rule(2);
+    const ipRule = { ...rule(1000), id: "test.ip" };
+    const checks = [
+      { rule: identity, parts: [normalizeEmailForKey("victim@example.com")] },
+      {
+        rule: ipRule,
+        parts: [clientIpFromHeaders(headers({ "x-forwarded-for": "1.2.3.4" }), undefined)],
+      },
+    ];
+    expect((await checkRateLimits(checks, T0)).allowed).toBe(true);
+    expect((await checkRateLimits(checks, T0)).allowed).toBe(true);
+    expect((await checkRateLimits(checks, T0)).allowed).toBe(false);
+  });
+
+  it("reads the left-most forwarded hop only when x-forwarded-for is the configured header", () => {
     expect(
       clientIpFromHeaders(
-        headers({ "cf-connecting-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.1" }),
-        undefined,
+        headers({ "x-forwarded-for": "198.51.100.1, 10.0.0.1" }),
+        "x-forwarded-for",
       ),
-    ).toBe("203.0.113.7");
-    expect(
-      clientIpFromHeaders(headers({ "x-forwarded-for": "198.51.100.1, 10.0.0.1" }), undefined),
     ).toBe("198.51.100.1");
   });
 

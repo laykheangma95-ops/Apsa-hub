@@ -37,8 +37,13 @@ export const RATE_LIMITS = {
   signInIdentity: rule("auth.sign_in.identity", 10, 15 * 60),
   /** 50 sign-in attempts per client IP per 15 min: a shared shop/NAT IP still fits. */
   signInIp: rule("auth.sign_in.ip", 50, 15 * 60),
-  /** 10 account creations per client IP per hour. */
+  /** 10 account creations per client IP per hour (skipped when the IP is unknown). */
   signUpIp: rule("auth.sign_up.ip", 10, 60 * 60),
+  /**
+   * 5 sign-up attempts per normalized email per hour — the header-independent
+   * dimension. Every attempt counts, whether or not the address is taken.
+   */
+  signUpIdentity: rule("auth.sign_up.identity", 5, 60 * 60),
   /**
    * Password-reset and verification emails: one per address per 60 s (the
    * cooldown the screens already show, AUTH_EMAIL_COOLDOWN_SECONDS) …
@@ -51,10 +56,21 @@ export const RATE_LIMITS = {
   authEmailIp: rule("auth.email.ip", 20, 60 * 60),
   /** 10 OTP / recovery-link verifications per email per 15 min (6-digit codes are guessable). */
   otpVerifyIdentity: rule("auth.otp_verify.identity", 10, 15 * 60),
+  /**
+   * 5 verifications per link token (token_hash) per 15 min — the dimension for
+   * links that carry no email. A token_hash is unguessable, so this bounds
+   * replay of one link, not guessing.
+   */
+  otpVerifyToken: rule("auth.otp_verify.token", 5, 15 * 60),
   /** 30 OTP / recovery-link verifications per client IP per 15 min. */
   otpVerifyIp: rule("auth.otp_verify.ip", 30, 15 * 60),
   /** 10 new-password submissions per client IP per 15 min (recovery session required anyway). */
   recoveryCompleteIp: rule("auth.recovery_complete.ip", 10, 15 * 60),
+  /**
+   * 10 new-password submissions per recovery session per 15 min, keyed by an
+   * HMAC digest of the session's refresh token — header-independent.
+   */
+  recoveryCompleteSession: rule("auth.recovery_complete.session", 10, 15 * 60),
 
   // ── Orders: authenticated, high volume, idempotent ────────────────────────
   //
@@ -76,8 +92,45 @@ export const RATE_LIMITS = {
   paymentReversalMember: rule("payments.reversal.member", 20, 60),
 
   // ── Webhooks (future providers) ───────────────────────────────────────────
-  /** Per provider per client IP, before any signature work. */
+  /**
+   * Per provider per client IP, before any signature work. SECONDARY only:
+   * signature verification and replay protection are the primary controls,
+   * and the bucket is skipped when the IP is unknown.
+   */
   webhookIp: rule("webhooks.ip", 600, 60),
 } as const satisfies Record<string, RateLimitRule>;
+
+/**
+ * What a limit does when the DURABLE (PostgreSQL) backend is unavailable.
+ *
+ *   memory_fallback — degrade to the per-instance memory store for that hit
+ *                     (still enforcing, but N instances ⇒ up to N × limit).
+ *   fail_closed     — refuse the operation with a retryable 503
+ *                     (RateLimitUnavailableError) and never touch memory.
+ */
+export type BackendFailurePolicy = "memory_fallback" | "fail_closed";
+
+/**
+ * The failure policy per operation class — explicit, not a default.
+ *
+ * Refunds, reversals and corrections move money back out (or rewrite a
+ * financial record) and are the target of a stolen-session or insider abuse
+ * run; a per-instance limit would multiply by the instance count exactly when
+ * the database is struggling. They FAIL CLOSED: the merchant retries in a
+ * moment, nothing is mutated.
+ *
+ * Sign-in / auth emails / sign-up, order creation and routine payment
+ * record/verify/attach degrade to memory: a database blip must not lock
+ * merchants out of the POS or their account, each is behind authorization,
+ * idempotency (orders, payments) or Supabase's own provider limits, and
+ * every record/verify is additionally bounded by the payment state machine.
+ */
+export const BACKEND_FAILURE_POLICY = {
+  auth: "memory_fallback",
+  orderCreate: "memory_fallback",
+  paymentMutation: "memory_fallback",
+  financialReversal: "fail_closed",
+  webhook: "memory_fallback",
+} as const satisfies Record<string, BackendFailurePolicy>;
 
 export type RateLimitRuleName = keyof typeof RATE_LIMITS;
