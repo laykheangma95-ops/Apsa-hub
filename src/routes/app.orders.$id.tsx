@@ -68,6 +68,7 @@ import {
   type OrderErrorKind,
 } from "@/lib/orders";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
+import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
   classifyPaymentError,
   paymentErrorKey,
@@ -779,7 +780,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                 </p>
               ) : null}
               {latestDelivery.codAmount ? (
-                <p className="text-body-sm text-status-warning-text">{t("order.codNote")}</p>
+                <>
+                  <p className="text-body-sm text-status-warning-text">{t("order.codNote")}</p>
+                  {/*
+                   * COD is what the courier collects; the order total is what
+                   * the customer owes. They may legitimately differ (a part-paid
+                   * order), but never silently: the two figures are named side
+                   * by side whenever they are not the same amount.
+                   */}
+                  <p className="text-body-sm tnum text-text-secondary">
+                    {t("deliveryFee.codAmount", {
+                      amount: formatMoney(latestDelivery.codAmount),
+                    })}
+                  </p>
+                  {codDiffersFromTotal(latestDelivery.codAmount, order.total) ? (
+                    <p className="text-body-sm text-status-warning-text">
+                      {t("deliveryFee.codDiffers", { total: formatMoney(order.total) })}
+                    </p>
+                  ) : null}
+                </>
               ) : null}
             </div>
           ) : (
@@ -843,6 +862,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         open={createDeliveryOpen}
         onOpenChange={setCreateDeliveryOpen}
         orderId={order.id}
+        orderTotal={order.total}
         onCreated={(detail) => {
           void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
           /*

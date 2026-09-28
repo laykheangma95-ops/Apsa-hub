@@ -55,12 +55,21 @@ import {
   UnauthorizedError,
   assertOwnerWouldRemain,
 } from "../server/auth/authorization";
-import {
-  auditLog,
-  auditLogRequired,
-  MANDATORY_AUDIT_ACTIONS,
-  type AuditAction,
-} from "../server/auth/audit";
+import type { AuditAction } from "../server/auth/audit";
+
+// Freshly imported with a cache-busting query rather than a static import:
+// Bun's mock.module() replaces a module's registry entry for the rest of the
+// whole `bun test` process, and other files (e.g. team-domain.test.ts's
+// installPassthroughAuthMocks(), which stubs auditLog as a no-op) never
+// restore it — mock.restore() does not undo mock.module(). If one of those
+// runs earlier in Bun's file schedule, a static `auditLog` binding here
+// resolves to that leaked no-op, and the U2 mandatory-audit guard assertions
+// see a resolved promise instead of a rejection. The `?isolate=` suffix forces
+// a fresh, never-mocked evaluation of the real module every run — the same
+// fix customer-domain.test.ts uses for its customers.export guard.
+const { auditLog, MANDATORY_AUDIT_ACTIONS } = (await import(
+  `../server/auth/audit?isolate=${Date.now()}-${Math.random().toString(36).slice(2)}`
+)) as typeof import("../server/auth/audit");
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 // These UUIDs represent test data to be seeded in a test database.

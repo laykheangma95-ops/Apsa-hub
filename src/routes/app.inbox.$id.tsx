@@ -134,6 +134,12 @@ function ConversationScreen() {
     void queryClient.invalidateQueries({
       queryKey: inventoryKeys.principal(userId, routeOrganizationId),
     });
+    // The conversation's customer now has one more order: their order
+    // history (customer detail and CustomerDetailSheet) must not serve the
+    // pre-order list. This principal's customer partition only.
+    void queryClient.invalidateQueries({
+      queryKey: customerKeys.principal(userId, routeOrganizationId),
+    });
   }
 
   const [operationError, setOperationError] = useState(false);

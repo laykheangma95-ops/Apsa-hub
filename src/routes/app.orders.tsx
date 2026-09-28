@@ -20,6 +20,7 @@ import { listRealOrders } from "@/lib/api";
 import { presentOrderSource } from "@/lib/orders";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
+import { customerKeys } from "@/lib/customers-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 import type { Order } from "@/types";
@@ -213,6 +214,11 @@ function OrderListScreen() {
           // A new order is new outstanding work, so Home's attention counts
           // move with it rather than waiting for their own refetch.
           void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+          // An order attached to a customer changes that customer's order
+          // history. This principal's customer partition only.
+          void queryClient.invalidateQueries({
+            queryKey: customerKeys.principal(session.userId, routeOrganizationId),
+          });
         }}
       />
 

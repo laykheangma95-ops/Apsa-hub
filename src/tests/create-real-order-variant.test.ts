@@ -223,9 +223,12 @@ describe("D. pricing follows the chosen variant", () => {
     expect(sheet).toMatch(
       /const unitPrice = product \? productVariantPrice\(product, variantId\) : usd\(0\)/,
     );
-    // subtotal -> discount -> total all descend from unitPrice, unchanged.
+    // subtotal -> discount -> total all descend from unitPrice, unchanged;
+    // the delivery fee (migration 044) is added on top, never folded into it.
     expect(sheet).toMatch(/const subtotal = multiplyMoney\(unitPrice, Math\.max\(1, quantity\)\)/);
-    expect(sheet).toMatch(/const total = subtractMoney\(subtotal, discount\)/);
+    expect(sheet).toMatch(
+      /const total = addMoney\(subtractMoney\(subtotal, discount\), deliveryFee\)/,
+    );
   });
 
   it("the picker shows each variant's own price so the choice is priced, not blind", () => {

@@ -289,8 +289,9 @@ describe("Prepare Order never guesses between multiple production variants", () 
   });
 
   it("submit is blocked until a multi-variant line has an explicit choice", () => {
+    // The line-readiness rule; readyToSubmit is itemsReady && a valid delivery fee.
     const fn = source.slice(
-      source.indexOf("const readyToSubmit ="),
+      source.indexOf("const itemsReady ="),
       source.indexOf("const estimatedTotal"),
     );
     expect(fn).toMatch(/needsVariantChoice\(line\.product!\)/);

@@ -15,9 +15,9 @@
  *     permission (checked in the service) before touching data.
  *
  * MONEY: no handler accepts a price, a line total, a subtotal or a total. The
- * only monetary input in this file is `discountMinor` — an integer minor-unit
- * input to the server's own calculation, bounded server-side and gated on
- * orders.apply_discount. Everything else is priced from the catalog inside the
+ * only monetary inputs in this file are `discountMinor` (gated on
+ * orders.apply_discount) and `deliveryMinor` — integer minor-unit inputs to the
+ * server's own calculation, both bounded server-side. Everything else is priced from the catalog inside the
  * create RPC (migration 024).
  *
  * STATE: there is no "update order" function. Status moves only through the
@@ -99,6 +99,14 @@ export const createOrderFn = createServerFn()
         // Opaque provenance only (Conversation -> Order linkage). Never a FK,
         // never conversation content — see migration 030.
         sourceConversationRef: z.string().trim().min(1).max(200).nullish(),
+        // Integer minor units the merchant charges for delivery. An input to
+        // the server's calculation (bounded per currency by create_order_v2),
+        // never a total and never the courier's cost.
+        deliveryMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+        // One logical creation attempt; reused verbatim on every retry of it.
+        idempotencyKey: z
+          .string()
+          .regex(/^[A-Za-z0-9_-]{16,128}$/, "A valid idempotency key is required"),
       })
       .parse(data),
   )
@@ -116,6 +124,8 @@ export const createOrderFn = createServerFn()
       locationId: data.locationId ?? null,
       discountMinor: data.discountMinor,
       sourceConversationRef: data.sourceConversationRef ?? null,
+      deliveryMinor: data.deliveryMinor,
+      idempotencyKey: data.idempotencyKey,
     });
   });
 

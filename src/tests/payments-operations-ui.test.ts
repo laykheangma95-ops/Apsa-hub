@@ -905,13 +905,15 @@ describe("production boundary", () => {
     // 043 is an unrelated Payments *domain* fix (duplicate-payment
     // suspicion — see supabase/migrations/043_payment_referenceless_duplicate.sql),
     // not anything the Payments Operations *UI* phase this file covers
-    // added. A migration numbered 044 or higher would mean THIS phase
-    // silently changed the schema.
-    const beyond043 = migrations.filter((file) => {
+    // added; nor is 044 (Order idempotency + delivery fee — see
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql). A
+    // migration numbered 045 or higher would mean THIS phase silently
+    // changed the schema.
+    const beyond044 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      return Number.isFinite(prefix) && prefix > 43;
+      return Number.isFinite(prefix) && prefix > 44;
     });
-    expect(beyond043).toEqual([]);
+    expect(beyond044).toEqual([]);
   });
 
   it("links to the order through the router, never by mutating order state", () => {

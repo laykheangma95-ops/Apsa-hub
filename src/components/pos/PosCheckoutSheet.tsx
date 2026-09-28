@@ -19,7 +19,9 @@ import {
 } from "@/components/orders/RecordOrderPaymentSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { ordersKeys } from "@/lib/orders-query";
+import { customerKeys } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { calculateChange, formatMoney, usdToKhr } from "@/lib/money";
@@ -107,6 +109,16 @@ export function PosCheckoutSheet({
   const [realDetail, setRealDetail] = useState<RealOrderDetail | null>(null);
   const [realFailure, setRealFailure] = useState<"permission" | "generic" | null>(null);
   const submittingRef = useRef(false);
+  /*
+   * createdOrderId only protects a retry whose create RESPONSE arrived. When
+   * the request reached the server but the response was lost, createdOrderId
+   * is still null and a retry calls createRealOrder again — so the create
+   * itself carries an idempotency key (src/lib/idempotency.ts): the same cart
+   * re-sends the same key and the server returns the order it already made.
+   * Held across a sheet close (reset() leaves it alone) for the same reason;
+   * released once the order exists, so the next sale is always a new order.
+   */
+  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
 
   /*
@@ -138,6 +150,12 @@ export function PosCheckoutSheet({
     // src/lib/inventory.ts): that module's dynamic server-function imports
     // must not be pulled into the POS sheet's bundle.
     void queryClient.invalidateQueries({ queryKey: ["inventory", userId, organizationId] });
+    // A sale attached to a customer is part of that customer's order history.
+    if (customer) {
+      void queryClient.invalidateQueries({
+        queryKey: customerKeys.principal(userId, organizationId),
+      });
+    }
   }
 
   const recordPaymentMutation = useMutation({
@@ -268,6 +286,7 @@ export function PosCheckoutSheet({
           })),
           customerId: customer && isProductionId(customer.id) ? customer.id : null,
           ...(totals.discount.amount > 0 ? { discountMinor: totals.discount.amount } : {}),
+          idempotency: idempotencyKeys.current,
         });
         orderId = created.order.id;
         lifecycleStatus = created.order.lifecycleStatus;

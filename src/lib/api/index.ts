@@ -5,6 +5,7 @@
 import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
+import { orderRequestFingerprint, type IdempotencyKeyHolder } from "@/lib/idempotency";
 import {
   mapDeliveryDetailToUi,
   mapDeliveryListPageToUi,
@@ -947,6 +948,18 @@ export interface CreateRealOrderInput {
    * never conversation content — see migration 030.
    */
   sourceConversationRef?: string | null;
+  /**
+   * Delivery fee charged to the customer, integer minor units in the org's
+   * currency — bounded and added into the total server-side.
+   */
+  deliveryMinor?: number;
+  /**
+   * The caller's idempotency-key holder for this order flow
+   * (src/lib/idempotency.ts). createRealOrder takes the key for THIS request
+   * from it — the same key on a retry of the same request, a new key for a
+   * different one — and releases it once the order exists.
+   */
+  idempotency: IdempotencyKeyHolder;
 }
 
 /**
@@ -955,8 +968,15 @@ export interface CreateRealOrderInput {
  * src/api/orders.ts's own comment on why one must never be added).
  */
 export async function createRealOrder(input: CreateRealOrderInput): Promise<RealOrderDetail> {
+  const { idempotency, ...request } = input;
+  // Taken before the request and kept if it fails: a retry of this exact
+  // request must re-send this exact key (migration 044 replays the order the
+  // first attempt created if it reached the server).
+  const idempotencyKey = idempotency.keyFor(orderRequestFingerprint(request));
   const { createOrderFn } = await import("@/api/orders");
-  const detail = await createOrderFn({ data: input });
+  const detail = await createOrderFn({ data: { ...request, idempotencyKey } });
+  // The order exists now; the next order must never reuse this key.
+  idempotency.release();
   return mapOrderDetailToUi(detail);
 }
 

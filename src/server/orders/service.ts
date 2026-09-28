@@ -243,6 +243,17 @@ function createFailureToError(result: { status: string; variant_id?: string }): 
       return badRequest("Each item quantity must be a positive integer");
     case "invalid_discount":
       return badRequest("Discount must be a non-negative integer minor amount");
+    case "invalid_delivery_fee":
+      return badRequest("Delivery fee must be a non-negative integer minor amount within bounds");
+    case "invalid_idempotency_key":
+      return badRequest("A valid idempotency key is required to create an order");
+    case "idempotency_conflict":
+      // Deliberately carries nothing about the stored order: the key was used
+      // for a different request, or by a different member.
+      return Object.assign(
+        conflict("This idempotency key was already used for a different order request"),
+        { code: "idempotency_conflict" },
+      );
     case "discount_exceeds_subtotal":
       return badRequest("Discount cannot exceed the order subtotal");
     case "customer_not_found":
@@ -285,10 +296,27 @@ export interface CreateOrderServiceInput {
    * than a plausible id is rejected rather than silently truncated.
    */
   sourceConversationRef?: string | null | undefined;
+  /**
+   * Delivery fee the merchant charges the customer — integer minor units in the
+   * ORGANIZATION's currency. An input to the calculation, never a total: the
+   * RPC bounds it per currency and adds it into the derived total itself.
+   * Never the courier's cost to the merchant.
+   */
+  deliveryMinor?: number | undefined;
+  /**
+   * One logical order-creation attempt, generated once by the client and
+   * reused on every retry of that attempt (migration 044). A replay returns
+   * the order the first attempt created; a reuse for a different request is a
+   * 409 idempotency conflict.
+   */
+  idempotencyKey: string;
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
 const SOURCE_CONVERSATION_REF_MAX_LENGTH = 200;
+
+/** Same shape the database enforces (orders_idempotency_key_format). */
+export const ORDER_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 /**
  * Create a new order in `draft` lifecycle state.
@@ -306,13 +334,26 @@ const SOURCE_CONVERSATION_REF_MAX_LENGTH = 200;
  *   5. Customer/location/variant ownership is checked against the caller's org
  *      BEFORE the write, so a cross-org id is rejected here as well as by the
  *      RPC and the DB triggers behind it.
- *   6. The RPC creates order + lines atomically, pricing them from the catalog.
+ *   6. The RPC creates order + lines atomically, pricing them from the catalog
+ *      and adding the bounded delivery fee into the derived total.
+ *
+ * Idempotency (migration 044): the RPC checks `idempotencyKey` before any
+ * catalog validation or write. The same key + same request + same member
+ * returns the order the first attempt created (no second order number, no
+ * second audit row); the same key with a different request or member is a 409.
  */
 export async function createOrder(
   ctx: AuthorizationContext,
   input: CreateOrderServiceInput,
 ): Promise<OrderDetail> {
   ctx.require("orders.create");
+
+  if (
+    typeof input.idempotencyKey !== "string" ||
+    !ORDER_IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)
+  ) {
+    throw badRequest("A valid idempotency key is required to create an order");
+  }
 
   if (!ORDER_SOURCES.includes(input.source)) {
     throw badRequest(`Invalid order source: ${String(input.source)}`);
@@ -335,6 +376,11 @@ export async function createOrder(
   // Giving money away is its own authority (PERMISSIONS_MATRIX.md §14).
   if (discountMinor > 0) {
     ctx.require("orders.apply_discount");
+  }
+
+  const deliveryMinor = input.deliveryMinor ?? 0;
+  if (!Number.isSafeInteger(deliveryMinor) || deliveryMinor < 0) {
+    throw badRequest("Delivery fee must be a non-negative integer minor amount within bounds");
   }
 
   const sourceConversationRef = input.sourceConversationRef?.trim() || null;
@@ -376,7 +422,9 @@ export async function createOrder(
     customer_id: input.customerId ?? null,
     location_id: input.locationId ?? null,
     discount_minor: discountMinor,
+    delivery_minor: deliveryMinor,
     source_conversation_ref: sourceConversationRef,
+    idempotency_key: input.idempotencyKey,
   });
 
   if (result.status !== "success" || !result.order_id) {
@@ -389,6 +437,10 @@ export async function createOrder(
     // that follows it failed, not that the order was lost.
     throw new Error("Order was created but could not be read back");
   }
+
+  // A replay created nothing, so it records nothing: the first attempt already
+  // wrote this order's audit row, and a second one would read as a second sale.
+  if (result.replayed) return detail;
 
   // Best-effort audit. orders.create is not in MANDATORY_AUDIT_ACTIONS — a
   // failed audit write must not destroy a completed sale the merchant has
@@ -404,6 +456,7 @@ export async function createOrder(
       currency: detail.currency,
       subtotal_minor: detail.subtotal.amount,
       discount_minor: detail.discount.amount,
+      delivery_minor: detail.delivery.amount,
       total_minor: detail.total.amount,
       item_count: detail.items.length,
       ...(detail.sourceConversationRef
