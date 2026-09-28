@@ -86,11 +86,12 @@ describe("U2: capability resolution is server-side and input-free", () => {
 
   it("takes the user from the cookie session, never from a parameter", () => {
     expect(source).toContain("await getSessionFn()");
-    expect(source).toMatch(/\.eq\("user_id", session\.userId\)/);
+    expect(source).toContain("resolveActiveOrganizationId(session.userId)");
   });
 
   it("filters the membership read to active rows only", () => {
-    expect(source).toMatch(/\.eq\("status", "active"\)/);
+    // The shared canonical resolver every domain API and this snapshot use.
+    expect(read("src/server/auth/active-organization.ts")).toMatch(/\.eq\("status", "active"\)/);
   });
 
   it("never filters membership by a caller-supplied organization id", () => {
@@ -102,7 +103,7 @@ describe("U2: capability resolution is server-side and input-free", () => {
   });
 
   it("keeps server-only modules behind dynamic imports", () => {
-    expect(source).toMatch(/await import\(["']@\/lib\/supabase\/server["']\)/);
+    expect(source).toMatch(/await import\(["']@\/server\/auth\/active-organization["']\)/);
     expect(source).toMatch(/await import\(["']@\/server\/auth\/authorization["']\)/);
     const staticImports = source
       .split("\n")

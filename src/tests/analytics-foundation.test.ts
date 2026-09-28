@@ -803,7 +803,7 @@ describe("Analytics query safety and bundle boundary", () => {
 
   it("never accepts organizationId or userId from the client in the API boundary", () => {
     const api = source("src/api/analytics.ts");
-    expect(api).toContain('.eq("user_id", session.userId)');
+    expect(api).toContain("resolveActiveOrganizationId(session.userId)");
     expect(api).toContain("AuthorizationService.forRequest");
     expect(api).not.toMatch(/z\.object\(\{[^}]*organizationId/s);
     expect(api).not.toMatch(/z\.object\(\{[^}]*userId/s);
@@ -822,7 +822,9 @@ describe("Analytics query safety and bundle boundary", () => {
       expect(line).not.toContain("@/server/auth/authorization");
     }
     expect(api).toContain('await import("@/server/analytics/service")');
-    expect(api).toContain('await import("@/lib/supabase/server")');
+    // The membership read (and its service-role client) lives behind the
+    // canonical resolver, itself imported inside the handler body.
+    expect(api).toContain('await import("@/server/auth/active-organization")');
   });
 
   it("gates every service export on analytics.read", () => {

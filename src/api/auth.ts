@@ -32,6 +32,10 @@ import {
   type ProviderAuthError,
 } from "@/lib/auth-recovery";
 import { claimAuthEmailSlot } from "@/lib/auth-email-throttle";
+import {
+  CANONICAL_MEMBERSHIP_ORDER,
+  pickCanonicalActiveMembership,
+} from "@/lib/active-organization";
 
 // ── Cookie constants — defined inline to avoid importing @/lib/supabase/server ─
 // Keeping these here means auth.ts carries no static dependency on the admin module.
@@ -158,7 +162,7 @@ async function getMembershipRows(userId: string): Promise<{
     .select("organization_id, status, joined_at")
     .eq("user_id", userId)
     .in("status", ["active", "suspended", "removed"])
-    .order("joined_at", { ascending: true });
+    .order(CANONICAL_MEMBERSHIP_ORDER.column, { ascending: CANONICAL_MEMBERSHIP_ORDER.ascending });
 
   return {
     data: (data ?? null) as MembershipRow[] | null,
@@ -178,7 +182,7 @@ export async function resolveAuthenticatedRoute(
   }
 
   const memberships = data ?? [];
-  const activeMembership = memberships.find((membership) => membership.status === "active");
+  const activeMembership = pickCanonicalActiveMembership(memberships);
   if (activeMembership) return { ok: true, organizationId: activeMembership.organization_id };
 
   const revokedMembership = memberships.find(
@@ -406,22 +410,12 @@ async function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
 
 async function auditSignOutBestEffort(userId: string): Promise<void> {
   try {
-    const { supabaseAdmin } = await import("@/lib/supabase/server");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: rawMembership } = await (supabaseAdmin as any)
-      .from("memberships")
-      .select("organization_id")
-      .eq("user_id", userId)
-      .eq("status", "active")
-      .order("joined_at", { ascending: false })
-      .limit(1)
-      .single();
-
-    if (!rawMembership) return;
-    const membership = rawMembership as { organization_id: string };
+    const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+    const organizationId = await resolveActiveOrganizationId(userId);
+    if (!organizationId) return;
 
     const { AuthorizationService } = await import("@/server/auth/authorization");
-    const authCtx = await AuthorizationService.forRequest(userId, membership.organization_id);
+    const authCtx = await AuthorizationService.forRequest(userId, organizationId);
 
     const { auditLog } = await import("@/server/auth/audit");
     await auditLog(authCtx, { action: "auth.sign_out", resourceType: "session" });

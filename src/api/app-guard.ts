@@ -11,6 +11,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { clearAuthCookieFn, getSessionFn } from "@/api/auth";
 import type { ServerSession } from "@/api/auth";
+import {
+  CANONICAL_MEMBERSHIP_ORDER,
+  pickCanonicalActiveMembership,
+} from "@/lib/active-organization";
 
 export type AppGuardResult =
   | { ok: true; session: ServerSession; organizationId: string }
@@ -33,7 +37,7 @@ export const checkAppGuardFn = createServerFn().handler(async (): Promise<AppGua
     .select("organization_id, status, joined_at")
     .eq("user_id", session.userId)
     .in("status", ["active", "suspended", "removed"])
-    .order("joined_at", { ascending: true });
+    .order(CANONICAL_MEMBERSHIP_ORDER.column, { ascending: CANONICAL_MEMBERSHIP_ORDER.ascending });
 
   if (error) {
     throw new Error(error.message);
@@ -42,9 +46,12 @@ export const checkAppGuardFn = createServerFn().handler(async (): Promise<AppGua
   const memberships = (membershipRows ?? []) as Array<{
     organization_id: string;
     status: string;
+    joined_at: string;
   }>;
 
-  const activeMembership = memberships.find((membership) => membership.status === "active");
+  // The same canonical pick every domain API makes (src/lib/active-organization.ts),
+  // so the organization the /app shell caches under is the one those APIs act on.
+  const activeMembership = pickCanonicalActiveMembership(memberships);
   if (activeMembership) {
     return { ok: true, session, organizationId: activeMembership.organization_id };
   }

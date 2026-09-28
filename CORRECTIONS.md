@@ -41,6 +41,22 @@ Corrections are listed newest first.
 
 ---
 
+### CORRECTION-002
+
+**Date:** 2026-09-28
+**Affects:** supabase/migrations/016_customer_permissions.sql (header comments — historical, not edited), PERMISSIONS_MATRIX.md §customers, src/server/customers/service.ts (`updateCustomer`), src/lib/capabilities.ts, src/components/customers/EditCustomerSheet.tsx
+**Section:** Customer edits — `customers.update_basic` vs `customers.view_sensitive`
+**Original:** Migration 016 describes `customers.update_basic` as "edit display name, phone, email, language" and seeds it to every staff role, implying any role holding it may write a customer's phone and email. `customers.view_sensitive` (the grant that lets a member READ those values) is seeded only to OWNER/MANAGER, with ⚠️ for the other roles in PERMISSIONS_MATRIX.md. Taken together, a Cashier/Sales/Customer Service member who is shown the phone as hidden could still overwrite it blind.
+**Correction:** Project owner decision — keep the stricter, fail-closed rule:
+- `customers.update_basic` authorizes editing a customer's basic, non-sensitive fields (display name, language).
+- Writing `primary_phone` or `primary_email` additionally requires `customers.view_sensitive`, checked server-side in `updateCustomer()` before any read or write.
+- A role that cannot read a sensitive value may not blind-overwrite it. The UI offers the phone field only when `canSensitive("customers.view_sensitive")` holds and the server marked the payload `sensitiveVisible`, but the server check is the authority.
+- The update response is PII-gated exactly like every other customer read.
+Affected permissions: `customers.update_basic`, `customers.view_sensitive`. No grant is added or removed; migration 016 stays as written (historical migrations are not edited) and this entry supersedes its comment.
+**Reason:** Sensitive values must not be writable by roles that cannot read them — a blind overwrite lets a member replace a customer's contact details they are not allowed to see (e.g. redirecting COD or delivery contact) with no way to know what they destroyed. Raised in the independent review of PR #78; resolved by the project owner.
+
+---
+
 ### CORRECTION-001
 
 **Date:** 2026-09-10

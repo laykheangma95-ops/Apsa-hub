@@ -24,7 +24,9 @@
  *
  * Safe to bundle for the browser.
  */
-import { createQueryPartition } from "@/lib/query-principal";
+import type { QueryClient } from "@tanstack/react-query";
+import { APSI_QUERY_ROOT } from "@/lib/apsi-query";
+import { createQueryPartition, principalTag } from "@/lib/query-principal";
 
 export const CUSTOMERS_QUERY_ROOT = "customers";
 
@@ -73,9 +75,10 @@ export const customerKeys = {
    * of its own for that reason: sharing `list` above with the Inbox's
    * single-page read would hand one of them a shape it cannot read.
    *
-   * Phones inside it are whatever the server returned at fetch time; every row
-   * still renders its phone through `visibleCustomerPhone` below, so a grant
-   * revoked since the fetch hides the number on the next render.
+   * Phones inside it are whatever the server returned at fetch time. A grant
+   * revoked since the fetch removes the entry itself
+   * (enforceCustomerSensitiveCache below); `visibleCustomerPhone` is only the
+   * render-time second line.
    */
   directory: (userId: string, organizationId: string) =>
     [CUSTOMERS_QUERY_ROOT, userId, organizationId, "directory"] as const,
@@ -104,6 +107,83 @@ export const CUSTOMERS_QUERY_PREFIX = partition.prefix;
 export const clearCustomerQueries = partition.clear;
 export const enforceCustomerCachePrincipal = partition.enforce;
 
+// ── Sensitive-grant eviction ─────────────────────────────────────────────────
+
+/**
+ * The last `customers.view_sensitive` answer each principal's customer cache
+ * was filled under, per QueryClient (so it survives remounts, like
+ * query-principal's own record).
+ */
+const LAST_SENSITIVE_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
+
+/**
+ * Every cache entry that can hold a raw customer phone, email or address for
+ * this principal:
+ *
+ *   - the whole Customer partition — list, directory, directory search,
+ *     picker search, options, every profile (Customer 360 / Inbox lookup) and
+ *     every customer order history under it; and
+ *   - Apsi console lookups answered while the grant held (`sensitive: true`
+ *     in apsiKeys.lookup), which carry the customer phone the server sent.
+ */
+function sensitiveCustomerCacheKeys(userId: string, organizationId: string) {
+  return [
+    customerKeys.principal(userId, organizationId),
+    [APSI_QUERY_ROOT, userId, organizationId, "lookup", true] as const,
+  ];
+}
+
+/**
+ * Evict raw customer PII from the React Query cache the moment
+ * `customers.view_sensitive` stops holding for this principal.
+ *
+ * Masking at render time (visibleCustomerPhone / customerSensitiveVisible) is
+ * not enough on its own: the payload fetched under the grant would still sit
+ * in the QueryClient, readable by anything that inspects the cache (devtools,
+ * a future component that forgets to mask, a persisted cache). So on every
+ * allowed -> not-allowed transition — including a first observation of "not
+ * allowed", and a snapshot whose refresh failed (pass `canSensitive`, never
+ * `can`) — every entry that may carry those values is cancelled and removed,
+ * synchronously. The next read refetches, and the server builds that response
+ * from its own resolution of the grant (src/server/customers/service.ts), so
+ * a revoked member gets only the non-sensitive shape back.
+ *
+ * `removeQueries`, not `invalidateQueries`: invalidation keeps the old payload
+ * readable until the refetch lands. In-flight fetches started under the grant
+ * are cancelled first so a late response cannot write the raw value back.
+ *
+ * A no-op while the answer is unchanged, so ordinary caching is untouched and
+ * entries fetched while already denied are kept. Scoped to this principal —
+ * another user's or organization's partition is enforceCustomerCachePrincipal's
+ * job. Call it during render (before any customer surface renders), never in
+ * an effect. Never throws.
+ */
+export function enforceCustomerSensitiveCache(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  canViewSensitive: boolean,
+): void {
+  try {
+    let record = LAST_SENSITIVE_GRANT.get(queryClient);
+    if (!record) {
+      record = new Map();
+      LAST_SENSITIVE_GRANT.set(queryClient, record);
+    }
+    const tag = principalTag(userId, organizationId);
+    const previous = record.get(tag);
+    record.set(tag, canViewSensitive);
+    if (canViewSensitive || previous === false) return;
+
+    for (const queryKey of sensitiveCustomerCacheKeys(userId, organizationId)) {
+      void queryClient.cancelQueries({ queryKey }).catch(() => undefined);
+      queryClient.removeQueries({ queryKey });
+    }
+  } catch {
+    // Never block a render. Render-time masking still hides the value.
+  }
+}
+
 // ── Sensitive-field masking ──────────────────────────────────────────────────
 
 /**
@@ -112,14 +192,11 @@ export const enforceCustomerCachePrincipal = partition.enforce;
  *
  * This is the same class of defect PR #59 found in the Payments reconciliation
  * band, in the Customer domain: a profile fetched while the member held
- * `customers.view_sensitive` stays in the React Query cache — keyed by
- * userId + organizationId, not by permission — until the next successful
- * refetch. If that grant is revoked mid-session, or the capability snapshot's
- * latest refresh fails, nothing purges or refetches that payload on its own:
- * capabilities and customer data are two independent queries. So every surface
- * that displays a phone MUST route it through here rather than reading
- * `customer.phone` directly, and the value disappears on the very next render
- * instead of waiting for a refetch or an invalidation.
+ * `customers.view_sensitive` is keyed by userId + organizationId, not by
+ * permission. enforceCustomerSensitiveCache above removes it from the cache
+ * when the grant stops holding; this is the render-time second line behind
+ * that eviction. So every surface that displays a phone MUST still route it
+ * through here rather than reading `customer.phone` directly.
  *
  * `canViewSensitive` must itself already be fail-closed. Pass
  * `capabilities.canSensitive("customers.view_sensitive")`, not `can(...)`: a

@@ -20,6 +20,7 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { checkAppGuardFn } from "@/api/app-guard";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
+import { CustomerSensitiveCacheGuard } from "@/components/customers/CustomerSensitiveCacheGuard";
 import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
 import { enforceApsiCachePrincipal } from "@/lib/apsi-query";
@@ -136,9 +137,16 @@ function AppLayout() {
       organizationId={organizationId}
       initialResult={capabilities ?? undefined}
     >
-      <AppShell>
-        <Outlet />
-      </AppShell>
+      {/*
+       * Inside the provider, above the shell: when customers.view_sensitive
+       * stops holding, raw customer PII leaves the cache before any customer
+       * surface renders again (src/lib/customers-query.ts).
+       */}
+      <CustomerSensitiveCacheGuard userId={session.userId} organizationId={organizationId}>
+        <AppShell>
+          <Outlet />
+        </AppShell>
+      </CustomerSensitiveCacheGuard>
     </CapabilityProvider>
   );
 }

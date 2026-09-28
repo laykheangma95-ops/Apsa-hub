@@ -66,7 +66,11 @@ export async function listCustomers(
     .from("customers")
     .select("*")
     .eq("organization_id", organizationId)
-    .order("created_at", { ascending: false });
+    // (created_at DESC, id DESC): `id` breaks created_at ties, so an offset
+    // page boundary is stable — no customer is skipped or repeated when two
+    // were created in the same instant (bulk import, same-transaction inserts).
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
 
   if (opts.status) query = query.eq("status", opts.status);
   if (opts.limit) query = query.limit(opts.limit);

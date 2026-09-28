@@ -10,6 +10,8 @@
  * never more.
  */
 
+import type { FulfillmentStatus, Order, OrderLifecycleStatus, PaymentStatus } from "@/types";
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 export type CustomerErrorKind = "unauthorized" | "forbidden" | "not_found" | "invalid" | "error";
@@ -154,4 +156,43 @@ export function planCustomerEdit(params: {
     canSubmit: !hasErrors && Object.keys(patch).length > 0,
     removesPhone,
   };
+}
+
+// ── Order history statuses ────────────────────────────────────────────────────
+
+/**
+ * One status fact on a Customer 360 order-history row. Each axis stays its own
+ * fact — lifecycle, payment, refund, fulfilment — exactly as Orders and Order
+ * detail present them; none is ever folded into another.
+ */
+export type CustomerOrderStatusFact =
+  | { axis: "lifecycle"; status: OrderLifecycleStatus }
+  | { axis: "payment"; status: PaymentStatus }
+  | { axis: "refund"; status: "refunded" | "partially_refunded" }
+  | { axis: "fulfillment"; status: FulfillmentStatus };
+
+/**
+ * The status facts an order-history row shows, in reading order.
+ *
+ * Lifecycle comes first and is never omitted when the order carries one:
+ * without it a cancelled order reads as merely "Unpaid · Not yet fulfilled",
+ * and a draft reads like a confirmed sale awaiting payment. Refund is its own
+ * axis (CORRECTIONS.md, approved financial semantics): a refunded order stays
+ * `paid` on the payment axis and reports the refund beside it, shown only when
+ * something was refunded — the same rule Order detail applies.
+ */
+export function customerOrderStatusFacts(
+  order: Pick<Order, "lifecycleStatus" | "paymentStatus" | "fulfillmentStatus" | "refundStatus">,
+): CustomerOrderStatusFact[] {
+  const facts: CustomerOrderStatusFact[] = [];
+  if (order.lifecycleStatus) facts.push({ axis: "lifecycle", status: order.lifecycleStatus });
+  facts.push({ axis: "payment", status: order.paymentStatus });
+  if (order.refundStatus && order.refundStatus !== "none") {
+    facts.push({
+      axis: "refund",
+      status: order.refundStatus === "full" ? "refunded" : "partially_refunded",
+    });
+  }
+  facts.push({ axis: "fulfillment", status: order.fulfillmentStatus });
+  return facts;
 }

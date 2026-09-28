@@ -15,7 +15,6 @@ import {
   SectionRow,
   SectionRows,
   SegmentedControl,
-  StatusChip,
   StickyActionBar,
   Timeline,
   type Segment,
@@ -23,6 +22,7 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
+import { CustomerOrderStatuses } from "@/components/customers/CustomerOrderStatuses";
 import { EditCustomerSheet } from "@/components/customers/EditCustomerSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
@@ -441,10 +441,12 @@ function Customer360Screen() {
                         <p className="text-caption text-text-muted">
                           {fullTimestamp(order.createdAt)}
                         </p>
-                        <div className="mt-1.5 flex flex-wrap gap-1.5">
-                          <StatusChip status={order.paymentStatus} />
-                          <StatusChip status={order.fulfillmentStatus} />
-                        </div>
+                        {/*
+                         * Lifecycle first, then payment, refund and
+                         * fulfilment as separate facts — a cancelled or
+                         * draft order must never read as merely unpaid.
+                         */}
+                        <CustomerOrderStatuses order={order} />
                       </div>
                       <span className="text-financial shrink-0 text-text-primary">
                         {formatMoney(order.total)}
