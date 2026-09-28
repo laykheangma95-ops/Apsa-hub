@@ -9,7 +9,9 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
     if (error != null && typeof error === "object" && "statusCode" in error) {
       throw error;
     }
-    console.error(error);
+    // Structured, redacted, with the same reporter as server functions.
+    const { reportServerError } = await import("./server/observability/errors");
+    reportServerError(error, { event: "ssr.unhandled_error" });
     return new Response(renderErrorPage(), {
       status: 500,
       headers: { "content-type": "text/html; charset=utf-8" },
@@ -24,6 +26,19 @@ const csrfMiddleware = createCsrfMiddleware({
   filter: (ctx) => ctx.handlerType === "serverFn",
 });
 
+// Every server function runs inside the observability boundary: request ID,
+// structured redacted error logging, and a sanitized public error (with a
+// support reference) instead of raw database text for unexpected failures.
+// See src/server/observability/server-fn-boundary.ts. Dynamically imported so
+// no server-only module enters the client bundle.
+const serverFnBoundary = createMiddleware({ type: "function" }).server(
+  async ({ next, serverFnMeta }) => {
+    const { runServerFnBoundary } = await import("./server/observability/server-fn-boundary");
+    return runServerFnBoundary(serverFnMeta, () => next());
+  },
+);
+
 export const startInstance = createStart(() => ({
   requestMiddleware: [errorMiddleware, csrfMiddleware],
+  functionMiddleware: [serverFnBoundary],
 }));

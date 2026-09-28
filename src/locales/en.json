@@ -19,7 +19,9 @@
       "forgotPassword": "Forgot password?",
       "errors": {
         "invalidCredentials": "That email and password do not match. Please try again.",
-        "generic": "We could not sign you in right now. Please try again."
+        "generic": "We could not sign you in right now. Please try again.",
+        "rateLimited": "Too many sign-in attempts. Please wait a few minutes, then try again.",
+        "reference": "Support reference: {{reference}}"
       }
     },
     "signUp": {
@@ -38,7 +40,9 @@
       "signIn": "Sign in",
       "errors": {
         "emailTaken": "That email is already registered. Try signing in instead.",
-        "generic": "We could not create your account right now. Please try again."
+        "generic": "We could not create your account right now. Please try again.",
+        "rateLimited": "Too many sign-up attempts from this connection. Please wait, then try again.",
+        "reference": "Support reference: {{reference}}"
       }
     },
     "forgotPassword": {

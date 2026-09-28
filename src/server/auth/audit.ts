@@ -169,8 +169,15 @@ export async function auditLogRequired(
       organizationId: ctx.organizationId,
       actorUserId: ctx.userId,
     });
-    throw new Error(
-      `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail. (${msg})`,
+    // A deliberate, public refusal (503 — the audit store is unavailable), so
+    // the server-function boundary passes it through for the UI to explain.
+    // The database's own error text stays in the server log above; it is not
+    // part of the message the browser receives.
+    throw Object.assign(
+      new Error(
+        `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail.`,
+      ),
+      { statusCode: 503, code: "audit_unavailable" },
     );
   }
 }

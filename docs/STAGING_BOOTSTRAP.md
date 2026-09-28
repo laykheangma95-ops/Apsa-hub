@@ -1,5 +1,10 @@
 # APSA — Staging Environment Bootstrap
 
+> **Update (2026-09-28):** the repository now holds migrations `001` … `045`; the
+> rehearsal scope is `009` → `045`. The ordered plan lives in
+> `docs/RELEASE_CHECKLIST.md` §2. §0 below is the historical baseline recorded
+> at bootstrap time and is intentionally left as recorded.
+
 **Purpose of this document:** stand up APSA's dedicated **non-production** staging
 environment so the controlled migration rehearsal **009 → 043** can later be run
 safely, against a project that is provably not production.

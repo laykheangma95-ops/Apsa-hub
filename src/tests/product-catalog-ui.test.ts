@@ -1917,11 +1917,13 @@ describe("J. the new screens keep the server/browser boundary", () => {
       .sort();
     // 044 is the migration head this phase inherited (bumped by migration 044,
     // the unrelated Order idempotency + delivery fee change — see
-    // supabase/migrations/044_order_idempotency_delivery_fee.sql).
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql), then by
+    // 045, the unrelated operability change (rate limits + webhook receipts —
+    // see supabase/migrations/045_operability_rate_limits_webhooks.sql).
     // The Product Catalog UI is built entirely on migrations 017-019, which
     // already exist; adding a new file here would move this pin and fail the
     // test on purpose.
-    expect(migrations.at(-1)).toBe("044_order_idempotency_delivery_fee.sql");
+    expect(migrations.at(-1)).toBe("045_operability_rate_limits_webhooks.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

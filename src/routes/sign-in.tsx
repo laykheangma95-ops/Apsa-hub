@@ -59,7 +59,11 @@ function SignInPage() {
         setError(
           result.code === "invalid_credentials"
             ? t("auth.signIn.errors.invalidCredentials")
-            : result.message || t("auth.signIn.errors.generic"),
+            : result.code === "rate_limited"
+              ? t("auth.signIn.errors.rateLimited")
+              : result.reference
+                ? `${t("auth.signIn.errors.generic")} ${t("auth.signIn.errors.reference", { reference: result.reference })}`
+                : t("auth.signIn.errors.generic"),
         );
         return;
       }

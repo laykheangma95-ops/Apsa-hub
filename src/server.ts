@@ -2,6 +2,10 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { healthResponse, isHealthRequest } from "./lib/health";
+import { missingServerEnv } from "./server/observability/env-check";
+import { reportServerError } from "./server/observability/errors";
+import { serverLog } from "./server/observability/logger";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -28,7 +32,9 @@ async function normalizeCatastrophicSsrResponse(response: Response): Promise<Res
   const body = await response.clone().text();
   if (!isH3SwallowedErrorBody(body)) return response;
 
-  console.error(consumeLastCapturedError() ?? new Error(`h3 swallowed SSR error: ${body}`));
+  reportServerError(consumeLastCapturedError() ?? new Error(`h3 swallowed SSR error: ${body}`), {
+    event: "ssr.swallowed_error",
+  });
   return new Response(renderErrorPage(), {
     status: 500,
     headers: { "content-type": "text/html; charset=utf-8" },
@@ -44,14 +50,28 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
+// Once per server instance: name (never value) any required variable that is
+// missing, so a misconfigured deployment is visible in the logs on its first
+// request instead of as scattered failures.
+let environmentChecked = false;
+function logMissingEnvironmentOnce(): void {
+  if (environmentChecked) return;
+  environmentChecked = true;
+  const missing = missingServerEnv(process.env, process.env["NODE_ENV"] === "production");
+  if (missing.length > 0) serverLog.error("server.env_missing", { missing });
+}
+
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    logMissingEnvironmentOnce();
+    // Liveness only — answered before the app router, touches nothing.
+    if (isHealthRequest(request)) return healthResponse(request.method);
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);
     } catch (error) {
-      console.error(error);
+      reportServerError(error, { event: "ssr.unhandled_error" });
       return new Response(renderErrorPage(), {
         status: 500,
         headers: { "content-type": "text/html; charset=utf-8" },

@@ -150,6 +150,18 @@ if (!fs.existsSync(LOCK_FILE)) {
   const parity = compareHostedParity(inventory, hosted, localHashes);
   appliedMigrations = parity.applied;
 
+  // The one-line answer an operator needs first: how far behind is hosted?
+  // This is the LOCK FILE's record; scripts/verify-readiness.ts derives the
+  // hosted level from live evidence instead.
+  const expectedEntry = inventory.entries[inventory.entries.length - 1];
+  const hostedFile = [...parity.applied].sort().at(-1);
+  console.log(
+    `\n  EXPECTED: ${expectedEntry ? expectedEntry.prefix : "none"} (${expectedEntry?.file ?? "no migrations"})`,
+  );
+  console.log(
+    `  HOSTED:   ${hostedFile ? hostedFile.slice(0, 3) : "none"} (${hostedFile ?? "none recorded"}) — per supabase/hosted-migrations.lock.json\n`,
+  );
+
   for (const f of parity.missingLocally) {
     fail(
       `${f} is recorded as applied to hosted Supabase but is missing locally — never delete a hosted migration.`,

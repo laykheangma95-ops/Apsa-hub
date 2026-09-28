@@ -330,7 +330,8 @@ process.env["VITE_APP_URL"] = APP_URL;
 
 const auth = await import("@/api/auth");
 const { checkAppGuardFn } = await import("@/api/app-guard");
-const { resetAuthEmailThrottle } = await import("@/lib/auth-email-throttle");
+const { resetAuthRateLimits: resetAuthEmailThrottle } =
+  await import("@/server/rate-limit/auth-limits");
 const {
   COOKIE_ACCESS_TOKEN,
   COOKIE_REFRESH_TOKEN,

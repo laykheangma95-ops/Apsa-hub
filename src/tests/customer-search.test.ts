@@ -740,10 +740,12 @@ describe("No migration was required, and the schema says why", () => {
     // supabase/migrations/043_payment_referenceless_duplicate.sql), not
     // anything this customer-search phase added, and neither is 044 (Order
     // idempotency + delivery fee — see
-    // supabase/migrations/044_order_idempotency_delivery_fee.sql). A
-    // migration numbered 045 or higher would mean THIS phase silently changed
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql), nor 045
+    // (operability: rate limits + webhook receipts — see
+    // supabase/migrations/045_operability_rate_limits_webhooks.sql). A
+    // migration numbered 046 or higher would mean THIS phase silently changed
     // the schema — which it must not do without first proving the change is
     // required and reporting it.
-    expect(migrations.filter((f) => /^04[5-9]|^0[5-9]\d/.test(f))).toEqual([]);
+    expect(migrations.filter((f) => /^04[6-9]|^0[5-9]\d/.test(f))).toEqual([]);
   });
 });
