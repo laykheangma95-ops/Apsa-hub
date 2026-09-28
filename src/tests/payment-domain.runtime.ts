@@ -225,6 +225,14 @@ async function withPaymentDb<T>(
   fn: (calls: RpcCall[]) => Promise<T>,
 ): Promise<T> {
   const { setPaymentRepositoryDbForTests } = await import("../server/payments/repository");
+  // A working durable limiter backend: refund/reversal/correction FAIL CLOSED
+  // without one (policies.ts#BACKEND_FAILURE_POLICY), which is tested in
+  // operability-limits.runtime.ts. These tests exercise the payment domain.
+  const { setPrimaryRateLimitStore, resetRateLimitFallbackStore } =
+    await import("../server/rate-limit/limiter");
+  const { MemoryRateLimitStore } = await import("../server/rate-limit/store");
+  setPrimaryRateLimitStore(new MemoryRateLimitStore());
+  resetRateLimitFallbackStore();
   const calls: RpcCall[] = [];
   const testDb = {
     from: (table: string) => fakeQuery(opts.tables?.[table] ?? { data: null, error: null }),

@@ -41,8 +41,12 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
+import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog, auditLogRequired } from "@/server/auth/audit";
+import { enforceRateLimits } from "@/server/rate-limit/limiter";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { Money, Currency } from "@/types";
 import * as repo from "./repository";
 import {
@@ -342,15 +346,15 @@ function mapEvidence(row: PaymentEvidenceRow, canViewReference: boolean): Paymen
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 function badRequest(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 400 });
+  return publicError(message, 400);
 }
 
 function notFound(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 404 });
+  return publicError(message, 404);
 }
 
 function conflict(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 409 });
+  return publicError(message, 409);
 }
 
 /**
@@ -366,11 +370,11 @@ async function bestEffortAudit(
   try {
     await auditLog(ctx, payload);
   } catch (err) {
-    console.error(
-      "[APSA] payment audit_log write failed (best-effort):",
-      err instanceof Error ? err.message : String(err),
-      { action: payload.action, organizationId: ctx.organizationId },
-    );
+    reportServerError(err, {
+      event: "payments.best_effort_audit_failed",
+      action: payload.action,
+      organizationId: ctx.organizationId,
+    });
   }
 }
 
@@ -475,6 +479,39 @@ export interface RecordPaymentServiceInput {
   note?: string | null | undefined;
 }
 
+// ── Abuse limits ──────────────────────────────────────────────────────────────
+//
+// Every payment mutation has financial impact and an audit trail, so each is
+// bounded per member (values and rationale: src/server/rate-limit/policies.ts).
+// Checked AFTER the permission check, so a member without the permission gets
+// the 403, not a 429. Money-moving-back-out actions (reverse, refund, correct)
+// share a second, tighter bucket. Idempotency keys and the payment state
+// machine remain the protection against duplicates; this is volume only.
+//
+// Backend-failure policy (policies.ts#BACKEND_FAILURE_POLICY): routine
+// record/verify/attach degrade to the per-instance store; reverse, refund and
+// correct FAIL CLOSED — with the durable limiter unreachable they throw a
+// retryable 503 here, before any read, write, payment event or audit row.
+
+async function enforcePaymentMutationLimit(ctx: AuthorizationContext): Promise<void> {
+  await enforceRateLimits(
+    [{ rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] }],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.paymentMutation },
+  );
+}
+
+async function enforcePaymentReversalLimit(ctx: AuthorizationContext): Promise<void> {
+  await enforceRateLimits(
+    [
+      { rule: RATE_LIMITS.paymentReversalMember, parts: [ctx.organizationId, ctx.userId] },
+      { rule: RATE_LIMITS.paymentMutateMember, parts: [ctx.organizationId, ctx.userId] },
+    ],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.financialReversal },
+  );
+}
+
 /**
  * Record a payment against an order.
  *
@@ -502,6 +539,7 @@ export async function recordPayment(
 
   // COD carries its own grant — see RECORD_METHOD_PERMISSIONS.
   ctx.require(RECORD_METHOD_PERMISSIONS[input.method]);
+  await enforcePaymentMutationLimit(ctx);
 
   if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
     throw badRequest("Amount must be a positive integer minor amount");
@@ -563,6 +601,7 @@ export async function attachEvidence(
   input: AttachEvidenceServiceInput,
 ): Promise<PaymentDetail> {
   ctx.require("payments.record");
+  await enforcePaymentMutationLimit(ctx);
 
   if (!PAYMENT_EVIDENCE_TYPES.includes(input.evidenceType)) {
     throw badRequest(`Invalid evidence type: ${String(input.evidenceType)}`);
@@ -649,6 +688,7 @@ export async function verifyPayment(
   // Permission is checked before the payment is loaded, so an unauthorized
   // caller cannot use timing or error shape to learn whether a payment id is real.
   ctx.require(permission);
+  await enforcePaymentMutationLimit(ctx);
 
   const payment = await loadTransitionTarget(ctx, paymentId);
   const from = payment.verification_state;
@@ -688,6 +728,7 @@ export async function reversePayment(
   reason: string,
 ): Promise<PaymentDetail> {
   ctx.require("payments.reverse");
+  await enforcePaymentReversalLimit(ctx);
 
   if (!reason?.trim()) throw badRequest("A reversal reason is required");
   await loadTransitionTarget(ctx, paymentId);
@@ -726,6 +767,7 @@ export async function refundPayment(
   idempotencyKey?: string | null,
 ): Promise<PaymentDetail> {
   ctx.require("payments.refund");
+  await enforcePaymentReversalLimit(ctx);
 
   if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
     throw badRequest("Refund amount must be a positive integer minor amount");
@@ -775,6 +817,7 @@ export async function correctPayment(
   updates: { reference?: string | null; note?: string | null },
 ): Promise<PaymentDetail> {
   ctx.require("payments.override_status");
+  await enforcePaymentReversalLimit(ctx);
 
   if (!reason?.trim()) throw badRequest("A correction reason is required");
   if (updates.reference == null && updates.note == null) {

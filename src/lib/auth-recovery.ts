@@ -26,7 +26,7 @@ export const PASSWORD_MAX_LENGTH = 72;
 
 /**
  * Cooldown between resend / reset-request submissions. The React countdown is
- * UX only; the server enforces the same window (src/lib/auth-email-throttle.ts).
+ * UX only; the server enforces the same window (src/server/rate-limit/auth-limits.ts).
  */
 export const AUTH_EMAIL_COOLDOWN_SECONDS = 60;
 

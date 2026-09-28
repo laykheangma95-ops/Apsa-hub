@@ -13,6 +13,7 @@
  * derived view over the payments table — never a maintained/cached balance,
  * same philosophy as inventory_stock.
  */
+import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
 import type { Money, Currency } from "@/types";
@@ -231,7 +232,7 @@ export async function getReconciliationSummary(
 }
 
 function notFound(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 404 });
+  return publicError(message, 404);
 }
 
 /**

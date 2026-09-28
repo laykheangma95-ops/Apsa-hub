@@ -1,3 +1,4 @@
+import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
@@ -53,10 +54,9 @@ export interface CreateDeliveryServiceInput {
   codAmountMinor?: number | null;
 }
 
-const badRequest = (message: string): Error =>
-  Object.assign(new Error(message), { statusCode: 400 });
-const notFound = (message: string): Error => Object.assign(new Error(message), { statusCode: 404 });
-const conflict = (message: string): Error => Object.assign(new Error(message), { statusCode: 409 });
+const badRequest = (message: string): Error => publicError(message, 400);
+const notFound = (message: string): Error => publicError(message, 404);
+const conflict = (message: string): Error => publicError(message, 409);
 
 function mapDelivery(row: DeliveryRow): DeliverySummary {
   return {

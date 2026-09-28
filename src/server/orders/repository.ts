@@ -61,6 +61,30 @@ function errMessage(error: unknown): string {
 // ── Writes (RPC only) ─────────────────────────────────────────────────────────
 
 /**
+ * True when `createdBy` already created an order in this organization under
+ * `idempotencyKey` — i.e. a create call with that key is a REPLAY that
+ * create_order_v2 will answer with the stored order, not new volume. Used only
+ * to keep the order-creation rate limit from blocking order recovery; the RPC
+ * still decides replay vs. conflict on its own.
+ */
+export async function orderExistsForIdempotencyKey(
+  organizationId: string,
+  createdBy: string,
+  idempotencyKey: string,
+): Promise<boolean> {
+  const { data, error } = await db
+    .from("orders")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("idempotency_key", idempotencyKey)
+    .eq("created_by", createdBy)
+    .limit(1);
+
+  if (error) throw new Error(`orderExistsForIdempotencyKey: ${errMessage(error)}`);
+  return Array.isArray(data) && data.length > 0;
+}
+
+/**
  * Create an order and all of its lines in ONE database transaction.
  *
  * organizationId and createdBy are server-supplied. The only monetary values

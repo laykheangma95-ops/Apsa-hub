@@ -50,8 +50,13 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
+import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
+import { RateLimitedError } from "@/server/rate-limit/errors";
+import { checkRateLimits } from "@/server/rate-limit/limiter";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { Money, Currency } from "@/types";
 import * as repo from "./repository";
 import {
@@ -207,24 +212,24 @@ async function bestEffortAudit(
   try {
     await auditLog(ctx, payload);
   } catch (err) {
-    console.error(
-      "[APSA] order audit_log write failed (best-effort):",
-      err instanceof Error ? err.message : String(err),
-      { action: payload.action, organizationId: ctx.organizationId },
-    );
+    reportServerError(err, {
+      event: "orders.best_effort_audit_failed",
+      action: payload.action,
+      organizationId: ctx.organizationId,
+    });
   }
 }
 
 function badRequest(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 400 });
+  return publicError(message, 400);
 }
 
 function notFound(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 404 });
+  return publicError(message, 404);
 }
 
 function conflict(message: string): Error {
-  return Object.assign(new Error(message), { statusCode: 409 });
+  return publicError(message, 409);
 }
 
 /**
@@ -319,6 +324,37 @@ const SOURCE_CONVERSATION_REF_MAX_LENGTH = 200;
 export const ORDER_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 /**
+ * Abuse protection for order creation — NOT a replacement for idempotency.
+ *
+ *   idempotency (migration 044): the same logical request → one order.
+ *   this limit: one member / one organization cannot flood APSA with thousands
+ *     of valid, unique requests (limits and rationale: rate-limit/policies.ts).
+ *
+ * A retry of an order this member ALREADY created under this key is recovery,
+ * not volume: when a bucket is full the key is looked up, and a replay is let
+ * through to create_order_v2, which returns the stored order. So a merchant
+ * whose response was lost can always get their order back, even at the limit.
+ */
+async function enforceOrderCreateLimit(
+  ctx: AuthorizationContext,
+  idempotencyKey: string,
+): Promise<void> {
+  const decision = await checkRateLimits(
+    [
+      { rule: RATE_LIMITS.orderCreateMember, parts: [ctx.organizationId, ctx.userId] },
+      { rule: RATE_LIMITS.orderCreateOrganization, parts: [ctx.organizationId] },
+    ],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.orderCreate },
+  );
+  if (decision.allowed) return;
+  if (await repo.orderExistsForIdempotencyKey(ctx.organizationId, ctx.userId, idempotencyKey)) {
+    return;
+  }
+  throw new RateLimitedError(decision.retryAfterSeconds);
+}
+
+/**
  * Create a new order in `draft` lifecycle state.
  *
  * A new order is always draft/unpaid/unfulfilled. It is not a sale until
@@ -354,6 +390,8 @@ export async function createOrder(
   ) {
     throw badRequest("A valid idempotency key is required to create an order");
   }
+
+  await enforceOrderCreateLimit(ctx, input.idempotencyKey);
 
   if (!ORDER_SOURCES.includes(input.source)) {
     throw badRequest(`Invalid order source: ${String(input.source)}`);

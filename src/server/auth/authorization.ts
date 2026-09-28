@@ -15,12 +15,14 @@ import {
   type MembershipContext,
 } from "./membership";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { markPublicDomainError } from "@/server/public-domain-error";
 
 export class ForbiddenError extends Error {
   readonly statusCode = 403;
   constructor(message = "Forbidden") {
     super(message);
     this.name = "ForbiddenError";
+    markPublicDomainError(this);
   }
 }
 
@@ -29,6 +31,7 @@ export class UnauthorizedError extends Error {
   constructor(message = "Unauthorized") {
     super(message);
     this.name = "UnauthorizedError";
+    markPublicDomainError(this);
   }
 }
 

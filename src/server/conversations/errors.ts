@@ -1,3 +1,5 @@
+import { markPublicDomainError } from "@/server/public-domain-error";
+
 export type ConversationErrorCode =
   | "conversation_not_found"
   | "message_not_found"
@@ -24,6 +26,7 @@ export class ConversationError extends Error {
             : code === "conversation_unavailable"
               ? 503
               : 400;
+    markPublicDomainError(this);
   }
 }
 

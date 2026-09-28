@@ -31,7 +31,6 @@ import {
   type PasswordUpdateIssue,
   type ProviderAuthError,
 } from "@/lib/auth-recovery";
-import { claimAuthEmailSlot } from "@/lib/auth-email-throttle";
 import {
   CANONICAL_MEMBERSHIP_ORDER,
   pickCanonicalActiveMembership,
@@ -261,13 +260,24 @@ export interface SignInResult {
   redirectTo: AuthRedirect;
 }
 
+/**
+ * `unexpected_error` never carries provider or database text: `reference` is
+ * the request's support ID (src/server/observability/request-id.ts) so a
+ * failed sign-in can be matched to its server log line.
+ */
 export type SignInError =
   | { ok: false; code: "invalid_credentials" }
-  | { ok: false; code: "unexpected_error"; message: string };
+  | { ok: false; code: "rate_limited" }
+  | { ok: false; code: "unexpected_error"; reference?: string };
 
 export const signInFn = createServerFn()
   .validator((data: unknown) => SignInInput.parse(data))
   .handler(async ({ data }): Promise<SignInResult | SignInError> => {
+    // Counted for EVERY attempt, before Supabase is asked anything, so a full
+    // bucket says nothing about whether the account exists.
+    const { allowSignInAttempt } = await import("@/server/rate-limit/auth-limits");
+    if (!(await allowSignInAttempt(data.email))) return { ok: false, code: "rate_limited" };
+
     const url = process.env["VITE_SUPABASE_URL"]!;
     const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
 
@@ -284,7 +294,8 @@ export const signInFn = createServerFn()
       if (error?.status === 400 || error?.status === 422) {
         return { ok: false, code: "invalid_credentials" };
       }
-      return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
+      await logProviderFailure("auth.sign_in", error ?? { name: "AuthUnknownError" });
+      return { ok: false, code: "unexpected_error", ...(await supportReference()) };
     }
 
     // A different (or the same) principal just authenticated: no recovery
@@ -306,14 +317,11 @@ export const signInFn = createServerFn()
 
       return { ok: true, redirectTo: routeResult.ok ? "/app" : routeResult.redirect };
     } catch (error) {
-      return {
-        ok: false,
-        code: "unexpected_error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Sign-in succeeded but APSA could not load your access state.",
-      };
+      // Credentials were valid but the membership lookup failed. The
+      // database's text goes to the server log only, never to the browser.
+      const { reportServerError } = await import("@/server/observability/errors");
+      reportServerError(error, { event: "auth.sign_in.access_state_failed" });
+      return { ok: false, code: "unexpected_error", ...(await supportReference()) };
     }
   });
 
@@ -332,14 +340,23 @@ export interface SignUpResult {
   emailVerificationRequired: boolean;
 }
 
+/**
+ * `weak_password.message` is Supabase's password-policy sentence (which rule
+ * failed) and is shown as-is. `unexpected_error` carries no provider text —
+ * only the request's support `reference`.
+ */
 export type SignUpError =
   | { ok: false; code: "email_taken" }
   | { ok: false; code: "weak_password"; message: string }
-  | { ok: false; code: "unexpected_error"; message: string };
+  | { ok: false; code: "rate_limited" }
+  | { ok: false; code: "unexpected_error"; reference?: string };
 
 export const signUpFn = createServerFn()
   .validator((data: unknown) => SignUpInput.parse(data))
   .handler(async ({ data }): Promise<SignUpResult | SignUpError> => {
+    const { allowSignUpAttempt } = await import("@/server/rate-limit/auth-limits");
+    if (!(await allowSignUpAttempt(data.email))) return { ok: false, code: "rate_limited" };
+
     const url = process.env["VITE_SUPABASE_URL"]!;
     const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
 
@@ -362,7 +379,8 @@ export const signUpFn = createServerFn()
       if (error.message?.includes("Password")) {
         return { ok: false, code: "weak_password", message: error.message };
       }
-      return { ok: false, code: "unexpected_error", message: error.message };
+      await logProviderFailure("auth.sign_up", error);
+      return { ok: false, code: "unexpected_error", ...(await supportReference()) };
     }
 
     // If Supabase issued a session immediately (email confirmation disabled),
@@ -420,8 +438,10 @@ async function auditSignOutBestEffort(userId: string): Promise<void> {
     const { auditLog } = await import("@/server/auth/audit");
     await auditLog(authCtx, { action: "auth.sign_out", resourceType: "session" });
   } catch (err) {
-    // Best-effort only — never block sign-out on audit failure.
-    console.error("[APSA] auth.sign_out audit log failed (best-effort):", err);
+    // Best-effort only — never block sign-out on audit failure. Structured and
+    // redacted: never the raw error or its cause chain.
+    const { reportServerError } = await import("@/server/observability/errors");
+    reportServerError(err, { event: "auth.sign_out.audit_failed" });
   }
 }
 
@@ -527,13 +547,19 @@ export interface VerifyEmailResult {
   ok: true;
 }
 export type VerifyEmailError =
-  { ok: false; code: "invalid_token" } | { ok: false; code: "unexpected_error"; message: string };
+  | { ok: false; code: "invalid_token" }
+  | { ok: false; code: "rate_limited" }
+  | { ok: false; code: "unexpected_error"; reference?: string };
 
 export const verifyEmailFn = createServerFn()
   .validator((data: unknown) => VerifyEmailInput.parse(data))
   .handler(async ({ data }): Promise<VerifyEmailResult | VerifyEmailError> => {
     if (!isVerifyEmailOtpType(data.type)) return { ok: false, code: "invalid_token" };
     const type = data.type;
+
+    // A 6-digit code is guessable: bounded per address and per client IP.
+    const { allowOtpVerification } = await import("@/server/rate-limit/auth-limits");
+    if (!(await allowOtpVerification(data.email))) return { ok: false, code: "rate_limited" };
 
     const url = process.env["VITE_SUPABASE_URL"]!;
     const anonKey = process.env["VITE_SUPABASE_ANON_KEY"]!;
@@ -552,7 +578,8 @@ export const verifyEmailFn = createServerFn()
       if (error?.status === 400 || error?.message?.includes("expired")) {
         return { ok: false, code: "invalid_token" };
       }
-      return { ok: false, code: "unexpected_error", message: error?.message ?? "Unknown error" };
+      await logProviderFailure("auth.verify_email", error ?? { name: "AuthUnknownError" });
+      return { ok: false, code: "unexpected_error", ...(await supportReference()) };
     }
 
     await clearRecoveryCookies();
@@ -582,7 +609,8 @@ export const verifyEmailFn = createServerFn()
 //     the result says so — it never claims "signed out everywhere".
 //   - Public email-addressed requests (reset, resend) are anti-enumerating:
 //     see src/lib/auth-recovery.ts. The server enforces the email cooldown
-//     (src/lib/auth-email-throttle.ts); Supabase remains the hard limit.
+//     and hourly/IP limits in the shared PostgreSQL limiter
+//     (src/server/rate-limit/auth-limits.ts); Supabase remains the hard limit.
 //   - Tokens and email addresses are never logged or returned to the client.
 
 function createAnonAuthClient() {
@@ -609,15 +637,30 @@ function appRedirectUrl(
   );
   if (!base.ok) {
     // The reason only — the configured value is not echoed.
-    console.error("[APSA] VITE_APP_URL is invalid; auth email not sent", { reason: base.reason });
+    void import("@/server/observability/logger").then(({ serverLog }) =>
+      serverLog.error("auth.app_url_invalid", { reason: base.reason }),
+    );
     return { ok: false };
   }
   return { ok: true, redirectTo: base.origin ? `${base.origin}${pathname}` : undefined };
 }
 
-function logProviderFailure(operation: string, error: ProviderAuthError): void {
+async function logProviderFailure(operation: string, error: ProviderAuthError): Promise<void> {
   // Status and code only — never the message (it can echo the email) or tokens.
-  console.error(`[APSA] ${operation} failed`, { status: error.status, code: error.code });
+  const { serverLog } = await import("@/server/observability/logger");
+  serverLog.error(`${operation}.provider_failed`, {
+    errorClass: error.name ?? "AuthError",
+    ...(typeof error.status === "number" ? { statusCode: error.status } : {}),
+    ...(error.code ? { errorCode: error.code } : {}),
+    retryable: isTransportFailure(error),
+  });
+}
+
+/** The current request's support ID, for an `unexpected_error` result. */
+async function supportReference(): Promise<{ reference?: string }> {
+  const { currentRequestId } = await import("@/server/observability/request-context");
+  const reference = currentRequestId();
+  return reference ? { reference } : {};
 }
 
 async function readRecoveryCookies(): Promise<{
@@ -645,7 +688,8 @@ export const requestPasswordResetFn = createServerFn()
     const redirect = appRedirectUrl("/reset-password");
     if (!redirect.ok) return { ok: false, code: "service_unavailable" };
 
-    // Inside the cooldown: nothing is sent, and the answer is the neutral one.
+    // Inside a limit: nothing is sent, and the answer is the neutral one.
+    const { claimAuthEmailSlot } = await import("@/server/rate-limit/auth-limits");
     if (!(await claimAuthEmailSlot("password_reset", data.email))) return { ok: true };
 
     let providerError: ProviderAuthError | null;
@@ -659,7 +703,7 @@ export const requestPasswordResetFn = createServerFn()
       providerError = { name: "AuthUnknownError" };
     }
 
-    if (providerError) logProviderFailure("auth.password_reset_request", providerError);
+    if (providerError) await logProviderFailure("auth.password_reset_request", providerError);
 
     // Unknown account, rate limit, SMTP failure, retryable 5xx, thrown
     // transport error — all answered identically. See src/lib/auth-recovery.ts.
@@ -678,7 +722,7 @@ const BeginPasswordRecoveryInput = z.union([
 ]);
 
 export type BeginPasswordRecoveryResult =
-  { ok: true } | { ok: false; code: "invalid_link" | "service_unavailable" };
+  { ok: true } | { ok: false; code: "invalid_link" | "service_unavailable" | "rate_limited" };
 
 export const beginPasswordRecoveryFn = createServerFn()
   .validator((data: unknown) => BeginPasswordRecoveryInput.parse(data))
@@ -686,6 +730,21 @@ export const beginPasswordRecoveryFn = createServerFn()
     // A new link attempt replaces any earlier recovery BEFORE the token is
     // checked: if this link fails, no older recovery may remain usable.
     await clearRecoveryCookies();
+
+    // Bounded per address (token + email links carry a guessable code), per
+    // link token (token_hash links), and per client IP when a trusted header
+    // is configured — after the old recovery is already gone.
+    const { allowOtpVerification } = await import("@/server/rate-limit/auth-limits");
+    if (
+      !(await allowOtpVerification(
+        "email" in data ? data.email : null,
+        undefined,
+        undefined,
+        "tokenHash" in data ? data.tokenHash : null,
+      ))
+    ) {
+      return { ok: false, code: "rate_limited" };
+    }
 
     const client = createAnonAuthClient();
     let result: Awaited<ReturnType<typeof client.auth.verifyOtp>>;
@@ -702,7 +761,7 @@ export const beginPasswordRecoveryFn = createServerFn()
     const { data: authData, error } = result;
     if (error || !authData.session) {
       if (error && isTransportFailure(error)) {
-        logProviderFailure("auth.password_recovery_verify", error);
+        await logProviderFailure("auth.password_recovery_verify", error);
         return { ok: false, code: "service_unavailable" };
       }
       return { ok: false, code: "invalid_link" };
@@ -763,6 +822,11 @@ export const completePasswordRecoveryFn = createServerFn()
     const recovery = await readRecoveryCookies();
     if (!recovery) return { ok: false, code: "recovery_expired" };
 
+    const { allowRecoveryCompletion } = await import("@/server/rate-limit/auth-limits");
+    if (!(await allowRecoveryCompletion(recovery.refreshToken))) {
+      return { ok: false, code: "unexpected_error" };
+    }
+
     const client = createAnonAuthClient();
     try {
       const { error: sessionError } = await client.auth.setSession({
@@ -772,7 +836,7 @@ export const completePasswordRecoveryFn = createServerFn()
       if (sessionError) {
         const issue = classifyPasswordUpdate(sessionError);
         if (issue === "recovery_expired") await clearRecoveryCookies();
-        else logProviderFailure("auth.password_recovery_session", sessionError);
+        else await logProviderFailure("auth.password_recovery_session", sessionError);
         return { ok: false, code: issue === "recovery_expired" ? issue : "unexpected_error" };
       }
 
@@ -780,7 +844,9 @@ export const completePasswordRecoveryFn = createServerFn()
       if (updateError) {
         const issue = classifyPasswordUpdate(updateError);
         if (issue === "recovery_expired") await clearRecoveryCookies();
-        if (issue === "unexpected_error") logProviderFailure("auth.password_update", updateError);
+        if (issue === "unexpected_error") {
+          await logProviderFailure("auth.password_update", updateError);
+        }
         return { ok: false, code: issue };
       }
     } catch {
@@ -795,10 +861,14 @@ export const completePasswordRecoveryFn = createServerFn()
     try {
       const { error: signOutError } = await client.auth.signOut({ scope: "global" });
       otherSessionsRevoked = !signOutError;
-      if (signOutError) logProviderFailure("auth.password_recovery_global_sign_out", signOutError);
+      if (signOutError) {
+        await logProviderFailure("auth.password_recovery_global_sign_out", signOutError);
+      }
     } catch {
       otherSessionsRevoked = false;
-      logProviderFailure("auth.password_recovery_global_sign_out", { name: "AuthUnknownError" });
+      await logProviderFailure("auth.password_recovery_global_sign_out", {
+        name: "AuthUnknownError",
+      });
     }
     await clearRecoveryCookies();
     await clearSessionCookies();
@@ -846,6 +916,7 @@ export const resendVerificationFn = createServerFn()
     const redirect = appRedirectUrl("/verify-email");
     if (!redirect.ok) return { ok: false, code: "service_unavailable" };
 
+    const { claimAuthEmailSlot } = await import("@/server/rate-limit/auth-limits");
     if (!(await claimAuthEmailSlot("verification_resend", email))) {
       // Own address: an honest "wait". Public: the neutral answer.
       return ownAddress ? { ok: false, code: "rate_limited" } : { ok: true };
@@ -863,7 +934,7 @@ export const resendVerificationFn = createServerFn()
       providerError = { name: "AuthUnknownError" };
     }
 
-    if (providerError) logProviderFailure("auth.verification_resend", providerError);
+    if (providerError) await logProviderFailure("auth.verification_resend", providerError);
 
     // Public, email-addressed request: every provider answer is neutral, so
     // nothing reveals whether the address has an account.

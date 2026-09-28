@@ -29,6 +29,7 @@
  *
  * Never import this file from browser-bundled code.
  */
+import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLogRequired } from "@/server/auth/audit";
 import * as repo from "./repository";
@@ -197,41 +198,33 @@ export async function recordMovement(
   input: RecordMovementInput,
 ): Promise<InventoryMovementDetail> {
   if (!INVENTORY_MOVEMENT_TYPES.includes(input.movementType)) {
-    throw Object.assign(new Error(`Invalid movement_type: ${String(input.movementType)}`), {
-      statusCode: 400,
-    });
+    throw publicError(`Invalid movement_type: ${String(input.movementType)}`, 400);
   }
 
   if (!Number.isInteger(input.quantityDelta) || input.quantityDelta === 0) {
-    throw Object.assign(new Error("quantity_delta must be a non-zero integer"), {
-      statusCode: 400,
-    });
+    throw publicError("quantity_delta must be a non-zero integer", 400);
   }
 
   ctx.require(requiredPermissionFor(input.movementType));
 
   if (input.movementType === "manual_adjustment" && !input.reason?.trim()) {
-    throw Object.assign(new Error("reason is required for manual_adjustment movements"), {
-      statusCode: 400,
-    });
+    throw publicError("reason is required for manual_adjustment movements", 400);
   }
 
   // Tenant ownership: reject guessed/cross-org product, variant, location IDs
   // before touching the ledger. This is defense-in-depth ahead of the DB trigger.
   const variant = await repo.findVariantForOrg(ctx.organizationId, input.variantId);
   if (!variant) {
-    throw Object.assign(new Error("Variant not found"), { statusCode: 404 });
+    throw publicError("Variant not found", 404);
   }
   if (variant.product_id !== input.productId) {
-    throw Object.assign(new Error("variant_id does not belong to the given product_id"), {
-      statusCode: 400,
-    });
+    throw publicError("variant_id does not belong to the given product_id", 400);
   }
 
   if (input.locationId != null) {
     const location = await repo.findLocationForOrg(ctx.organizationId, input.locationId);
     if (!location) {
-      throw Object.assign(new Error("Location not found"), { statusCode: 404 });
+      throw publicError("Location not found", 404);
     }
   }
 
@@ -271,10 +264,7 @@ export async function recordMovement(
     movement = await repo.insertMovement(ctx.organizationId, movementInput);
   } catch (err) {
     if (repo.isDuplicateReferenceError(err)) {
-      throw Object.assign(
-        new Error("A movement for this reference already exists (idempotent duplicate)"),
-        { statusCode: 409 },
-      );
+      throw publicError("A movement for this reference already exists (idempotent duplicate)", 409);
     }
     throw err;
   }
@@ -291,7 +281,7 @@ export async function getVariantStock(
 
   const variant = await repo.findVariantForOrg(ctx.organizationId, variantId);
   if (!variant) {
-    throw Object.assign(new Error("Variant not found"), { statusCode: 404 });
+    throw publicError("Variant not found", 404);
   }
 
   const rows = await repo.getVariantStockRows(ctx.organizationId, variantId);

@@ -13,7 +13,7 @@ Contains no secrets. Safe to commit.
 
 ## 0. When to run this
 
-- Before requesting the `009` → `043` migration rehearsal on a dedicated
+- Before requesting the `009` → `045` migration rehearsal on a dedicated
   staging Supabase project.
 - Before recording `STAGING VERIFIED` on any PR.
 - Before every staging → production promotion.
@@ -68,7 +68,7 @@ finding — investigate before promoting.
 
 ---
 
-## 2. Migration rehearsal plan (009 → 043)
+## 2. Migration rehearsal plan (009 → 045)
 
 **Do not apply.** This section is the ordered plan `docs/STAGING_BOOTSTRAP.md`
 §10 refers to as a "separate, explicitly approved phase" — it is documented
@@ -77,11 +77,11 @@ credentials exist and application is explicitly authorized.
 
 - Recorded hosted baseline: `001`–`008` (locked by sha256 in
   `supabase/hosted-migrations.lock.json`).
-- Pending, in required numeric order: `009` → `043` (33 files). Numbering
+- Pending, in required numeric order: `009` → `045` (35 files). Numbering
   gaps at `028`/`029` are never-created numbers, not deletions —
   `check:staging-readiness` reports this as informational, not blocking.
 - `check-migration-safety.ts` confirms today: 0 duplicate numbers across all
-  41 files, all 8 hosted files hash-match their lock entries (no hosted
+  43 files, all 8 hosted files hash-match their lock entries (no hosted
   migration has been edited), 0 ambiguous overloaded-function references.
 - Domain dependency order embedded in the numeric sequence (verified by
   reading each file's header comment and foreign keys):
@@ -103,10 +103,21 @@ credentials exist and application is explicitly authorized.
   - `041`–`042`: team invitations + team permissions (depends on `006`
     memberships)
   - `043`: payment referenceless-duplicate handling (depends on `034`–`035`)
+  - `044`: order idempotency + delivery fee, `create_order_v2` (depends on
+    `023`–`026`)
+  - `045`: operability — rate-limit buckets, webhook event receipts and their
+    pruning, `apsa_migration_history()` (readiness proof) and
+    `apsa_schema_level()` (convenience marker only) (no dependency on tenant
+    tables; see `docs/OPERABILITY.md`)
+- **Apply with the Supabase CLI (`supabase db push`), not the SQL editor.**
+  Readiness proves contiguous application from the CLI's
+  `supabase_migrations.schema_migrations` ledger; files run by hand leave no
+  ledger and readiness cannot pass. Never use `supabase migration repair
+  --status applied` to satisfy readiness — it records a file without running it.
 - RLS: every migration from `011` onward enables RLS in the same file it
   creates its table(s) in — there is no separate "enable RLS later" pass, so
   applying in numeric order never leaves a tenant table briefly unprotected.
-- Idempotency: none of `009`–`043` are written to be safely re-run (`CREATE
+- Idempotency: none of `009`–`045` are written to be safely re-run (`CREATE
   TYPE`/`CREATE TABLE` without `IF NOT EXISTS` in most files, by design — a
   second run against the same database is expected to fail loudly rather
   than silently no-op). This is why staging starts **empty** (§10 of
@@ -116,7 +127,7 @@ credentials exist and application is explicitly authorized.
 
 **Migrations that cannot safely apply to an empty database out of order:**
 none, provided the numeric sequence above is followed exactly — every
-foreign key, trigger, and RPC reference in `009`–`043` points only at objects
+foreign key, trigger, and RPC reference in `009`–`045` points only at objects
 created by an equal-or-lower-numbered migration already in this checkout.
 
 ---
@@ -244,29 +255,47 @@ Grounded in the actual enums shipped in `supabase/migrations/023`, `027`,
 
 ## 7. Release observability — minimum launch-critical gaps
 
-Audit scope: structured logs, server errors, failed-mutation visibility,
-Vercel logs, Supabase logs, audit events. Do not add a new observability
-platform — use what Vercel/Supabase already provide.
+Design and evidence: `docs/OPERABILITY.md`. Incident handling:
+`docs/INCIDENT_RUNBOOK.md`.
 
-Current state found in this checkout:
-- `auditLog()`/`auditLogRequired()` exist (`src/server/auth/audit.ts`) and are
-  wired into sensitive actions (price changes, exports, refunds, permission
-  changes) per `SECURITY.md`'s requirement — `customers.export` fails closed
-  if the audit write fails; most other actions are best-effort (logged as a
-  console warning on failure, e.g. the `order audit_log write failed
-  (best-effort)` line observed during the local test run above, which is
-  expected in an unconfigured-Supabase test environment, not a staging gap).
-- No dedicated error-tracking service (Sentry, etc.) is wired in this
-  checkout. Minimum launch-critical gap: **before the first real production
-  traffic**, confirm Vercel's own function/runtime logs are being retained
-  long enough to debug a failed mutation after the fact, and confirm
-  Supabase's Postgres logs are reachable from the dashboard for the
-  production project. Neither requires new code — it is a dashboard
-  configuration check, not a build task.
-- No alerting on best-effort audit-log failures. If a launch-blocking gap is
-  later found here, the minimal fix is upgrading specific high-sensitivity
-  actions from best-effort to fail-closed (as `customers.export` already is),
-  not introducing a new logging platform.
+Built in code (this checkout):
+- Structured, redacted JSON logs (`src/server/observability/logger.ts`) with
+  `requestId`, `domain`, `operation`, `organizationId`, `userId`, `errorClass`,
+  `errorCode`, `statusCode`, `retryable`.
+- A global server-function boundary: every unexpected failure is logged once
+  and reaches the browser only as a generic message with a support reference
+  (`[ref:req_…]`) — never SQL, stack traces or table names.
+- A provider-neutral `ErrorReporter` interface. **No external provider
+  (Sentry, OpenTelemetry) is configured**; the platform log pipeline is the
+  sink until one is approved.
+- `auditLog()`/`auditLogRequired()` unchanged in behavior; the fail-closed
+  error no longer carries database text.
+
+Still to confirm before real merchant traffic (dashboard checks, no code):
+- [ ] The hosting platform retains function logs long enough to investigate a
+      failed mutation after the fact (record the retention here: `____`).
+- [ ] Supabase Postgres and Auth logs are reachable from the dashboard for the
+      project holding merchant data.
+- [ ] Someone knows how to search the logs by `requestId` (runbook §6).
+- [ ] No alerting exists yet — the on-call person checks logs for
+      `server_fn.unexpected_error` and `rate_limit.backend_degraded` daily during
+      Internal Alpha. Alerting is a post-Alpha item.
+
+---
+
+## 7a. Readiness and backup gates
+
+- [ ] `bun run verify:readiness --app-url=<staging deployment> --check-app-env`
+      exits 0: server boots (`/api/health`), required env present (names only),
+      database reachable, **every repository migration recorded in the Supabase
+      CLI ledger — none missing, none out of order, none unknown**
+      (`apsa_migration_history()`), migration objects present (cross-check),
+      every RPC the server calls exists, and the `apsa_schema_level() = 45`
+      marker. The marker alone is never migration proof. Not claimed until
+      this has passed against staging.
+- [ ] `docs/BACKUP_RESTORE.md` §2 fully ticked for the project that will hold
+      merchant data, including a completed restore drill into a disposable
+      project. No "backup verified" claim without that evidence.
 
 ---
 
@@ -294,9 +323,10 @@ production. Do not continue past a failure; do not downgrade `PENDING`/
 13. Role/permission test plan (§5 above)
 14. Money/order/inventory invariant checks (§6 above)
 15. Observability minimum check (§7 above)
-16. Independent review record valid for the current commit SHA
+16. Readiness and backup gates (§7a above)
+17. Independent review record valid for the current commit SHA
     (`docs/GITHUB_GOVERNANCE.md` §5)
 
-Only when all 16 pass is a PR eligible for `STAGING VERIFIED`, and only after
+Only when all 17 pass is a PR eligible for `STAGING VERIFIED`, and only after
 a **separate**, explicitly authorized production deploy step is it eligible
 for `PRODUCTION VERIFIED`.

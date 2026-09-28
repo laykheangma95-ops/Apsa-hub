@@ -18,7 +18,9 @@ import {
   resolveAppBaseUrl,
   validateNewPassword,
 } from "@/lib/auth-recovery";
-import { claimAuthEmailSlot, resetAuthEmailThrottle } from "@/lib/auth-email-throttle";
+import { claimAuthEmailSlot, resetAuthRateLimits } from "@/server/rate-limit/auth-limits";
+import { setPrimaryRateLimitStore } from "@/server/rate-limit/limiter";
+import { MemoryRateLimitStore } from "@/server/rate-limit/store";
 import en from "../locales/en.json";
 import km from "../locales/km.json";
 
@@ -138,21 +140,29 @@ describe("app base URL validation", () => {
 
 describe("server-side auth email throttle", () => {
   it("allows one email per address and purpose per cooldown window", async () => {
-    resetAuthEmailThrottle();
+    // Same contract as the PR #76 cooldown, now on the shared limiter; the
+    // store is pinned to memory so this test never reaches a database.
+    const restore = setPrimaryRateLimitStore(new MemoryRateLimitStore());
+    resetAuthRateLimits();
     const t0 = 1_000_000;
-    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0)).toBe(true);
-    expect(await claimAuthEmailSlot("password_reset", " A@Example.com ", t0 + 59_000)).toBe(false);
-    expect(await claimAuthEmailSlot("verification_resend", "a@example.com", t0)).toBe(true);
-    expect(await claimAuthEmailSlot("password_reset", "b@example.com", t0)).toBe(true);
-    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0 + 60_000)).toBe(true);
-    resetAuthEmailThrottle();
+    const ip = null;
+    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0, ip)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", " A@Example.com ", t0 + 59_000, ip)).toBe(
+      false,
+    );
+    expect(await claimAuthEmailSlot("verification_resend", "a@example.com", t0, ip)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", "b@example.com", t0, ip)).toBe(true);
+    expect(await claimAuthEmailSlot("password_reset", "a@example.com", t0 + 60_000, ip)).toBe(true);
+    restore();
+    resetAuthRateLimits();
   });
 
   it("is not the only guard: the client cooldown is documented as UX", () => {
     expect(read("src/lib/auth-recovery.ts")).toMatch(/React countdown is\s+\* UX only/);
-    const throttle = read("src/lib/auth-email-throttle.ts");
-    expect(throttle).toContain("NOT a distributed limiter");
-    expect(throttle).toContain("remain the hard, provider-side limit");
+    const limits = read("src/server/rate-limit/auth-limits.ts");
+    expect(limits).toContain("remain behind this as the provider-side hard");
+    // The per-process store is documented for exactly what it is.
+    expect(read("src/server/rate-limit/store.ts")).toContain("NOT a distributed limiter");
   });
 });
 

@@ -20,7 +20,9 @@
  * SECURITY: Never pass organizationId or actorUserId from client-supplied request body.
  * Always derive them from the validated AuthorizationContext (ctx.organizationId, ctx.userId).
  */
+import { publicError } from "@/server/public-domain-error";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "./authorization";
 
 export type AuditAction =
@@ -131,15 +133,15 @@ export async function auditLog(ctx: AuthorizationContext, payload: AuditPayload)
     .insert(buildAuditRow(ctx, payload));
 
   if (error) {
-    console.error(
-      "[APSA] audit_log write failed (best-effort):",
-      (error as { message?: string }).message,
-      {
-        action: payload.action,
-        organizationId: ctx.organizationId,
-        actorUserId: ctx.userId,
-      },
-    );
+    // Structured and redacted: the database error's code and scrubbed text,
+    // never the raw PostgREST payload.
+    reportServerError(error, {
+      event: "audit.write_failed",
+      mandatory: false,
+      action: payload.action,
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+    });
   }
 }
 
@@ -163,14 +165,21 @@ export async function auditLogRequired(
     .insert(buildAuditRow(ctx, payload));
 
   if (error) {
-    const msg = (error as { message?: string }).message ?? "unknown error";
-    console.error("[APSA] CRITICAL: mandatory audit_log write failed — blocking action:", msg, {
+    reportServerError(error, {
+      event: "audit.required_write_failed",
+      mandatory: true,
       action: payload.action,
       organizationId: ctx.organizationId,
-      actorUserId: ctx.userId,
+      userId: ctx.userId,
     });
-    throw new Error(
-      `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail. (${msg})`,
+    // A deliberate, public refusal (503 — the audit store is unavailable), so
+    // the server-function boundary passes it through for the UI to explain.
+    // The database's own error (scrubbed) stays in the structured server log
+    // above; it is not part of the message the browser receives.
+    throw publicError(
+      `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail.`,
+      503,
+      "audit_unavailable",
     );
   }
 }

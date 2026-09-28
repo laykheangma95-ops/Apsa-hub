@@ -1080,6 +1080,34 @@ Inspect Analytics
 
 Fix major problems before 5-merchant pilot.
 
+## Alpha sequencing (clarification, 2026-09-28)
+
+Scope is unchanged; this only fixes the ORDER in which Internal Alpha is
+exercised, so a messaging provider (Phase 11) does not block testing the rest
+of the business OS. Current status and blockers: `APSA_BUILD_STATUS.md`.
+
+**ALPHA A — Core Business OS** (no messaging provider required)
+
+- Products
+- Inventory
+- POS / manual order
+- Payments
+- Delivery
+- Customers
+- Analytics
+
+Journey: Create Business → Add Product → Receive Stock → Create Order (POS or
+manual) → Record Payment → Prepare Delivery → Deliver → Inspect Analytics.
+
+**ALPHA B — Social Commerce** (after the first real messaging provider)
+
+- Telegram
+- Inbox
+- Conversation → Order
+
+Journey: Receive Message → Conversation → Order → the Alpha A journey from
+Record Payment onward.
+
 ---
 
 # 25. PHASE 19 — 5 MERCHANT PILOT

@@ -332,11 +332,11 @@ describe("sign-in flow runtime", () => {
       data: { email: "owner@example.com", password: "secret123" },
     });
 
-    expect(result).toEqual({
-      ok: false,
-      code: "unexpected_error",
-      message: "Membership service unavailable",
-    });
+    // A real error — but the database's text stays in the server log; the
+    // browser gets the code only (and a support reference when a request
+    // context exists).
+    expect(result).toEqual({ ok: false, code: "unexpected_error" });
+    expect(JSON.stringify(result)).not.toContain("Membership service unavailable");
     expect(setCookieCalls).toHaveLength(0);
     expect(deleteCookieCalls).toEqual([
       ...RECOVERY_COOKIES,

@@ -58,8 +58,14 @@ function SignUpPage() {
           setError(result.message);
         } else if (result.code === "email_taken") {
           setError(t("auth.signUp.errors.emailTaken"));
+        } else if (result.code === "rate_limited") {
+          setError(t("auth.signUp.errors.rateLimited"));
         } else {
-          setError(result.message || t("auth.signUp.errors.generic"));
+          setError(
+            result.reference
+              ? `${t("auth.signUp.errors.generic")} ${t("auth.signUp.errors.reference", { reference: result.reference })}`
+              : t("auth.signUp.errors.generic"),
+          );
         }
         return;
       }
