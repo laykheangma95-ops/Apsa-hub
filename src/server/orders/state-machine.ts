@@ -272,6 +272,35 @@ export function isTerminalLifecycle(status: OrderLifecycleStatus): boolean {
   return TERMINAL_LIFECYCLE_STATUSES.includes(status);
 }
 
+// ── Ready-to-Pack eligibility (derived, never a new status) ────────────────────
+//
+// The packing queue is NOT a new order state and NOT "payment completed"
+// (session scope §11 — Cambodian COD means the money often arrives after the
+// goods leave). It is a pure VIEW derived from the two authoritative axes:
+//
+//   lifecycle   === "confirmed"    a committed sale (draft is not yet a sale;
+//                                  completed / cancelled are done)
+//   fulfillment === "unfulfilled"  the goods still need packing (processing means
+//                                  a delivery already picked it up; fulfilled /
+//                                  cancelled are done)
+//
+// Deliberately excludes `processing`: once fulfillment has advanced, the order
+// has left the "needs packing" queue. Keeping this a pure predicate means the
+// queue can never contradict the order's real lifecycle.
+
+export const READY_TO_PACK_LIFECYCLE: OrderLifecycleStatus = "confirmed";
+export const READY_TO_PACK_FULFILLMENT: OrderFulfillmentStatus = "unfulfilled";
+
+export function isReadyToPackEligible(order: {
+  lifecycleStatus: OrderLifecycleStatus;
+  fulfillmentStatus: OrderFulfillmentStatus;
+}): boolean {
+  return (
+    order.lifecycleStatus === READY_TO_PACK_LIFECYCLE &&
+    order.fulfillmentStatus === READY_TO_PACK_FULFILLMENT
+  );
+}
+
 // ── Who may perform each transition ───────────────────────────────────────────
 //
 // Permission keys only — the check itself is the caller's, against a

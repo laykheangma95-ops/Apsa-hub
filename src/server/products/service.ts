@@ -23,6 +23,7 @@
 import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
+import { formatApsaBarcode, APSA_SERIAL_LENGTH } from "@/lib/barcode/apsa-code";
 import * as repo from "./repository";
 import type {
   ProductRow,
@@ -262,6 +263,93 @@ export async function lookupByBarcode(
     variant: mapVariant(variant, canViewCost),
     product: mapProduct(product, [variant], canViewCost),
   };
+}
+
+/**
+ * Generate a fresh, org-unique APSA barcode for a variant and persist it.
+ *
+ * This is the "let APSA generate one" path (session scope §3). Three invariants:
+ *
+ *   1. NEVER overwrite an existing barcode. A variant that already carries one
+ *      (a manufacturer code, or a code entered manually) is left untouched — the
+ *      caller must clear it first. Automatic overwrite would silently orphan a
+ *      code already printed on stock.
+ *   2. UNIQUENESS IS SERVER-CHECKED, never trusted from the client. Each
+ *      candidate is re-checked against the live org index (barcodeExistsForOrg,
+ *      which is status-agnostic to match the DB unique index) before use, and
+ *      the DB unique constraint is the final backstop against a concurrent race.
+ *   3. NO PII / NO UUID. The code is APSA + a non-reversible org prefix + random
+ *      serial + Luhn check (see src/lib/barcode/apsa-code.ts).
+ *
+ * `serialFactory` is a test seam; in production it defaults to a crypto RNG.
+ */
+export interface GenerateBarcodeOptions {
+  serialFactory?: () => string;
+  maxAttempts?: number;
+}
+
+function cryptoRandomSerial(): string {
+  const buf = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(buf);
+  // Fold into the serial space (10^APSA_SERIAL_LENGTH). Modulo bias here is
+  // irrelevant: the collision check + unique index guarantee correctness; the
+  // serial only needs enough spread to make retries rare.
+  const modulus = 10 ** APSA_SERIAL_LENGTH;
+  return String(buf[0]! % modulus);
+}
+
+export async function generateVariantBarcode(
+  ctx: AuthorizationContext,
+  variantId: string,
+  options: GenerateBarcodeOptions = {},
+): Promise<ProductVariantDetail> {
+  // Assigning a barcode is a basic-field edit (same gate as editing SKU/barcode
+  // through updateVariant), not a price or cost change.
+  ctx.require("products.update_basic");
+
+  const existing = await repo.findVariantById(ctx.organizationId, variantId);
+  if (!existing) {
+    throw publicError("Variant not found", 404);
+  }
+  if (existing.barcode && existing.barcode.trim() !== "") {
+    throw publicError("Variant already has a barcode; clear it before generating a new one", 409);
+  }
+
+  const serialFactory = options.serialFactory ?? cryptoRandomSerial;
+  const maxAttempts = options.maxAttempts ?? 8;
+
+  let code: string | null = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const candidate = formatApsaBarcode(ctx.organizationId, serialFactory());
+    // eslint-disable-next-line no-await-in-loop
+    const taken = await repo.barcodeExistsForOrg(ctx.organizationId, candidate);
+    if (!taken) {
+      code = candidate;
+      break;
+    }
+  }
+  if (!code) {
+    throw publicError("Could not generate a unique barcode; please try again", 503);
+  }
+
+  const canViewCost = ctx.can("products.view_cost");
+
+  let updated: ProductVariantRow | null;
+  try {
+    updated = await repo.updateVariant(ctx.organizationId, variantId, { barcode: code });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // A concurrent generation won the same code between our check and our write.
+    if (msg.includes("uniq_product_variants_barcode_per_org")) {
+      throw publicError("Barcode already exists in this organization", 409);
+    }
+    throw err;
+  }
+  if (!updated) {
+    throw publicError("Variant not found", 404);
+  }
+
+  return mapVariant(updated, canViewCost);
 }
 
 export async function createProduct(

@@ -28,6 +28,7 @@ import {
   type UiPaymentReconciliation,
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
+import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import type { BusinessSummary, CustomerSummary, TopSellersPage } from "@/lib/analytics-view";
 import { assertPrototypeFixturesAllowed, isDemoModeError } from "@/lib/api/prototype-gate";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
@@ -560,6 +561,95 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
   const result = await lookupBySkuFn({ data: { sku } });
   if (!result) return null;
   return mapServerProductToUi(result.product as ServerProductItem);
+}
+
+/**
+ * Full lookup result (variant + product) for a barcode — used by the POS scan
+ * flow and the Inventory scan lookup, which need the exact variant, not just the
+ * product's default. Null only for a genuine not-found; other errors propagate.
+ */
+export interface BarcodeLookupResult {
+  variant: {
+    id: string;
+    sku: string | null;
+    barcode: string | null;
+    name: string;
+    price: { amount: number; currency: "USD" | "KHR" };
+  };
+  product: Product;
+}
+
+export async function lookupVariantByBarcode(barcode: string): Promise<BarcodeLookupResult | null> {
+  const { lookupByBarcodeFn } = await import("@/api/products");
+  const result = await lookupByBarcodeFn({ data: { barcode } });
+  if (!result) return null;
+  const r = result as {
+    variant: BarcodeLookupResult["variant"];
+    product: ServerProductItem;
+  };
+  return { variant: r.variant, product: mapServerProductToUi(r.product) };
+}
+
+/**
+ * Mint and persist a fresh, org-unique APSA barcode for a variant. The server
+ * refuses to overwrite an existing barcode and checks uniqueness itself. Returns
+ * the updated variant (with its new barcode). Errors propagate.
+ */
+export interface GeneratedVariant {
+  id: string;
+  productId: string;
+  sku: string | null;
+  barcode: string | null;
+  name: string;
+}
+
+export async function generateVariantBarcode(variantId: string): Promise<GeneratedVariant> {
+  const { generateVariantBarcodeFn } = await import("@/api/products");
+  const variant = await generateVariantBarcodeFn({ data: { variantId } });
+  return variant as unknown as GeneratedVariant;
+}
+
+/* ----------------------------- Fulfillment / packing ---------------------- */
+
+export interface ReadyToPackRow {
+  orderId: string;
+  orderNumber: string;
+  createdAt: string;
+  source: string;
+  customerName: string | null;
+  itemCount: number;
+  currency: "USD" | "KHR";
+  total: Money;
+  paid: boolean;
+  collect: Money;
+  deliveryStatus: string | null;
+}
+
+/**
+ * The Ready-to-Pack queue — confirmed orders that still need packing, org-scoped
+ * and permission-gated server-side. No mock fallback: a failure surfaces as a
+ * failure, an empty queue means nothing needs packing.
+ */
+export async function listReadyToPack(options: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ReadyToPackRow[]> {
+  const { listReadyToPackFn } = await import("@/api/fulfillment");
+  const data: { limit?: number; offset?: number } = {};
+  if (options.limit !== undefined) data.limit = options.limit;
+  if (options.offset !== undefined) data.offset = options.offset;
+  const rows = await listReadyToPackFn({ data });
+  return rows as unknown as ReadyToPackRow[];
+}
+
+/**
+ * Authoritative, PII-gated parcel label data for one order. The server requires
+ * customers.view_sensitive; this is fulfillment output, not a customer export.
+ */
+export async function getParcelLabelData(orderId: string): Promise<ParcelLabelInput> {
+  const { getParcelLabelDataFn } = await import("@/api/fulfillment");
+  const data = await getParcelLabelDataFn({ data: { orderId } });
+  return data as unknown as ParcelLabelInput;
 }
 
 /**

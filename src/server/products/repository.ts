@@ -266,6 +266,33 @@ export async function findVariantByBarcode(
   return data ? (data as ProductVariantRow) : null;
 }
 
+/**
+ * Whether ANY variant in the org already carries this barcode — regardless of
+ * status. Used by the APSA barcode generator's collision check.
+ *
+ * Status-agnostic on purpose: the uniqueness index
+ * (uniq_product_variants_barcode_per_org) covers ARCHIVED variants too, so a
+ * generated code that happens to match an archived variant's barcode would still
+ * be rejected by the DB on write. Checking only ACTIVE rows (as the lookup path
+ * does) would let the generator "confirm" a code that then fails to persist.
+ */
+export async function barcodeExistsForOrg(
+  organizationId: string,
+  barcode: string,
+): Promise<boolean> {
+  if (!barcode || !barcode.trim()) return false;
+
+  const { data, error } = await db
+    .from("product_variants")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("barcode", barcode.trim())
+    .limit(1);
+
+  if (error) throw new Error(`barcodeExistsForOrg: ${(error as { message: string }).message}`);
+  return Array.isArray(data) && data.length > 0;
+}
+
 export async function createVariant(
   organizationId: string,
   productId: string,
