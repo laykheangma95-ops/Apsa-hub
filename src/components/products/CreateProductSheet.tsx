@@ -7,6 +7,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { BottomSheet } from "@/design-system";
 import { MoneyAmountField } from "@/components/products/MoneyAmountField";
 import { CategoryChoice } from "@/components/products/CategoryChoice";
+import { ProductImageField } from "@/components/products/ProductImageField";
+import { notifyError } from "@/lib/feedback";
+import { classifyProductImageError, uploadProductImage } from "@/lib/product-image-client";
+import type { PreparedImage } from "@/lib/product-image-client";
 import {
   catalogErrorKey,
   classifyCatalogError,
@@ -23,6 +27,8 @@ interface CreateProductSheetProps {
   categories: readonly CatalogCategory[];
   /** True only when the server says this member has products.update_cost. */
   canSetCost: boolean;
+  /** True only when this member also holds products.update_basic (photo upload). */
+  canSetPhoto: boolean;
   onCreated: (product: CatalogProduct) => void;
 }
 
@@ -39,6 +45,7 @@ export function CreateProductSheet({
   onOpenChange,
   categories,
   canSetCost,
+  canSetPhoto,
   onCreated,
 }: CreateProductSheetProps) {
   const { t } = useTranslation();
@@ -57,6 +64,7 @@ export function CreateProductSheet({
   const [costError, setCostError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [photo, setPhoto] = useState<PreparedImage | null>(null);
 
   const nameError = touched && nameKm.trim() === "" ? t("catalog.detail.nameKmMissing") : null;
 
@@ -75,6 +83,7 @@ export function CreateProductSheet({
     setPriceError(null);
     setCostError(null);
     setFormError(null);
+    setPhoto(null);
   }
 
   async function submit() {
@@ -97,7 +106,7 @@ export function CreateProductSheet({
 
     setSaving(true);
     try {
-      const product = await createCatalogProduct({
+      let product = await createCatalogProduct({
         nameKm: nameKm.trim(),
         nameEn: nameEn.trim() === "" ? null : nameEn.trim(),
         descriptionKm: descriptionKm.trim() === "" ? null : descriptionKm.trim(),
@@ -113,6 +122,18 @@ export function CreateProductSheet({
           weightGrams: null,
         },
       });
+      if (photo) {
+        // The product is already saved. A photo failure must not hide that or
+        // lose the product: report it and let the merchant retry from the
+        // product page, where replace/retry is one tap.
+        try {
+          const uploaded = await uploadProductImage(product.id, photo, undefined);
+          product = { ...product, imageUrl: uploaded.imageUrl };
+        } catch (err) {
+          notifyError(t(`catalog.image.error.${classifyProductImageError(err)}`));
+          notifyError(t("catalog.image.createdWithoutPhoto"));
+        }
+      }
       onCreated(product);
       reset();
       onOpenChange(false);
@@ -140,6 +161,10 @@ export function CreateProductSheet({
       }
     >
       <div className="space-y-4">
+        {canSetPhoto ? (
+          <ProductImageField imageUrl={null} canEdit onPendingChange={setPhoto} disabled={saving} />
+        ) : null}
+
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="product-name-km" className="text-label text-text-secondary">
             {t("catalog.detail.nameKm")}

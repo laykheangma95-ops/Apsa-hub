@@ -1,4 +1,5 @@
 import { motion } from "motion/react";
+import { ProductImage } from "@/components/products/ProductImage";
 import { Check, Search, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -566,8 +567,9 @@ export function PrepareOrderSheet({
                         <button
                           type="button"
                           onClick={() => pickProduct(line.key, candidate)}
-                          className="tap-target flex w-full items-center justify-between gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left hover:bg-surface-secondary"
+                          className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left hover:bg-surface-secondary"
                         >
+                          <ProductImage src={candidate.imageUrl} className="size-11" />
                           <span className="min-w-0 flex-1 truncate text-label text-text-primary">
                             {localName(candidate, language)}
                           </span>
@@ -818,6 +820,7 @@ function ProductSearch({ products, language, query, onQueryChange, onPick }: Pro
               disabled={product.stock === 0}
               className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left hover:bg-surface-secondary disabled:opacity-50"
             >
+              <ProductImage src={product.imageUrl} className="size-11" />
               <span className="min-w-0 flex-1">
                 <span className="text-label block truncate text-text-primary">
                   {localName(product, language)}

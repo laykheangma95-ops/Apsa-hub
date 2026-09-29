@@ -34,6 +34,7 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CategoryChoice } from "@/components/products/CategoryChoice";
 import { VariantSheet } from "@/components/products/VariantSheet";
+import { ProductImageField } from "@/components/products/ProductImageField";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { notifyError, notifySuccess } from "@/lib/feedback";
 import { formatMoney } from "@/lib/money";
@@ -414,6 +415,15 @@ function ProductDetailScreen() {
                 {t("catalog.detail.readOnly")}
               </p>
             ) : null}
+
+            <Section title={t("catalog.image.title")}>
+              <ProductImageField
+                imageUrl={product.imageUrl}
+                canEdit={canUpdateBasic && !archived}
+                productId={product.id}
+                onChanged={invalidate}
+              />
+            </Section>
 
             <Section title={t("catalog.detail.basics")}>
               <div className="space-y-4">

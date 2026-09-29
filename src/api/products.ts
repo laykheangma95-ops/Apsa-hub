@@ -352,3 +352,63 @@ export const updateCategoryFn = createServerFn()
     const { categoryId, ...patch } = data;
     return updateCategory(authCtx, categoryId, patch);
   });
+
+// ── Product image (V1: one primary photo) ─────────────────────────────────────
+// Upload is a two-step, server-authorized flow so no storage credential and no
+// client-chosen path ever reaches the browser:
+//   1. requestProductImageUploadFn — checks products.update_basic and the
+//      declared type/size, returns a server-generated path + signed upload URL.
+//   2. the browser PUTs the bytes straight to that URL.
+//   3. attachProductImageFn — re-checks permission, verifies the object is under
+//      THIS organization/product, sniffs its real format and size, then points
+//      the product at it and retires the old object.
+
+export const requestProductImageUploadFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        productId: z.string().uuid("Invalid product ID"),
+        mimeType: z.string().min(1).max(100),
+        sizeBytes: z
+          .number()
+          .int()
+          .min(1)
+          .max(100 * 1024 * 1024),
+        fileName: z.string().max(255).optional(),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { requestProductImageUpload } = await import("@/server/products/image-service");
+    return requestProductImageUpload(authCtx, data.productId, {
+      mimeType: data.mimeType,
+      sizeBytes: data.sizeBytes,
+      fileName: data.fileName,
+    });
+  });
+
+export const attachProductImageFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        productId: z.string().uuid("Invalid product ID"),
+        path: z.string().min(1).max(200),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { attachProductImage } = await import("@/server/products/image-service");
+    return attachProductImage(authCtx, data.productId, data.path);
+  });
+
+export const removeProductImageFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ productId: z.string().uuid("Invalid product ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { removeProductImage } = await import("@/server/products/image-service");
+    return removeProductImage(authCtx, data.productId);
+  });
