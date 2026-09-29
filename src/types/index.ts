@@ -232,6 +232,11 @@ export interface Product {
   barcode?: string;
   /** Present on the production path — the DB UUID of the category. */
   categoryId?: string;
+  /**
+   * Short-lived signed URL of the product's primary photo (production path).
+   * Presentation only — product identity is `id`/`variantId`, never this.
+   */
+  imageUrl?: string;
   /** Present on the production path — the variant DB UUID. */
   variantId?: string;
   /**

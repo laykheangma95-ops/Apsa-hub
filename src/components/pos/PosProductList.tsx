@@ -1,6 +1,7 @@
 import { Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { StatusChip } from "@/design-system";
+import { ProductImage } from "@/components/products/ProductImage";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
@@ -22,20 +23,31 @@ const COMPANION_VAR: Record<Product["companion"], string> = {
   luma: "var(--companion-luma)",
 };
 
-/** Thumb placeholder: products carry no imagery in mock data. */
+/**
+ * Product thumbnail: the photo when there is one, otherwise the companion-colour
+ * initial tile. The picture only aids recognition — name, SKU and price stay
+ * authoritative — and a missing or failing image falls back to the tile, so
+ * ringing a sale never depends on an image loading.
+ */
 function Thumb({ product, size }: { product: Product; size: "sm" | "lg" }) {
   const { language } = useLanguage();
+  const box = size === "sm" ? "size-11" : "h-20 w-full";
   return (
-    <span
-      aria-hidden
-      className={cn(
-        "flex shrink-0 items-center justify-center rounded-xl text-text-inverse",
-        size === "sm" ? "size-11 text-body" : "h-20 w-full text-h3",
-      )}
-      style={{ backgroundColor: COMPANION_VAR[product.companion] }}
-    >
-      {localName(product, language).slice(0, 1)}
-    </span>
+    <ProductImage
+      src={product.imageUrl}
+      className={box}
+      fallback={
+        <span
+          className={cn(
+            "flex size-full items-center justify-center text-text-inverse",
+            size === "sm" ? "text-body" : "text-h3",
+          )}
+          style={{ backgroundColor: COMPANION_VAR[product.companion] }}
+        >
+          {localName(product, language).slice(0, 1)}
+        </span>
+      }
+    />
   );
 }
 

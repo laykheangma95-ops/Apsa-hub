@@ -1697,7 +1697,37 @@
       "generic": "That didn't save. Try again."
     },
     "save": "Save",
-    "saving": "Saving"
+    "saving": "Saving",
+    "image": {
+      "title": "Photo",
+      "choose": "Choose photo",
+      "take": "Take photo",
+      "replace": "Replace photo",
+      "remove": "Remove photo",
+      "retry": "Try again",
+      "none": "No photo",
+      "hint": "JPEG, PNG or WebP. Large photos are resized.",
+      "pendingNote": "The photo uploads after the product is saved.",
+      "preparing": "Preparing photo…",
+      "uploading": "Uploading… {{percent}}%",
+      "removing": "Removing…",
+      "uploaded": "Photo saved",
+      "removed": "Photo removed",
+      "createdWithoutPhoto": "Product saved without a photo. Add it from the product page.",
+      "error": {
+        "unsupported_type": "This file type is not supported. Use a JPEG, PNG or WebP photo.",
+        "heic_unsupported": "HEIC photos are not supported yet. Choose a JPEG, PNG or WebP photo.",
+        "too_large": "This photo is too large. Choose a smaller one.",
+        "empty": "This file is empty. Choose another photo.",
+        "corrupt": "This photo could not be read. Choose another one.",
+        "upload_failed": "The photo did not upload. Try again.",
+        "save_failed": "The photo uploaded but could not be saved. Try again.",
+        "remove_failed": "The photo could not be removed. Try again.",
+        "forbidden": "You do not have permission to change this photo.",
+        "not_found": "This product no longer exists.",
+        "network": "Connection lost. Check your network and try again."
+      }
+    }
   },
   "inventory": {
     "saving": "Saving",

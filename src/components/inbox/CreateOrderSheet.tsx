@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { ProductImage } from "@/components/products/ProductImage";
 import { motion } from "motion/react";
 import { Check, Search } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -443,6 +444,7 @@ export function CreateOrderSheet({
                       disabled={item.stock === 0}
                       className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
                     >
+                      <ProductImage src={item.imageUrl} className="size-11" />
                       <span className="min-w-0 flex-1">
                         <span className="text-label block truncate text-text-primary">
                           {localName(item, language)}

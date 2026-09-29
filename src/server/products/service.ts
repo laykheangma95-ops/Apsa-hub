@@ -26,6 +26,7 @@ import { auditLog } from "@/server/auth/audit";
 import { formatApsaBarcode, APSA_SERIAL_LENGTH } from "@/lib/barcode/apsa-code";
 import { isCode128Encodable } from "@/lib/barcode/code128";
 import * as repo from "./repository";
+import { resolveImageUrls } from "./image-service";
 import type {
   ProductRow,
   ProductVariantRow,
@@ -105,6 +106,11 @@ export interface ProductDetail {
   descriptionEn: string | null;
   categoryId: string | null;
   status: string;
+  /**
+   * Short-lived signed URL of the primary photo, or null. Presentation only —
+   * never identity. The storage path is not exposed.
+   */
+  imageUrl: string | null;
   companion: CompanionColor;
   /** Inventory is a separate domain — stock is always null from the Product domain. */
   stock: null;
@@ -161,6 +167,7 @@ function mapProduct(
     descriptionEn: product.description_en,
     categoryId: product.category_id,
     status: product.status,
+    imageUrl: null,
     companion: deriveCompanion(product.id),
     stock: null,
     createdBy: product.created_by,
@@ -181,6 +188,25 @@ function mapCategory(row: ProductCategoryRow): ProductCategoryDetail {
     status: row.status,
     createdAt: row.created_at,
   };
+}
+
+/** Fill in signed image URLs for already-mapped products (one batch call). */
+async function withImageUrls(
+  details: ProductDetail[],
+  rows: ProductRow[],
+): Promise<ProductDetail[]> {
+  const urls = await resolveImageUrls(rows);
+  for (const d of details) d.imageUrl = urls.get(d.id) ?? null;
+  return details;
+}
+
+async function mapOneWithImage(
+  row: ProductRow,
+  variants: ProductVariantRow[],
+  canViewCost: boolean,
+): Promise<ProductDetail> {
+  const [detail] = await withImageUrls([mapProduct(row, variants, canViewCost)], [row]);
+  return detail!;
 }
 
 // ── Service functions ─────────────────────────────────────────────────────────
@@ -205,7 +231,10 @@ export async function getProductCatalog(
     variantsByProduct.set(v.product_id, list);
   }
 
-  return products.map((p) => mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost));
+  return withImageUrls(
+    products.map((p) => mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost)),
+    products,
+  );
 }
 
 /**
@@ -235,7 +264,7 @@ export async function getProductDetail(
     throw publicError("Product not found", 404);
   }
 
-  return mapProduct(product, variants, canViewCost);
+  return mapOneWithImage(product, variants, canViewCost);
 }
 
 /**
@@ -258,7 +287,7 @@ export async function lookupBySku(
 
   return {
     variant: mapVariant(variant, canViewCost),
-    product: mapProduct(product, [variant], canViewCost),
+    product: await mapOneWithImage(product, [variant], canViewCost),
   };
 }
 
@@ -282,7 +311,7 @@ export async function lookupByBarcode(
 
   return {
     variant: mapVariant(variant, canViewCost),
-    product: mapProduct(product, [variant], canViewCost),
+    product: await mapOneWithImage(product, [variant], canViewCost),
   };
 }
 
@@ -432,7 +461,7 @@ export async function createProduct(
     throw err;
   }
 
-  return mapProduct(product, [variant], canViewCost);
+  return mapOneWithImage(product, [variant], canViewCost);
 }
 
 export async function updateProduct(
@@ -454,7 +483,7 @@ export async function updateProduct(
 
   const canViewCost = ctx.can("products.view_cost");
   const variants = await repo.listVariantsByProduct(ctx.organizationId, productId);
-  return mapProduct(updated, variants, canViewCost);
+  return mapOneWithImage(updated, variants, canViewCost);
 }
 
 export async function archiveProduct(
@@ -472,7 +501,7 @@ export async function archiveProduct(
 
   const canViewCost = ctx.can("products.view_cost");
   const variants = await repo.listVariantsByProduct(ctx.organizationId, productId, true);
-  return mapProduct(updated, variants, canViewCost);
+  return mapOneWithImage(updated, variants, canViewCost);
 }
 
 export async function createVariant(

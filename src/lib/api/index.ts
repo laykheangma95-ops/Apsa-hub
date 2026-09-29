@@ -353,6 +353,7 @@ interface ServerProductItem {
   nameKm: string;
   nameEn: string | null;
   categoryId: string | null;
+  imageUrl?: string | null;
   stock: null;
   companion: Product["companion"];
   variants: Array<{
@@ -397,6 +398,7 @@ function mapServerProductToUi(p: ServerProductItem): Product {
   };
   if (firstVariant?.barcode) mapped.barcode = firstVariant.barcode;
   if (p.categoryId) mapped.categoryId = p.categoryId;
+  if (p.imageUrl) mapped.imageUrl = p.imageUrl;
   if (firstVariant?.id) mapped.variantId = firstVariant.id;
   if (p.variants.length > 1) {
     mapped.productionVariants = p.variants.map((v) => ({

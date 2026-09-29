@@ -18,6 +18,7 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
 import { Input } from "@/components/ui/input";
+import { ProductImage } from "@/components/products/ProductImage";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CreateProductSheet } from "@/components/products/CreateProductSheet";
@@ -66,47 +67,50 @@ function ProductRow({ product }: { product: CatalogProduct }) {
     <Link
       to="/app/products/$id"
       params={{ id: product.id }}
-      className="press flex w-full flex-col gap-1.5 border-b border-border-default bg-surface-primary px-4 py-3 text-left last:border-b-0 hover:bg-surface-secondary"
+      className="press flex w-full items-start gap-3 border-b border-border-default bg-surface-primary px-4 py-3 text-left last:border-b-0 hover:bg-surface-secondary"
     >
-      <div className="flex min-w-0 items-baseline gap-2">
-        <span className="text-label min-w-0 flex-1 text-text-primary" lang="km">
-          <span className="chip-text">{product.nameKm}</span>
-        </span>
-        <span className="text-financial tnum shrink-0 text-text-primary">
-          {price ? formatMoney(price) : t("catalog.list.noPrice")}
-        </span>
-      </div>
-
-      {product.nameEn ? (
-        <span className="text-caption min-w-0 truncate text-text-secondary" lang="en">
-          {product.nameEn}
-        </span>
-      ) : null}
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        {/*
-         * Status is never colour alone: the marker carries its own icon and a
-         * written label, and it survives a Khmer label without clipping.
-         */}
-        <span
-          className={
-            archived
-              ? "text-label inline-flex max-w-full items-center gap-1.5 rounded-full bg-surface-secondary px-2 py-0.5 text-text-secondary"
-              : "text-label inline-flex max-w-full items-center gap-1.5 rounded-full bg-status-success-soft px-2 py-0.5 text-status-success-text"
-          }
-        >
-          {archived ? (
-            <Archive className="size-3.5 shrink-0" aria-hidden />
-          ) : (
-            <Package className="size-3.5 shrink-0" aria-hidden />
-          )}
-          <span className="chip-text">
-            {t(archived ? "catalog.list.status.archived" : "catalog.list.status.active")}
+      <ProductImage src={product.imageUrl} className="size-14" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <div className="flex min-w-0 items-baseline gap-2">
+          <span className="text-label min-w-0 flex-1 text-text-primary" lang="km">
+            <span className="chip-text">{product.nameKm}</span>
           </span>
-        </span>
-        <span className="text-caption text-text-muted">
-          {t("catalog.list.variants", { count: product.variants.length })}
-        </span>
+          <span className="text-financial tnum shrink-0 text-text-primary">
+            {price ? formatMoney(price) : t("catalog.list.noPrice")}
+          </span>
+        </div>
+
+        {product.nameEn ? (
+          <span className="text-caption min-w-0 truncate text-text-secondary" lang="en">
+            {product.nameEn}
+          </span>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/*
+           * Status is never colour alone: the marker carries its own icon and a
+           * written label, and it survives a Khmer label without clipping.
+           */}
+          <span
+            className={
+              archived
+                ? "text-label inline-flex max-w-full items-center gap-1.5 rounded-full bg-surface-secondary px-2 py-0.5 text-text-secondary"
+                : "text-label inline-flex max-w-full items-center gap-1.5 rounded-full bg-status-success-soft px-2 py-0.5 text-status-success-text"
+            }
+          >
+            {archived ? (
+              <Archive className="size-3.5 shrink-0" aria-hidden />
+            ) : (
+              <Package className="size-3.5 shrink-0" aria-hidden />
+            )}
+            <span className="chip-text">
+              {t(archived ? "catalog.list.status.archived" : "catalog.list.status.active")}
+            </span>
+          </span>
+          <span className="text-caption text-text-muted">
+            {t("catalog.list.variants", { count: product.variants.length })}
+          </span>
+        </div>
       </div>
     </Link>
   );
@@ -172,6 +176,9 @@ function ProductListScreen() {
   // Cost goes through canSensitive: no cost-entry affordance while the current
   // capability snapshot is unconfirmed (see CapabilityView.canSensitive).
   const canSetCost = identityOk && capabilities.canSensitive("products.update_cost");
+  // A photo is a basic-field edit on the server (products.update_basic), which
+  // is a different key from products.create — offer the picker only when it holds.
+  const canSetPhoto = identityOk && capabilities.can("products.update_basic");
 
   const organizationId = routeOrganizationId;
 
@@ -355,6 +362,7 @@ function ProductListScreen() {
           onOpenChange={setCreateOpen}
           categories={activeCategories}
           canSetCost={canSetCost}
+          canSetPhoto={canSetPhoto}
           onCreated={() => invalidateCatalog()}
         />
       ) : null}

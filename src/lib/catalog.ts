@@ -57,6 +57,8 @@ export interface CatalogProduct {
   descriptionEn: string | null;
   categoryId: string | null;
   status: string;
+  /** Signed display URL of the primary photo; null when none. Never identity. */
+  imageUrl: string | null;
   companion: CompanionColor;
   /** Inventory is a separate domain — always null from the Product domain. */
   stock: null;

@@ -172,6 +172,32 @@ export async function createProduct(
   return data as ProductRow;
 }
 
+/**
+ * Point a product at a new primary image (or clear it with null).
+ * Scoped to the caller's organization; the products_image_path_owned CHECK
+ * (migration 048) additionally refuses a path outside this org/product.
+ * Returns the updated row, or null when the product is not in this org.
+ */
+export async function setProductImagePath(
+  organizationId: string,
+  productId: string,
+  imagePath: string | null,
+): Promise<ProductRow | null> {
+  const { data, error } = await db
+    .from("products")
+    .update({ image_path: imagePath, image_updated_at: new Date().toISOString() })
+    .eq("id", productId)
+    .eq("organization_id", organizationId)
+    .select()
+    .single();
+
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`setProductImagePath: ${(error as { message: string }).message}`);
+  }
+  return data ? (data as ProductRow) : null;
+}
+
 export async function updateProduct(
   organizationId: string,
   productId: string,

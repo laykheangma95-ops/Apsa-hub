@@ -18,6 +18,7 @@
  * key (src/lib/idempotency.ts), so a retry after a lost response returns the
  * order the first attempt created instead of a second one.
  */
+import { ProductImage } from "@/components/products/ProductImage";
 import { useQuery } from "@tanstack/react-query";
 import { Check, Search } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
@@ -792,6 +793,7 @@ export function CreateRealOrderSheet({
                   disabled={!item.variantId && (item.productionVariants?.length ?? 0) === 0}
                   className="tap-target flex w-full items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-secondary disabled:opacity-50"
                 >
+                  <ProductImage src={item.imageUrl} className="size-11" />
                   <span className="min-w-0 flex-1">
                     <span className="text-label block truncate text-text-primary">
                       {localName(item, language)}

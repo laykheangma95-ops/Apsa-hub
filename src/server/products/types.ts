@@ -29,6 +29,9 @@ export interface ProductRow {
   description_en: string | null;
   category_id: string | null;
   status: ProductStatusDb;
+  /** Storage object path of the primary photo (migration 048); null = none. */
+  image_path: string | null;
+  image_updated_at: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
