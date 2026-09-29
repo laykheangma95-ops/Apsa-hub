@@ -44,17 +44,30 @@ describe("gate", () => {
   it("disabled in production", () => {
     expect(inboxSimulatorEnabled({ DEV: true, PROD: true })).toBe(false);
     expect(inboxSimulatorEnabled({ DEV: false, PROD: true })).toBe(false);
-    expect(inboxSimulatorEnabled({ PROD: "true" })).toBe(false);
   });
   it("missing config = disabled", () => {
     expect(inboxSimulatorEnabled({})).toBe(false);
     expect(inboxSimulatorEnabled(undefined as never)).toBe(false);
     expect(inboxSimulatorEnabled(null as never)).toBe(false);
   });
-  it("unexpected values = disabled", () => {
-    for (const v of ["true", "1", "yes", "TRUE", 1, {}, [], "", null]) {
-      expect(inboxSimulatorEnabled({ DEV: v })).toBe(false);
+  it("only { DEV: true, PROD: false } enables; every other DEV/PROD value fails closed", () => {
+    const bad: unknown[] = [undefined, null, "true", "false", 1, 0, {}, [], "", true, false];
+    for (const dev of bad) {
+      for (const prod of bad) {
+        const expected = dev === true && prod === false;
+        expect(inboxSimulatorEnabled({ DEV: dev, PROD: prod })).toBe(expected);
+      }
     }
+    for (const v of bad) {
+      if (v !== true) expect(inboxSimulatorEnabled({ DEV: v })).toBe(false);
+      expect(inboxSimulatorEnabled({ PROD: v })).toBe(false);
+    }
+    expect(inboxSimulatorEnabled({ DEV: true })).toBe(false);
+    expect(inboxSimulatorEnabled({ DEV: true, PROD: undefined })).toBe(false);
+    expect(inboxSimulatorEnabled({ DEV: true, PROD: "true" })).toBe(false);
+    expect(inboxSimulatorEnabled({ DEV: true, PROD: "false" })).toBe(false);
+    expect(inboxSimulatorEnabled({ DEV: true, PROD: 0 })).toBe(false);
+    expect(inboxSimulatorEnabled({ DEV: true, PROD: {} })).toBe(false);
   });
 });
 
@@ -112,9 +125,9 @@ describe("isolation", () => {
   const importsOf = (src: string): { spec: string; typeOnly: boolean }[] =>
     [
       ...src.matchAll(
-        /(?:import|export)\s+(type\s+)?[^;'"]*?from\s+["']([^"']+)["']|import\s+["']([^"']+)["']/g,
+        /(?:import|export)\s+(type\s+)?[^;'"]*?from\s+["']([^"']+)["']|import\s+["']([^"']+)["']|\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g,
       ),
-    ].map((m) => ({ spec: (m[2] ?? m[3])!, typeOnly: !!m[1] }));
+    ].map((m) => ({ spec: (m[2] ?? m[3] ?? m[4])!, typeOnly: !!m[1] }));
   const resolve = (spec: string, from: string): string | null => {
     const base = spec.startsWith("@/")
       ? path.join("src", spec.slice(2))
@@ -174,6 +187,22 @@ describe("isolation", () => {
     expect(problems).toEqual([]);
     expect([...seen].some((f) => f.endsWith("design-system/index.ts"))).toBe(false);
     expect([...seen].some((f) => f.endsWith("BottomNav.tsx"))).toBe(false);
+  });
+  it("import graph parser detects dynamic imports (same rules as static)", () => {
+    const specs = (src: string) => importsOf(src).map((i) => i.spec);
+    expect(specs('const m = await import("@/lib/api");')).toEqual(["@/lib/api"]);
+    expect(specs("const m = await import( '@/api/orders' )")).toEqual(["@/api/orders"]);
+    expect(specs("import(`@/stores/cart`)")).toEqual(["@/stores/cart"]);
+    expect(specs('import("./local")')).toEqual(["./local"]);
+    for (const s of [
+      "@/lib/api",
+      "@/api/orders",
+      "@/stores/cart",
+      "@/design-system",
+      "@/providers/x",
+    ]) {
+      expect(ALLOWED_ALIAS.has(s)).toBe(false);
+    }
   });
   it("barrel and production specifiers are not allowlisted / are flagged", () => {
     expect(ALLOWED_ALIAS.has("@/design-system")).toBe(false);
