@@ -1,4 +1,4 @@
-import { createFileRoute, notFound } from "@tanstack/react-router";
+import { createFileRoute, notFound, Outlet, useRouterState } from "@tanstack/react-router";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -174,6 +174,9 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
 }
 
 function DesignReference() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  if (pathname !== "/design") return <Outlet />;
+
   const { t } = useTranslation();
   const { language } = useLanguage();
   const [qty, setQty] = useState(2);
