@@ -6,6 +6,7 @@ import {
   Home,
   Inbox,
   Package,
+  PackageCheck,
   RotateCcw,
   ScanLine,
   Sparkles,
@@ -66,6 +67,7 @@ export type MobileNavRoute =
   | "/app/pos"
   | "/app/team"
   | "/app/orders"
+  | "/app/pack"
   | "/app/products"
   | "/app/inventory"
   | "/app/deliveries"
@@ -258,6 +260,19 @@ const SALES_GROUPS: readonly MobileNavSheetGroup[] = [
         availability: "live",
         to: "/app/payments",
         requiresAll: ["payments.read"],
+      },
+      {
+        // The packing work queue. Gated on orders.read — the key listReadyToPack
+        // requires; printing a parcel label inside it needs the narrow
+        // fulfillment.print_label capability, which the screen and the server
+        // both re-check.
+        id: "ready-to-pack",
+        labelKey: "nav.salesActions.readyToPack.label",
+        descriptionKey: "nav.salesActions.readyToPack.description",
+        icon: PackageCheck,
+        availability: "live",
+        to: "/app/pack",
+        requiresAll: ["orders.read"],
       },
       {
         id: "delivery",
@@ -474,6 +489,7 @@ export function resolveMobileNavActiveTab(
   if (
     pathname.startsWith("/app/pos") ||
     pathname.startsWith("/app/orders") ||
+    pathname.startsWith("/app/pack") ||
     pathname.startsWith("/app/payments") ||
     pathname.startsWith("/app/deliveries") ||
     pathname.startsWith("/app/products") ||

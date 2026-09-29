@@ -135,7 +135,43 @@ async function waitForDevToolsEndpoint(
   }
 }
 
+/**
+ * Bound an awaited step. A hung Chromium/DevTools handshake used to stall
+ * `beforeAll` for its whole 120s budget with no diagnostics (seen once on a
+ * loaded CI runner); every step that waits on the browser now fails fast with
+ * its own name so the session can be retried on a fresh browser.
+ */
+function within<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms: ${label}`)), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Page/browser events seen while starting a session — printed if it fails. */
+const diagnostics: string[] = [];
+
+/** Start a session, retrying once on a brand-new browser if the handshake hangs. */
 async function startSession(browser: string): Promise<Session> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      // A whole-attempt watchdog: whatever step hangs, the attempt fails with
+      // the page/browser diagnostics gathered so far instead of eating the
+      // 200s hook budget in silence.
+      return await within("session start", 55_000, startSessionOnce(browser));
+    } catch (error) {
+      lastError = new Error(`${error}\nDiagnostics:\n${diagnostics.slice(-40).join("\n")}`);
+      console.warn(
+        `[pos-payment-stacking.browser] session attempt ${attempt} failed: ${lastError}`,
+      );
+    }
+  }
+  throw lastError;
+}
+
+async function startSessionOnce(browser: string): Promise<Session> {
   /*
    * `@/lib/api` is redirected to the fixture stub for THIS bundle only. The
    * alias lives here rather than in the fixture's own imports so the fixture
@@ -205,11 +241,11 @@ async function startSession(browser: string): Promise<Session> {
 
   let endpoint: string;
   try {
-    const wsUrl = await waitForDevToolsEndpoint(child, 30_000);
+    const wsUrl = await waitForDevToolsEndpoint(child, 20_000);
     endpoint = `http://${new URL(wsUrl.replace(/^ws:/, "http:")).host}`;
   } catch (error) {
-    child.kill();
-    await child.exited;
+    child.kill(9);
+    await Promise.race([child.exited, Bun.sleep(3000)]);
     server.stop(true);
     fs.rmSync(profile, { recursive: true, force: true });
     const reason = error instanceof Error ? error.message : String(error);
@@ -225,16 +261,39 @@ async function startSession(browser: string): Promise<Session> {
    * whole suite failed before it opened a sheet. `/json/new` is the approach
    * bottom-sheet-focus-trap.browser.ts already proves on this CI.
    */
-  const pageTarget = (await (
-    await fetch(`${endpoint}/json/new?about:blank`, { method: "PUT" })
-  ).json()) as { webSocketDebuggerUrl?: string };
-  if (!pageTarget?.webSocketDebuggerUrl) throw new Error("no page target");
+  const teardown = async () => {
+    child.kill(9);
+    await Promise.race([child.exited, Bun.sleep(3000)]);
+    server.stop(true);
+    fs.rmSync(profile, { recursive: true, force: true });
+  };
+  let socket!: WebSocket;
+  try {
+    const pageTarget = (await within(
+      "create page target",
+      10_000,
+      fetch(`${endpoint}/json/new?about:blank`, {
+        method: "PUT",
+        signal: AbortSignal.timeout(10_000),
+      }).then((r) => r.json()),
+    )) as { webSocketDebuggerUrl?: string };
+    if (!pageTarget?.webSocketDebuggerUrl) throw new Error("no page target");
 
-  const socket = new WebSocket(pageTarget.webSocketDebuggerUrl);
-  await new Promise<void>((resolve, reject) => {
-    socket.addEventListener("open", () => resolve(), { once: true });
-    socket.addEventListener("error", () => reject(new Error("CDP socket failed")), { once: true });
-  });
+    socket = new WebSocket(pageTarget.webSocketDebuggerUrl);
+    await within(
+      "open CDP socket",
+      10_000,
+      new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", () => reject(new Error("CDP socket failed")), {
+          once: true,
+        });
+      }),
+    );
+  } catch (error) {
+    await teardown();
+    throw error;
+  }
 
   let nextId = 1;
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -244,7 +303,17 @@ async function startSession(browser: string): Promise<Session> {
       result?: unknown;
       error?: { message: string };
     };
-    if (message.id === undefined) return;
+    if (message.id === undefined) {
+      const m = message as { method?: string; params?: unknown };
+      if (
+        m.method === "Runtime.exceptionThrown" ||
+        m.method === "Runtime.consoleAPICalled" ||
+        m.method === "Log.entryAdded"
+      ) {
+        diagnostics.push(`${m.method}: ${JSON.stringify(m.params).slice(0, 500)}`);
+      }
+      return;
+    }
     const slot = pending.get(message.id);
     if (!slot) return;
     pending.delete(message.id);
@@ -254,10 +323,14 @@ async function startSession(browser: string): Promise<Session> {
 
   function send(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const id = nextId++;
-    return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      socket.send(JSON.stringify({ id, method, params }));
-    });
+    return within(
+      `CDP ${method}`,
+      15_000,
+      new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        socket.send(JSON.stringify({ id, method, params }));
+      }),
+    );
   }
 
   async function evaluate<T>(expression: string): Promise<T> {
@@ -291,13 +364,19 @@ async function startSession(browser: string): Promise<Session> {
     throw new Error(`timed out waiting for: ${label}`);
   }
 
-  await send("Page.enable");
-  await send("Runtime.enable");
-  await send("Page.navigate", { url: server.url.origin });
-  // The page must be the foreground one, or Chromium delivers no focus events
-  // and every containment assertion below silently stops covering anything.
-  await send("Page.bringToFront");
-  await waitFor("document.getElementById('trigger')", "fixture mount");
+  try {
+    await send("Page.enable");
+    await send("Runtime.enable");
+    await send("Page.navigate", { url: server.url.origin });
+    // The page must be the foreground one, or Chromium delivers no focus events
+    // and every containment assertion below silently stops covering anything.
+    await send("Page.bringToFront");
+    await waitFor("document.getElementById('trigger')", "fixture mount");
+  } catch (error) {
+    socket.close();
+    await teardown();
+    throw error;
+  }
 
   return {
     evaluate,
@@ -310,8 +389,8 @@ async function startSession(browser: string): Promise<Session> {
     },
     async close() {
       socket.close();
-      child.kill();
-      await child.exited;
+      child.kill(9);
+      await Promise.race([child.exited, Bun.sleep(3000)]);
       server.stop(true);
       fs.rmSync(profile, { recursive: true, force: true });
     },
@@ -376,7 +455,7 @@ describeBrowser("POS checkout → Record Payment, real Chromium", () => {
 
   beforeAll(async () => {
     page = await startSession(BROWSER!);
-  }, 120000);
+  }, 200000);
 
   afterAll(async () => {
     await page?.close();

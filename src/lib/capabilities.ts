@@ -34,6 +34,11 @@ export const UI_PERMISSION_KEYS = [
   "orders.create",
   "orders.confirm",
   "orders.cancel",
+  // orders.update gates the "Confirm / edit shipping destination" affordance
+  // (updateOrderShippingSnapshot requires it — src/server/orders/service.ts,
+  // migration 047) and is the same grant the fulfillment-status transitions
+  // already enforce. Seeded to OWNER/MANAGER/CASHIER by migration 003.
+  "orders.update",
   // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
   // action: refundPayment requires payments.refund. The historical
   // orders.refund key no longer authorizes anything, so the UI must not gate
@@ -118,6 +123,13 @@ export const UI_PERMISSION_KEYS = [
   "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
+  // Fulfillment — src/server/fulfillment/service.ts. fulfillment.print_label
+  // gates the parcel-label affordance (Ready-to-Pack print). It is a NARROW
+  // operational grant scoped to the shipping fields a label needs (name, phone,
+  // delivery address), NOT customers.view_sensitive — so cashiers/sales who pack
+  // can print without unrestricted customer PII (migration 046, PR #80 §20).
+  // getParcelLabelData feeds it straight into ctx.require.
+  "fulfillment.print_label",
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",

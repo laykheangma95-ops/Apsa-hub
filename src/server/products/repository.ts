@@ -266,6 +266,33 @@ export async function findVariantByBarcode(
   return data ? (data as ProductVariantRow) : null;
 }
 
+/**
+ * Whether ANY variant in the org already carries this barcode — regardless of
+ * status. Used by the APSA barcode generator's collision check.
+ *
+ * Status-agnostic on purpose: the uniqueness index
+ * (uniq_product_variants_barcode_per_org) covers ARCHIVED variants too, so a
+ * generated code that happens to match an archived variant's barcode would still
+ * be rejected by the DB on write. Checking only ACTIVE rows (as the lookup path
+ * does) would let the generator "confirm" a code that then fails to persist.
+ */
+export async function barcodeExistsForOrg(
+  organizationId: string,
+  barcode: string,
+): Promise<boolean> {
+  if (!barcode || !barcode.trim()) return false;
+
+  const { data, error } = await db
+    .from("product_variants")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("barcode", barcode.trim())
+    .limit(1);
+
+  if (error) throw new Error(`barcodeExistsForOrg: ${(error as { message: string }).message}`);
+  return Array.isArray(data) && data.length > 0;
+}
+
 export async function createVariant(
   organizationId: string,
   productId: string,
@@ -301,6 +328,42 @@ export async function updateVariant(
   if (error) {
     const msg = (error as { message?: string })?.message ?? "unknown";
     throw new Error(`updateVariant: ${msg}`);
+  }
+  return data ? (data as ProductVariantRow) : null;
+}
+
+/**
+ * Atomically set a variant's barcode ONLY while it is still NULL — the
+ * concurrency-safe write behind APSA barcode generation.
+ *
+ * The `.is("barcode", null)` predicate is the whole point: two requests that
+ * both read a NULL barcode and both try to write can no longer both succeed.
+ * The database evaluates the predicate under its own row lock, so exactly one
+ * UPDATE matches the row; the loser matches zero rows and gets `null` back —
+ * it never overwrites the winner's code. The org-scoped unique index remains
+ * the final authority against a cross-variant code collision (surfaced as a
+ * thrown unique-violation the caller retries on).
+ *
+ * Returns the updated row when this call won the write, or null when the
+ * barcode was already set (by a concurrent winner) so nothing matched.
+ */
+export async function updateVariantBarcodeIfNull(
+  organizationId: string,
+  variantId: string,
+  barcode: string,
+): Promise<ProductVariantRow | null> {
+  const { data, error } = await db
+    .from("product_variants")
+    .update({ barcode })
+    .eq("id", variantId)
+    .eq("organization_id", organizationId)
+    .is("barcode", null)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    const msg = (error as { message?: string })?.message ?? "unknown";
+    throw new Error(`updateVariantBarcodeIfNull: ${msg}`);
   }
   return data ? (data as ProductVariantRow) : null;
 }

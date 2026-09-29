@@ -23,7 +23,8 @@ import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
 import { PosCustomerSheet } from "@/components/pos/PosCustomerSheet";
 import { PosProductList } from "@/components/pos/PosProductList";
 import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
-import { getPosProducts } from "@/lib/api";
+import { getPosProducts, lookupVariantByBarcode } from "@/lib/api";
+import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { formatMoney } from "@/lib/money";
 import {
@@ -112,6 +113,13 @@ function PosScreen() {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [offline, setOffline] = useState(false);
+  // Barcode scanning via a keyboard-wedge scanner (§8). On by default so a
+  // plugged-in scanner just works; the merchant can toggle it off.
+  const [scanEnabled, setScanEnabled] = useState(true);
+  const [scanNotice, setScanNotice] = useState<{
+    kind: "added" | "notFound" | "error";
+    label?: string;
+  } | null>(null);
 
   useEffect(() => {
     const sync = () => setOffline(!navigator.onLine);
@@ -199,6 +207,50 @@ function PosScreen() {
     addProduct(product, undefined, 1, product.variantId);
   }
 
+  /**
+   * A completed barcode scan: resolve the EXACT variant server-side and add one
+   * to the cart, or show a non-destructive "not found" notice (§8). A repeated
+   * scan of the same code increments that variant's line (addToCart is keyed by
+   * product+variant). Stock policy is unchanged — availableStock drives the line
+   * max exactly as a tap does; no new policy is invented here.
+   */
+  async function handleScan(code: string) {
+    try {
+      const result = await lookupVariantByBarcode(code.trim());
+      if (!result) {
+        setScanNotice({ kind: "notFound" });
+        return;
+      }
+      const { product, variant } = result;
+      setLines((current) =>
+        addToCart(current, {
+          key: lineKey(product.id, variant.id),
+          productId: product.id,
+          variantId: variant.id,
+          nameKm: product.nameKm,
+          nameEn: product.nameEn,
+          sku: variant.sku || product.sku,
+          ...(variant.name ? { variant: variant.name } : {}),
+          quantity: 1,
+          unitPrice: variant.price,
+          stock: Math.max(1, availableStock(product)),
+        }),
+      );
+      setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });
+    } catch {
+      setScanNotice({ kind: "error" });
+    }
+  }
+
+  useBarcodeScanner({ enabled: canSell && scanEnabled && !checkoutOpen, onScan: handleScan });
+
+  // Auto-clear the scan notice so it never lingers as stale state.
+  useEffect(() => {
+    if (!scanNotice) return;
+    const timer = setTimeout(() => setScanNotice(null), 2600);
+    return () => clearTimeout(timer);
+  }, [scanNotice]);
+
   function resetSale() {
     setLines([]);
     setDiscount({ enabled: false, mode: "amount", value: 0 });
@@ -259,6 +311,25 @@ function PosScreen() {
         </p>
       ) : null}
 
+      {/* Non-destructive scan feedback. Status is text, never colour alone. */}
+      <div role="status" aria-live="polite">
+        {scanNotice ? (
+          <p
+            className={`text-body-sm px-4 py-2 ${
+              scanNotice.kind === "added"
+                ? "bg-status-success-soft text-status-success-text"
+                : "bg-status-warning-soft text-status-warning-text"
+            }`}
+          >
+            {scanNotice.kind === "added"
+              ? t("pos.scanAdded")
+              : scanNotice.kind === "notFound"
+                ? t("pos.scanNotFound")
+                : t("pos.scanError")}
+          </p>
+        ) : null}
+      </div>
+
       <div className="mx-auto flex max-w-[1200px] flex-col lg:flex-row lg:items-start lg:gap-4 lg:px-4 lg:py-4">
         <main className="min-w-0 flex-1">
           <div className="space-y-3 bg-surface-primary px-4 py-3 lg:rounded-2xl lg:border lg:border-border-default">
@@ -280,16 +351,21 @@ function PosScreen() {
                 />
               </div>
               {/*
-               * No barcode scanner exists yet (see Home's create sheet for the
-               * same rule). Silently dropping a fabricated barcode into search
-               * used to read as a broken tap that matched nothing — an honestly
-               * disabled control is the correct answer until this is built.
+               * Keyboard-wedge scanning is live (§8): a USB/Bluetooth scanner
+               * types the barcode and the useBarcodeScanner hook resolves the
+               * exact variant. This control toggles that listener on/off — some
+               * merchants share a device and want it off while typing.
                */}
               <button
                 type="button"
-                disabled
-                aria-label={`${t("pos.scan")} · ${t("nav.comingSoon")}`}
-                className="tap-target flex size-12 shrink-0 cursor-not-allowed items-center justify-center rounded-2xl border border-border-default bg-surface-secondary text-text-muted"
+                aria-pressed={scanEnabled}
+                aria-label={t("pos.scanMode")}
+                onClick={() => setScanEnabled((on) => !on)}
+                className={`press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border ${
+                  scanEnabled
+                    ? "border-action-primary bg-action-primary/10 text-action-primary"
+                    : "border-border-default bg-surface-primary text-text-secondary"
+                }`}
               >
                 <ScanLine className="size-5" aria-hidden />
               </button>

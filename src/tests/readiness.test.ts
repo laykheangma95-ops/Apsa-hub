@@ -156,7 +156,7 @@ describe("migration level evidence", () => {
     expect(called.length).toBeGreaterThan(10);
     expect(called.filter((name) => !created.has(name))).toEqual([]);
     expect(called).toContain("consume_rate_limit");
-    expect(called).toContain("create_order_v2");
+    expect(called).toContain("create_order_v3");
   });
 });
 

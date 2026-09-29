@@ -6,6 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, ErrorState, QuantityStepper } from "@/design-system";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
+import { ShippingIntentSection } from "@/components/orders/ShippingIntentSection";
+import {
+  type ShippingDestinationValue,
+  EMPTY_SHIPPING_DESTINATION,
+  orderShippingPayload,
+  shippingIntentReady,
+} from "@/lib/shipping-destination";
 import {
   createOrder,
   createRealOrder,
@@ -136,6 +143,19 @@ export function PrepareOrderSheet({
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
   const [deliveryFeeText, setDeliveryFeeText] = useState("");
+  /*
+   * Optional order shipping destination for the production path — the parcel's
+   * authoritative destination, snapshotted onto the order (§13). Prefilled with
+   * the conversation customer's name/phone as a convenience. That prefill is
+   * dormant: shipping is sent only when the merchant explicitly turns it on, so
+   * partial Inbox contact details never turn a pickup order into a shipment.
+   */
+  const [shipIntent, setShipIntent] = useState(false);
+  const [shipping, setShipping] = useState<ShippingDestinationValue>(() => ({
+    ...EMPTY_SHIPPING_DESTINATION,
+    name: displayName,
+    phone: customer.phone ?? "",
+  }));
   const submittingRef = useRef(false);
   /*
    * One idempotency key per logical order attempt (src/lib/idempotency.ts).
@@ -154,6 +174,8 @@ export function PrepareOrderSheet({
     setFailure(null);
     setBlocker(null);
     setDeliveryFeeText("");
+    setShipping({ ...EMPTY_SHIPPING_DESTINATION, name: displayName, phone: customer.phone ?? "" });
+    setShipIntent(false);
     submittingRef.current = false;
   }
 
@@ -209,7 +231,8 @@ export function PrepareOrderSheet({
   const deliveryFee: Money = { amount: deliveryMinor ?? 0, currency: estimatedTotal.currency };
   const previewTotal = addMoney(estimatedTotal, deliveryFee);
 
-  const readyToSubmit = itemsReady && deliveryMinor !== null;
+  const readyToSubmit =
+    itemsReady && deliveryMinor !== null && shippingIntentReady(shipIntent, shipping);
 
   /** The chosen lines, for naming the ones that blocked the order. */
   const readyLinesForDisplay = useMemo(
@@ -274,6 +297,9 @@ export function PrepareOrderSheet({
           ...(sourceConversationRef ? { sourceConversationRef } : {}),
           // readyToSubmit guarantees a parsed fee on this (production) path.
           ...(deliveryMinor! > 0 ? { deliveryMinor: deliveryMinor! } : {}),
+          ...(orderShippingPayload(shipIntent, shipping)
+            ? { shipping: orderShippingPayload(shipIntent, shipping)! }
+            : {}),
           idempotency: idempotencyKeys.current,
         });
         setStep({ name: "created-real", detail });
@@ -572,6 +598,19 @@ export function PrepareOrderSheet({
               onChange={setDeliveryFeeText}
               currency={estimatedTotal.currency}
             />
+          ) : null}
+
+          {realCustomer ? (
+            <div>
+              <p className="text-label text-text-secondary">{t("shipping.title")}</p>
+              <ShippingIntentSection
+                idPrefix="prepare-order"
+                intent={shipIntent}
+                onIntentChange={setShipIntent}
+                value={shipping}
+                onChange={setShipping}
+              />
+            </div>
           ) : null}
 
           <div className="rounded-xl border border-border-default bg-surface-secondary p-3">

@@ -53,6 +53,29 @@ export interface OrderRow {
   updated_at: string;
   /** Opaque provenance only — see migration 030. Never a Conversation FK. */
   source_conversation_ref: string | null;
+  /**
+   * Order shipping destination SNAPSHOT (migration 047). Captured at creation
+   * and editable before fulfillment; order-authoritative and independent of the
+   * customer profile. All three are NULL for a pickup / no-delivery order and
+   * for any order created before migration 047 (no snapshot). This is
+   * fulfillment PII — never mapped into the general OrderSummary/OrderDetail
+   * (which need only orders.read); it is read solely through the fulfillment
+   * label path, which gates on fulfillment.print_label.
+   */
+  shipping_name: string | null;
+  shipping_phone: string | null;
+  shipping_address: string | null;
+}
+
+/**
+ * Order shipping destination snapshot as it crosses the domain boundary. Each
+ * field is optional/nullable; an order with no destination (pickup) omits all
+ * three. Normalized and validated by the service before it reaches the RPC.
+ */
+export interface OrderShippingSnapshotInput {
+  name?: string | null | undefined;
+  phone?: string | null | undefined;
+  address?: string | null | undefined;
 }
 
 export interface OrderItemRow {
@@ -117,6 +140,24 @@ export interface CreateOrderInput {
   delivery_minor?: number | undefined;
   /** One logical creation attempt. Required by create_order_v2. */
   idempotency_key: string;
+  /**
+   * Optional order shipping destination snapshot, written atomically with the
+   * order by create_order_v3 (migration 047) and folded into the idempotency
+   * fingerprint. Absent/blank for a pickup order.
+   */
+  shipping?: OrderShippingSnapshotInput | undefined;
+}
+
+/** Result envelope returned by the update_order_shipping_v1 RPC (migration 047). Presence booleans only — never raw PII. */
+export interface UpdateOrderShippingRpcResult {
+  status: string;
+  order_id?: string;
+  had_name?: boolean;
+  had_phone?: boolean;
+  had_address?: boolean;
+  has_name?: boolean;
+  has_phone?: boolean;
+  has_address?: boolean;
 }
 
 /** Result envelope returned by the create_order_v2 RPC (migration 044). */
@@ -156,6 +197,13 @@ export interface ListOrdersOptions {
   lifecycle_status?: OrderLifecycleStatus | undefined;
   payment_status?: OrderPaymentStatus | undefined;
   fulfillment_status?: OrderFulfillmentStatus | undefined;
+  /**
+   * Match any of several fulfillment statuses (`fulfillment_status IN (...)`).
+   * Used by the Ready-to-Pack queue, which spans `unfulfilled` + `processing`.
+   * Ignored when empty; combined with `fulfillment_status` it further narrows,
+   * so callers pass one or the other.
+   */
+  fulfillment_statuses?: readonly OrderFulfillmentStatus[] | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
 }

@@ -5,7 +5,9 @@
   },
   "auth": {
     "signIn": {
-      "head": { "title": "Sign in — APSA" },
+      "head": {
+        "title": "Sign in — APSA"
+      },
       "title": "Welcome back",
       "subtitle": "Sign in to your APSA business.",
       "emailLabel": "Email",
@@ -25,7 +27,9 @@
       }
     },
     "signUp": {
-      "head": { "title": "Create account — APSA" },
+      "head": {
+        "title": "Create account — APSA"
+      },
       "title": "Create your account",
       "subtitle": "Start selling with APSA in a few minutes.",
       "nameLabel": "Your name",
@@ -46,7 +50,9 @@
       }
     },
     "forgotPassword": {
-      "head": { "title": "Reset your password — APSA" },
+      "head": {
+        "title": "Reset your password — APSA"
+      },
       "title": "Reset your password",
       "subtitle": "Enter the email you use for APSA. We'll send you a link to choose a new password.",
       "emailLabel": "Email",
@@ -64,7 +70,9 @@
       }
     },
     "resetPassword": {
-      "head": { "title": "Choose a new password — APSA" },
+      "head": {
+        "title": "Choose a new password — APSA"
+      },
       "checking": "Checking your reset link…",
       "title": "Choose a new password",
       "subtitle": "Use at least {{min}} characters. You'll sign in with this password from now on.",
@@ -98,7 +106,9 @@
       "backToSignIn": "Back to sign in"
     },
     "accessDenied": {
-      "head": { "title": "Access paused — APSA" },
+      "head": {
+        "title": "Access paused — APSA"
+      },
       "title": "You no longer have access",
       "subtitle": "Your access to this business has been paused or removed.",
       "hint": "Ask the business owner to restore your access, then sign in again.",
@@ -211,6 +221,10 @@
       "analytics": {
         "label": "Analytics",
         "description": "Sales, collection, top sellers and customers."
+      },
+      "readyToPack": {
+        "label": "Ready to Pack",
+        "description": "Pack confirmed orders and print parcel labels"
       }
     },
     "tabWithCount": "{{tab}}, {{count}} need attention",
@@ -925,7 +939,12 @@
       "body": "One or more items have no sellable variant, so APSA can't price them or take them out of stock. Remove them from the cart, or add a variant to the product first.",
       "noVariant": "No sellable variant",
       "back": "Back to cart"
-    }
+    },
+    "scanNotFound": "No product found for that barcode",
+    "scanAdded": "Added to cart",
+    "scanMode": "Scan mode",
+    "scanModeOn": "Scan mode on — scan a barcode",
+    "scanError": "Could not look up that barcode. Please try again."
   },
   "order": {
     "title": "Order",
@@ -1408,7 +1427,9 @@
     }
   },
   "onboarding": {
-    "head": { "title": "Create your business — APSA" },
+    "head": {
+      "title": "Create your business — APSA"
+    },
     "title": "Create your business",
     "subtitle": "APSA needs one business workspace before you can start selling.",
     "nameLabel": "Business name",
@@ -1428,7 +1449,9 @@
     }
   },
   "verifyEmail": {
-    "head": { "title": "Verify your email — APSA" },
+    "head": {
+      "title": "Verify your email — APSA"
+    },
     "title": "Verify your email",
     "verifying": "Verifying your email…",
     "success": "Email verified. Taking you to your account…",
@@ -1455,7 +1478,9 @@
     }
   },
   "inviteAccept": {
-    "head": { "title": "Team invite — APSA" },
+    "head": {
+      "title": "Team invite — APSA"
+    },
     "title": "Team invite",
     "loading": "Checking your invite…",
     "loadError": "Could not load this invite. Check your connection and try again.",
@@ -1639,7 +1664,12 @@
       "archiveAction": "Archive variant",
       "restoreAction": "Restore variant",
       "archived": "Variant archived",
-      "restored": "Variant restored"
+      "restored": "Variant restored",
+      "generateBarcode": "Generate",
+      "printLabel": "Print label",
+      "printLabelSaveFirst": "Save your changes to print the label.",
+      "barcodeGenerating": "Generating…",
+      "barcodeGenerateError": "Could not generate a barcode. Please try again."
     },
     "category": {
       "title": "Categories",
@@ -1681,7 +1711,9 @@
       "duplicate": "This movement was already recorded. Nothing was counted twice.",
       "audit_blocked": "The adjustment was blocked because its audit record could not be saved. Stock did not change.",
       "generic": "That did not go through. Check your connection and try again."
-    }
+    },
+    "scanLookup": "Scan or enter a barcode",
+    "scanNotFound": "No product found for that barcode"
   },
   "inventoryList": {
     "title": "Stock",
@@ -2199,5 +2231,79 @@
       "walkIn": "Orders with no customer",
       "note": "New means the customer's first confirmed order is in this period; returning means they had one before it. Orders with no customer attached are not counted as customers."
     }
+  },
+  "labels": {
+    "print": "Print",
+    "product": {
+      "title": "Product label",
+      "quantity": "Quantity",
+      "includeQr": "Include APSA QR"
+    },
+    "parcel": {
+      "title": "Parcel label",
+      "bulkTitle": "Parcel labels ({{count}})",
+      "error": "Could not load label data. Please try again.",
+      "from": "From",
+      "to": "To",
+      "phone": "Phone",
+      "items": "{{count}} items",
+      "moreItems": "+{{count}} more",
+      "paid": "Paid",
+      "cod": "COD",
+      "amountToCollect": "Amount to collect",
+      "reprint": "Reprint",
+      "addressNotConfirmed": "Shipping address not confirmed — verify before shipping",
+      "noAddress": "No address on file",
+      "denied": "You do not have permission to print parcel labels.",
+      "confirmCta": "Confirm shipping address",
+      "needsConfirmTitle": "Destination not confirmed",
+      "needsConfirmBody": "{{count}} order(s) need a confirmed shipping address before their labels can print.",
+      "needsConfirmOne": "This order needs a confirmed shipping address before its label can print.",
+      "editCta": "Edit shipping address"
+    }
+  },
+  "pack": {
+    "title": "Ready to Pack",
+    "subtitle": "Confirmed orders waiting to be packed",
+    "paid": "Paid",
+    "codCollect": "COD · {{amount}}",
+    "itemCount": "{{count}} items",
+    "noCustomer": "Walk-in customer",
+    "view": "View",
+    "printParcel": "Print parcel label",
+    "selectOrder": "Select order {{code}}",
+    "selectedCount": "{{count}} selected",
+    "printSelected": "Print {{count}} labels",
+    "error": {
+      "title": "Could not load the packing queue",
+      "body": "Something went wrong. Please try again."
+    },
+    "empty": {
+      "title": "Nothing to pack",
+      "body": "Confirmed orders that need packing will appear here."
+    }
+  },
+  "shipping": {
+    "title": "Shipping destination",
+    "optional": "Optional — leave blank for in-store pickup",
+    "name": "Recipient name",
+    "phone": "Recipient phone",
+    "address": "Delivery address",
+    "namePlaceholder": "Who receives the parcel",
+    "phonePlaceholder": "Contact number for the courier",
+    "addressPlaceholder": "House, street, sangkat, khan, city / province",
+    "note": "This destination is saved on the order. Later changes to the customer's profile won't change it.",
+    "confirmTitle": "Confirm shipping address",
+    "confirmBody": "This order has no confirmed destination. Enter where the parcel should go before printing its label.",
+    "editTitle": "Edit shipping address",
+    "save": "Save destination",
+    "saving": "Saving…",
+    "saved": "Shipping address saved",
+    "error": "Could not save the shipping address. Try again.",
+    "nameRequired": "Enter a recipient name.",
+    "addressRequired": "Enter a delivery address.",
+    "intent": "Ship this order",
+    "intentHint": "Off = in-store pickup. Turn on to send it to a delivery address.",
+    "intentNeedsDestination": "Enter a recipient name and delivery address to ship this order."
   }
 }

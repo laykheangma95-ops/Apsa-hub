@@ -5,6 +5,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BottomSheet } from "@/design-system";
 import { MoneyAmountField } from "@/components/products/MoneyAmountField";
+import { ProductLabelDialog } from "@/components/labels/ProductLabelDialog";
+import { generateVariantBarcode } from "@/lib/api";
 import {
   catalogErrorKey,
   classifyCatalogError,
@@ -25,6 +27,8 @@ interface VariantSheetProps {
   productId: string;
   /** Absent for "add variant"; present for "edit variant". */
   variant?: CatalogVariant | undefined;
+  /** Product name, used only for the printable product label. */
+  productName?: string | undefined;
   permissions: VariantPermissions;
   onSaved: () => void;
 }
@@ -85,6 +89,7 @@ export function VariantSheet({
   onOpenChange,
   productId,
   variant,
+  productName,
   permissions,
   onSaved,
 }: VariantSheetProps) {
@@ -94,6 +99,8 @@ export function VariantSheet({
     variant ? formFor(variant, permissions.canViewCost) : emptyForm(),
   );
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [labelOpen, setLabelOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{
     price?: string;
@@ -215,6 +222,49 @@ export function VariantSheet({
     }
   }
 
+  /**
+   * Mint an APSA barcode for this variant (edit mode only — the variant must
+   * exist server-side to persist the code). The server checks uniqueness and
+   * refuses to overwrite an existing barcode, so this button is only offered when
+   * the field is empty.
+   */
+  async function generate() {
+    if (!variant) return;
+    setGenerating(true);
+    setFormError(null);
+    try {
+      const updated = await generateVariantBarcode(variant.id);
+      if (updated.barcode) set("barcode", updated.barcode);
+      onSaved();
+    } catch (err) {
+      setFormError(t(catalogErrorKey(classifyCatalogError(err))));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  const barcodeValue = form.barcode.trim();
+
+  /*
+   * The printed product label must carry PERSISTED, authoritative data — never
+   * a half-typed SKU/barcode or a stale price from the open form (§14 of the
+   * repair brief). So the label is built from the saved `variant` prop, and
+   * Print is disabled whenever the form has unsaved edits: the merchant saves
+   * first, then prints exactly what the server holds. `isDirty` compares the
+   * current form against the saved baseline; any difference blocks Print.
+   */
+  const savedForm = variant ? formFor(variant, costVisible) : null;
+  const isDirty =
+    savedForm !== null &&
+    (form.name !== savedForm.name ||
+      form.sku !== savedForm.sku ||
+      form.barcode !== savedForm.barcode ||
+      form.priceText !== savedForm.priceText ||
+      form.priceCurrency !== savedForm.priceCurrency ||
+      form.costText !== savedForm.costText ||
+      form.costCurrency !== savedForm.costCurrency ||
+      form.weight !== savedForm.weight);
+
   return (
     <BottomSheet
       open={open}
@@ -296,6 +346,45 @@ export function VariantSheet({
             disabled={!basicEditable}
             onChange={(event) => set("barcode", event.target.value)}
           />
+          {/*
+           * Barcode actions. Generate mints an org-unique APSA code — offered
+           * only in edit mode (a variant must exist to persist it) and only when
+           * the field is empty, so an existing manufacturer/manual code is never
+           * overwritten. Print label opens the 50×30 mm preview once a code is set.
+           */}
+          {isEdit ? (
+            <div className="flex flex-wrap gap-2">
+              {basicEditable && barcodeValue === "" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="tap-target h-10"
+                  disabled={generating}
+                  onClick={() => void generate()}
+                >
+                  {generating
+                    ? t("catalog.variant.barcodeGenerating")
+                    : t("catalog.variant.generateBarcode")}
+                </Button>
+              ) : null}
+              {barcodeValue !== "" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="tap-target h-10"
+                  disabled={isDirty}
+                  onClick={() => setLabelOpen(true)}
+                >
+                  {t("catalog.variant.printLabel")}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {isEdit && barcodeValue !== "" && isDirty ? (
+            <p className="text-caption text-text-secondary">
+              {t("catalog.variant.printLabelSaveFirst")}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -328,6 +417,24 @@ export function VariantSheet({
           {saving ? t("catalog.saving") : t("catalog.save")}
         </Button>
       </div>
+
+      {variant ? (
+        /*
+         * Authoritative, persisted data only — never the live form's unsaved
+         * SKU/barcode or a stale typed price (§14). Print is disabled while the
+         * form is dirty, so what prints always matches what the server holds.
+         */
+        <ProductLabelDialog
+          open={labelOpen}
+          onClose={() => setLabelOpen(false)}
+          productName={productName ?? variant.name}
+          variantName={variant.name}
+          sku={variant.sku}
+          barcode={variant.barcode}
+          price={variant.price}
+          variantId={variant.id}
+        />
+      ) : null}
     </BottomSheet>
   );
 }

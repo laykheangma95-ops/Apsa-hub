@@ -21,6 +21,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { checkAppGuardFn } from "@/api/app-guard";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import { CustomerSensitiveCacheGuard } from "@/components/customers/CustomerSensitiveCacheGuard";
+import { FulfillmentSensitiveCacheGuard } from "@/components/fulfillment/FulfillmentSensitiveCacheGuard";
 import { AppShell } from "@/design-system";
 import { CapabilityProvider } from "@/hooks/use-capabilities";
 import { enforceApsiCachePrincipal } from "@/lib/apsi-query";
@@ -31,6 +32,7 @@ import { enforceConversationCachePrincipal } from "@/lib/inbox-query";
 import { enforceOrderCachePrincipal } from "@/lib/orders-query";
 import { enforceTeamCachePrincipal } from "@/lib/team-query";
 import { enforceSettingsCachePrincipal } from "@/lib/settings-view";
+import { enforceFulfillmentCachePrincipal } from "@/lib/fulfillment-query";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -117,6 +119,7 @@ function AppLayout() {
   enforceConversationCachePrincipal(queryClient, session.userId, organizationId);
   enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
   enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId);
+  enforceFulfillmentCachePrincipal(queryClient, session.userId, organizationId);
   enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
   /*
    * Account and business profile (Settings, and the Team header's business
@@ -143,9 +146,17 @@ function AppLayout() {
        * surface renders again (src/lib/customers-query.ts).
        */}
       <CustomerSensitiveCacheGuard userId={session.userId} organizationId={organizationId}>
-        <AppShell>
-          <Outlet />
-        </AppShell>
+        {/*
+         * Same guarantee for the Fulfillment domain: a parcel label carries the
+         * same gated fields (name, phone, address), so its cache is evicted the
+         * moment customers.view_sensitive stops holding, before any label
+         * surface renders again (src/lib/fulfillment-query.ts).
+         */}
+        <FulfillmentSensitiveCacheGuard userId={session.userId} organizationId={organizationId}>
+          <AppShell>
+            <Outlet />
+          </AppShell>
+        </FulfillmentSensitiveCacheGuard>
       </CustomerSensitiveCacheGuard>
     </CapabilityProvider>
   );

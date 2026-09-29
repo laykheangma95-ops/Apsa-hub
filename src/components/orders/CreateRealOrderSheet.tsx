@@ -28,6 +28,13 @@ import { Input } from "@/components/ui/input";
 import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
+import { ShippingIntentSection } from "@/components/orders/ShippingIntentSection";
+import {
+  type ShippingDestinationValue,
+  EMPTY_SHIPPING_DESTINATION,
+  orderShippingPayload,
+  shippingIntentReady,
+} from "@/lib/shipping-destination";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import {
   createRealOrder,
@@ -112,6 +119,17 @@ export function CreateRealOrderSheet({
   const [deliveryFeeText, setDeliveryFeeText] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
   const [customer, setCustomer] = useState<OrderCustomerOption | null>(null);
+  /*
+   * Optional order shipping destination — the parcel's authoritative
+   * destination, snapshotted onto the order at creation (§13). Left blank for an
+   * in-store pickup order. Selecting a customer prefills the recipient
+   * name/phone as a convenience; the address is always the merchant's to enter,
+   * since the customer's on-file address is not the order's destination truth.
+   */
+  const [shipping, setShipping] = useState<ShippingDestinationValue>(EMPTY_SHIPPING_DESTINATION);
+  // Shipping is an explicit choice — a chosen customer's prefilled name/phone
+  // never turn a pickup order into a shipment.
+  const [shipIntent, setShipIntent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
@@ -263,6 +281,21 @@ export function CreateRealOrderSheet({
     setVariantId(defaultProductVariantId(next));
   }
 
+  /*
+   * Prefill the shipping recipient from the chosen customer as a convenience
+   * (dormant unless the merchant turns shipping on), but only into blank fields so a merchant's own edits are never overwritten.
+   * The address is deliberately never prefilled from the customer profile — the
+   * order's destination is the merchant's to confirm, not the mutable default.
+   */
+  function selectCustomer(next: OrderCustomerOption) {
+    setCustomer(next);
+    setShipping((prev) => ({
+      ...prev,
+      name: prev.name.trim() ? prev.name : localName(next, language),
+      phone: prev.phone.trim() ? prev.phone : (next.phone ?? ""),
+    }));
+  }
+
   const mustChooseVariant = needsVariantChoice(product);
   const activeVariants = product?.productionVariants ?? [];
   const selectedVariant = activeVariants.find((v) => v.variantId === variantId) ?? null;
@@ -286,6 +319,8 @@ export function CreateRealOrderSheet({
     setDeliveryFeeText("");
     setCustomerQuery("");
     setCustomer(null);
+    setShipping(EMPTY_SHIPPING_DESTINATION);
+    setShipIntent(false);
     setSubmitting(false);
     setFailure(null);
     setCreated(null);
@@ -302,22 +337,26 @@ export function CreateRealOrderSheet({
    * product that means an EXPLICIT choice; `product.variantId` is deliberately
    * not consulted here, so restoring it would fail the regression tests.
    */
-  const readyToSubmit = Boolean(product) && Boolean(variantId) && deliveryMinor !== null;
+  const shippingReady = shippingIntentReady(shipIntent, shipping);
+  const orderInputsReady = deliveryMinor !== null && shippingReady;
+  const readyToSubmit = Boolean(product) && Boolean(variantId) && orderInputsReady;
 
   async function submit() {
     if (!product || !variantId) return;
-    if (deliveryMinor === null) return;
+    if (deliveryMinor === null || !shippingReady) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
     try {
+      const shippingPayload = orderShippingPayload(shipIntent, shipping);
       const detail = await createRealOrder({
         source,
         items: [{ variantId, quantity, productId: product.id }],
         customerId: customer?.id ?? null,
         ...(discountEnabled && discount.amount > 0 ? { discountMinor: discount.amount } : {}),
         ...(deliveryMinor > 0 ? { deliveryMinor } : {}),
+        ...(shippingPayload ? { shipping: shippingPayload } : {}),
         idempotency: idempotencyKeys.current,
       });
       /*
@@ -621,7 +660,7 @@ export function CreateRealOrderSheet({
                       <li key={c.id}>
                         <button
                           type="button"
-                          onClick={() => setCustomer(c)}
+                          onClick={() => selectCustomer(c)}
                           className="tap-target flex w-full items-center justify-between rounded-xl border border-border-default bg-surface-primary px-3 py-2 text-left hover:bg-surface-secondary"
                         >
                           <span className="min-w-0 flex-1">
@@ -652,6 +691,17 @@ export function CreateRealOrderSheet({
                 ) : null}
               </div>
             )}
+          </div>
+
+          <div>
+            <p className="text-label text-text-secondary">{t("shipping.title")}</p>
+            <ShippingIntentSection
+              idPrefix="order-create"
+              intent={shipIntent}
+              onIntentChange={setShipIntent}
+              value={shipping}
+              onChange={setShipping}
+            />
           </div>
 
           <div className="rounded-xl border border-border-default bg-surface-secondary p-3">

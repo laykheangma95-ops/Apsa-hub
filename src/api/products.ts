@@ -281,6 +281,20 @@ export const updateVariantFn = createServerFn()
     });
   });
 
+// ── generateVariantBarcodeFn ──────────────────────────────────────────────────
+// Mints a fresh, org-unique APSA barcode for a variant and persists it. Refuses
+// to overwrite an existing barcode; uniqueness is checked server-side.
+
+export const generateVariantBarcodeFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ variantId: z.string().uuid("Invalid variant ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { generateVariantBarcode } = await import("@/server/products/service");
+    return generateVariantBarcode(authCtx, data.variantId);
+  });
+
 // ── listCategoriesFn ──────────────────────────────────────────────────────────
 
 export const listCategoriesFn = createServerFn()
