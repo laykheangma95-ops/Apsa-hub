@@ -40,7 +40,6 @@ afterEach(() => {
 describe("gate", () => {
   it("enabled only for an explicit dev build", () => {
     expect(inboxSimulatorEnabled({ DEV: true, PROD: false })).toBe(true);
-    expect(inboxSimulatorEnabled({ DEV: "true" })).toBe(true);
   });
   it("disabled in production", () => {
     expect(inboxSimulatorEnabled({ DEV: true, PROD: true })).toBe(false);
@@ -53,7 +52,7 @@ describe("gate", () => {
     expect(inboxSimulatorEnabled(null as never)).toBe(false);
   });
   it("unexpected values = disabled", () => {
-    for (const v of ["1", "yes", "TRUE", 1, {}, [], "", null]) {
+    for (const v of ["true", "1", "yes", "TRUE", 1, {}, [], "", null]) {
       expect(inboxSimulatorEnabled({ DEV: v })).toBe(false);
     }
   });
@@ -96,10 +95,91 @@ describe("route", () => {
 });
 
 describe("isolation", () => {
-  it("simulator files import nothing that can reach production paths", () => {
-    const forbidden =
-      /from\s+["'](@\/lib\/(api|mock|supabase)|@\/server|@\/api|@\/integrations|@tanstack\/react-query|@supabase)|createServerFn|localStorage|sessionStorage|indexedDB|fetch\(|useMutation|useQuery|create_order|supabase/i;
+  const forbidden =
+    /from\s+["'](@\/lib\/(api|mock|supabase)|@\/server|@\/api|@\/integrations|@\/hooks\/use-capabilities|@\/stores?\b|@\/providers?\b|@tanstack\/react-query|@supabase)|createServerFn|localStorage|sessionStorage|indexedDB|fetch\(|useMutation|useQuery|create_order|supabase/i;
+  // Explicit allowlist: aliased imports the simulator graph may use.
+  const ALLOWED_ALIAS = new Set([
+    "@/components/ui/button",
+    "@/components/ui/input",
+    "@/design-system/ChannelBadge",
+    "@/design-system/MessageBubble",
+    "@/design-system/StatusChip",
+    "@/lib/utils",
+    "@/types",
+  ]);
+  const ALLOWED_PKG =
+    /^(react|react-i18next|lucide-react|date-fns|clsx|tailwind-merge|class-variance-authority|@radix-ui\/react-slot)$/;
+  const importsOf = (src: string): { spec: string; typeOnly: boolean }[] =>
+    [
+      ...src.matchAll(
+        /(?:import|export)\s+(type\s+)?[^;'"]*?from\s+["']([^"']+)["']|import\s+["']([^"']+)["']/g,
+      ),
+    ].map((m) => ({ spec: (m[2] ?? m[3])!, typeOnly: !!m[1] }));
+  const resolve = (spec: string, from: string): string | null => {
+    const base = spec.startsWith("@/")
+      ? path.join("src", spec.slice(2))
+      : path.join(path.dirname(from), spec);
+    for (const c of [
+      base + ".ts",
+      base + ".tsx",
+      path.join(base, "index.ts"),
+      path.join(base, "index.tsx"),
+    ]) {
+      if (fs.existsSync(path.join(root, c))) return c;
+    }
+    return null;
+  };
+  const graph = (entry: string) => {
+    const seen = new Set<string>();
+    const problems: string[] = [];
+    const visit = (file: string) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const src = code(file);
+      if (forbidden.test(src)) problems.push(`${file}: forbidden production reference`);
+      for (const { spec, typeOnly } of importsOf(src)) {
+        if (typeOnly) continue;
+        if (!spec.startsWith("@/") && !spec.startsWith(".")) {
+          if (!ALLOWED_PKG.test(spec)) problems.push(`${file}: package ${spec} not allowlisted`);
+          continue;
+        }
+        if (
+          spec.startsWith("@/") &&
+          !ALLOWED_ALIAS.has(spec) &&
+          !/^@\/simulator\/inbox\//.test(spec)
+        ) {
+          problems.push(`${file}: import ${spec} not allowlisted`);
+          continue;
+        }
+        const target = resolve(spec, file);
+        if (!target) problems.push(`${file}: cannot resolve ${spec}`);
+        else visit(target);
+      }
+    };
+    visit(entry);
+    return { seen, problems };
+  };
+
+  it("simulator files have no direct production references", () => {
     for (const f of SIM_FILES) expect(code(f)).not.toMatch(forbidden);
+  });
+  it("rejects broad barrel imports (design-system index)", () => {
+    for (const f of SIM_FILES) {
+      expect(code(f)).not.toMatch(/from\s+["']@\/design-system["']/);
+      expect(code(f)).not.toMatch(/from\s+["']@\/design-system\/index["']/);
+    }
+  });
+  it("transitive import graph of the simulator stays presentation-only", () => {
+    const { seen, problems } = graph("src/simulator/inbox/InboxSimulator.tsx");
+    expect(problems).toEqual([]);
+    expect([...seen].some((f) => f.endsWith("design-system/index.ts"))).toBe(false);
+    expect([...seen].some((f) => f.endsWith("BottomNav.tsx"))).toBe(false);
+  });
+  it("barrel and production specifiers are not allowlisted / are flagged", () => {
+    expect(ALLOWED_ALIAS.has("@/design-system")).toBe(false);
+    expect(forbidden.test('import { useQuery } from "@tanstack/react-query";')).toBe(true);
+    expect(forbidden.test('import { x } from "@/lib/api";')).toBe(true);
+    expect(forbidden.test('import { x } from "@/hooks/use-capabilities";')).toBe(true);
   });
 });
 

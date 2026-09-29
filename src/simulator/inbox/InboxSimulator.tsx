@@ -2,7 +2,9 @@ import { ArrowLeft, RotateCcw, Send, ShoppingBag, UserRound } from "lucide-react
 import { useReducer, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ChannelBadge, MessageBubble, StatusChip } from "@/design-system";
+import { ChannelBadge } from "@/design-system/ChannelBadge";
+import { MessageBubble } from "@/design-system/MessageBubble";
+import { StatusChip } from "@/design-system/StatusChip";
 import type { ConversationStatus } from "@/types";
 import {
   initialSimState,
