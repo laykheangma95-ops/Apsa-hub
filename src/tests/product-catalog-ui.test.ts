@@ -1924,7 +1924,8 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // UI is built entirely on migrations 017-019, which already exist; it added
     // none of its own, and a new file beyond 047 would move this pin and fail
     // the test on purpose.
-    expect(migrations.at(-1)).toBe("047_order_shipping_snapshot.sql");
+    // 048 (explicit service_role table grants) is an unrelated environment fix.
+    expect(migrations.at(-1)).toBe("048_service_role_table_grants.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",
