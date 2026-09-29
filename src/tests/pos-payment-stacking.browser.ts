@@ -149,15 +149,23 @@ function within<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Page/browser events seen while starting a session — printed if it fails. */
+const diagnostics: string[] = [];
+
 /** Start a session, retrying once on a brand-new browser if the handshake hangs. */
 async function startSession(browser: string): Promise<Session> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      return await startSessionOnce(browser);
+      // A whole-attempt watchdog: whatever step hangs, the attempt fails with
+      // the page/browser diagnostics gathered so far instead of eating the
+      // 200s hook budget in silence.
+      return await within("session start", 55_000, startSessionOnce(browser));
     } catch (error) {
-      lastError = error;
-      console.warn(`[pos-payment-stacking.browser] session attempt ${attempt} failed: ${error}`);
+      lastError = new Error(`${error}\nDiagnostics:\n${diagnostics.slice(-40).join("\n")}`);
+      console.warn(
+        `[pos-payment-stacking.browser] session attempt ${attempt} failed: ${lastError}`,
+      );
     }
   }
   throw lastError;
@@ -236,8 +244,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
     const wsUrl = await waitForDevToolsEndpoint(child, 20_000);
     endpoint = `http://${new URL(wsUrl.replace(/^ws:/, "http:")).host}`;
   } catch (error) {
-    child.kill();
-    await child.exited;
+    child.kill(9);
+    await Promise.race([child.exited, Bun.sleep(3000)]);
     server.stop(true);
     fs.rmSync(profile, { recursive: true, force: true });
     const reason = error instanceof Error ? error.message : String(error);
@@ -254,8 +262,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
    * bottom-sheet-focus-trap.browser.ts already proves on this CI.
    */
   const teardown = async () => {
-    child.kill();
-    await child.exited;
+    child.kill(9);
+    await Promise.race([child.exited, Bun.sleep(3000)]);
     server.stop(true);
     fs.rmSync(profile, { recursive: true, force: true });
   };
@@ -295,7 +303,17 @@ async function startSessionOnce(browser: string): Promise<Session> {
       result?: unknown;
       error?: { message: string };
     };
-    if (message.id === undefined) return;
+    if (message.id === undefined) {
+      const m = message as { method?: string; params?: unknown };
+      if (
+        m.method === "Runtime.exceptionThrown" ||
+        m.method === "Runtime.consoleAPICalled" ||
+        m.method === "Log.entryAdded"
+      ) {
+        diagnostics.push(`${m.method}: ${JSON.stringify(m.params).slice(0, 500)}`);
+      }
+      return;
+    }
     const slot = pending.get(message.id);
     if (!slot) return;
     pending.delete(message.id);
@@ -371,8 +389,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
     },
     async close() {
       socket.close();
-      child.kill();
-      await child.exited;
+      child.kill(9);
+      await Promise.race([child.exited, Bun.sleep(3000)]);
       server.stop(true);
       fs.rmSync(profile, { recursive: true, force: true });
     },
