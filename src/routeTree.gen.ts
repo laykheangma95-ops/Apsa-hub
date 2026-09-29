@@ -215,7 +215,6 @@ export interface FileRoutesByFullPath {
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRouteWithChildren
   '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
-  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -249,6 +248,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/access-denied': typeof AccessDeniedRoute
   '/design': typeof DesignRouteWithChildren
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -284,6 +284,7 @@ export interface FileRoutesById {
   '/access-denied': typeof AccessDeniedRoute
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRouteWithChildren
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -319,10 +320,7 @@ export interface FileRouteTypes {
     | '/'
     | '/access-denied'
     | '/app'
-    | '/design'
-    | '/design/inbox-simulator'
-    | '/design/inbox-simulator'
-    | '/design/inbox-simulator'
+    | '/design'    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -356,6 +354,7 @@ export interface FileRouteTypes {
     | '/'
     | '/access-denied'
     | '/design'
+    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -390,6 +389,7 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/app'
     | '/design'
+    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
