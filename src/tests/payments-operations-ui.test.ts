@@ -916,8 +916,8 @@ describe("production boundary", () => {
     // the schema.
     const beyond047 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      // 048 is the later, unrelated V1 product-images phase.
-      return Number.isFinite(prefix) && prefix > 48;
+      // 048/049 are the later, unrelated V1 product-images phase.
+      return Number.isFinite(prefix) && prefix > 49;
     });
     expect(beyond047).toEqual([]);
   });

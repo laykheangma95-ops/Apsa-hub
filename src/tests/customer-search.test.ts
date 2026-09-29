@@ -749,7 +749,7 @@ describe("No migration was required, and the schema says why", () => {
     // supabase/migrations/047_order_shipping_snapshot.sql). A migration numbered
     // 048 or higher would mean THIS phase silently changed the schema — which it
     // must not do without first proving the change is required and reporting it.
-    // (048_product_images.sql is the later, unrelated V1 product-images phase.)
-    expect(migrations.filter((f) => /^049|^0[5-9]\d/.test(f))).toEqual([]);
+    // (048/049 are the later, unrelated V1 product-images phase.)
+    expect(migrations.filter((f) => /^0[5-9]\d/.test(f))).toEqual([]);
   });
 });

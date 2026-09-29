@@ -33,11 +33,13 @@ import {
   PRODUCT_IMAGE_MAX_BYTES,
   buildProductImagePath,
   checkDeclaredImage,
+  inspectImageStructure,
   isOwnedProductImagePath,
   mimeFromProductImagePath,
-  sniffImageMime,
   type ProductImageErrorKind,
 } from "@/lib/product-image";
+import { enforceRateLimits } from "@/server/rate-limit/limiter";
+import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import * as repo from "./repository";
 import { PRODUCT_IMAGE_READ_TTL_SECONDS, getProductImageStorage } from "./image-storage";
 import type { ProductRow } from "./types";
@@ -48,6 +50,18 @@ const UPLOAD_MESSAGES: Partial<Record<ProductImageErrorKind, string>> = {
   too_large: "This image is too large.",
   empty: "This image file is empty.",
 };
+
+/**
+ * Upload tickets. Supabase signs an upload URL for 2 hours; the ticket outlives
+ * it by an hour, so once a ticket is expired no upload can still land and the
+ * sweep can safely delete whatever object is there.
+ */
+export const PRODUCT_IMAGE_TICKET_TTL_SECONDS = 3 * 60 * 60;
+/** Issued-but-unattached tickets one member / one organization may hold at once. */
+export const PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER = 30;
+export const PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION = 100;
+/** Expired tickets swept per ticket request — bounds the work added to it. */
+export const PRODUCT_IMAGE_SWEEP_BATCH = 25;
 
 // ── Reads ────────────────────────────────────────────────────────────────────
 
@@ -83,8 +97,53 @@ export interface ProductImageUploadTicket {
 }
 
 /**
- * Step 1 of upload/replace: authorize, validate the declared file, and mint a
- * server-generated object path plus a signed upload URL bound to it.
+ * Delete abandoned uploads: tickets that expired without being attached.
+ * Oldest first, at most PRODUCT_IMAGE_SWEEP_BATCH per call, across tenants
+ * (server housekeeping; nothing from the rows is returned to any caller).
+ *
+ * Safety: an object is deleted only when (1) its ticket is expired, (2) its
+ * path is in exactly the shape its own ticket's org + product produce, and
+ * (3) NO product currently references it. A current product image is never
+ * removed, even if its ticket row was left behind. The ticket row is removed
+ * only after the object is gone (or was never deletable), so a failed storage
+ * delete is retried by the next sweep. Never throws: a sweep failure must not
+ * block ticket issuance, reads, or anything else.
+ */
+export async function sweepExpiredProductImageUploads(
+  now: Date = new Date(),
+): Promise<{ removed: number; released: number }> {
+  try {
+    const expired = await repo.listExpiredUploadTickets(
+      now.toISOString(),
+      PRODUCT_IMAGE_SWEEP_BATCH,
+    );
+    if (expired.length === 0) return { removed: 0, released: 0 };
+
+    const wellFormed = expired.filter((t) =>
+      isOwnedProductImagePath(t.object_path, t.organization_id, t.product_id),
+    );
+    const referenced = await repo.findReferencedImagePaths(wellFormed.map((t) => t.object_path));
+    const deletable = wellFormed.map((t) => t.object_path).filter((p) => !referenced.has(p));
+
+    if (deletable.length > 0) await getProductImageStorage().remove(deletable);
+    await repo.deleteUploadTickets(expired.map((t) => t.object_path));
+    return { removed: deletable.length, released: expired.length - deletable.length };
+  } catch {
+    serverLog.warn("product_image.sweep_failed", {});
+    return { removed: 0, released: 0 };
+  }
+}
+
+/**
+ * Step 1 of upload/replace: authorize, bound abuse, validate the declared
+ * file, record a ticket, and mint a server-generated object path plus a signed
+ * upload URL bound to it.
+ *
+ * Abuse bounds (all server-side, derived from the verified session — never
+ * from client input): a durable per-member and per-organization issuance rate
+ * limit that FAILS CLOSED if the limiter is unavailable, and a cap on
+ * outstanding unattached tickets. The ticket row is written BEFORE the URL is
+ * signed, so no signed URL exists without a ticket the sweep can find.
  */
 export async function requestProductImageUpload(
   ctx: AuthorizationContext,
@@ -98,8 +157,20 @@ export async function requestProductImageUpload(
     throw publicError(UPLOAD_MESSAGES[checked.kind] ?? "Unsupported image.", 400);
   }
 
+  await enforceRateLimits(
+    [
+      { rule: RATE_LIMITS.productImageUploadMember, parts: [ctx.organizationId, ctx.userId] },
+      { rule: RATE_LIMITS.productImageUploadOrganization, parts: [ctx.organizationId] },
+    ],
+    undefined,
+    { onBackendFailure: BACKEND_FAILURE_POLICY.productImageUpload },
+  );
+
   const product = await repo.findProductById(ctx.organizationId, productId);
   if (!product) throw publicError("Product not found", 404);
+
+  // Opportunistic, bounded, never throws.
+  await sweepExpiredProductImageUploads();
 
   const path = buildProductImagePath(
     ctx.organizationId,
@@ -107,11 +178,50 @@ export async function requestProductImageUpload(
     globalThis.crypto.randomUUID(),
     checked.mime,
   );
+  const nowIso = new Date().toISOString();
+  try {
+    const [mine, org] = await Promise.all([
+      repo.countOutstandingUploadTickets(
+        ctx.organizationId,
+        ctx.userId,
+        nowIso,
+        PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER,
+      ),
+      repo.countOutstandingUploadTickets(
+        ctx.organizationId,
+        null,
+        nowIso,
+        PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION,
+      ),
+    ]);
+    if (
+      mine >= PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER ||
+      org >= PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION
+    ) {
+      throw publicError(
+        "Too many photo uploads are waiting to be saved. Please try again later.",
+        429,
+      );
+    }
+    await repo.insertUploadTicket({
+      organizationId: ctx.organizationId,
+      productId: product.id,
+      issuedBy: ctx.userId,
+      objectPath: path,
+      expiresAt: new Date(Date.now() + PRODUCT_IMAGE_TICKET_TTL_SECONDS * 1000).toISOString(),
+    });
+  } catch (err) {
+    if (isPublicDomainError(err)) throw err;
+    serverLog.error("product_image.ticket_record_failed", { productId });
+    throw publicError("Could not start the upload. Please try again.", 503);
+  }
+
   try {
     const signed = await getProductImageStorage().createUpload(path);
     return { path, uploadUrl: signed.signedUrl };
   } catch {
     serverLog.error("product_image.upload_ticket_failed", { productId });
+    await repo.deleteUploadTickets([path]).catch(() => undefined);
     throw publicError("Could not start the upload. Please try again.", 503);
   }
 }
@@ -125,6 +235,20 @@ async function bestEffortRemove(paths: string[], event: string, productId: strin
     // Path is deliberately not logged: it embeds tenant and product ids.
     serverLog.warn(event, { productId, count: paths.length });
   }
+}
+
+/**
+ * Remove a rejected object AND its ticket. If the object cannot be deleted the
+ * ticket is kept, so the expiry sweep retries the deletion.
+ */
+async function discardUpload(path: string, event: string, productId: string): Promise<void> {
+  try {
+    await getProductImageStorage().remove([path]);
+  } catch {
+    serverLog.warn(event, { productId, count: 1 });
+    return;
+  }
+  await repo.deleteUploadTickets([path]).catch(() => undefined);
 }
 
 /**
@@ -147,6 +271,23 @@ export async function attachProductImage(
     throw publicError("The uploaded image could not be verified. Please try again.", 400);
   }
 
+  // Only an object this server issued a live ticket for can be attached.
+  let ticket;
+  try {
+    ticket = await repo.findLiveUploadTicket(
+      ctx.organizationId,
+      product.id,
+      path,
+      new Date().toISOString(),
+    );
+  } catch {
+    serverLog.error("product_image.ticket_lookup_failed", { productId });
+    throw publicError("Could not verify the upload. Please try again.", 503);
+  }
+  if (!ticket) {
+    throw publicError("The uploaded image could not be verified. Please try again.", 400);
+  }
+
   const storage = getProductImageStorage();
   const invalid = () =>
     publicError("The uploaded image could not be verified. Please try again.", 400);
@@ -161,12 +302,12 @@ export async function attachProductImage(
   if (!inspection) throw invalid();
 
   const declaredMime = mimeFromProductImagePath(path);
-  const realMime = sniffImageMime(inspection.head);
   const tooBig = inspection.sizeBytes > PRODUCT_IMAGE_MAX_BYTES || inspection.sizeBytes <= 0;
-  if (!declaredMime || realMime !== declaredMime || tooBig) {
-    // Wrong bytes for the claimed type (or oversize): delete the stray object
-    // and refuse. The product is untouched.
-    await bestEffortRemove([path], "product_image.reject_cleanup_failed", productId);
+  const structure = tooBig ? null : inspectImageStructure(inspection.head, inspection.sizeBytes);
+  if (!declaredMime || structure?.mime !== declaredMime || tooBig) {
+    // Wrong/truncated/spoofed bytes for the claimed type (or oversize): delete
+    // the stray object and refuse. The product is untouched.
+    await discardUpload(path, "product_image.reject_cleanup_failed", productId);
     throw publicError(
       tooBig ? "This image is too large." : "This file is not a valid JPEG, PNG or WebP image.",
       400,
@@ -181,10 +322,16 @@ export async function attachProductImage(
     // Save failed AFTER a successful upload: the product still points at its
     // previous image (if any). Drop the new object so it is not orphaned.
     serverLog.error("product_image.attach_failed", { productId });
-    await bestEffortRemove([path], "product_image.attach_cleanup_failed", productId);
+    await discardUpload(path, "product_image.attach_cleanup_failed", productId);
     throw publicError("Could not save the photo. Please try again.", 500);
   }
   if (!updated) throw publicError("Product not found", 404);
+
+  // The product references the object: consume the ticket. If this fails the
+  // sweep still cannot delete the object — it skips any referenced path.
+  await repo.deleteUploadTickets([path]).catch(() => {
+    serverLog.warn("product_image.ticket_consume_failed", { productId });
+  });
 
   // Only now — the row already references the new object — retire the old one.
   if (previousPath && previousPath !== path) {

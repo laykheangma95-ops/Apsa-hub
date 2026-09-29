@@ -49,15 +49,111 @@ const PRODUCT_A = "a0000000-0000-4000-8000-000000000001";
 const PRODUCT_B = "b0000000-0000-4000-8000-000000000001";
 const USER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
-const JPEG = new Uint8Array([
-  0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1,
-]);
-const PNG = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0, 0, 0, 0,
-]);
-const WEBP = new Uint8Array([
-  0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50, 0, 0, 0, 0,
-]);
+// ── Structurally valid minimal images (built, not captured) ─────────────────
+
+const bytes = (...parts: Array<number[] | Uint8Array>) => {
+  const out: number[] = [];
+  for (const p of parts) out.push(...p);
+  return new Uint8Array(out);
+};
+const be16 = (n: number) => [(n >> 8) & 0xff, n & 0xff];
+const be32 = (n: number) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+const le16 = (n: number) => [n & 0xff, (n >> 8) & 0xff];
+const le32 = (n: number) => [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff];
+const tag = (t: string) => Array.from(t, (c) => c.charCodeAt(0));
+
+function crc32(data: number[]): number {
+  let c = 0xffffffff;
+  for (const byte of data) {
+    c ^= byte;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function makeJpeg(w = 64, h = 48): Uint8Array {
+  const app0 = [0xff, 0xe0, ...be16(16), ...tag("JFIF"), 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof = [
+    0xff,
+    0xc0,
+    ...be16(17),
+    8,
+    ...be16(h),
+    ...be16(w),
+    3,
+    1,
+    0x22,
+    0,
+    2,
+    0x11,
+    1,
+    3,
+    0x11,
+    1,
+  ];
+  const sos = [0xff, 0xda, ...be16(12), 3, 1, 0, 2, 0x11, 3, 0x11, 0, 63, 0];
+  return bytes([0xff, 0xd8], app0, sof, sos, [0x12, 0x34], [0xff, 0xd9]);
+}
+
+function makePng(w = 64, h = 48, opts: { badCrc?: boolean } = {}): Uint8Array {
+  const ihdr = [...tag("IHDR"), ...be32(w), ...be32(h), 8, 2, 0, 0, 0];
+  const crc = crc32(ihdr) ^ (opts.badCrc ? 1 : 0);
+  const idat = [...tag("IDAT"), 0x78, 0x9c];
+  return bytes(
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    be32(13),
+    ihdr,
+    be32(crc >>> 0),
+    be32(2),
+    idat,
+    be32(crc32(idat)),
+    be32(0),
+    tag("IEND"),
+    be32(crc32(tag("IEND"))),
+  );
+}
+
+function riff(...chunks: number[][]): Uint8Array {
+  const body = chunks.flat();
+  return bytes(tag("RIFF"), le32(4 + body.length), tag("WEBP"), body);
+}
+const vp8Chunk = (w: number, h: number) => [
+  ...tag("VP8 "),
+  ...le32(10),
+  0x10,
+  0,
+  0,
+  0x9d,
+  0x01,
+  0x2a,
+  ...le16(w),
+  ...le16(h),
+];
+const vp8lChunk = (w: number, h: number) => [
+  ...tag("VP8L"),
+  ...le32(5),
+  0x2f,
+  ...le32((w - 1) | ((h - 1) << 14)),
+];
+const vp8xChunk = (w: number, h: number, flags = 0) => [
+  ...tag("VP8X"),
+  ...le32(10),
+  flags,
+  0,
+  0,
+  0,
+  (w - 1) & 0xff,
+  ((w - 1) >> 8) & 0xff,
+  ((w - 1) >> 16) & 0xff,
+  (h - 1) & 0xff,
+  ((h - 1) >> 8) & 0xff,
+  ((h - 1) >> 16) & 0xff,
+];
+const makeWebp = (w = 64, h = 48) => riff(vp8Chunk(w, h));
+
+const JPEG = makeJpeg();
+const PNG = makePng();
+const WEBP = makeWebp();
 const SVG = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>');
 const HTML = new TextEncoder().encode("<!doctype html><script>alert(1)</script>");
 const EXE = new Uint8Array([0x4d, 0x5a, 0x90, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0xff, 0xff, 0, 0]);
@@ -92,12 +188,15 @@ type Row = Record<string, unknown>;
 class FakeDb {
   products: Row[] = [];
   variants: Row[] = [];
+  uploads: Row[] = [];
+  failTicketWrites = false;
   failNextProductUpdate = false;
   log: string[] = [];
 
   private table(name: string): Row[] {
     if (name === "products") return this.products;
     if (name === "product_variants") return this.variants;
+    if (name === "product_image_uploads") return this.uploads;
     return [];
   }
 
@@ -105,8 +204,18 @@ class FakeDb {
     const rows = this.table(name);
     const filters: Array<(r: Row) => boolean> = [];
     let patch: Row | null = null;
+    let deleting = false;
+    let limitN = Infinity;
     const matches = () => rows.filter((r) => filters.every((f) => f(r)));
     const settle = () => {
+      if (name === "product_image_uploads" && this.failTicketWrites) {
+        return { data: null, error: { message: "ticket db down" } };
+      }
+      if (deleting) {
+        const hit = matches();
+        for (const r of hit) rows.splice(rows.indexOf(r), 1);
+        return { data: null, error: null };
+      }
       if (patch) {
         if (name === "products" && this.failNextProductUpdate) {
           this.failNextProductUpdate = false;
@@ -117,12 +226,36 @@ class FakeDb {
         if (name === "products") this.log.push("db.update");
         return { data: hit.map((r) => ({ ...r })), error: null };
       }
-      return { data: matches().map((r) => ({ ...r })), error: null };
+      return {
+        data: matches()
+          .slice(0, limitN)
+          .map((r) => ({ ...r })),
+        error: null,
+      };
     };
     const q: Record<string, unknown> = {
       select: () => q,
       update: (p: Row) => {
         patch = p;
+        return q;
+      },
+      insert: (row: Row) => {
+        if (name === "product_image_uploads" && this.failTicketWrites) {
+          return Promise.resolve({ data: null, error: { message: "ticket db down" } });
+        }
+        rows.push({ id: `t${rows.length + 1}-${Math.random()}`, ...row });
+        return Promise.resolve({ data: null, error: null });
+      },
+      delete: () => {
+        deleting = true;
+        return q;
+      },
+      gt: (col: string, val: unknown) => {
+        filters.push((r) => String(r[col]) > String(val));
+        return q;
+      },
+      lte: (col: string, val: unknown) => {
+        filters.push((r) => String(r[col]) <= String(val));
         return q;
       },
       eq: (col: string, val: unknown) => {
@@ -134,7 +267,10 @@ class FakeDb {
         return q;
       },
       order: () => q,
-      limit: () => q,
+      limit: (n: number) => {
+        limitN = n;
+        return q;
+      },
       range: () => q,
       single: async () => {
         const res = settle();
@@ -207,6 +343,7 @@ let db: FakeDb;
 let storage: FakeStorage;
 let restoreDb: () => void;
 let restoreStorage: () => void;
+let restoreLimiter: () => void;
 
 async function svc() {
   return import("../server/products/image-service");
@@ -220,15 +357,18 @@ beforeEach(async () => {
   const st = await import("../server/products/image-storage");
   restoreDb = repo.setProductRepositoryDbForTests(db);
   restoreStorage = st.setProductImageStorageForTests(storage);
-  const origUpdate = db.from.bind(db);
   // Record storage/db ordering in one timeline.
   db.log = storage.events;
-  void origUpdate;
+  // A fresh in-memory limiter store per test stands in for the durable one.
+  const lim = await import("../server/rate-limit/limiter");
+  const store = await import("../server/rate-limit/store");
+  restoreLimiter = lim.setPrimaryRateLimitStore(new store.MemoryRateLimitStore());
 });
 
 afterEach(() => {
   restoreDb();
   restoreStorage();
+  restoreLimiter();
 });
 
 const rowOf = (id: string) => db.products.find((r) => r.id === id)!;
@@ -943,5 +1083,610 @@ describe("G. migration 048 and locales", () => {
       (km as unknown as { catalog: { image: unknown } }).catalog.image,
     );
     expect(/[฀-๿]/.test(khImage)).toBe(false);
+  });
+});
+
+// ══ H. Signed-upload abuse bounds ═════════════════════════════════════════════
+
+const userId = (n: number) => `c0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const as = (ctx: AuthorizationContext, n: number) =>
+  ({ ...ctx, userId: userId(n) }) as AuthorizationContext;
+const askTicket = async (ctx: AuthorizationContext, productId = PRODUCT_A) =>
+  (await svc()).requestProductImageUpload(ctx, productId, {
+    mimeType: "image/jpeg",
+    sizeBytes: 1000,
+  });
+
+describe("H. signed-upload issuance limits", () => {
+  it("limits one member per window (durable rule, fails with 429)", async () => {
+    const { RATE_LIMITS } = await import("../server/rate-limit/policies");
+    const ctx = editor(ORG_A);
+    for (let i = 0; i < RATE_LIMITS.productImageUploadMember.limit; i++) {
+      await askTicket(ctx);
+      db.uploads.length = 0; // isolate the rate limit from the outstanding cap
+    }
+    await expect(askTicket(ctx)).rejects.toMatchObject({ statusCode: 429 });
+    expect(db.uploads.length).toBe(0); // the refused request recorded nothing
+  });
+
+  it("limits the organization in aggregate: many staff cannot bypass the member limit", async () => {
+    const { RATE_LIMITS } = await import("../server/rate-limit/policies");
+    const orgLimit = RATE_LIMITS.productImageUploadOrganization.limit;
+    const perMember = RATE_LIMITS.productImageUploadMember.limit;
+    expect(orgLimit).toBeGreaterThan(perMember); // several staff fit …
+    let issued = 0;
+    for (let member = 1; issued < orgLimit; member++) {
+      for (let k = 0; k < perMember && issued < orgLimit; k++) {
+        await askTicket(as(editor(ORG_A), member));
+        db.uploads.length = 0;
+        issued++;
+      }
+    }
+    // … a fresh member who never hit their own limit is still refused.
+    await expect(askTicket(as(editor(ORG_A), 999))).rejects.toMatchObject({ statusCode: 429 });
+  });
+
+  it("does not affect a different organization", async () => {
+    const { RATE_LIMITS } = await import("../server/rate-limit/policies");
+    for (let i = 0; i < RATE_LIMITS.productImageUploadMember.limit; i++) {
+      await askTicket(editor(ORG_A));
+      db.uploads.length = 0;
+    }
+    await expect(askTicket(editor(ORG_A))).rejects.toMatchObject({ statusCode: 429 });
+    const other = await askTicket(as(editor(ORG_B), 2), PRODUCT_B);
+    expect(other.path.startsWith(`${ORG_B}/`)).toBe(true);
+  });
+
+  it("issues a unique, ticketed path per request and records each one", async () => {
+    const a = await askTicket(editor(ORG_A));
+    const b = await askTicket(editor(ORG_A));
+    expect(a.path).not.toBe(b.path);
+    expect(db.uploads.map((r) => r.object_path).sort()).toEqual([a.path, b.path].sort());
+    expect(db.uploads[0]).toMatchObject({
+      organization_id: ORG_A,
+      product_id: PRODUCT_A,
+      issued_by: USER,
+    });
+  });
+
+  it("caps outstanding unattached tickets per member, then per organization", async () => {
+    const s = await svc();
+    const ctx = editor(ORG_A);
+    for (let i = 0; i < s.PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER; i++) await askTicket(ctx);
+    await expect(askTicket(ctx)).rejects.toMatchObject({ statusCode: 429 });
+    // Other members still have their own allowance until the org cap is reached.
+    let member = 2;
+    while (db.uploads.length < s.PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION) {
+      const c = as(editor(ORG_A), member++);
+      for (
+        let k = 0;
+        k < s.PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER &&
+        db.uploads.length < s.PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION;
+        k++
+      ) {
+        await askTicket(c);
+      }
+    }
+    await expect(askTicket(as(editor(ORG_A), 500))).rejects.toMatchObject({ statusCode: 429 });
+    // A different tenant is unaffected.
+    await askTicket(as(editor(ORG_B), 2), PRODUCT_B);
+  });
+
+  it("FAILS CLOSED when the durable limiter is unavailable (no ticket, no signed URL)", async () => {
+    const lim = await import("../server/rate-limit/limiter");
+    const { RateLimitBackendError } = await import("../server/rate-limit/store");
+    const restore = lim.setPrimaryRateLimitStore({
+      name: "postgres",
+      hit: async () => {
+        throw new RateLimitBackendError("down");
+      },
+    } as never);
+    try {
+      let signed = 0;
+      const orig = storage.createUpload.bind(storage);
+      storage.createUpload = async (p: string) => {
+        signed++;
+        return orig(p);
+      };
+      await expect(askTicket(editor(ORG_A))).rejects.toMatchObject({ statusCode: 503 });
+      expect(signed).toBe(0);
+      expect(db.uploads.length).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("uses the fail-closed policy and documents its rules", async () => {
+    const { BACKEND_FAILURE_POLICY, RATE_LIMITS } = await import("../server/rate-limit/policies");
+    expect(BACKEND_FAILURE_POLICY.productImageUpload).toBe("fail_closed");
+    expect(RATE_LIMITS.productImageUploadMember.id).toBe("products.image_upload.member");
+    expect(RATE_LIMITS.productImageUploadOrganization.id).toBe(
+      "products.image_upload.organization",
+    );
+  });
+
+  it("permission is checked before the limiter or storage is touched", async () => {
+    await expect(askTicket(viewer(ORG_A))).rejects.toBeInstanceOf(ForbiddenError);
+    expect(db.uploads.length).toBe(0);
+  });
+
+  it("no ticket is left if the URL cannot be signed; a ticket-write failure signs nothing", async () => {
+    const orig = storage.createUpload.bind(storage);
+    storage.createUpload = async () => {
+      throw new Error("sign down");
+    };
+    await expect(askTicket(editor(ORG_A))).rejects.toMatchObject({ statusCode: 503 });
+    expect(db.uploads.length).toBe(0);
+    storage.createUpload = orig;
+
+    let signed = 0;
+    storage.createUpload = async (p: string) => {
+      signed++;
+      return orig(p);
+    };
+    db.failTicketWrites = true;
+    await expect(askTicket(editor(ORG_A))).rejects.toMatchObject({ statusCode: 503 });
+    expect(signed).toBe(0);
+  });
+});
+
+// ══ I. Abandoned uploads: tickets + bounded sweep ═════════════════════════════
+
+const expire = (path: string) => {
+  const row = db.uploads.find((r) => r.object_path === path)!;
+  row.expires_at = new Date(Date.now() - 1000).toISOString();
+};
+
+describe("I. abandoned-upload tickets and cleanup", () => {
+  it("attach requires a live ticket for exactly this org + product + path", async () => {
+    const s = await svc();
+    const ctx = editor(ORG_A);
+    // Well-formed owned path the server never issued.
+    const forged = buildProductImagePath(
+      ORG_A,
+      PRODUCT_A,
+      "d0000000-0000-4000-8000-0000000000aa",
+      "image/jpeg",
+    );
+    storage.put(forged, JPEG);
+    await expect(s.attachProductImage(ctx, PRODUCT_A, forged)).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(rowOf(PRODUCT_A).image_path).toBeNull();
+
+    // An expired ticket no longer authorises attach.
+    const up = await uploadFor(ctx, PRODUCT_A, JPEG);
+    expire(up.ticket.path);
+    await expect(up.attach()).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("attach consumes the ticket", async () => {
+    const up = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    expect(db.uploads.length).toBe(1);
+    await up.attach();
+    expect(db.uploads.length).toBe(0);
+    expect(rowOf(PRODUCT_A).image_path).toBe(up.ticket.path);
+  });
+
+  it("a rejected (spoofed) upload is deleted together with its ticket", async () => {
+    const up = await uploadFor(editor(ORG_A), PRODUCT_A, new Uint8Array([0xff, 0xd8, 0xff]));
+    await expect(up.attach()).rejects.toMatchObject({ statusCode: 400 });
+    expect(storage.objects.has(up.ticket.path)).toBe(false);
+    expect(db.uploads.length).toBe(0);
+  });
+
+  it("an abandoned upload expires and the next ticket request removes object and row", async () => {
+    const abandoned = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    expect(storage.objects.has(abandoned.ticket.path)).toBe(true);
+    expire(abandoned.ticket.path);
+    const fresh = await askTicket(editor(ORG_A));
+    expect(storage.objects.has(abandoned.ticket.path)).toBe(false);
+    expect(db.uploads.map((r) => r.object_path)).toEqual([fresh.path]);
+  });
+
+  it("an unexpired ticket's object is never swept", async () => {
+    const pending = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    await askTicket(editor(ORG_A));
+    expect(storage.objects.has(pending.ticket.path)).toBe(true);
+    expect(db.uploads.some((r) => r.object_path === pending.ticket.path)).toBe(true);
+  });
+
+  it("never deletes an attached/current image, even if a stale ticket row survives", async () => {
+    const up = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    await up.attach();
+    // Simulate a failed consume: an expired ticket row for the CURRENT image.
+    db.uploads.push({
+      id: "stale",
+      organization_id: ORG_A,
+      product_id: PRODUCT_A,
+      issued_by: USER,
+      object_path: up.ticket.path,
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    const s = await svc();
+    const out = await s.sweepExpiredProductImageUploads();
+    expect(out).toEqual({ removed: 0, released: 1 });
+    expect(storage.objects.has(up.ticket.path)).toBe(true);
+    expect(rowOf(PRODUCT_A).image_path).toBe(up.ticket.path);
+    expect(db.uploads.length).toBe(0);
+  });
+
+  it("never touches another tenant's attached image or live ticket", async () => {
+    const b = await uploadFor(editor(ORG_B), PRODUCT_B, JPEG);
+    await b.attach();
+    const bPending = await uploadFor(as(editor(ORG_B), 2), PRODUCT_B, PNG, "image/png");
+    const a = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    expire(a.ticket.path);
+    await askTicket(editor(ORG_A)); // org A's request sweeps org A's abandoned upload …
+    expect(storage.objects.has(a.ticket.path)).toBe(false);
+    expect(storage.objects.has(b.ticket.path)).toBe(true); // … and only that.
+    expect(rowOf(PRODUCT_B).image_path).toBe(b.ticket.path);
+    expect(storage.objects.has(bPending.ticket.path)).toBe(true);
+    expect(db.uploads.some((r) => r.object_path === bPending.ticket.path)).toBe(true);
+  });
+
+  it("refuses to delete a ticket row whose path is not its own org/product shape", async () => {
+    const victim = await uploadFor(editor(ORG_B), PRODUCT_B, JPEG);
+    await victim.attach();
+    db.uploads.push({
+      id: "poisoned",
+      organization_id: ORG_A,
+      product_id: PRODUCT_A,
+      issued_by: USER,
+      object_path: victim.ticket.path, // org B's object under an org A ticket
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    await (await svc()).sweepExpiredProductImageUploads();
+    expect(storage.objects.has(victim.ticket.path)).toBe(true);
+  });
+
+  it("bounds the sweep per invocation", async () => {
+    const s = await svc();
+    const paths: string[] = [];
+    for (let i = 0; i < s.PRODUCT_IMAGE_SWEEP_BATCH + 5; i++) {
+      paths.push((await uploadFor(as(editor(ORG_A), 100 + i), PRODUCT_A, JPEG)).ticket.path);
+    }
+    paths.forEach(expire); // expire together so no request sweeps them early
+    const first = await s.sweepExpiredProductImageUploads();
+    expect(first.removed).toBe(s.PRODUCT_IMAGE_SWEEP_BATCH);
+    expect(db.uploads.length).toBe(5);
+    const second = await s.sweepExpiredProductImageUploads();
+    expect(second.removed).toBe(5);
+    expect(db.uploads.length).toBe(0);
+  });
+
+  it("a failing sweep never blocks ticket issuance, and the tickets are kept for retry", async () => {
+    const abandoned = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    expire(abandoned.ticket.path);
+    storage.failRemove = true;
+    const t = await askTicket(editor(ORG_A));
+    expect(t.uploadUrl).toContain("storage.test");
+    expect(db.uploads.some((r) => r.object_path === abandoned.ticket.path)).toBe(true);
+    storage.failRemove = false;
+    await (await svc()).sweepExpiredProductImageUploads();
+    expect(storage.objects.has(abandoned.ticket.path)).toBe(false);
+  });
+
+  it("the ticket outlives the signed upload token (2 h) so nothing can land after a sweep", async () => {
+    const s = await svc();
+    expect(s.PRODUCT_IMAGE_TICKET_TTL_SECONDS).toBeGreaterThan(2 * 60 * 60);
+  });
+});
+
+// ══ J. Ranged-GET size verification fails closed ══════════════════════════════
+
+describe("J. Range / Content-Range verification", () => {
+  const PROBE = 128 * 1024;
+  const res = (status: number, body: Uint8Array | null, headers: Record<string, string> = {}) =>
+    new Response(body, { status, headers });
+  const evaluate = async (r: Response) =>
+    (await import("../server/products/image-storage")).evaluateProbeResponse(r);
+  const body = (n: number) => new Uint8Array(n).fill(7);
+
+  it("206 + valid Content-Range: size is the range TOTAL, not the body length", async () => {
+    const out = await evaluate(
+      res(206, body(PROBE), {
+        "content-range": `bytes 0-${PROBE - 1}/2000000`,
+        "content-length": String(PROBE),
+      }),
+    );
+    expect(out?.sizeBytes).toBe(2_000_000);
+    expect(out?.head.length).toBe(PROBE);
+  });
+
+  it("206 + valid range for an object smaller than the probe", async () => {
+    const out = await evaluate(res(206, body(100), { "content-range": "bytes 0-99/100" }));
+    expect(out).toMatchObject({ sizeBytes: 100 });
+    expect(out?.head.length).toBe(100);
+  });
+
+  it("206 with NO Content-Range fails closed — Content-Length is never the object size", async () => {
+    await expect(
+      evaluate(res(206, body(PROBE), { "content-length": String(PROBE) })),
+    ).rejects.toThrow();
+    await expect(evaluate(res(206, body(100), { "content-length": "100" }))).rejects.toThrow();
+  });
+
+  it("206 with malformed Content-Range fails closed", async () => {
+    for (const cr of [
+      "garbage",
+      "bytes 0-99/abc",
+      "bytes 0-/100",
+      "bytes -99/100",
+      "items 0-99/100",
+      "bytes 0-99/-5",
+      "bytes 0-99/99999999999999999999",
+    ]) {
+      await expect(evaluate(res(206, body(100), { "content-range": cr }))).rejects.toThrow();
+    }
+  });
+
+  it("206 with a wildcard / unknown total fails closed", async () => {
+    await expect(
+      evaluate(res(206, body(100), { "content-range": "bytes 0-99/*" })),
+    ).rejects.toThrow();
+    await expect(evaluate(res(206, body(0), { "content-range": "bytes */100" }))).rejects.toThrow();
+  });
+
+  it("206 with contradictory values fails closed", async () => {
+    const bad: Array<[Uint8Array, Record<string, string>]> = [
+      [body(100), { "content-range": "bytes 5-104/1000" }], // does not start at 0
+      [body(100), { "content-range": "bytes 0-99/50" }], // end beyond total
+      [body(100), { "content-range": "bytes 0-99/99" }], // end == total
+      [body(50), { "content-range": "bytes 0-49/100" }], // shorter than asked, not clamped
+      [body(100), { "content-range": "bytes 0-99/100", "content-length": "7" }], // header vs range
+      [body(100), { "content-range": `bytes 0-${PROBE * 2 - 1}/9999999` }], // more than asked
+      [body(60), { "content-range": "bytes 0-99/100" }], // body shorter than range
+      [body(0), { "content-range": "bytes 0-99/0" }], // zero total
+    ];
+    for (const [b, h] of bad) await expect(evaluate(res(206, b, h))).rejects.toThrow();
+  });
+
+  it("200 + valid Content-Length: whole-object semantics", async () => {
+    const out = await evaluate(res(200, body(300), { "content-length": "300" }));
+    expect(out).toMatchObject({ sizeBytes: 300 });
+    expect(out?.head.length).toBe(300);
+  });
+
+  it("200 large object: reads only the probe, size from Content-Length", async () => {
+    const out = await evaluate(
+      res(200, body(PROBE + 500), { "content-length": String(PROBE + 500) }),
+    );
+    expect(out?.sizeBytes).toBe(PROBE + 500);
+    expect(out?.head.length).toBe(PROBE);
+  });
+
+  it("200 with missing / invalid length or a content-encoding fails closed", async () => {
+    const chunked = new Response(
+      new ReadableStream({
+        start(c) {
+          c.enqueue(body(10));
+          c.close();
+        },
+      }),
+      { status: 200 },
+    );
+    chunked.headers.delete("content-length");
+    await expect(evaluate(chunked)).rejects.toThrow();
+    await expect(evaluate(res(200, body(10), { "content-length": "abc" }))).rejects.toThrow();
+    await expect(
+      evaluate(res(200, body(10), { "content-length": "10", "content-encoding": "gzip" })),
+    ).rejects.toThrow();
+  });
+
+  it("an oversize total is reported faithfully so the service can refuse it", async () => {
+    const out = await evaluate(
+      res(206, body(PROBE), {
+        "content-range": `bytes 0-${PROBE - 1}/${PRODUCT_IMAGE_MAX_BYTES + 1}`,
+      }),
+    );
+    expect(out?.sizeBytes).toBe(PRODUCT_IMAGE_MAX_BYTES + 1);
+  });
+
+  it("missing object / empty object → null; other statuses fail closed", async () => {
+    expect(await evaluate(res(404, null))).toBeNull();
+    expect(await evaluate(res(400, null))).toBeNull();
+    expect(await evaluate(res(416, null, { "content-range": "bytes */0" }))).toBeNull();
+    for (const status of [201, 204, 301, 403, 500, 503]) {
+      await expect(evaluate(res(status, null))).rejects.toThrow();
+    }
+  });
+
+  it("the service maps an unverifiable response to a retryable 503 and keeps the old image", async () => {
+    const first = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    await first.attach();
+    const next = await uploadFor(editor(ORG_A), PRODUCT_A, PNG, "image/png");
+    storage.failInspect = true;
+    await expect(next.attach()).rejects.toMatchObject({ statusCode: 503 });
+    expect(rowOf(PRODUCT_A).image_path).toBe(first.ticket.path);
+  });
+
+  it("hosted Range behaviour stays a documented staging gate", () => {
+    expect(read("docs/PRODUCT_IMAGES.md")).toMatch(/Range/);
+    expect(read("docs/PRODUCT_IMAGES.md")).toMatch(/Pending staging/i);
+  });
+});
+
+// ══ K. Structural image validation ════════════════════════════════════════════
+
+describe("K. structural image validation", () => {
+  const inspect = async (b: Uint8Array, total = b.length) =>
+    (await import("../lib/product-image")).inspectImageStructure(b, total);
+
+  it("accepts valid minimal JPEG, PNG and WebP (VP8, VP8L, VP8X) and reports dimensions", async () => {
+    expect(await inspect(makeJpeg(320, 200))).toEqual({
+      mime: "image/jpeg",
+      width: 320,
+      height: 200,
+    });
+    expect(await inspect(makePng(1600, 900))).toEqual({
+      mime: "image/png",
+      width: 1600,
+      height: 900,
+    });
+    expect(await inspect(makeWebp(640, 480))).toEqual({
+      mime: "image/webp",
+      width: 640,
+      height: 480,
+    });
+    expect(await inspect(riff(vp8lChunk(300, 200)))).toEqual({
+      mime: "image/webp",
+      width: 300,
+      height: 200,
+    });
+    expect(await inspect(riff(vp8xChunk(50, 40), vp8Chunk(50, 40)))).toEqual({
+      mime: "image/webp",
+      width: 50,
+      height: 40,
+    });
+  });
+
+  it("accepts a JPEG whose frame header follows large metadata segments", async () => {
+    const exif = [0xff, 0xe1, ...be16(60000), ...new Array(59998).fill(0)];
+    const j = makeJpeg();
+    const withExif = bytes([0xff, 0xd8], exif, j.subarray(2));
+    expect((await inspect(withExif))?.mime).toBe("image/jpeg");
+  });
+
+  it("rejects truncated / header-only JPEG", async () => {
+    const j = makeJpeg();
+    expect(await inspect(new Uint8Array([0xff, 0xd8, 0xff]))).toBeNull(); // 3-byte signature
+    expect(await inspect(j.subarray(0, 2 + 18))).toBeNull(); // SOI + APP0 only
+    expect(await inspect(j.subarray(0, 12))).toBeNull(); // cut inside APP0
+    expect(await inspect(j.subarray(0, 2 + 18 + 10))).toBeNull(); // cut inside SOF
+    expect(await inspect(bytes([0xff, 0xd8, 0xff, 0xd9]))).toBeNull(); // EOI, no frame
+    expect(await inspect(bytes([0xff, 0xd8, 0xff, 0xda, ...be16(2)]))).toBeNull(); // scan before frame
+  });
+
+  it("rejects a JPEG with a malformed segment structure", async () => {
+    expect(await inspect(bytes([0xff, 0xd8, 0xff, 0xe0, ...be16(1), 0, 0]))).toBeNull(); // length < 2
+    expect(await inspect(bytes([0xff, 0xd8, 0xff, 0xe0, ...be16(500), 0, 0, 0]))).toBeNull(); // runs past data
+    expect(await inspect(bytes([0xff, 0xd8, 0x00, 0x11, 0x22, 0x33]))).toBeNull(); // not at a marker
+    const sofShort = bytes([0xff, 0xd8, 0xff, 0xc0, ...be16(8), 8, ...be16(10), ...be16(10), 3]);
+    expect(await inspect(sofShort)).toBeNull(); // 3 components declared, none present
+  });
+
+  it("rejects truncated / header-only PNG", async () => {
+    const p = makePng();
+    expect(await inspect(p.subarray(0, 8))).toBeNull(); // signature only
+    expect(await inspect(p.subarray(0, 20))).toBeNull(); // truncated IHDR
+    expect(await inspect(p.subarray(0, 32))).toBeNull(); // missing last CRC byte
+    expect(await inspect(makePng(64, 48, { badCrc: true }))).toBeNull();
+    const wrongLen = new Uint8Array(p);
+    wrongLen[11] = 12; // IHDR length 12
+    expect(await inspect(wrongLen)).toBeNull();
+    const notIhdr = new Uint8Array(p);
+    notIhdr[12] = 0x58;
+    expect(await inspect(notIhdr)).toBeNull();
+  });
+
+  it("rejects truncated / header-only / malformed WebP", async () => {
+    const w = makeWebp();
+    expect(await inspect(bytes(tag("RIFF"), le32(4), tag("WEBP")))).toBeNull(); // RIFF+WEBP only
+    expect(await inspect(w.subarray(0, 12))).toBeNull();
+    expect(await inspect(w.subarray(0, 24))).toBeNull(); // chunk header, payload cut
+    expect(await inspect(w, w.length - 4)).toBeNull(); // container claims more than exists
+    expect(await inspect(riff([...tag("VP8 "), ...le32(9999), 0, 0, 0]))).toBeNull(); // chunk past RIFF
+    expect(await inspect(riff([...tag("JUNK"), ...le32(4), 1, 2, 3, 4]))).toBeNull(); // no image chunk
+    const badStart = new Uint8Array(w);
+    badStart[23] = 0; // corrupt VP8 start code
+    expect(await inspect(badStart)).toBeNull();
+    expect(await inspect(riff(vp8xChunk(50, 40)))).toBeNull(); // extended header, no payload
+    expect(await inspect(riff(vp8xChunk(50, 40, 0x02), vp8Chunk(50, 40)))).toBeNull(); // animated
+    expect(await inspect(riff(vp8xChunk(50, 40), vp8Chunk(60, 40)))).toBeNull(); // canvas mismatch
+  });
+
+  it("rejects a valid signature followed by an arbitrary fake body", async () => {
+    const fake = new TextEncoder().encode("<html><script>alert(1)</script></html>".repeat(20));
+    expect(await inspect(bytes([0xff, 0xd8, 0xff], fake))).toBeNull();
+    expect(await inspect(bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], fake))).toBeNull();
+    expect(await inspect(bytes(tag("RIFF"), le32(fake.length), tag("WEBP"), fake))).toBeNull();
+    expect(await inspect(SVG)).toBeNull();
+    expect(await inspect(HTML)).toBeNull();
+    expect(await inspect(EXE)).toBeNull();
+  });
+
+  it("enforces dimension and pixel bounds (zero, absurd, decompression-bomb)", async () => {
+    const lib = await import("../lib/product-image");
+    expect(lib.PRODUCT_IMAGE_MAX_DIMENSION).toBe(8192);
+    expect(lib.PRODUCT_IMAGE_MAX_PIXELS).toBe(40_000_000);
+    expect(await inspect(makePng(0, 10))).toBeNull();
+    expect(await inspect(makePng(10, 0))).toBeNull();
+    expect(await inspect(makeJpeg(0, 10))).toBeNull();
+    expect(await inspect(makeJpeg(10, 0))).toBeNull();
+    expect(await inspect(makePng(8193, 10))).toBeNull(); // over per-edge bound
+    expect(await inspect(makePng(0x7fffffff, 0x7fffffff))).toBeNull();
+    expect(await inspect(makeJpeg(8000, 8000))).toBeNull(); // 64 MP
+    expect(await inspect(riff(vp8lChunk(16384, 16384)))).toBeNull();
+    expect(await inspect(makeJpeg(4032, 3024))).toMatchObject({ width: 4032, height: 3024 }); // 12 MP phone
+    expect(await inspect(makePng(8192, 4096))).not.toBeNull(); // at the bounds (33.5 MP)
+  });
+
+  it("the service refuses truncated and spoofed uploads and keeps the current image", async () => {
+    const first = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
+    await first.attach();
+    const cases: Array<[Uint8Array, string]> = [
+      [new Uint8Array([0xff, 0xd8, 0xff]), "image/jpeg"],
+      [PNG.subarray(0, 8), "image/png"],
+      [PNG.subarray(0, 20), "image/png"],
+      [bytes(tag("RIFF"), le32(4), tag("WEBP")), "image/webp"],
+      [bytes([0xff, 0xd8, 0xff], HTML), "image/jpeg"],
+    ];
+    for (const [b, mime] of cases) {
+      const bad = await uploadFor(editor(ORG_A), PRODUCT_A, b, mime);
+      await expect(bad.attach()).rejects.toMatchObject({ statusCode: 400 });
+      expect(storage.objects.has(bad.ticket.path)).toBe(false);
+      expect(rowOf(PRODUCT_A).image_path).toBe(first.ticket.path);
+    }
+    // Declared type must match the structure actually found.
+    const mismatch = await uploadFor(editor(ORG_A), PRODUCT_A, PNG, "image/jpeg");
+    await expect(mismatch.attach()).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("valid uploads still attach (JPEG, PNG, WebP)", async () => {
+    for (const [b, mime] of [
+      [JPEG, "image/jpeg"],
+      [PNG, "image/png"],
+      [WEBP, "image/webp"],
+    ] as const) {
+      const up = await uploadFor(editor(ORG_A), PRODUCT_A, b, mime);
+      await up.attach();
+      expect(rowOf(PRODUCT_A).image_path).toBe(up.ticket.path);
+    }
+  });
+});
+
+// ══ L. Migration 049 + docs ═══════════════════════════════════════════════════
+
+describe("L. migration 049 and documentation", () => {
+  const sql = () => read("supabase/migrations/049_product_image_uploads.sql");
+  const code = () =>
+    sql()
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+
+  it("is RLS-only: no client policy or grant, no SECURITY DEFINER", () => {
+    expect(code()).toMatch(/ENABLE ROW LEVEL SECURITY/);
+    expect(code()).toMatch(
+      /REVOKE ALL ON public\.product_image_uploads FROM PUBLIC, anon, authenticated/,
+    );
+    expect(code()).not.toMatch(/CREATE POLICY/i);
+    expect(code()).not.toMatch(/SECURITY DEFINER/i);
+    expect(code()).not.toMatch(/GRANT[^;]*\b(anon|authenticated)\b/i);
+  });
+
+  it("pins the object path to the ticket's own org/product and indexes expiry + path", () => {
+    expect(code()).toMatch(/product_image_uploads_path_owned/);
+    expect(code()).toMatch(/UNIQUE INDEX[^;]*object_path/);
+    expect(code()).toMatch(/INDEX[^;]*\(expires_at\)/);
+    expect(code()).toMatch(/\(organization_id, issued_by, expires_at\)/);
+  });
+
+  it("docs state the storage-path exposure accurately", () => {
+    const doc = read("docs/PRODUCT_IMAGES.md");
+    expect(doc).not.toMatch(/storage path is never returned/i);
+    expect(doc).toMatch(/signed bearer URL/i);
+    expect(doc).toMatch(/not an authorization secret/i);
   });
 });

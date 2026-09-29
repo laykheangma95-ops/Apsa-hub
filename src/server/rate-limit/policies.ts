@@ -91,6 +91,18 @@ export const RATE_LIMITS = {
   paymentMutateMember: rule("payments.mutate.member", 60, 60),
   paymentReversalMember: rule("payments.reversal.member", 20, 60),
 
+  // ── Product images: cost-bearing upload authority ─────────────────────────
+  //
+  // Each ticket is a signed URL that lets the holder write up to 5 MiB to
+  // storage. A merchant setting up a catalogue adds a photo per product (and
+  // retries failed phone uploads): 60/hour per member is one a minute for an
+  // hour, 200/hour per organization is several staff doing that at once.
+  // Beyond that, someone is scripting storage writes. Outstanding (issued but
+  // not yet attached) tickets are capped separately in image-service.ts.
+
+  productImageUploadMember: rule("products.image_upload.member", 60, 60 * 60),
+  productImageUploadOrganization: rule("products.image_upload.organization", 200, 60 * 60),
+
   // ── Webhooks (future providers) ───────────────────────────────────────────
   /**
    * Per provider per client IP, before any signature work. SECONDARY only:
@@ -130,6 +142,10 @@ export const BACKEND_FAILURE_POLICY = {
   orderCreate: "memory_fallback",
   paymentMutation: "memory_fallback",
   financialReversal: "fail_closed",
+  // A signed upload URL is cost-bearing write authority; a per-instance memory
+  // limit would multiply by the instance count exactly when the database is
+  // struggling. Photos are optional: the merchant retries in a moment.
+  productImageUpload: "fail_closed",
   webhook: "memory_fallback",
 } as const satisfies Record<string, BackendFailurePolicy>;
 

@@ -184,6 +184,8 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | `orders.create.organization` | 600 | 60 s | organization | Ten cashiers at the member ceiling |
 | `payments.mutate.member` | 60 | 60 s | organization + member | Far above any real counter |
 | `payments.reversal.member` | 20 | 60 s | organization + member | Refund/reverse/correct are rare and audited |
+| `products.image_upload.member` | 60 | 3600 s | organization + member | Signed product-photo upload URLs (5 MiB write authority): one a minute for an hour |
+| `products.image_upload.organization` | 200 | 3600 s | organization | Several staff at once; stops bypassing the member bucket |
 | `webhooks.ip` | 600 | 60 s | provider + client IP (only when trusted) | Secondary to signature + replay checks |
 
 Every **auth** limit with an IP bucket also has an identity- or token-derived
@@ -261,6 +263,7 @@ window ends; no payment is lost or duplicated by the refusal.
 | Order creation | per-instance memory fallback | The POS must keep selling; idempotency (044) and authorization remain |
 | Routine payments (record, verify, attach evidence) | per-instance memory fallback | Bounded by permission, idempotency and the payment state machine |
 | **Refund, reversal, correction** | **FAIL CLOSED** — public retryable 503 `rate_limit_unavailable`, thrown right after the permission check, before any read, write, payment event or audit row; memory is never consulted | Money moving back out (or a financial record rewritten) must not be bounded only per instance, exactly when the database is struggling |
+| **Product-image upload URL issuance** | **FAIL CLOSED** — public retryable 503, before any ticket is recorded or URL signed | A signed URL is cost-bearing storage write authority; a per-instance limit would multiply by instance count. Photos are optional, so an outage costs a retry |
 | Webhooks (future) | per-instance memory fallback | The IP bucket is secondary; signature and replay checks are primary |
 
 Tested: with the durable store failing, refund / reversal / correction each

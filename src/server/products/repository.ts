@@ -198,6 +198,112 @@ export async function setProductImagePath(
   return data ? (data as ProductRow) : null;
 }
 
+// ── Signed-upload tickets (migration 049) ─────────────────────────────────────
+//
+// One row per signed upload URL issued. The row is permission to attach that
+// exact object path and the durable count of outstanding uploads; it is
+// deleted when the upload is attached or swept after it expires.
+
+export interface UploadTicketRow {
+  id: string;
+  organization_id: string;
+  product_id: string;
+  issued_by: string;
+  object_path: string;
+  expires_at: string;
+}
+
+const TICKET_COLUMNS = "id, organization_id, product_id, issued_by, object_path, expires_at";
+
+export async function insertUploadTicket(ticket: {
+  organizationId: string;
+  productId: string;
+  issuedBy: string;
+  objectPath: string;
+  expiresAt: string;
+}): Promise<void> {
+  const { error } = await db.from("product_image_uploads").insert({
+    organization_id: ticket.organizationId,
+    product_id: ticket.productId,
+    issued_by: ticket.issuedBy,
+    object_path: ticket.objectPath,
+    expires_at: ticket.expiresAt,
+  });
+  if (error) throw new Error(`insertUploadTicket: ${(error as { message: string }).message}`);
+}
+
+/** Outstanding (unexpired) tickets for an org, optionally one member; capped at `limit` rows. */
+export async function countOutstandingUploadTickets(
+  organizationId: string,
+  issuedBy: string | null,
+  nowIso: string,
+  limit: number,
+): Promise<number> {
+  let q = db
+    .from("product_image_uploads")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .gt("expires_at", nowIso);
+  if (issuedBy) q = q.eq("issued_by", issuedBy);
+  const { data, error } = await q.limit(limit);
+  if (error)
+    throw new Error(`countOutstandingUploadTickets: ${(error as { message: string }).message}`);
+  return (data as unknown[] | null)?.length ?? 0;
+}
+
+/** The live (unexpired) ticket for exactly this org + product + path, or null. */
+export async function findLiveUploadTicket(
+  organizationId: string,
+  productId: string,
+  objectPath: string,
+  nowIso: string,
+): Promise<UploadTicketRow | null> {
+  const { data, error } = await db
+    .from("product_image_uploads")
+    .select(TICKET_COLUMNS)
+    .eq("organization_id", organizationId)
+    .eq("product_id", productId)
+    .eq("object_path", objectPath)
+    .gt("expires_at", nowIso)
+    .limit(1);
+  if (error) throw new Error(`findLiveUploadTicket: ${(error as { message: string }).message}`);
+  return ((data as UploadTicketRow[] | null) ?? [])[0] ?? null;
+}
+
+export async function deleteUploadTickets(objectPaths: string[]): Promise<void> {
+  if (objectPaths.length === 0) return;
+  const { error } = await db.from("product_image_uploads").delete().in("object_path", objectPaths);
+  if (error) throw new Error(`deleteUploadTickets: ${(error as { message: string }).message}`);
+}
+
+/** Oldest expired tickets across all tenants, bounded. Server housekeeping only. */
+export async function listExpiredUploadTickets(
+  nowIso: string,
+  limit: number,
+): Promise<UploadTicketRow[]> {
+  const { data, error } = await db
+    .from("product_image_uploads")
+    .select(TICKET_COLUMNS)
+    .lte("expires_at", nowIso)
+    .order("expires_at", { ascending: true })
+    .limit(limit);
+  if (error) throw new Error(`listExpiredUploadTickets: ${(error as { message: string }).message}`);
+  return (data as UploadTicketRow[] | null) ?? [];
+}
+
+/** Which of these object paths are some product's CURRENT image. */
+export async function findReferencedImagePaths(objectPaths: string[]): Promise<Set<string>> {
+  if (objectPaths.length === 0) return new Set();
+  const { data, error } = await db
+    .from("products")
+    .select("image_path")
+    .in("image_path", objectPaths);
+  if (error) throw new Error(`findReferencedImagePaths: ${(error as { message: string }).message}`);
+  return new Set(
+    ((data as Array<{ image_path: string | null }>) ?? []).map((r) => r.image_path as string),
+  );
+}
+
 export async function updateProduct(
   organizationId: string,
   productId: string,
