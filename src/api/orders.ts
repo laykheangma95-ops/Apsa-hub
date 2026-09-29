@@ -52,6 +52,17 @@ const orderLineSchema = z.object({
   productId: z.string().uuid("Invalid product ID").optional(),
 });
 
+/**
+ * Optional order shipping destination snapshot (migration 047). These are
+ * loosely bounded here; the authoritative validation/normalization (non-blank
+ * when supplied, phone shape, no markup) is the service's — never the client's.
+ */
+const shippingSnapshotSchema = z.object({
+  name: z.string().max(500).nullish(),
+  phone: z.string().max(100).nullish(),
+  address: z.string().max(2000).nullish(),
+});
+
 // ── Internal helper: resolve session + organization ────────────────────────────
 // organizationId is NEVER accepted from the caller — always derived from DB membership.
 
@@ -100,6 +111,9 @@ export const createOrderFn = createServerFn()
         idempotencyKey: z
           .string()
           .regex(/^[A-Za-z0-9_-]{16,128}$/, "A valid idempotency key is required"),
+        // Optional order shipping destination — snapshotted onto the order and
+        // folded into the idempotency fingerprint server-side (migration 047).
+        shipping: shippingSnapshotSchema.optional(),
       })
       .parse(data),
   )
@@ -119,7 +133,30 @@ export const createOrderFn = createServerFn()
       sourceConversationRef: data.sourceConversationRef ?? null,
       deliveryMinor: data.deliveryMinor,
       idempotencyKey: data.idempotencyKey,
+      ...(data.shipping ? { shipping: data.shipping } : {}),
     });
+  });
+
+// ── updateOrderShippingFn ───────────────────────────────────────────────────────
+//
+// The "Confirm / edit shipping destination" write. Narrow by construction:
+// orderId + the three shipping fields, nothing else. The service requires
+// orders.update and the RPC refuses once fulfillment is terminal, so a shipped
+// parcel's destination is never casually rewritten.
+
+export const updateOrderShippingFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        shipping: shippingSnapshotSchema,
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { updateOrderShippingSnapshot } = await import("@/server/orders/service");
+    return updateOrderShippingSnapshot(authCtx, data.orderId, data.shipping);
   });
 
 // ── Transitions ───────────────────────────────────────────────────────────────

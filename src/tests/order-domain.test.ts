@@ -359,7 +359,7 @@ describe("Test 1: Successful order creation", () => {
           audit_logs: { data: null, error: null },
         },
         rpc: {
-          create_order_v2: {
+          create_order_v3: {
             data: { status: "success", order_id: ORDER_ID, order_number: "APSA-2026-000001" },
             error: null,
           },
@@ -392,7 +392,7 @@ describe("Test 1: Successful order creation", () => {
           order_status_history: itemRows([]),
         },
         rpc: {
-          create_order_v2: {
+          create_order_v3: {
             data: { status: "success", order_id: ORDER_ID },
             error: null,
           },
@@ -441,7 +441,7 @@ describe("Test 2: Multi-item order", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v3: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
@@ -512,7 +512,7 @@ describe("Test 4: Server-authoritative pricing", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v3: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
@@ -671,7 +671,7 @@ describe("Test 6: Client cannot inject organization_id or user_id", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v3: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
@@ -851,7 +851,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
       withOrderDb(
         {
           tables: { product_variants: variantRow },
-          rpc: { create_order_v2: { data: { status: "variant_not_found" }, error: null } },
+          rpc: { create_order_v3: { data: { status: "variant_not_found" }, error: null } },
         },
         () =>
           createOrder(ctx, {
@@ -876,7 +876,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v3: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async (recorded) => {
         await createOrder(ctx, {
@@ -892,7 +892,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
     );
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.fn).toBe("create_order_v2");
+    expect(calls[0]!.fn).toBe("create_order_v3");
   });
 });
 
@@ -1420,7 +1420,7 @@ describe("Test 18: Server-authorized write path", () => {
           order_items: oneLine,
           order_status_history: itemRows([]),
         },
-        rpc: { create_order_v2: { data: { status: "success", order_id: ORDER_ID }, error: null } },
+        rpc: { create_order_v3: { data: { status: "success", order_id: ORDER_ID }, error: null } },
       },
       async () => {
         const created = await createOrder(ctx, {
@@ -1495,10 +1495,17 @@ describe("Test 19: No arbitrary-update escape hatch", () => {
     expect(src).toContain("transitionOrderFulfillmentFn");
   });
 
-  it("all writes flow through the two transactional RPCs", () => {
+  it("all writes flow through the narrow transactional RPCs", () => {
     const src = readSource("src/server/orders/repository.ts");
     const rpcNames = [...src.matchAll(/db\.rpc\("(\w+)"/g)].map((m) => m[1]);
-    expect(rpcNames.sort()).toEqual(["create_order_v2", "transition_order_status_v1"]);
+    // create_order_v3 (migration 047) supersedes v2 for new writes;
+    // update_order_shipping_v1 is the narrow shipping-snapshot write. There is
+    // still no generic order UPDATE — every write is one of these specific RPCs.
+    expect(rpcNames.sort()).toEqual([
+      "create_order_v3",
+      "transition_order_status_v1",
+      "update_order_shipping_v1",
+    ]);
   });
 });
 
@@ -1723,16 +1730,18 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
     }
   });
 
-  it("the two granted functions are exactly the two the repository calls", () => {
-    // Migration 044 supersedes create_order_v1 with create_order_v2. v1 stays
-    // granted only so a build predating 044 keeps working during a rolling
-    // deploy; the repository no longer calls it.
+  it("the granted functions are exactly the ones the repository calls", () => {
+    // Each superseded create overload stays granted only so a build predating
+    // its successor keeps working during a rolling deploy; the repository no
+    // longer calls it. create_order_v1 (superseded by v2, migration 044) and
+    // create_order_v2 (superseded by v3, migration 047) are both such leftovers.
     const sql =
       executableSql(rpcMigration()) +
-      executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql"));
+      executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql")) +
+      executableSql(readSource("supabase/migrations/047_order_shipping_snapshot.sql"));
     const granted = [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
       .map((m) => m[1])
-      .filter((name) => name !== "create_order_v1")
+      .filter((name) => name !== "create_order_v1" && name !== "create_order_v2")
       .sort();
     const called = [...readSource("src/server/orders/repository.ts").matchAll(/db\.rpc\("(\w+)"/g)]
       .map((m) => m[1])

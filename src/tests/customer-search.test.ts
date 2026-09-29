@@ -744,10 +744,11 @@ describe("No migration was required, and the schema says why", () => {
     // (operability: rate limits + webhook receipts —
     // supabase/migrations/045_operability_rate_limits_webhooks.sql), and 046
     // (the fulfillment/barcode phase's narrow fulfillment.print_label capability
-    // — supabase/migrations/046_fulfillment_permissions.sql). A migration
-    // numbered 047 or higher would mean THIS phase silently changed the schema —
-    // which it must not do without first proving the change is required and
-    // reporting it.
-    expect(migrations.filter((f) => /^04[7-9]|^0[5-9]\d/.test(f))).toEqual([]);
+    // — supabase/migrations/046_fulfillment_permissions.sql), and 047 (the
+    // fulfillment shipping-snapshot phase's order-authoritative destination —
+    // supabase/migrations/047_order_shipping_snapshot.sql). A migration numbered
+    // 048 or higher would mean THIS phase silently changed the schema — which it
+    // must not do without first proving the change is required and reporting it.
+    expect(migrations.filter((f) => /^04[89]|^0[5-9]\d/.test(f))).toEqual([]);
   });
 });

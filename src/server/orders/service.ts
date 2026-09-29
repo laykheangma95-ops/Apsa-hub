@@ -232,6 +232,120 @@ function conflict(message: string): Error {
   return publicError(message, 409);
 }
 
+// ── Shipping destination snapshot (§4, §19) ────────────────────────────────────
+
+/** Upper bounds mirror the migration-047 CHECK constraints. */
+const SHIPPING_NAME_MAX = 200;
+const SHIPPING_PHONE_MAX = 40;
+const SHIPPING_ADDRESS_MAX = 1000;
+
+/** The normalized snapshot the domain persists. Null address is a valid pickup order. */
+export interface NormalizedShippingSnapshot {
+  name: string | null;
+  phone: string | null;
+  address: string | null;
+}
+
+/**
+ * Trim, collapse internal whitespace, and reject anything carrying control
+ * characters or HTML angle brackets — a label prints these verbatim, so they
+ * must never smuggle markup or invisible characters (§19: "no HTML/script
+ * authority"). Khmer is fully supported: nothing here is ASCII-only.
+ */
+function cleanShippingText(value: string): string {
+  // Map control characters (incl. DEL) to a space by code point, then collapse
+  // whitespace — done without a control-character regex on purpose.
+  const stripped = [...value]
+    .map((ch) => {
+      const code = ch.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f ? " " : ch;
+    })
+    .join("");
+  return stripped.replace(/\s+/gu, " ").trim();
+}
+
+function hasMarkup(value: string): boolean {
+  return /[<>]/u.test(value);
+}
+
+/** Digits only, across ASCII and Khmer numerals. */
+function shippingPhoneDigits(value: string): string {
+  const map: Record<string, string> = {
+    "០": "0",
+    "១": "1",
+    "២": "2",
+    "៣": "3",
+    "៤": "4",
+    "៥": "5",
+    "៦": "6",
+    "៧": "7",
+    "៨": "8",
+    "៩": "9",
+  };
+  return [...value]
+    .map((c) => map[c] ?? c)
+    .join("")
+    .replace(/\D/gu, "");
+}
+
+/**
+ * Validate and normalize a shipping destination snapshot.
+ *
+ * Returns null when nothing at all was supplied (a pickup / no-delivery order —
+ * a valid state). When ANY field is supplied the destination is treated as
+ * "shipping required", so a recipient name AND an address are both mandatory
+ * (§19); the phone is optional but, when present, must be a plausible number.
+ * Throws a 400 on any violation — the server owns this validation, never the
+ * client (§4).
+ */
+export function normalizeShippingSnapshot(
+  input:
+    | {
+        name?: string | null | undefined;
+        phone?: string | null | undefined;
+        address?: string | null | undefined;
+      }
+    | null
+    | undefined,
+): NormalizedShippingSnapshot | null {
+  if (!input) return null;
+
+  const rawName = typeof input.name === "string" ? cleanShippingText(input.name) : "";
+  const rawPhone = typeof input.phone === "string" ? cleanShippingText(input.phone) : "";
+  const rawAddress = typeof input.address === "string" ? cleanShippingText(input.address) : "";
+
+  // Nothing supplied at all → no snapshot (pickup order).
+  if (!rawName && !rawPhone && !rawAddress) return null;
+
+  if (hasMarkup(rawName) || hasMarkup(rawPhone) || hasMarkup(rawAddress)) {
+    throw badRequest("Shipping details must not contain HTML");
+  }
+
+  if (!rawName) throw badRequest("A recipient name is required for a shipping destination");
+  if (rawName.length > SHIPPING_NAME_MAX) {
+    throw badRequest(`Recipient name must be at most ${SHIPPING_NAME_MAX} characters`);
+  }
+
+  if (!rawAddress) throw badRequest("A delivery address is required for a shipping destination");
+  if (rawAddress.length > SHIPPING_ADDRESS_MAX) {
+    throw badRequest(`Delivery address must be at most ${SHIPPING_ADDRESS_MAX} characters`);
+  }
+
+  let phone: string | null = null;
+  if (rawPhone) {
+    if (rawPhone.length > SHIPPING_PHONE_MAX) {
+      throw badRequest(`Phone must be at most ${SHIPPING_PHONE_MAX} characters`);
+    }
+    const digits = shippingPhoneDigits(rawPhone);
+    if (digits.length < 6 || digits.length > 15) {
+      throw badRequest("A valid phone number is required");
+    }
+    phone = rawPhone;
+  }
+
+  return { name: rawName, phone, address: rawAddress };
+}
+
 /**
  * Maps the create RPC's business-outcome envelope to HTTP-shaped errors.
  *
@@ -315,6 +429,20 @@ export interface CreateOrderServiceInput {
    * 409 idempotency conflict.
    */
   idempotencyKey: string;
+  /**
+   * Optional order shipping destination — the parcel's authoritative
+   * destination, snapshotted onto the order at creation (§4, migration 047).
+   * Validated and normalized server-side; folded into the idempotency
+   * fingerprint so a retry with a different address is a conflict, not a silent
+   * re-address. Omit for an in-store pickup / no-delivery order.
+   */
+  shipping?:
+    | {
+        name?: string | null | undefined;
+        phone?: string | null | undefined;
+        address?: string | null | undefined;
+      }
+    | undefined;
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
@@ -428,6 +556,11 @@ export async function createOrder(
     );
   }
 
+  // The order-authoritative shipping destination, validated and normalized here
+  // (the server owns this — §4). null for a pickup order. Its presence — never
+  // its values — reaches the audit row below.
+  const shipping = normalizeShippingSnapshot(input.shipping);
+
   // Tenant ownership, checked before the write. The RPC and the DB triggers
   // check the same things; this layer exists so the caller gets a precise 404
   // instead of a raw SQL error, and so a cross-org id never reaches the
@@ -463,6 +596,7 @@ export async function createOrder(
     delivery_minor: deliveryMinor,
     source_conversation_ref: sourceConversationRef,
     idempotency_key: input.idempotencyKey,
+    ...(shipping ? { shipping } : {}),
   });
 
   if (result.status !== "success" || !result.order_id) {
@@ -500,6 +634,15 @@ export async function createOrder(
       ...(detail.sourceConversationRef
         ? { source_conversation_ref: detail.sourceConversationRef }
         : {}),
+      // PII-safe: record only WHICH shipping fields were captured, never their
+      // values (§11 audit). A shipping snapshot is fulfillment PII.
+      shipping_snapshot: shipping
+        ? {
+            name: shipping.name !== null,
+            phone: shipping.phone !== null,
+            address: shipping.address !== null,
+          }
+        : false,
     },
   });
 
@@ -664,6 +807,91 @@ export async function transitionFulfillmentStatus(
   });
 
   return requireDetail(ctx.organizationId, orderId);
+}
+
+// ── Shipping destination snapshot (set / confirm / correct) ────────────────────
+
+/** Maps the update_order_shipping_v1 envelope to HTTP-shaped errors. */
+function shippingUpdateFailureToError(result: { status: string }): Error {
+  switch (result.status) {
+    case "order_not_found":
+      return notFound("Order not found");
+    case "order_terminal":
+      return conflict("Order is complete or cancelled; its shipping destination cannot be changed");
+    case "fulfillment_terminal":
+      return conflict(
+        "This order is already fulfilled or its delivery is cancelled; its shipping destination can no longer be changed",
+      );
+    case "invalid_shipping":
+      return badRequest("Shipping details are invalid");
+    default:
+      return new Error(`Shipping update failed: ${result.status}`);
+  }
+}
+
+/**
+ * Set, confirm, or correct an order's shipping destination snapshot before
+ * fulfillment (§4, §9, §10).
+ *
+ * This is the human "Confirm shipping address" / "Edit destination" action:
+ *   - an order created before the snapshot existed (no destination) is
+ *     confirmed by supplying one, which unblocks its first parcel label; and
+ *   - a destination captured at creation is corrected while the parcel is still
+ *     on the packing bench.
+ *
+ * Authorized by orders.update — the narrowest existing fulfillment capability
+ * (state-machine.ts already uses it for fulfillment moves), so no new capability
+ * is invented. The RPC refuses once lifecycle or fulfillment is terminal, so a
+ * shipped/closed parcel's historical destination is never casually rewritten.
+ *
+ * A destination is REQUIRED here: you cannot "confirm" an order to nowhere. To
+ * express a pickup order, simply never open this action.
+ *
+ * Audit is PII-safe: it records which fields changed presence (from the RPC's
+ * booleans), never a raw name, phone or address (§11).
+ */
+export async function updateOrderShippingSnapshot(
+  ctx: AuthorizationContext,
+  orderId: string,
+  input: {
+    name?: string | null | undefined;
+    phone?: string | null | undefined;
+    address?: string | null | undefined;
+  },
+): Promise<{ ok: true }> {
+  ctx.require("orders.update");
+
+  const shipping = normalizeShippingSnapshot(input);
+  if (!shipping) {
+    throw badRequest("A shipping destination (recipient name and delivery address) is required");
+  }
+
+  const result = await repo.updateOrderShipping(ctx.organizationId, orderId, ctx.userId, shipping);
+  if (result.status !== "success") throw shippingUpdateFailureToError(result);
+
+  await bestEffortAudit(ctx, {
+    action: "orders.update",
+    resourceType: "orders",
+    resourceId: orderId,
+    // Field NAMES / presence only — never a raw address, name or phone (§11).
+    beforeJson: {
+      shipping_snapshot: {
+        name: result.had_name === true,
+        phone: result.had_phone === true,
+        address: result.had_address === true,
+      },
+    },
+    afterJson: {
+      changed: "shipping_snapshot",
+      shipping_snapshot: {
+        name: result.has_name === true,
+        phone: result.has_phone === true,
+        address: result.has_address === true,
+      },
+    },
+  });
+
+  return { ok: true };
 }
 
 // ── Reads ─────────────────────────────────────────────────────────────────────

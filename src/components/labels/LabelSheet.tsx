@@ -29,6 +29,13 @@ export interface LabelSheetProps {
   pageSize: { width: number; height: number };
   /** Non-printing controls (quantity, toggles) shown above the preview. */
   controls?: React.ReactNode;
+  /**
+   * Whether the current content may be printed. Defaults to true. When false
+   * the header Print button is hidden — used to block printing a parcel label
+   * whose destination is not yet confirmed (§9), so nothing unsafe is sent to a
+   * printer.
+   */
+  printable?: boolean;
   /** Each child is rendered as its own physical page. */
   children: React.ReactNode;
 }
@@ -41,6 +48,7 @@ export function LabelSheet({
   title,
   pageSize,
   controls,
+  printable = true,
   children,
 }: LabelSheetProps) {
   const { t } = useTranslation();
@@ -125,14 +133,16 @@ export function LabelSheet({
           <X className="size-5" aria-hidden />
         </button>
         <h2 className="text-h3 min-w-0 flex-1 truncate text-text-primary">{title}</h2>
-        <Button
-          type="button"
-          onClick={() => window.print()}
-          className="press-tactile tap-target h-10 gap-2 rounded-full px-4"
-        >
-          <Printer className="size-4" aria-hidden />
-          {t("labels.print")}
-        </Button>
+        {printable ? (
+          <Button
+            type="button"
+            onClick={() => window.print()}
+            className="press-tactile tap-target h-10 gap-2 rounded-full px-4"
+          >
+            <Printer className="size-4" aria-hidden />
+            {t("labels.print")}
+          </Button>
+        ) : null}
       </header>
 
       {controls ? (

@@ -655,6 +655,20 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
 }
 
 /**
+ * Set / confirm / correct an order's shipping destination snapshot (migration
+ * 047). The server requires orders.update and refuses once fulfillment is
+ * terminal. Used by the "Confirm shipping address" flow that unblocks a
+ * first-time parcel label on an order that had no destination snapshot.
+ */
+export async function updateOrderShipping(
+  orderId: string,
+  shipping: { name?: string | null; phone?: string | null; address?: string | null },
+): Promise<void> {
+  const { updateOrderShippingFn } = await import("@/api/orders");
+  await updateOrderShippingFn({ data: { orderId, shipping } });
+}
+
+/**
  * Deterministic cosmetic color, matching src/server/customers/service.ts's own
  * deriveCompanion exactly, so a customer created here shows the same color
  * later on Customer 360 (which computes it server-side from the same id).
@@ -1130,6 +1144,13 @@ export interface CreateRealOrderInput {
    * currency — bounded and added into the total server-side.
    */
   deliveryMinor?: number;
+  /**
+   * Optional order shipping destination — the parcel's authoritative
+   * destination, snapshotted onto the order server-side and folded into the
+   * idempotency fingerprint (migration 047), so a retry with a different
+   * address is a conflict rather than a silent re-address. Omit for pickup.
+   */
+  shipping?: { name?: string | null; phone?: string | null; address?: string | null };
   /**
    * The caller's idempotency-key holder for this order flow
    * (src/lib/idempotency.ts). createRealOrder takes the key for THIS request

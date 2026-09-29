@@ -1917,13 +1917,14 @@ describe("J. the new screens keep the server/browser boundary", () => {
       .sort();
     // The migration head this phase inherited has since been bumped by later,
     // unrelated phases: 044 (Order idempotency + delivery fee), 045 (operability
-    // rate limits + webhook receipts), and 046 (the fulfillment/barcode phase's
-    // narrow fulfillment.print_label capability — see
-    // supabase/migrations/046_fulfillment_permissions.sql). The Product Catalog
+    // rate limits + webhook receipts), 046 (the fulfillment/barcode phase's
+    // narrow fulfillment.print_label capability), and 047 (the fulfillment
+    // shipping-snapshot phase's order-authoritative destination — see
+    // supabase/migrations/047_order_shipping_snapshot.sql). The Product Catalog
     // UI is built entirely on migrations 017-019, which already exist; it added
-    // none of its own, and a new file beyond 046 would move this pin and fail
+    // none of its own, and a new file beyond 047 would move this pin and fail
     // the test on purpose.
-    expect(migrations.at(-1)).toBe("046_fulfillment_permissions.sql");
+    expect(migrations.at(-1)).toBe("047_order_shipping_snapshot.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

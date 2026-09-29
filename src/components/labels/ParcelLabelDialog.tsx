@@ -1,28 +1,38 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { ParcelLabel } from "./ParcelLabel";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/design-system";
+import { ShippingDestinationSheet } from "@/components/orders/ShippingDestinationSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { getParcelLabelData } from "@/lib/api";
 import { buildParcelLabel, PARCEL_LABEL_SIZE_MM } from "@/lib/labels/parcel-label";
+import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
 
 /**
  * Parcel label preview + print (§13, §17). Accepts one or many order ids; each
  * order prints as its own 100×150 mm page (§17 bulk print).
  *
- * ── PII IS FAIL-CLOSED (§7 of the repair brief) ───────────────────────────────
+ * ── ORDER-AUTHORITATIVE DESTINATION (§9, §13, migration 047) ──────────────────
  *
- * The label payload carries customer name, phone and delivery address. So:
- *   - the query key is partitioned by principal (userId + organizationId), never
- *     a bare ["parcel-labels", ids], so one member's label PII can never be
- *     served to another in the same tab; and
- *   - the fetch is gated on `canSensitive("fulfillment.print_label")` — the same
- *     capability the server requires — read fail-closed: a pending or
- *     refresh-failed snapshot does not fetch, and a denied member sees the
- *     refusal state, never a label. FulfillmentSensitiveCacheGuard evicts any
- *     cached label PII the instant that capability stops holding.
+ * A label's destination is the ORDER's shipping snapshot, never the mutable
+ * customer default. An order whose snapshot is not confirmed
+ * (addressConfirmed === false) is NOT printable: the batch's Print button is
+ * hidden and each such order shows a "Confirm shipping address" action that
+ * captures the destination (updateOrderShipping). Only once every selected
+ * order is confirmed does the batch print — so a first-time label can never go
+ * out with an unverified address.
+ *
+ * ── PII IS FAIL-CLOSED (§12) ──────────────────────────────────────────────────
+ *
+ * The label payload carries customer name, phone and delivery address, so the
+ * query key is principal-partitioned and the fetch is gated on
+ * `canSensitive("fulfillment.print_label")` — the same capability the server
+ * requires — read fail-closed. FulfillmentSensitiveCacheGuard evicts any cached
+ * label PII the instant that capability stops holding.
  */
 export interface ParcelLabelDialogProps {
   open: boolean;
@@ -43,9 +53,16 @@ export function ParcelLabelDialog({
 }: ParcelLabelDialogProps) {
   const { t } = useTranslation();
   const capabilities = useCapabilities();
+  const queryClient = useQueryClient();
   // Fail-closed: canSensitive, not can — a pending/refresh-failed snapshot must
   // not fetch label PII, and this is the same key the server enforces.
   const canPrint = capabilities.canSensitive("fulfillment.print_label");
+  // Correcting a destination needs orders.update (same server gate).
+  const canConfirm = capabilities.can("orders.update");
+
+  const [confirmOrder, setConfirmOrder] = useState<{
+    input: ParcelLabelInput;
+  } | null>(null);
 
   const query = useQuery({
     // Principal-partitioned + sorted id set (see fulfillmentKeys.parcelLabels).
@@ -56,30 +73,114 @@ export function ParcelLabelDialog({
 
   if (!open) return null;
 
+  const data = query.data ?? [];
+  const unconfirmed = data.filter((d) => !d.customer.addressConfirmed);
+  const confirmed = data.filter((d) => d.customer.addressConfirmed);
+  const allConfirmed = data.length > 0 && unconfirmed.length === 0;
+
   const title =
     orderIds.length > 1
       ? t("labels.parcel.bulkTitle", { count: orderIds.length })
       : t("labels.parcel.title");
 
+  function evictAndRefetch() {
+    // Drop the stale label PII and refetch so a just-confirmed order becomes
+    // printable, and refresh the Ready-to-Pack queue it came from.
+    void queryClient.invalidateQueries({
+      queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: fulfillmentKeys.readyToPack(userId, organizationId),
+    });
+  }
+
   return (
-    <LabelSheet open={open} onClose={onClose} title={title} pageSize={PARCEL_LABEL_SIZE_MM}>
-      {!canPrint ? (
-        <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
-          {t("labels.parcel.denied")}
-        </div>
-      ) : query.isPending ? (
-        <div className="flex h-full items-center justify-center">
-          <Spinner />
-        </div>
-      ) : query.isError ? (
-        <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
-          {t("labels.parcel.error")}
-        </div>
-      ) : (
-        (query.data ?? []).map((data, i) => (
-          <ParcelLabel key={orderIds[i] ?? i} vm={buildParcelLabel(data)} />
-        ))
-      )}
-    </LabelSheet>
+    <>
+      <LabelSheet
+        open={open}
+        onClose={onClose}
+        title={title}
+        pageSize={PARCEL_LABEL_SIZE_MM}
+        printable={canPrint && allConfirmed}
+        controls={
+          canPrint && query.isSuccess && unconfirmed.length > 0 ? (
+            <div className="space-y-2">
+              <div>
+                <p className="text-label text-text-primary">
+                  {t("labels.parcel.needsConfirmTitle")}
+                </p>
+                <p className="text-caption text-text-muted">
+                  {unconfirmed.length === 1
+                    ? t("labels.parcel.needsConfirmOne")
+                    : t("labels.parcel.needsConfirmBody", { count: unconfirmed.length })}
+                </p>
+              </div>
+              <ul className="space-y-1.5">
+                {unconfirmed.map((d) => (
+                  <li
+                    key={d.order.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-border-default px-3 py-2"
+                  >
+                    <span className="text-label tnum min-w-0 flex-1 truncate text-text-primary">
+                      {d.order.orderNumber}
+                    </span>
+                    {canConfirm ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="tap-target h-9 shrink-0 rounded-xl"
+                        onClick={() => setConfirmOrder({ input: d })}
+                      >
+                        {t("labels.parcel.confirmCta")}
+                      </Button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : undefined
+        }
+      >
+        {!canPrint ? (
+          <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
+            {t("labels.parcel.denied")}
+          </div>
+        ) : query.isPending ? (
+          <div className="flex h-full items-center justify-center">
+            <Spinner />
+          </div>
+        ) : query.isError ? (
+          <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
+            {t("labels.parcel.error")}
+          </div>
+        ) : (
+          // Only confirmed orders render as printable label pages. Unconfirmed
+          // ones are surfaced in `controls` with a confirm action instead, and
+          // the Print button stays hidden until every one is confirmed.
+          confirmed.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />)
+        )}
+      </LabelSheet>
+
+      {confirmOrder ? (
+        <ShippingDestinationSheet
+          open={confirmOrder !== null}
+          onOpenChange={(next) => {
+            if (!next) setConfirmOrder(null);
+          }}
+          orderId={confirmOrder.input.order.id}
+          orderNumber={confirmOrder.input.order.orderNumber}
+          initial={{
+            name: confirmOrder.input.customer.name ?? "",
+            phone: confirmOrder.input.customer.phone ?? "",
+            address: confirmOrder.input.customer.address ?? "",
+          }}
+          editing={confirmOrder.input.customer.addressConfirmed}
+          onSaved={() => {
+            setConfirmOrder(null);
+            evictAndRefetch();
+          }}
+        />
+      ) : null}
+    </>
   );
 }

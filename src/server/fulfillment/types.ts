@@ -51,21 +51,19 @@ export interface ParcelLabelData {
     /** Operational contact only — gated server-side (see getParcelLabelData). */
     phone: string | null;
     /**
-     * Single formatted delivery address line, or null when none on file.
-     *
-     * V1 has no order- or delivery-level destination SNAPSHOT, so this is the
-     * customer's current on-file address — which is mutable and may have
-     * changed since the order was placed. It is therefore NOT authoritative on
-     * its own; `addressConfirmed` says so, and the label surfaces a
-     * "not confirmed" warning rather than presenting it as the shipping truth.
+     * The order's authoritative shipping destination address (a single
+     * formatted line from orders.shipping_address, migration 047), or null when
+     * the order has no confirmed destination snapshot yet. The mutable customer
+     * default is NEVER substituted here (§13) — an unconfirmed order shows no
+     * address and the UI blocks its first-time print until a human confirms one.
      */
     address: string | null;
     /**
-     * Whether `address` is an order-authoritative destination. False in V1:
-     * there is no per-order/delivery address snapshot to read, so the value
-     * shown is only the customer's mutable default and must be human-verified
-     * before shipping (§13). A future additive order-destination snapshot would
-     * set this true.
+     * Whether `address` is the order's own authoritative destination snapshot.
+     * True once orders.shipping_address is set (at creation or via an explicit
+     * confirm/edit); false for a pickup order or one created before the snapshot
+     * existed. When false the label is NOT printable as-is: the destination must
+     * be confirmed first (§9, §13).
      */
     addressConfirmed: boolean;
   };

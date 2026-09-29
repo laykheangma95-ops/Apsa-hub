@@ -515,7 +515,7 @@ describe("Test 17: sourceConversationRef reaches the create RPC unchanged", () =
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v2: {
+          create_order_v3: {
             data: {
               status: "success",
               order_id: orderRow().data && "11111111-0000-0000-0000-000000000001",
@@ -532,7 +532,7 @@ describe("Test 17: sourceConversationRef reaches the create RPC unchanged", () =
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           sourceConversationRef: "  con-1  ",
         });
-        const call = calls.find((c) => c.fn === "create_order_v2");
+        const call = calls.find((c) => c.fn === "create_order_v3");
         expect(call?.args["p_source_conversation_ref"]).toBe("con-1");
       },
     );
@@ -553,7 +553,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v2: {
+          create_order_v3: {
             data: {
               status: "success",
               order_id: "11111111-0000-0000-0000-000000000001",
@@ -570,7 +570,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
           sourceConversationRef: "   ",
         });
-        const call = calls.find((c) => c.fn === "create_order_v2");
+        const call = calls.find((c) => c.fn === "create_order_v3");
         expect(call?.args["p_source_conversation_ref"]).toBeNull();
       },
     );
@@ -589,7 +589,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           product_variants: variantRow,
         },
         rpc: {
-          create_order_v2: {
+          create_order_v3: {
             data: {
               status: "success",
               order_id: "11111111-0000-0000-0000-000000000001",
@@ -605,7 +605,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
         });
-        const call = calls.find((c) => c.fn === "create_order_v2");
+        const call = calls.find((c) => c.fn === "create_order_v3");
         expect(call?.args["p_source_conversation_ref"]).toBeNull();
       },
     );

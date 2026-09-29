@@ -6,6 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, ErrorState, QuantityStepper } from "@/design-system";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
+import { ShippingDestinationFields } from "@/components/orders/ShippingDestinationFields";
+import {
+  type ShippingDestinationValue,
+  EMPTY_SHIPPING_DESTINATION,
+  shippingDestinationPayload,
+} from "@/lib/shipping-destination";
 import {
   createOrder,
   createRealOrder,
@@ -136,6 +142,16 @@ export function PrepareOrderSheet({
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
   const [deliveryFeeText, setDeliveryFeeText] = useState("");
+  /*
+   * Optional order shipping destination for the production path — the parcel's
+   * authoritative destination, snapshotted onto the order (§13). Prefilled with
+   * the conversation customer's name/phone as a convenience; blank for pickup.
+   */
+  const [shipping, setShipping] = useState<ShippingDestinationValue>(() => ({
+    ...EMPTY_SHIPPING_DESTINATION,
+    name: displayName,
+    phone: customer.phone ?? "",
+  }));
   const submittingRef = useRef(false);
   /*
    * One idempotency key per logical order attempt (src/lib/idempotency.ts).
@@ -154,6 +170,7 @@ export function PrepareOrderSheet({
     setFailure(null);
     setBlocker(null);
     setDeliveryFeeText("");
+    setShipping({ ...EMPTY_SHIPPING_DESTINATION, name: displayName, phone: customer.phone ?? "" });
     submittingRef.current = false;
   }
 
@@ -274,6 +291,9 @@ export function PrepareOrderSheet({
           ...(sourceConversationRef ? { sourceConversationRef } : {}),
           // readyToSubmit guarantees a parsed fee on this (production) path.
           ...(deliveryMinor! > 0 ? { deliveryMinor: deliveryMinor! } : {}),
+          ...(shippingDestinationPayload(shipping)
+            ? { shipping: shippingDestinationPayload(shipping)! }
+            : {}),
           idempotency: idempotencyKeys.current,
         });
         setStep({ name: "created-real", detail });
@@ -572,6 +592,18 @@ export function PrepareOrderSheet({
               onChange={setDeliveryFeeText}
               currency={estimatedTotal.currency}
             />
+          ) : null}
+
+          {realCustomer ? (
+            <div>
+              <p className="text-label text-text-secondary">{t("shipping.title")}</p>
+              <p className="text-caption mb-2 text-text-muted">{t("shipping.optional")}</p>
+              <ShippingDestinationFields
+                idPrefix="prepare-order"
+                value={shipping}
+                onChange={setShipping}
+              />
+            </div>
           ) : null}
 
           <div className="rounded-xl border border-border-default bg-surface-secondary p-3">

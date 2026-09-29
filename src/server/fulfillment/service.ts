@@ -64,23 +64,6 @@ function outstandingMinor(
 }
 
 /**
- * Join Cambodian address parts into a single readable line, skipping blanks.
- * Order follows local convention (house/street → sangkat → khan → city/province).
- */
-function formatAddress(row: repo.CustomerAddressRow): string | null {
-  const parts = [
-    [row.house_no, row.street].filter((p) => p && p.trim()).join(" "),
-    row.sangkat,
-    row.khan,
-    row.city,
-    row.province,
-  ]
-    .map((p) => (p ?? "").trim())
-    .filter((p) => p.length > 0);
-  return parts.length > 0 ? parts.join(", ") : null;
-}
-
-/**
  * The merchant's Ready-to-Pack queue: confirmed orders that still need packing,
  * newest first, each enriched with customer name, item count, payment mode and
  * any current delivery state.
@@ -180,10 +163,17 @@ function printBlockError(reason: ParcelLabelBlockReason): Error {
  * The amount to collect is the authoritative OUTSTANDING balance from the
  * Payment ledger, not the full total and not derived from payment_status.
  *
- * ── ADDRESS (§13) ─────────────────────────────────────────────────────────────
- * V1 has no order/delivery destination snapshot, so the address shown is the
- * customer's mutable on-file default, flagged addressConfirmed:false so the label
- * warns rather than presenting it as the shipping truth.
+ * ── ADDRESS (§13, migration 047) ──────────────────────────────────────────────
+ * The destination is the ORDER's own shipping snapshot (orders.shipping_*),
+ * captured at creation and editable before fulfillment — order-authoritative and
+ * independent of the customer profile, so a later profile edit cannot re-address
+ * an already placed parcel. When the snapshot is present, addressConfirmed is
+ * true and its name/phone/address are the label's destination. When it is absent
+ * (a pickup order, or an order created before migration 047), the mutable
+ * customer default is DELIBERATELY NOT used as the destination — address is null,
+ * addressConfirmed is false, and the UI blocks a first-time print until a human
+ * confirms the destination (updateOrderShippingSnapshot). name/phone still fall
+ * back to the customer contact purely as a display/prefill convenience.
  */
 export async function getParcelLabelData(
   ctx: AuthorizationContext,
@@ -205,13 +195,10 @@ export async function getParcelLabelData(
     throw printBlockError(printability.reason);
   }
 
-  const [items, contact, address, businessName, delivery, totals] = await Promise.all([
+  const [items, contact, businessName, delivery, totals] = await Promise.all([
     ordersRepo.listOrderItems(ctx.organizationId, orderId),
     order.customer_id
       ? repo.customerContact(ctx.organizationId, order.customer_id)
-      : Promise.resolve(null),
-    order.customer_id
-      ? repo.customerDefaultAddress(ctx.organizationId, order.customer_id)
       : Promise.resolve(null),
     repo.organizationName(ctx.organizationId),
     ctx.can("delivery.read")
@@ -219,6 +206,22 @@ export async function getParcelLabelData(
       : Promise.resolve(null),
     repo.orderPaymentTotals(ctx.organizationId, orderId),
   ]);
+
+  // The destination is the ORDER's snapshot, never the mutable customer default.
+  // A non-empty shipping_address is the authoritative, confirmed destination.
+  const snapshotAddress =
+    typeof order.shipping_address === "string" && order.shipping_address.trim().length > 0
+      ? order.shipping_address
+      : null;
+  const addressConfirmed = snapshotAddress !== null;
+  // Name/phone come from the snapshot when it exists; otherwise from the
+  // customer contact as a display/prefill convenience only (never the address).
+  const shipName = addressConfirmed
+    ? (order.shipping_name ?? null)
+    : (contact?.display_name ?? null);
+  const shipPhone = addressConfirmed
+    ? (order.shipping_phone ?? null)
+    : (contact?.primary_phone ?? null);
 
   const labelItems: ParcelLabelItem[] = items.map((line) => ({
     quantity: line.quantity,
@@ -233,12 +236,12 @@ export async function getParcelLabelData(
   return {
     merchant: { businessName: businessName ?? "" },
     customer: {
-      name: contact?.display_name ?? null,
-      phone: contact?.primary_phone ?? null,
-      address: address ? formatAddress(address) : null,
-      // V1: no order/delivery destination snapshot — the on-file default is not
-      // authoritative and must be human-verified before shipping (§13).
-      addressConfirmed: false,
+      name: shipName,
+      phone: shipPhone,
+      // ONLY the order snapshot's address is ever the destination (§13). Null
+      // when unconfirmed — the mutable customer default is never substituted.
+      address: snapshotAddress,
+      addressConfirmed,
     },
     order: {
       id: order.id,

@@ -35,6 +35,8 @@ import type {
   CreateOrderInput,
   CreateOrderRpcResult,
   TransitionRpcResult,
+  UpdateOrderShippingRpcResult,
+  OrderShippingSnapshotInput,
   ListOrdersOptions,
   OrderStatusAxis,
 } from "./types";
@@ -91,16 +93,20 @@ export async function orderExistsForIdempotencyKey(
  * passed are `discount_minor` and `delivery_minor` — inputs to the calculation,
  * each bounded by the RPC — never a total.
  *
- * create_order_v2 (migration 044) is idempotent on (organization, key): a
+ * create_order_v3 (migration 047) is idempotent on (organization, key): a
  * replay of the same request by the same principal returns the order the first
- * attempt created, with `replayed: true`, and writes nothing.
+ * attempt created, with `replayed: true`, and writes nothing. It supersedes
+ * create_order_v2 by folding the optional shipping destination snapshot into
+ * the request fingerprint and writing it in the same INSERT — so a retry with a
+ * different address is an idempotency_conflict, never a silent re-address. v2
+ * remains in the database for rolling-deploy compatibility; new writes use v3.
  */
 export async function createOrder(
   organizationId: string,
   createdBy: string | null,
   input: CreateOrderInput,
 ): Promise<CreateOrderRpcResult> {
-  const { data, error } = await db.rpc("create_order_v2", {
+  const { data, error } = await db.rpc("create_order_v3", {
     p_organization_id: organizationId,
     p_created_by: createdBy,
     p_source: input.source,
@@ -115,10 +121,41 @@ export async function createOrder(
     p_delivery_minor: input.delivery_minor ?? 0,
     p_source_conversation_ref: input.source_conversation_ref ?? null,
     p_idempotency_key: input.idempotency_key,
+    p_shipping_name: input.shipping?.name ?? null,
+    p_shipping_phone: input.shipping?.phone ?? null,
+    p_shipping_address: input.shipping?.address ?? null,
   });
 
   if (error) throw new Error(`createOrder: ${errMessage(error)}`);
   return data as CreateOrderRpcResult;
+}
+
+/**
+ * Set/confirm/correct an order's shipping destination snapshot (migration 047).
+ *
+ * Narrow by construction — the RPC touches only the three shipping columns and
+ * refuses once lifecycle or fulfillment is terminal — which is why this is a
+ * dedicated call rather than the generic update the module deliberately lacks.
+ * The result carries presence booleans only, never raw PII, so the caller can
+ * write a safe audit row from it.
+ */
+export async function updateOrderShipping(
+  organizationId: string,
+  orderId: string,
+  actor: string | null,
+  shipping: OrderShippingSnapshotInput,
+): Promise<UpdateOrderShippingRpcResult> {
+  const { data, error } = await db.rpc("update_order_shipping_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_actor: actor,
+    p_shipping_name: shipping.name ?? null,
+    p_shipping_phone: shipping.phone ?? null,
+    p_shipping_address: shipping.address ?? null,
+  });
+
+  if (error) throw new Error(`updateOrderShipping: ${errMessage(error)}`);
+  return data as UpdateOrderShippingRpcResult;
 }
 
 /**

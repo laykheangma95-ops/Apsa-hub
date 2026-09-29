@@ -910,13 +910,15 @@ describe("production boundary", () => {
     // (operability: rate limits + webhook receipts —
     // supabase/migrations/045_operability_rate_limits_webhooks.sql), and 046
     // (the fulfillment/barcode phase's narrow fulfillment.print_label capability
-    // — supabase/migrations/046_fulfillment_permissions.sql). A migration
-    // numbered 047 or higher would mean THIS phase silently changed the schema.
-    const beyond046 = migrations.filter((file) => {
+    // — supabase/migrations/046_fulfillment_permissions.sql), and 047 (the
+    // fulfillment shipping-snapshot phase — supabase/migrations/047_order_shipping_snapshot.sql).
+    // A migration numbered 048 or higher would mean THIS phase silently changed
+    // the schema.
+    const beyond047 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      return Number.isFinite(prefix) && prefix > 46;
+      return Number.isFinite(prefix) && prefix > 47;
     });
-    expect(beyond046).toEqual([]);
+    expect(beyond047).toEqual([]);
   });
 
   it("links to the order through the router, never by mutating order state", () => {

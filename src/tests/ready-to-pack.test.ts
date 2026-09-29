@@ -359,10 +359,12 @@ describe("getParcelLabelData — assembly", () => {
       () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
     );
     expect(data.merchant.businessName).toBe("Dara Shop");
+    // No order snapshot on this order → name/phone fall back to the customer
+    // contact for display, but the mutable on-file address is NEVER used as the
+    // destination (§13, migration 047): address is null and unconfirmed.
     expect(data.customer.name).toBe("Sokha");
     expect(data.customer.phone).toBe("012345678");
-    expect(data.customer.address).toContain("Boeng Keng Kang");
-    // §13: the on-file default is not an order-authoritative destination.
+    expect(data.customer.address).toBeNull();
     expect(data.customer.addressConfirmed).toBe(false);
     expect(data.order.itemCount).toBe(2);
     expect(data.reprint).toBe(false);
@@ -376,6 +378,47 @@ describe("getParcelLabelData — assembly", () => {
       "name",
       "phone",
     ]);
+  });
+
+  it("uses the ORDER shipping snapshot as the destination, never the customer default (§13, §16)", async () => {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    const data = await withDb(
+      {
+        // The order carries its own confirmed destination snapshot…
+        orders: orderRow({
+          shipping_name: "Mother",
+          shipping_phone: "0987654321",
+          shipping_address: "Snapshot House, Siem Reap",
+        }),
+        order_items: [],
+        // …and the customer contact/default is DIFFERENT. It must not leak in.
+        customers: { display_name: "Sokha", primary_phone: "012345678" },
+        customer_addresses: [
+          {
+            house_no: "12",
+            street: "St 240",
+            sangkat: "Boeng Keng Kang",
+            khan: "Chamkarmon",
+            city: "Phnom Penh",
+            province: null,
+            country: "KH",
+            landmark: null,
+            is_default: true,
+          },
+        ],
+        organizations: { display_name: "Dara Shop" },
+        deliveries: [],
+        order_payment_totals: totalsRow({ received_minor: 0 }),
+      },
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
+    );
+    // Destination is the order snapshot — name, phone AND address — and it is
+    // confirmed. The customer's own name/phone/default address never appear.
+    expect(data.customer.name).toBe("Mother");
+    expect(data.customer.phone).toBe("0987654321");
+    expect(data.customer.address).toBe("Snapshot House, Siem Reap");
+    expect(data.customer.addressConfirmed).toBe(true);
+    expect(data.customer.address).not.toContain("Boeng Keng Kang");
   });
 
   it("marks a processing order's label as a REPRINT (§19)", async () => {

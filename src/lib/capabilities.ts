@@ -34,6 +34,11 @@ export const UI_PERMISSION_KEYS = [
   "orders.create",
   "orders.confirm",
   "orders.cancel",
+  // orders.update gates the "Confirm / edit shipping destination" affordance
+  // (updateOrderShippingSnapshot requires it — src/server/orders/service.ts,
+  // migration 047) and is the same grant the fulfillment-status transitions
+  // already enforce. Seeded to OWNER/MANAGER/CASHIER by migration 003.
+  "orders.update",
   // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
   // action: refundPayment requires payments.refund. The historical
   // orders.refund key no longer authorizes anything, so the UI must not gate

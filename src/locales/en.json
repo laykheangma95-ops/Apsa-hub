@@ -2254,7 +2254,11 @@
       "reprint": "Reprint",
       "addressNotConfirmed": "Shipping address not confirmed — verify before shipping",
       "noAddress": "No address on file",
-      "denied": "You do not have permission to print parcel labels."
+      "denied": "You do not have permission to print parcel labels.",
+      "confirmCta": "Confirm shipping address",
+      "needsConfirmTitle": "Destination not confirmed",
+      "needsConfirmBody": "{{count}} order(s) need a confirmed shipping address before their labels can print.",
+      "needsConfirmOne": "This order needs a confirmed shipping address before its label can print."
     }
   },
   "pack": {
@@ -2277,5 +2281,25 @@
       "title": "Nothing to pack",
       "body": "Confirmed orders that need packing will appear here."
     }
+  },
+  "shipping": {
+    "title": "Shipping destination",
+    "optional": "Optional — leave blank for in-store pickup",
+    "name": "Recipient name",
+    "phone": "Recipient phone",
+    "address": "Delivery address",
+    "namePlaceholder": "Who receives the parcel",
+    "phonePlaceholder": "Contact number for the courier",
+    "addressPlaceholder": "House, street, sangkat, khan, city / province",
+    "note": "This destination is saved on the order. Later changes to the customer's profile won't change it.",
+    "confirmTitle": "Confirm shipping address",
+    "confirmBody": "This order has no confirmed destination. Enter where the parcel should go before printing its label.",
+    "editTitle": "Edit shipping address",
+    "save": "Save destination",
+    "saving": "Saving…",
+    "saved": "Shipping address saved",
+    "error": "Could not save the shipping address. Try again.",
+    "nameRequired": "Enter a recipient name.",
+    "addressRequired": "Enter a delivery address."
   }
 }
