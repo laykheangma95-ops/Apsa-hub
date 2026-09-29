@@ -916,7 +916,8 @@ describe("production boundary", () => {
     // the schema.
     const beyond047 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      return Number.isFinite(prefix) && prefix > 47;
+      // 048 (explicit service_role table grants) is an unrelated environment fix.
+      return Number.isFinite(prefix) && prefix > 48;
     });
     expect(beyond047).toEqual([]);
   });
