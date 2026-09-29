@@ -78,7 +78,7 @@ export const Route = createFileRoute("/design")({
       },
     ],
   }),
-  component: DesignReference,
+  component: DesignRouteLayout,
 });
 
 /** Component-gallery fixtures only; never used by the production Home data path. */
@@ -173,10 +173,12 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function DesignReference() {
+function DesignRouteLayout() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  if (pathname !== "/design") return <Outlet />;
+  return pathname === "/design" ? <DesignReference /> : <Outlet />;
+}
 
+function DesignReference() {
   const { t } = useTranslation();
   const { language } = useLanguage();
   const [qty, setQty] = useState(2);
