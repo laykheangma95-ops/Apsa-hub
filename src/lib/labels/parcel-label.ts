@@ -41,8 +41,16 @@ export interface ParcelLabelItemInput {
  */
 export interface ParcelLabelInput {
   merchant: { businessName: string };
-  customer: { name: string | null; phone: string | null; address: string | null };
+  customer: {
+    name: string | null;
+    phone: string | null;
+    address: string | null;
+    /** False when `address` is the mutable on-file default, not an order snapshot (§13). */
+    addressConfirmed: boolean;
+  };
   order: { id: string; orderNumber: string; itemCount: number; items: ParcelLabelItemInput[] };
+  /** True when packing already advanced — a re-issue, shown as REPRINT (§19). */
+  reprint: boolean;
   payment: { paid: boolean; collect: Money | null };
   delivery: { providerName: string; trackingNumber: string | null; status: string } | null;
 }
@@ -57,9 +65,17 @@ export interface ParcelLabelLine {
 
 export interface ParcelLabelViewModel {
   merchantName: string;
-  customer: { name: string | null; phone: string | null; address: string | null };
+  customer: {
+    name: string | null;
+    phone: string | null;
+    address: string | null;
+    /** False when the address is not an order-authoritative destination (§13). */
+    addressConfirmed: boolean;
+  };
   orderNumber: string;
   itemCount: number;
+  /** True when this is a re-issue of a label for an already-advanced order (§19). */
+  reprint: boolean;
   items: ParcelLabelLine[];
   /** Lines beyond the cap that were not shown; 0 when everything fits (§15). */
   overflowCount: number;
@@ -102,9 +118,11 @@ export function buildParcelLabel(
       name: input.customer.name,
       phone: input.customer.phone,
       address: input.customer.address,
+      addressConfirmed: input.customer.addressConfirmed,
     },
     orderNumber: input.order.orderNumber,
     itemCount: input.order.itemCount,
+    reprint: input.reprint,
     items: shown,
     overflowCount,
     payment: {
@@ -115,6 +133,8 @@ export function buildParcelLabel(
         input.payment.paid || !input.payment.collect ? null : formatMoney(input.payment.collect),
     },
     delivery: input.delivery,
-    qr: { payload, svg: renderQrSvg(payload, { moduleSize: 4, quietModules: 3, ecLevel: "M" }) },
+    // Quiet zone is the 4-module ISO minimum (renderQrSvg clamps to it) so the
+    // order QR stays decodable on a cheap camera (§3).
+    qr: { payload, svg: renderQrSvg(payload, { moduleSize: 4, quietModules: 4, ecLevel: "M" }) },
   };
 }

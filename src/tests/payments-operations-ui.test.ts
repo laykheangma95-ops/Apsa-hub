@@ -902,20 +902,21 @@ describe("production boundary", () => {
 
   it("adds no migration in this phase", () => {
     const migrations = fs.readdirSync(path.resolve(ROOT, "supabase/migrations"));
-    // 043 is an unrelated Payments *domain* fix (duplicate-payment
-    // suspicion — see supabase/migrations/043_payment_referenceless_duplicate.sql),
-    // not anything the Payments Operations *UI* phase this file covers
-    // added; nor is 044 (Order idempotency + delivery fee — see
-    // supabase/migrations/044_order_idempotency_delivery_fee.sql), nor 045
-    // (operability: rate limits + webhook receipts — see
-    // supabase/migrations/045_operability_rate_limits_webhooks.sql). A
-    // migration numbered 046 or higher would mean THIS phase silently
-    // changed the schema.
-    const beyond045 = migrations.filter((file) => {
+    // All later migrations belong to other, unrelated phases, none of them the
+    // Payments Operations *UI* phase this file covers: 043 (Payments domain
+    // duplicate-payment fix — supabase/migrations/043_payment_referenceless_duplicate.sql),
+    // 044 (Order idempotency + delivery fee —
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql), 045
+    // (operability: rate limits + webhook receipts —
+    // supabase/migrations/045_operability_rate_limits_webhooks.sql), and 046
+    // (the fulfillment/barcode phase's narrow fulfillment.print_label capability
+    // — supabase/migrations/046_fulfillment_permissions.sql). A migration
+    // numbered 047 or higher would mean THIS phase silently changed the schema.
+    const beyond046 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
-      return Number.isFinite(prefix) && prefix > 45;
+      return Number.isFinite(prefix) && prefix > 46;
     });
-    expect(beyond045).toEqual([]);
+    expect(beyond046).toEqual([]);
   });
 
   it("links to the order through the router, never by mutating order state", () => {

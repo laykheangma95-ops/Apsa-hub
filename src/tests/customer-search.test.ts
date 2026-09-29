@@ -736,16 +736,18 @@ describe("No migration was required, and the schema says why", () => {
 
   it("this phase adds no migration of its own", () => {
     const migrations = fs.readdirSync(path.join(ROOT, "supabase/migrations"));
-    // 043 is an unrelated Payments fix (see
-    // supabase/migrations/043_payment_referenceless_duplicate.sql), not
-    // anything this customer-search phase added, and neither is 044 (Order
-    // idempotency + delivery fee — see
-    // supabase/migrations/044_order_idempotency_delivery_fee.sql), nor 045
-    // (operability: rate limits + webhook receipts — see
-    // supabase/migrations/045_operability_rate_limits_webhooks.sql). A
-    // migration numbered 046 or higher would mean THIS phase silently changed
-    // the schema — which it must not do without first proving the change is
-    // required and reporting it.
-    expect(migrations.filter((f) => /^04[6-9]|^0[5-9]\d/.test(f))).toEqual([]);
+    // These are all unrelated later phases, none of them this customer-search
+    // phase's: 043 (Payments fix —
+    // supabase/migrations/043_payment_referenceless_duplicate.sql), 044 (Order
+    // idempotency + delivery fee —
+    // supabase/migrations/044_order_idempotency_delivery_fee.sql), 045
+    // (operability: rate limits + webhook receipts —
+    // supabase/migrations/045_operability_rate_limits_webhooks.sql), and 046
+    // (the fulfillment/barcode phase's narrow fulfillment.print_label capability
+    // — supabase/migrations/046_fulfillment_permissions.sql). A migration
+    // numbered 047 or higher would mean THIS phase silently changed the schema —
+    // which it must not do without first proving the change is required and
+    // reporting it.
+    expect(migrations.filter((f) => /^04[7-9]|^0[5-9]\d/.test(f))).toEqual([]);
   });
 });

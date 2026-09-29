@@ -156,6 +156,13 @@ export interface ListOrdersOptions {
   lifecycle_status?: OrderLifecycleStatus | undefined;
   payment_status?: OrderPaymentStatus | undefined;
   fulfillment_status?: OrderFulfillmentStatus | undefined;
+  /**
+   * Match any of several fulfillment statuses (`fulfillment_status IN (...)`).
+   * Used by the Ready-to-Pack queue, which spans `unfulfilled` + `processing`.
+   * Ignored when empty; combined with `fulfillment_status` it further narrows,
+   * so callers pass one or the other.
+   */
+  fulfillment_statuses?: readonly OrderFulfillmentStatus[] | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
 }

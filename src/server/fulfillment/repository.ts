@@ -166,6 +166,74 @@ export async function latestDeliveryForOrder(
   return rows[0] ?? null;
 }
 
+/**
+ * One order's ledger-derived settlement totals, read from the Payment domain's
+ * authoritative `order_payment_totals` view (migration 040).
+ *
+ * The COD amount printed on a label is NOT `payment_status != paid ? total : 0`
+ * — a partially paid or partly refunded order would show the wrong figure. It
+ * is the real OUTSTANDING balance, and this view is the one place APSA derives
+ * received/refunded/net per order. Reading the view here (rather than importing
+ * the Payment service) is the same cross-domain read pattern this repository
+ * already uses for customers/deliveries/organizations, and it copies NO
+ * settlement logic: the SQL view owns that; the service only subtracts
+ * net_minor from total_minor to get "amount left to collect".
+ */
+export interface OrderPaymentTotalsRow {
+  order_id: string;
+  total_minor: number;
+  received_minor: number;
+  refunded_minor: number;
+  net_minor: number;
+  currency: string;
+  payment_status: string;
+  refund_status: string;
+}
+
+/** Settlement totals for one order, org-scoped. Null when not found in this org. */
+export async function orderPaymentTotals(
+  organizationId: string,
+  orderId: string,
+): Promise<OrderPaymentTotalsRow | null> {
+  const { data, error } = await db
+    .from("order_payment_totals")
+    .select(
+      "order_id, total_minor, received_minor, refunded_minor, net_minor, currency, payment_status, refund_status",
+    )
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .single();
+
+  if (error) {
+    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
+    throw new Error(`orderPaymentTotals: ${errMessage(error)}`);
+  }
+  return (data ?? null) as OrderPaymentTotalsRow | null;
+}
+
+/** Settlement totals for a set of orders, org-scoped (queue rollup). */
+export async function orderPaymentTotalsByIds(
+  organizationId: string,
+  orderIds: string[],
+): Promise<Map<string, OrderPaymentTotalsRow>> {
+  const totals = new Map<string, OrderPaymentTotalsRow>();
+  if (orderIds.length === 0) return totals;
+
+  const { data, error } = await db
+    .from("order_payment_totals")
+    .select(
+      "order_id, total_minor, received_minor, refunded_minor, net_minor, currency, payment_status, refund_status",
+    )
+    .eq("organization_id", organizationId)
+    .in("order_id", orderIds);
+
+  if (error) throw new Error(`orderPaymentTotalsByIds: ${errMessage(error)}`);
+  for (const row of (data ?? []) as OrderPaymentTotalsRow[]) {
+    totals.set(row.order_id, row);
+  }
+  return totals;
+}
+
 /** Latest delivery status per order, for a set of orders (queue rollup). */
 export async function latestDeliveryStatusByOrder(
   organizationId: string,

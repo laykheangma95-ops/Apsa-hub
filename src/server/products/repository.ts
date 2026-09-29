@@ -333,6 +333,42 @@ export async function updateVariant(
 }
 
 /**
+ * Atomically set a variant's barcode ONLY while it is still NULL — the
+ * concurrency-safe write behind APSA barcode generation.
+ *
+ * The `.is("barcode", null)` predicate is the whole point: two requests that
+ * both read a NULL barcode and both try to write can no longer both succeed.
+ * The database evaluates the predicate under its own row lock, so exactly one
+ * UPDATE matches the row; the loser matches zero rows and gets `null` back —
+ * it never overwrites the winner's code. The org-scoped unique index remains
+ * the final authority against a cross-variant code collision (surfaced as a
+ * thrown unique-violation the caller retries on).
+ *
+ * Returns the updated row when this call won the write, or null when the
+ * barcode was already set (by a concurrent winner) so nothing matched.
+ */
+export async function updateVariantBarcodeIfNull(
+  organizationId: string,
+  variantId: string,
+  barcode: string,
+): Promise<ProductVariantRow | null> {
+  const { data, error } = await db
+    .from("product_variants")
+    .update({ barcode })
+    .eq("id", variantId)
+    .eq("organization_id", organizationId)
+    .is("barcode", null)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    const msg = (error as { message?: string })?.message ?? "unknown";
+    throw new Error(`updateVariantBarcodeIfNull: ${msg}`);
+  }
+  return data ? (data as ProductVariantRow) : null;
+}
+
+/**
  * List all active variants for the products returned by listProducts.
  * Used to build the POS product grid in a single extra query rather than N+1.
  */

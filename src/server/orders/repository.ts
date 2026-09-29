@@ -226,6 +226,9 @@ export async function listOrders(
   if (opts.lifecycle_status) query = query.eq("lifecycle_status", opts.lifecycle_status);
   if (opts.payment_status) query = query.eq("payment_status", opts.payment_status);
   if (opts.fulfillment_status) query = query.eq("fulfillment_status", opts.fulfillment_status);
+  if (opts.fulfillment_statuses && opts.fulfillment_statuses.length > 0) {
+    query = query.in("fulfillment_status", opts.fulfillment_statuses);
+  }
   if (opts.limit) query = query.limit(opts.limit);
   if (opts.offset && opts.limit) {
     query = query.range(opts.offset, opts.offset + opts.limit - 1);

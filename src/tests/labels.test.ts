@@ -50,12 +50,39 @@ describe("buildProductLabel", () => {
     expect(parseApsaQrPayload(vm.qr!.payload)).toEqual({ kind: "variant", id: VARIANT_ID });
     expect(vm.qr!.svg).toContain("<svg");
   });
+
+  it("does not crash on a stored barcode Code 128 cannot encode — renders no bars, keeps the number (§14)", () => {
+    // A non-ASCII manufacturer barcode that predates save-time validation.
+    const vm = buildProductLabel({
+      productName: "Imported Item",
+      barcode: "88500 123", // contains a non-breaking space (code 160)
+      price: { amount: 1000, currency: "USD" },
+    });
+    // No throw; the unencodable value renders no bars but the number is still shown.
+    expect(vm.barcodeSvg).toBeNull();
+    expect(vm.barcode).toBe("88500 123");
+  });
+
+  it("renders a responsive Code 128 SVG that scales to the label width (§8)", () => {
+    const vm = buildProductLabel({
+      productName: "Long Code",
+      barcode: "APSAK7Q400831527", // 16-char APSA-style code
+      price: { amount: 1000, currency: "USD" },
+    });
+    expect(vm.barcodeSvg).toContain('width="100%"');
+    expect(vm.barcodeSvg).toContain("viewBox=");
+  });
 });
 
 function parcelInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInput {
   return {
     merchant: { businessName: "Dara Shop" },
-    customer: { name: "Sokha", phone: "012345678", address: "12 St 240, BKK1, Phnom Penh" },
+    customer: {
+      name: "Sokha",
+      phone: "012345678",
+      address: "12 St 240, BKK1, Phnom Penh",
+      addressConfirmed: false,
+    },
     order: {
       id: ORDER_ID,
       orderNumber: "APSA-2026-001048",
@@ -65,6 +92,7 @@ function parcelInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInpu
         { quantity: 1, productName: "Cap", variantName: "White" },
       ],
     },
+    reprint: false,
     payment: { paid: false, collect: { amount: 75000, currency: "KHR" } },
     delivery: null,
     ...overrides,
@@ -123,9 +151,36 @@ describe("buildParcelLabel", () => {
     expect(vm.qr.payload).not.toContain("012345678");
   });
 
-  it("carries only name/phone/address for the customer — no other PII fields", () => {
+  it("carries only name/phone/address (plus the addressConfirmed flag) for the customer — no other PII fields", () => {
     const vm = buildParcelLabel(parcelInput());
-    expect(Object.keys(vm.customer).sort()).toEqual(["address", "name", "phone"]);
+    // addressConfirmed is a boolean flag, not PII — email/notes/etc. are still absent.
+    expect(Object.keys(vm.customer).sort()).toEqual([
+      "address",
+      "addressConfirmed",
+      "name",
+      "phone",
+    ]);
+  });
+
+  it("carries the addressConfirmed flag through unchanged (§13)", () => {
+    expect(buildParcelLabel(parcelInput()).customer.addressConfirmed).toBe(false);
+    expect(
+      buildParcelLabel(
+        parcelInput({
+          customer: {
+            name: "Sokha",
+            phone: "012345678",
+            address: "12 St 240",
+            addressConfirmed: true,
+          },
+        }),
+      ).customer.addressConfirmed,
+    ).toBe(true);
+  });
+
+  it("carries the reprint flag through (§19)", () => {
+    expect(buildParcelLabel(parcelInput()).reprint).toBe(false);
+    expect(buildParcelLabel(parcelInput({ reprint: true })).reprint).toBe(true);
   });
 
   it("passes delivery info through when present", () => {

@@ -263,8 +263,9 @@ const SALES_GROUPS: readonly MobileNavSheetGroup[] = [
       },
       {
         // The packing work queue. Gated on orders.read — the key listReadyToPack
-        // requires; printing a parcel label inside it needs customers.view_sensitive,
-        // which the screen and the server both re-check.
+        // requires; printing a parcel label inside it needs the narrow
+        // fulfillment.print_label capability, which the screen and the server
+        // both re-check.
         id: "ready-to-pack",
         labelKey: "nav.salesActions.readyToPack.label",
         descriptionKey: "nav.salesActions.readyToPack.description",

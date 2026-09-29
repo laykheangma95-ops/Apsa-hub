@@ -8,7 +8,12 @@
  * Run: bun test src/tests/barcode-encoding.test.ts
  */
 import { describe, it, expect } from "bun:test";
-import { encodeCode128B, code128Modules, renderCode128Svg } from "../lib/barcode/code128";
+import {
+  encodeCode128B,
+  code128Modules,
+  renderCode128Svg,
+  isCode128Encodable,
+} from "../lib/barcode/code128";
 import {
   APSA_BARCODE_LENGTH,
   formatApsaBarcode,
@@ -45,11 +50,39 @@ describe("Code 128 encoding", () => {
     expect(() => encodeCode128B("")).toThrow();
   });
 
-  it("renders an SVG whose width tracks the module count + quiet zones", () => {
-    const svg = renderCode128Svg("A", { moduleWidth: 2, quietModules: 10 });
+  it("isCode128Encodable accepts real barcodes and rejects unencodable/empty ones (§14)", () => {
+    // Common manufacturer + APSA formats are all fine.
+    expect(isCode128Encodable("8850123456789")).toBe(true); // EAN-13 digits
+    expect(isCode128Encodable("APSAK7Q400831527")).toBe(true); // APSA alphanumeric
+    expect(isCode128Encodable("ABC-123_x.9")).toBe(true); // punctuation in Set B
+    // Unencodable: control chars, non-breaking space, non-ASCII, empty.
+    expect(isCode128Encodable("A\u0000B")).toBe(false);
+    expect(isCode128Encodable("88500 123")).toBe(false); // NBSP (160)
+    expect(isCode128Encodable("café")).toBe(false); // é is outside 32–126
+    expect(isCode128Encodable("")).toBe(false);
+  });
+
+  it("renders an SVG whose intrinsic geometry tracks the module count + quiet zones", () => {
+    // Non-responsive: the intrinsic pixel size is pinned.
+    const svg = renderCode128Svg("A", { moduleWidth: 2, quietModules: 10, responsive: false });
     // (46 modules + 20 quiet) * 2 = 132
     expect(svg).toContain('width="132"');
+    expect(svg).toContain('viewBox="0 0 132 60"');
     expect(svg.startsWith("<svg")).toBe(true);
+  });
+
+  it("is responsive by default: scales to its container, geometry in the viewBox", () => {
+    // A long 17-char APSA code on a narrow 50×30 label must fit, not clip (§8):
+    // the SVG fills its box (100%) and carries the true width in the viewBox, so
+    // the label's CSS controls the physical size and nothing overflows.
+    const svg = renderCode128Svg("APSAK7Q400831527", { moduleWidth: 2, quietModules: 10 });
+    expect(svg).toContain('width="100%"');
+    expect(svg).toContain('height="100%"');
+    expect(svg).toContain('preserveAspectRatio="none"');
+    // The intrinsic width lives in the viewBox and includes both quiet zones.
+    const modules = code128Modules("APSAK7Q400831527").length;
+    const viewboxWidth = (modules + 20) * 2;
+    expect(svg).toContain(`viewBox="0 0 ${viewboxWidth} 60"`);
   });
 });
 

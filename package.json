@@ -65,6 +65,7 @@
     "input-otp": "^1.4.2",
     "lucide-react": "^0.575.0",
     "motion": "^13.1.1",
+    "qrcode-generator": "1.5.0",
     "react": "^19.2.0",
     "react-day-picker": "^9.14.0",
     "react-dom": "^19.2.0",
@@ -81,6 +82,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.14",
     "@eslint/js": "^9.32.0",
     "@lovable.dev/vite-tanstack-config": "^2.20.0",
     "@types/node": "^22.16.5",
@@ -93,11 +95,11 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^15.15.0",
+    "jsqr": "1.4.0",
     "nitro": "3.0.260603-beta",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
-    "vite": "^8.1.5",
-    "@electric-sql/pglite": "0.3.14"
+    "vite": "^8.1.5"
   }
 }

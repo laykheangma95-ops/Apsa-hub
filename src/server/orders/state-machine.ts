@@ -278,18 +278,42 @@ export function isTerminalLifecycle(status: OrderLifecycleStatus): boolean {
 // (session scope §11 — Cambodian COD means the money often arrives after the
 // goods leave). It is a pure VIEW derived from the two authoritative axes:
 //
-//   lifecycle   === "confirmed"    a committed sale (draft is not yet a sale;
-//                                  completed / cancelled are done)
-//   fulfillment === "unfulfilled"  the goods still need packing (processing means
-//                                  a delivery already picked it up; fulfilled /
-//                                  cancelled are done)
+//   lifecycle   === "confirmed"           a committed sale (draft is not yet a
+//                                         sale; completed / cancelled are done)
+//   fulfillment  IN  (unfulfilled,        the goods still need shipping — see
+//                     processing)         below on why `processing` belongs here
 //
-// Deliberately excludes `processing`: once fulfillment has advanced, the order
-// has left the "needs packing" queue. Keeping this a pure predicate means the
-// queue can never contradict the order's real lifecycle.
+// ── WHY `processing` IS INCLUDED (PR #80 review, §11) ─────────────────────────
+//
+// An earlier revision excluded `processing` on the theory that it meant "a
+// delivery already picked it up". That contradicts the order state machine as it
+// actually behaves: `unfulfilled -> processing` is "picking/packing has STARTED"
+// (FULFILLMENT_TRANSITIONS above), and creating a pending delivery for an order
+// moves it to `processing` while the parcel is still on the packing bench, not
+// yet handed to a courier. Excluding it dropped orders that are mid-pack — the
+// exact orders a packer is working — out of the queue the moment a delivery was
+// arranged. The queue therefore includes both:
+//
+//   confirmed + unfulfilled   not started
+//   confirmed + processing    packing under way / pending delivery, not shipped
+//
+// It still excludes `fulfilled` (the customer has it) and `cancelled` (called
+// off), and any non-confirmed lifecycle (draft / completed / cancelled). Keeping
+// this a pure predicate means the queue can never contradict the order's real
+// lifecycle, and getParcelLabelData's own lifecycle guard is the second check
+// on what may actually be printed.
 
 export const READY_TO_PACK_LIFECYCLE: OrderLifecycleStatus = "confirmed";
-export const READY_TO_PACK_FULFILLMENT: OrderFulfillmentStatus = "unfulfilled";
+
+/**
+ * Fulfillment axes that still need shipping. `fulfilled` and `cancelled` are
+ * terminal for packing and excluded; `unfulfilled` and `processing` both mean
+ * "a committed sale awaiting shipment" (see the block comment above).
+ */
+export const READY_TO_PACK_FULFILLMENT_STATUSES: readonly OrderFulfillmentStatus[] = [
+  "unfulfilled",
+  "processing",
+];
 
 export function isReadyToPackEligible(order: {
   lifecycleStatus: OrderLifecycleStatus;
@@ -297,8 +321,55 @@ export function isReadyToPackEligible(order: {
 }): boolean {
   return (
     order.lifecycleStatus === READY_TO_PACK_LIFECYCLE &&
-    order.fulfillmentStatus === READY_TO_PACK_FULFILLMENT
+    READY_TO_PACK_FULFILLMENT_STATUSES.includes(order.fulfillmentStatus)
   );
+}
+
+// ── Parcel-label printability (derived lifecycle guard, §19) ───────────────────
+//
+// getParcelLabelData must not hand out a fresh shipping label for an order in a
+// terminal or never-shippable state. This is the authoritative rule for WHICH
+// orders may be printed, kept beside the eligibility predicate rather than
+// inlined in the service so the two answers ("what's in the queue" and "what may
+// be printed") live together and can be tested exhaustively.
+//
+//   draft                  — not a committed sale yet; nothing to ship.
+//   cancelled (lifecycle)  — the sale was called off.
+//   completed              — done (paid AND fulfilled); a shipping label is no
+//                            longer meaningful.
+//   fulfillment=cancelled  — the delivery was cancelled; this parcel is void.
+//
+// Everything else is a confirmed sale that may be printed. `reprint` is true once
+// packing has advanced beyond `unfulfilled` (processing/fulfilled), so the label
+// can honestly say REPRINT rather than PRINT — it never silently treats a
+// re-issue as a fresh packing label.
+
+export type ParcelLabelBlockReason = "draft" | "cancelled" | "completed" | "delivery_cancelled";
+
+export interface ParcelLabelPrintability {
+  allowed: boolean;
+  /** True when packing has already advanced (processing/fulfilled) — a re-issue. */
+  reprint: boolean;
+  /** Why printing is refused; undefined when allowed. */
+  reason?: ParcelLabelBlockReason;
+}
+
+export function parcelLabelPrintability(order: {
+  lifecycleStatus: OrderLifecycleStatus;
+  fulfillmentStatus: OrderFulfillmentStatus;
+}): ParcelLabelPrintability {
+  if (order.lifecycleStatus === "draft") return { allowed: false, reprint: false, reason: "draft" };
+  if (order.lifecycleStatus === "cancelled") {
+    return { allowed: false, reprint: false, reason: "cancelled" };
+  }
+  if (order.lifecycleStatus === "completed") {
+    return { allowed: false, reprint: false, reason: "completed" };
+  }
+  if (order.fulfillmentStatus === "cancelled") {
+    return { allowed: false, reprint: false, reason: "delivery_cancelled" };
+  }
+  // lifecycle === "confirmed" with fulfillment unfulfilled/processing/fulfilled.
+  return { allowed: true, reprint: order.fulfillmentStatus !== "unfulfilled" };
 }
 
 // ── Who may perform each transition ───────────────────────────────────────────

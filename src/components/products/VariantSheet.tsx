@@ -245,6 +245,26 @@ export function VariantSheet({
 
   const barcodeValue = form.barcode.trim();
 
+  /*
+   * The printed product label must carry PERSISTED, authoritative data — never
+   * a half-typed SKU/barcode or a stale price from the open form (§14 of the
+   * repair brief). So the label is built from the saved `variant` prop, and
+   * Print is disabled whenever the form has unsaved edits: the merchant saves
+   * first, then prints exactly what the server holds. `isDirty` compares the
+   * current form against the saved baseline; any difference blocks Print.
+   */
+  const savedForm = variant ? formFor(variant, costVisible) : null;
+  const isDirty =
+    savedForm !== null &&
+    (form.name !== savedForm.name ||
+      form.sku !== savedForm.sku ||
+      form.barcode !== savedForm.barcode ||
+      form.priceText !== savedForm.priceText ||
+      form.priceCurrency !== savedForm.priceCurrency ||
+      form.costText !== savedForm.costText ||
+      form.costCurrency !== savedForm.costCurrency ||
+      form.weight !== savedForm.weight);
+
   return (
     <BottomSheet
       open={open}
@@ -352,12 +372,18 @@ export function VariantSheet({
                   type="button"
                   variant="outline"
                   className="tap-target h-10"
+                  disabled={isDirty}
                   onClick={() => setLabelOpen(true)}
                 >
                   {t("catalog.variant.printLabel")}
                 </Button>
               ) : null}
             </div>
+          ) : null}
+          {isEdit && barcodeValue !== "" && isDirty ? (
+            <p className="text-caption text-text-secondary">
+              {t("catalog.variant.printLabelSaveFirst")}
+            </p>
           ) : null}
         </div>
 
@@ -393,13 +419,18 @@ export function VariantSheet({
       </div>
 
       {variant ? (
+        /*
+         * Authoritative, persisted data only — never the live form's unsaved
+         * SKU/barcode or a stale typed price (§14). Print is disabled while the
+         * form is dirty, so what prints always matches what the server holds.
+         */
         <ProductLabelDialog
           open={labelOpen}
           onClose={() => setLabelOpen(false)}
           productName={productName ?? variant.name}
           variantName={variant.name}
-          sku={form.sku.trim() || variant.sku}
-          barcode={barcodeValue || variant.barcode}
+          sku={variant.sku}
+          barcode={variant.barcode}
           price={variant.price}
           variantId={variant.id}
         />

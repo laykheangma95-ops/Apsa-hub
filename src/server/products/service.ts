@@ -24,6 +24,7 @@ import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
 import { formatApsaBarcode, APSA_SERIAL_LENGTH } from "@/lib/barcode/apsa-code";
+import { isCode128Encodable } from "@/lib/barcode/code128";
 import * as repo from "./repository";
 import type {
   ProductRow,
@@ -55,6 +56,26 @@ function deriveCompanion(id: string): CompanionColor {
 
 function toMoney(amount: number, currency: string): Money {
   return { amount, currency: currency as Currency };
+}
+
+/**
+ * Reject a manual/manufacturer barcode that Code 128 cannot encode BEFORE it is
+ * stored (§14). A value with non-ASCII or control characters would otherwise
+ * persist and then crash label generation every time the label is opened — a
+ * latent print crash. Common manufacturer formats (EAN/UPC, alphanumeric) all
+ * pass; only genuinely unencodable input is refused. An empty/cleared barcode
+ * (null / "") is fine and skipped.
+ */
+function assertBarcodeEncodable(barcode: string | null | undefined): void {
+  if (barcode == null) return;
+  const trimmed = barcode.trim();
+  if (trimmed === "") return;
+  if (!isCode128Encodable(trimmed)) {
+    throw publicError(
+      "Barcode contains characters that cannot be printed as a Code 128 label; use digits and standard letters/symbols only",
+      400,
+    );
+  }
 }
 
 // ── Exported domain types ─────────────────────────────────────────────────────
@@ -317,38 +338,56 @@ export async function generateVariantBarcode(
 
   const serialFactory = options.serialFactory ?? cryptoRandomSerial;
   const maxAttempts = options.maxAttempts ?? 8;
-
-  let code: string | null = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const candidate = formatApsaBarcode(ctx.organizationId, serialFactory());
-    const taken = await repo.barcodeExistsForOrg(ctx.organizationId, candidate);
-    if (!taken) {
-      code = candidate;
-      break;
-    }
-  }
-  if (!code) {
-    throw publicError("Could not generate a unique barcode; please try again", 503);
-  }
-
   const canViewCost = ctx.can("products.view_cost");
 
-  let updated: ProductVariantRow | null;
-  try {
-    updated = await repo.updateVariant(ctx.organizationId, variantId, { barcode: code });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // A concurrent generation won the same code between our check and our write.
-    if (msg.includes("uniq_product_variants_barcode_per_org")) {
-      throw publicError("Barcode already exists in this organization", 409);
+  /*
+   * Each attempt: generate a candidate, then write it with a CONDITIONAL
+   * update that only fires while barcode IS STILL NULL (repo.updateVariant-
+   * BarcodeIfNull). This closes the race the pre-read check alone left open —
+   * two requests that both saw NULL cannot both persist, because the database
+   * evaluates "barcode IS NULL" under its own row lock:
+   *
+   *   - exactly one conditional UPDATE matches the row and wins;
+   *   - a concurrent generation that already set the barcode makes this write
+   *     match ZERO rows, so we return the EXISTING code rather than clobbering
+   *     it (invariant 1 — never overwrite);
+   *   - a cross-variant code collision trips the org-unique index and throws;
+   *     we retry with a fresh candidate up to maxAttempts (the DB index, not
+   *     the pre-read, is the final uniqueness authority).
+   *
+   * barcodeExistsForOrg stays as a courtesy that avoids most doomed writes, but
+   * it is explicitly NOT relied on for correctness.
+   */
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const candidate = formatApsaBarcode(ctx.organizationId, serialFactory());
+    if (await repo.barcodeExistsForOrg(ctx.organizationId, candidate)) continue;
+
+    let written: ProductVariantRow | null;
+    try {
+      written = await repo.updateVariantBarcodeIfNull(ctx.organizationId, variantId, candidate);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Another variant took this exact code between our check and our write —
+      // retry with a fresh candidate rather than overwriting or failing hard.
+      if (msg.includes("uniq_product_variants_barcode_per_org")) continue;
+      throw err;
     }
-    throw err;
-  }
-  if (!updated) {
-    throw publicError("Variant not found", 404);
+
+    if (written) return mapVariant(written, canViewCost);
+
+    // Zero rows updated: the barcode is no longer NULL because a concurrent
+    // generation already set it. Return that persisted code — the first write
+    // wins and is never replaced.
+    const current = await repo.findVariantById(ctx.organizationId, variantId);
+    if (!current) throw publicError("Variant not found", 404);
+    if (current.barcode && current.barcode.trim() !== "") {
+      return mapVariant(current, canViewCost);
+    }
+    // Still NULL despite a 0-row conditional write (should not happen) — fall
+    // through and try again rather than returning an unbarcoded variant.
   }
 
-  return mapVariant(updated, canViewCost);
+  throw publicError("Could not generate a unique barcode; please try again", 503);
 }
 
 export async function createProduct(
@@ -371,6 +410,7 @@ export async function createProduct(
       throw publicError("cost_currency is required when cost_amount is set", 400);
     }
   }
+  assertBarcodeEncodable(initialVariant.barcode);
 
   const canViewCost = ctx.can("products.view_cost");
   const product = await repo.createProduct(ctx.organizationId, {
@@ -451,6 +491,7 @@ export async function createVariant(
   if (!Number.isInteger(input.price_amount) || input.price_amount < 0) {
     throw publicError("price_amount must be a non-negative integer (minor units)", 400);
   }
+  assertBarcodeEncodable(input.barcode);
 
   const canViewCost = ctx.can("products.view_cost");
 
@@ -495,6 +536,7 @@ export async function updateVariant(
       throw publicError("price_amount must be a non-negative integer (minor units)", 400);
     }
   }
+  assertBarcodeEncodable(patch.barcode);
 
   if (isChangingPrice) {
     // Best-effort price change audit — does NOT block the update on audit failure.

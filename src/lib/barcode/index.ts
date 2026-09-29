@@ -10,6 +10,7 @@ export {
   code128Modules,
   code128ModuleCount,
   renderCode128Svg,
+  isCode128Encodable,
   type Code128RenderOptions,
 } from "./code128";
 
@@ -33,4 +34,10 @@ export {
   type ApsaQrRef,
 } from "./payload";
 
-export { qrMatrix, renderQrSvg, type QrEcLevel, type QrRenderOptions } from "./qr";
+export {
+  qrMatrix,
+  renderQrSvg,
+  QR_MIN_QUIET_MODULES,
+  type QrEcLevel,
+  type QrRenderOptions,
+} from "./qr";

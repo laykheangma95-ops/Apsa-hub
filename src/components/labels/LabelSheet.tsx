@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Printer, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { collectTrapFocusables, resolveTrapFocus } from "@/design-system/focus-trap";
 
 /**
  * A print overlay for physical labels (product 50×30 mm, parcel 100×150 mm).
@@ -12,8 +13,13 @@ import { Button } from "@/components/ui/button";
  * its own physical page at the exact millimetre size, so the barcode/QR are not
  * clipped or rescaled (§27).
  *
- * Not a hard focus trap: Escape closes it and both controls are keyboard
- * reachable, so a keyboard user is never stuck in the preview (§22).
+ * ── FOCUS (§21) ───────────────────────────────────────────────────────────────
+ * A real modal: aria-modal is truthful because focus is actually contained. On
+ * open, the invoking control is remembered and focus moves into the dialog; Tab
+ * and Shift+Tab cycle within it (reusing the same collectTrapFocusables /
+ * resolveTrapFocus utility the design-system BottomSheet uses, so there is one
+ * proven trap, not a second hand-rolled one); Escape closes; and on close focus
+ * returns to the control that opened it.
  */
 export interface LabelSheetProps {
   open: boolean;
@@ -39,16 +45,48 @@ export function LabelSheet({
 }: LabelSheetProps) {
   const { t } = useTranslation();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Latest onClose without re-running the effect between renders.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
+    const panel = panelRef.current;
+    // Remember the control that opened the dialog, to restore focus on close.
+    const restore = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      // Tab is ours while the dialog is open — contain focus rather than let it
+      // walk out onto the app behind the overlay (keeps aria-modal honest).
+      e.preventDefault();
+      const focusables = collectTrapFocusables(panel);
+      const landed = resolveTrapFocus(
+        focusables,
+        document.activeElement as HTMLElement | null,
+        e.shiftKey,
+        (candidate) => {
+          candidate.focus();
+          return document.activeElement === candidate;
+        },
+      );
+      if (!landed) panel.focus();
     };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      // Return focus to the invoking control (§21).
+      restore?.focus?.();
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -67,9 +105,11 @@ export function LabelSheet({
 
   return (
     <div
+      ref={panelRef}
       role="dialog"
       aria-modal="true"
       aria-label={title}
+      tabIndex={-1}
       className="fixed inset-0 z-[60] flex flex-col bg-surface-secondary"
     >
       <style>{printCss}</style>

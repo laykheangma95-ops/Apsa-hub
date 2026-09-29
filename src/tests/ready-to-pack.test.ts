@@ -1,11 +1,17 @@
 /**
- * Ready-to-Pack queue + parcel label — eligibility predicate and service.
+ * Ready-to-Pack queue + parcel label — eligibility, lifecycle, COD outstanding
+ * and PII gating.
  *
- * Behavioural: the pure predicate is asserted across the axis matrix, and the
- * service is driven against a mocked db to prove a confirmed/unfulfilled order
- * appears, cancelled/completed/draft do not, PAID vs COD is derived from the
- * order's own payment_status, and the parcel label carries only fulfillment PII
- * gated on customers.view_sensitive.
+ * Behavioural, driven against a mocked db. Covers the PR #80 repairs:
+ *   - Ready-to-Pack includes confirmed + (unfulfilled | processing) (§11).
+ *   - parcelLabelPrintability rejects terminal/never-shippable states and marks
+ *     re-issues as reprints (§19).
+ *   - the COD amount is the authoritative OUTSTANDING balance from
+ *     order_payment_totals — partial payment, full settlement and refund all
+ *     derive correctly, in integer minor units, no floating point (§18).
+ *   - the parcel label is gated on the narrow fulfillment.print_label capability,
+ *     NOT customers.view_sensitive (§20), and the on-file address is flagged
+ *     addressConfirmed:false (§13).
  *
  * Run: bun test src/tests/ready-to-pack.test.ts
  */
@@ -14,6 +20,7 @@ import { ForbiddenError } from "../server/auth/authorization";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import {
   isReadyToPackEligible,
+  parcelLabelPrintability,
   ORDER_LIFECYCLE_STATUSES,
   ORDER_FULFILLMENT_STATUSES,
 } from "../server/orders/state-machine";
@@ -21,6 +28,8 @@ import {
 const ORG_A = "11111111-1111-4111-8111-111111111111";
 const ORDER_ID = "12345678-90ab-4cde-8f01-234567890abc";
 const CUSTOMER_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+const PRINT_PERMS = ["orders.read", "fulfillment.print_label"];
 
 function makeCtx(permissions: string[]): AuthorizationContext {
   const perms = new Set(permissions);
@@ -41,29 +50,74 @@ function makeCtx(permissions: string[]): AuthorizationContext {
   } as unknown as AuthorizationContext;
 }
 
+// ── Pure predicates ─────────────────────────────────────────────────────────────
+
 describe("isReadyToPackEligible (pure)", () => {
-  it("is true only for confirmed + unfulfilled", () => {
+  it("is true for confirmed + unfulfilled AND confirmed + processing (§11)", () => {
     for (const lifecycleStatus of ORDER_LIFECYCLE_STATUSES) {
       for (const fulfillmentStatus of ORDER_FULFILLMENT_STATUSES) {
-        const expected = lifecycleStatus === "confirmed" && fulfillmentStatus === "unfulfilled";
+        const expected =
+          lifecycleStatus === "confirmed" &&
+          (fulfillmentStatus === "unfulfilled" || fulfillmentStatus === "processing");
         expect(isReadyToPackEligible({ lifecycleStatus, fulfillmentStatus })).toBe(expected);
       }
     }
   });
 
-  it("excludes cancelled, completed, and already-processing orders", () => {
+  it("includes a processing order still awaiting shipment", () => {
     expect(
-      isReadyToPackEligible({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" }),
+      isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" }),
+    ).toBe(true);
+  });
+
+  it("excludes fulfilled, cancelled, completed and draft", () => {
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" }),
+    ).toBe(false);
+    expect(
+      isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "cancelled" }),
     ).toBe(false);
     expect(
       isReadyToPackEligible({ lifecycleStatus: "completed", fulfillmentStatus: "unfulfilled" }),
     ).toBe(false);
     expect(
-      isReadyToPackEligible({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" }),
+      isReadyToPackEligible({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" }),
     ).toBe(false);
     expect(
       isReadyToPackEligible({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" }),
     ).toBe(false);
+  });
+});
+
+describe("parcelLabelPrintability (pure, §19)", () => {
+  it("allows a confirmed unfulfilled order as a fresh print (not a reprint)", () => {
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "confirmed", fulfillmentStatus: "unfulfilled" }),
+    ).toEqual({ allowed: true, reprint: false });
+  });
+
+  it("allows a confirmed processing/fulfilled order but marks it a REPRINT", () => {
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" }),
+    ).toEqual({ allowed: true, reprint: true });
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" }),
+    ).toEqual({ allowed: true, reprint: true });
+  });
+
+  it("refuses draft, cancelled, completed and a cancelled delivery", () => {
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" }),
+    ).toEqual({ allowed: false, reprint: false, reason: "draft" });
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" }),
+    ).toEqual({ allowed: false, reprint: false, reason: "cancelled" });
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "completed", fulfillmentStatus: "fulfilled" }),
+    ).toEqual({ allowed: false, reprint: false, reason: "completed" });
+    expect(
+      parcelLabelPrintability({ lifecycleStatus: "confirmed", fulfillmentStatus: "cancelled" }),
+    ).toEqual({ allowed: false, reprint: false, reason: "delivery_cancelled" });
   });
 });
 
@@ -76,6 +130,7 @@ interface Tables {
   customer_addresses?: unknown;
   organizations?: unknown;
   deliveries?: unknown;
+  order_payment_totals?: unknown;
 }
 
 /**
@@ -114,10 +169,10 @@ function orderRow(overrides: Record<string, unknown> = {}) {
     location_id: null,
     source: "FACEBOOK",
     currency: "KHR",
-    subtotal_minor: 75000,
+    subtotal_minor: 100000,
     discount_minor: 0,
     delivery_minor: 0,
-    total_minor: 75000,
+    total_minor: 100000,
     lifecycle_status: "confirmed",
     payment_status: "unpaid",
     refund_status: "none",
@@ -126,6 +181,25 @@ function orderRow(overrides: Record<string, unknown> = {}) {
     created_at: "2026-02-01T00:00:00Z",
     updated_at: "2026-02-01T00:00:00Z",
     source_conversation_ref: null,
+    ...overrides,
+  };
+}
+
+/** One order_payment_totals view row. net_minor = received - refunded. */
+function totalsRow(overrides: Record<string, unknown> = {}) {
+  const total = (overrides.total_minor as number | undefined) ?? 100000;
+  const received = (overrides.received_minor as number | undefined) ?? 0;
+  const refunded = (overrides.refunded_minor as number | undefined) ?? 0;
+  return {
+    order_id: ORDER_ID,
+    organization_id: ORG_A,
+    total_minor: total,
+    received_minor: received,
+    refunded_minor: refunded,
+    net_minor: received - refunded,
+    currency: "KHR",
+    payment_status: "unpaid",
+    refund_status: "none",
     ...overrides,
   };
 }
@@ -144,14 +218,16 @@ async function withDb<T>(tables: Tables, fn: () => Promise<T>): Promise<T> {
 }
 
 describe("listReadyToPack", () => {
-  it("returns a confirmed/unfulfilled order as a COD collect row", async () => {
+  it("returns a confirmed/unfulfilled order with the outstanding COD amount", async () => {
     const { listReadyToPack } = await import("../server/fulfillment/service");
     const rows = await withDb(
       {
-        orders: [orderRow()],
+        orders: [orderRow({ total_minor: 100000 })],
         order_items: [{ order_id: ORDER_ID, quantity: 3 }],
         customers: [{ id: CUSTOMER_ID, display_name: "Sokha" }],
         deliveries: [],
+        // Partial payment: 30,000 of 100,000 settled → collect 70,000.
+        order_payment_totals: [totalsRow({ received_minor: 30000 })],
       },
       () => listReadyToPack(makeCtx(["orders.read"])),
     );
@@ -160,17 +236,34 @@ describe("listReadyToPack", () => {
     expect(rows[0]!.customerName).toBe("Sokha");
     expect(rows[0]!.itemCount).toBe(3);
     expect(rows[0]!.paid).toBe(false);
-    expect(rows[0]!.collect).toEqual({ amount: 75000, currency: "KHR" });
+    expect(rows[0]!.collect).toEqual({ amount: 70000, currency: "KHR" });
   });
 
-  it("shows PAID (collect 0) when the order's payment_status is paid", async () => {
+  it("includes a processing order still awaiting shipment (§11)", async () => {
     const { listReadyToPack } = await import("../server/fulfillment/service");
     const rows = await withDb(
       {
-        orders: [orderRow({ payment_status: "paid" })],
+        orders: [orderRow({ fulfillment_status: "processing" })],
         order_items: [{ order_id: ORDER_ID, quantity: 1 }],
         customers: [{ id: CUSTOMER_ID, display_name: "Sokha" }],
         deliveries: [],
+        order_payment_totals: [totalsRow()],
+      },
+      () => listReadyToPack(makeCtx(["orders.read"])),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.orderId).toBe(ORDER_ID);
+  });
+
+  it("shows PAID (collect 0) when the order is fully settled", async () => {
+    const { listReadyToPack } = await import("../server/fulfillment/service");
+    const rows = await withDb(
+      {
+        orders: [orderRow({ total_minor: 100000, payment_status: "paid" })],
+        order_items: [{ order_id: ORDER_ID, quantity: 1 }],
+        customers: [{ id: CUSTOMER_ID, display_name: "Sokha" }],
+        deliveries: [],
+        order_payment_totals: [totalsRow({ received_minor: 100000, payment_status: "paid" })],
       },
       () => listReadyToPack(makeCtx(["orders.read"])),
     );
@@ -189,6 +282,7 @@ describe("listReadyToPack", () => {
         order_items: [],
         customers: [],
         deliveries: [],
+        order_payment_totals: [],
       },
       () => listReadyToPack(makeCtx(["orders.read"])),
     );
@@ -203,8 +297,8 @@ describe("listReadyToPack", () => {
   });
 });
 
-describe("getParcelLabelData", () => {
-  it("requires customers.view_sensitive on top of orders.read", async () => {
+describe("getParcelLabelData — permission (§20)", () => {
+  it("requires fulfillment.print_label on top of orders.read", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
     await withDb({ orders: orderRow() }, async () => {
       await expect(getParcelLabelData(makeCtx(["orders.read"]), ORDER_ID)).rejects.toBeInstanceOf(
@@ -213,11 +307,22 @@ describe("getParcelLabelData", () => {
     });
   });
 
-  it("assembles authoritative COD data with only fulfillment PII", async () => {
+  it("does NOT accept customers.view_sensitive as a substitute", async () => {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    await withDb({ orders: orderRow() }, async () => {
+      await expect(
+        getParcelLabelData(makeCtx(["orders.read", "customers.view_sensitive"]), ORDER_ID),
+      ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+  });
+});
+
+describe("getParcelLabelData — assembly", () => {
+  it("assembles authoritative COD data with only fulfillment PII, address flagged unconfirmed", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
     const data = await withDb(
       {
-        orders: orderRow(),
+        orders: orderRow({ total_minor: 100000 }),
         order_items: [
           {
             id: "l1",
@@ -227,9 +332,9 @@ describe("getParcelLabelData", () => {
             product_name_snapshot: "Classic Tee",
             variant_name_snapshot: "Black / M",
             sku_snapshot: "TEE-BM",
-            unit_price_minor: 25000,
+            unit_price_minor: 50000,
             quantity: 2,
-            line_total_minor: 50000,
+            line_total_minor: 100000,
             created_at: "2026-02-01T00:00:00Z",
           },
         ],
@@ -249,43 +354,163 @@ describe("getParcelLabelData", () => {
         ],
         organizations: { display_name: "Dara Shop" },
         deliveries: [],
+        order_payment_totals: totalsRow({ received_minor: 30000 }),
       },
-      () => getParcelLabelData(makeCtx(["orders.read", "customers.view_sensitive"]), ORDER_ID),
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
     );
     expect(data.merchant.businessName).toBe("Dara Shop");
     expect(data.customer.name).toBe("Sokha");
     expect(data.customer.phone).toBe("012345678");
     expect(data.customer.address).toContain("Boeng Keng Kang");
+    // §13: the on-file default is not an order-authoritative destination.
+    expect(data.customer.addressConfirmed).toBe(false);
     expect(data.order.itemCount).toBe(2);
+    expect(data.reprint).toBe(false);
+    // §18: outstanding = 100,000 - 30,000 net = 70,000.
     expect(data.payment.paid).toBe(false);
-    expect(data.payment.collect).toEqual({ amount: 75000, currency: "KHR" });
-    // No PII beyond name/phone/address — the shape has no email/notes fields at all.
-    expect(Object.keys(data.customer).sort()).toEqual(["address", "name", "phone"]);
+    expect(data.payment.collect).toEqual({ amount: 70000, currency: "KHR" });
+    // Only name/phone/address(+flag) — no email/notes fields exist on the shape.
+    expect(Object.keys(data.customer).sort()).toEqual([
+      "address",
+      "addressConfirmed",
+      "name",
+      "phone",
+    ]);
   });
 
-  it("shows PAID with nothing to collect for a paid order", async () => {
+  it("marks a processing order's label as a REPRINT (§19)", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
     const data = await withDb(
       {
-        orders: orderRow({ payment_status: "paid" }),
+        orders: orderRow({ fulfillment_status: "processing" }),
         order_items: [],
         customers: { display_name: "Sokha", primary_phone: "012345678" },
         customer_addresses: [],
         organizations: { display_name: "Dara Shop" },
         deliveries: [],
+        order_payment_totals: totalsRow(),
       },
-      () => getParcelLabelData(makeCtx(["orders.read", "customers.view_sensitive"]), ORDER_ID),
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
+    );
+    expect(data.reprint).toBe(true);
+  });
+
+  it("shows PAID with nothing to collect for a fully settled order", async () => {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    const data = await withDb(
+      {
+        orders: orderRow({ total_minor: 100000, payment_status: "paid" }),
+        order_items: [],
+        customers: { display_name: "Sokha", primary_phone: "012345678" },
+        customer_addresses: [],
+        organizations: { display_name: "Dara Shop" },
+        deliveries: [],
+        order_payment_totals: totalsRow({ received_minor: 100000, payment_status: "paid" }),
+      },
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
     );
     expect(data.payment.paid).toBe(true);
     expect(data.payment.collect).toBeNull();
   });
 
-  it("refuses a draft order (no committed sale to ship)", async () => {
+  it("derives outstanding from settlement after a refund, not stale payment_status", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
-    await withDb({ orders: orderRow({ lifecycle_status: "draft" }) }, async () => {
-      await expect(
-        getParcelLabelData(makeCtx(["orders.read", "customers.view_sensitive"]), ORDER_ID),
-      ).rejects.toThrow(/confirmed order/i);
-    });
+    const data = await withDb(
+      {
+        orders: orderRow({ total_minor: 100000, payment_status: "paid" }),
+        order_items: [],
+        customers: { display_name: "Sokha", primary_phone: "012345678" },
+        customer_addresses: [],
+        organizations: { display_name: "Dara Shop" },
+        deliveries: [],
+        // Paid 100,000 then refunded 30,000 → net 70,000 → outstanding 30,000.
+        order_payment_totals: totalsRow({
+          received_minor: 100000,
+          refunded_minor: 30000,
+          payment_status: "paid",
+          refund_status: "partial",
+        }),
+      },
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
+    );
+    expect(data.payment.paid).toBe(false);
+    expect(data.payment.collect).toEqual({ amount: 30000, currency: "KHR" });
+  });
+
+  it("refuses draft / cancelled / completed orders (§19)", async () => {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    for (const [status, pattern] of [
+      ["draft", /confirmed order/i],
+      ["cancelled", /confirmed order/i],
+      ["completed", /completed/i],
+    ] as const) {
+      await withDb(
+        { orders: orderRow({ lifecycle_status: status }), order_payment_totals: totalsRow() },
+        async () => {
+          await expect(getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID)).rejects.toThrow(pattern);
+        },
+      );
+    }
+  });
+
+  it("refuses an order whose delivery was cancelled (§19)", async () => {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    await withDb(
+      {
+        orders: orderRow({ fulfillment_status: "cancelled" }),
+        order_payment_totals: totalsRow(),
+      },
+      async () => {
+        await expect(getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID)).rejects.toThrow(/void/i);
+      },
+    );
+  });
+});
+
+// ── COD outstanding balance, both currencies (§18) ──────────────────────────────
+
+describe("COD outstanding balance", () => {
+  async function collectFor(
+    tableOverrides: Record<string, unknown>,
+    orderOverrides: Record<string, unknown>,
+  ) {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    return withDb(
+      {
+        orders: orderRow(orderOverrides),
+        order_items: [],
+        customers: { display_name: "Sokha", primary_phone: "012" },
+        customer_addresses: [],
+        organizations: { display_name: "Dara Shop" },
+        deliveries: [],
+        order_payment_totals: totalsRow(tableOverrides),
+      },
+      () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
+    );
+  }
+
+  it("KHR: total 100000, settled 30000 → collect 70000", async () => {
+    const data = await collectFor(
+      { currency: "KHR", total_minor: 100000, received_minor: 30000 },
+      { currency: "KHR", total_minor: 100000 },
+    );
+    expect(data.payment.collect).toEqual({ amount: 70000, currency: "KHR" });
+  });
+
+  it("USD: total 2000, settled 500 → collect 1500", async () => {
+    const data = await collectFor(
+      { currency: "USD", total_minor: 2000, received_minor: 500 },
+      { currency: "USD", total_minor: 2000 },
+    );
+    expect(data.payment.collect).toEqual({ amount: 1500, currency: "USD" });
+  });
+
+  it("over-settlement never yields a negative collect (clamps to PAID)", async () => {
+    const data = await collectFor(
+      { currency: "USD", total_minor: 2000, received_minor: 2500 },
+      { currency: "USD", total_minor: 2000 },
+    );
+    expect(data.payment.paid).toBe(true);
+    expect(data.payment.collect).toBeNull();
   });
 });

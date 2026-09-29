@@ -16,9 +16,17 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
   return (
     <div className="flex h-full w-full flex-col gap-[2mm] p-[4mm] text-black">
       {/* Merchant */}
-      <div className="border-b border-black pb-[2mm]">
-        <p className="text-[7pt] tracking-wide text-neutral-600">{t("labels.parcel.from")}</p>
-        <p className="truncate text-[11pt] font-bold">{vm.merchantName}</p>
+      <div className="flex items-start justify-between gap-[2mm] border-b border-black pb-[2mm]">
+        <div className="min-w-0">
+          <p className="text-[7pt] tracking-wide text-neutral-600">{t("labels.parcel.from")}</p>
+          <p className="truncate text-[11pt] font-bold">{vm.merchantName}</p>
+        </div>
+        {/* Re-issue marker — a word, never colour alone (§19). */}
+        {vm.reprint ? (
+          <span className="shrink-0 border border-black px-[1.5mm] py-[0.5mm] text-[7pt] font-bold tracking-wide">
+            {t("labels.parcel.reprint")}
+          </span>
+        ) : null}
       </div>
 
       {/* Customer (fulfillment PII only) */}
@@ -34,18 +42,36 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         ) : null}
         {vm.customer.address ? (
           <p className="text-[9pt] leading-snug">{vm.customer.address}</p>
+        ) : (
+          <p className="text-[9pt] leading-snug font-semibold">{t("labels.parcel.noAddress")}</p>
+        )}
+        {/*
+         * The on-file address is the customer's mutable default, not an
+         * order-authoritative destination (§13). Say so plainly — a word, not a
+         * colour — so staff verify the destination before shipping.
+         */}
+        {!vm.customer.addressConfirmed ? (
+          <p className="mt-[0.5mm] border border-black px-[1mm] py-[0.5mm] text-[7pt] font-bold leading-tight">
+            ⚠ {t("labels.parcel.addressNotConfirmed")}
+          </p>
         ) : null}
       </div>
 
-      {/* Order + items */}
-      <div className="min-h-0 flex-1 border-b border-black pb-[2mm]">
-        <div className="flex items-baseline justify-between">
+      {/*
+       * Order + items. min-h-0 + overflow-hidden keeps a long item list bounded
+       * INSIDE this region so it can never push the payment / COD / QR row below
+       * off the fixed-height label (§22). The order number and item count sit
+       * above the scroll-free list and are never clipped; overflowCount already
+       * caps the list with a "+ N more" note upstream (buildParcelLabel).
+       */}
+      <div className="flex min-h-0 flex-1 flex-col border-b border-black pb-[2mm]">
+        <div className="flex shrink-0 items-baseline justify-between">
           <p className="text-[11pt] font-bold tabular-nums">{vm.orderNumber}</p>
           <p className="text-[8pt] text-neutral-700">
             {t("labels.parcel.items", { count: vm.itemCount })}
           </p>
         </div>
-        <ul className="mt-[1mm] space-y-[0.5mm]">
+        <ul className="mt-[1mm] min-h-0 flex-1 space-y-[0.5mm] overflow-hidden">
           {vm.items.map((line, i) => (
             <li key={i} className="truncate text-[8pt] leading-tight">
               {line.text}
@@ -53,7 +79,7 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
           ))}
         </ul>
         {vm.overflowCount > 0 ? (
-          <p className="mt-[0.5mm] text-[7pt] text-neutral-600">
+          <p className="mt-[0.5mm] shrink-0 text-[7pt] text-neutral-600">
             {t("labels.parcel.moreItems", { count: vm.overflowCount })}
           </p>
         ) : null}

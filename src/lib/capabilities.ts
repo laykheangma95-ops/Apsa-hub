@@ -118,6 +118,13 @@ export const UI_PERMISSION_KEYS = [
   "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
+  // Fulfillment — src/server/fulfillment/service.ts. fulfillment.print_label
+  // gates the parcel-label affordance (Ready-to-Pack print). It is a NARROW
+  // operational grant scoped to the shipping fields a label needs (name, phone,
+  // delivery address), NOT customers.view_sensitive — so cashiers/sales who pack
+  // can print without unrestricted customer PII (migration 046, PR #80 §20).
+  // getParcelLabelData feeds it straight into ctx.require.
+  "fulfillment.print_label",
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",

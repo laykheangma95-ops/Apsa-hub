@@ -18,9 +18,13 @@ export interface ReadyToPackEntry {
   itemCount: number;
   currency: Currency;
   total: Money;
-  /** Derived from the order's own payment_status — never recomputed in the client. */
+  /** True when nothing is left to collect (outstanding balance is zero). */
   paid: boolean;
-  /** Amount to collect on delivery: 0 when paid, the order total otherwise. */
+  /**
+   * Amount to collect on delivery — the authoritative OUTSTANDING balance
+   * (order total minus net settled, from the Payment ledger), not the full
+   * total. Zero when the order is settled. Never recomputed in the client.
+   */
   collect: Money;
   /** Latest delivery status for the order, or null when none is arranged yet. */
   deliveryStatus: string | null;
@@ -44,10 +48,26 @@ export interface ParcelLabelData {
   };
   customer: {
     name: string | null;
-    /** Operational contact only — gated by customers.view_sensitive server-side. */
+    /** Operational contact only — gated server-side (see getParcelLabelData). */
     phone: string | null;
-    /** Single formatted delivery address line, or null when none on file. */
+    /**
+     * Single formatted delivery address line, or null when none on file.
+     *
+     * V1 has no order- or delivery-level destination SNAPSHOT, so this is the
+     * customer's current on-file address — which is mutable and may have
+     * changed since the order was placed. It is therefore NOT authoritative on
+     * its own; `addressConfirmed` says so, and the label surfaces a
+     * "not confirmed" warning rather than presenting it as the shipping truth.
+     */
     address: string | null;
+    /**
+     * Whether `address` is an order-authoritative destination. False in V1:
+     * there is no per-order/delivery address snapshot to read, so the value
+     * shown is only the customer's mutable default and must be human-verified
+     * before shipping (§13). A future additive order-destination snapshot would
+     * set this true.
+     */
+    addressConfirmed: boolean;
   };
   order: {
     id: string;
@@ -56,6 +76,11 @@ export interface ParcelLabelData {
     itemCount: number;
     items: ParcelLabelItem[];
   };
+  /**
+   * True when packing has already advanced (processing/fulfilled) so this is a
+   * re-issue, not a first packing label (§19). The label says REPRINT vs PRINT.
+   */
+  reprint: boolean;
   payment: {
     paid: boolean;
     /** null when fully paid; the amount to collect otherwise. */

@@ -1667,6 +1667,7 @@
       "restored": "Variant restored",
       "generateBarcode": "Generate",
       "printLabel": "Print label",
+      "printLabelSaveFirst": "Save your changes to print the label.",
       "barcodeGenerating": "Generating…",
       "barcodeGenerateError": "Could not generate a barcode. Please try again."
     },
@@ -2249,7 +2250,11 @@
       "moreItems": "+{{count}} more",
       "paid": "Paid",
       "cod": "COD",
-      "amountToCollect": "Amount to collect"
+      "amountToCollect": "Amount to collect",
+      "reprint": "Reprint",
+      "addressNotConfirmed": "Shipping address not confirmed — verify before shipping",
+      "noAddress": "No address on file",
+      "denied": "You do not have permission to print parcel labels."
     }
   },
   "pack": {

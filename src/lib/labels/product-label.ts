@@ -12,7 +12,7 @@
  */
 import type { Money } from "@/types";
 import { formatMoney } from "@/lib/money";
-import { renderCode128Svg } from "@/lib/barcode/code128";
+import { renderCode128Svg, isCode128Encodable } from "@/lib/barcode/code128";
 import { renderQrSvg } from "@/lib/barcode/qr";
 import { variantQrPayload } from "@/lib/barcode/payload";
 
@@ -49,12 +49,20 @@ export function buildProductLabel(input: ProductLabelInput): ProductLabelViewMod
   const sku = input.sku?.trim() || null;
   const variantName = input.variantName?.trim() || null;
 
+  // Defence against a stored barcode Code 128 cannot encode (non-ASCII/control
+  // characters that predate save-time validation): render no bars rather than
+  // throwing and crashing the whole label (§14). The human-readable number is
+  // still shown below, so the value is never silently lost.
+  const barcodeEncodable = barcode !== null && isCode128Encodable(barcode);
+
   let qr: ProductLabelViewModel["qr"] = null;
   if (input.includeQr && input.variantId) {
     // variantQrPayload throws on a non-UUID; a label must not silently drop the
     // QR, so callers pass a real variant id or leave includeQr off.
     const payload = variantQrPayload(input.variantId);
-    qr = { payload, svg: renderQrSvg(payload, { moduleSize: 3, quietModules: 2, ecLevel: "M" }) };
+    // Quiet zone is the 4-module ISO minimum (renderQrSvg clamps to it): a
+    // 2-module margin was undecodable on cheap cameras (§3).
+    qr = { payload, svg: renderQrSvg(payload, { moduleSize: 3, quietModules: 4, ecLevel: "M" }) };
   }
 
   return {
@@ -62,7 +70,9 @@ export function buildProductLabel(input: ProductLabelInput): ProductLabelViewMod
     variantName,
     sku,
     barcode,
-    barcodeSvg: barcode ? renderCode128Svg(barcode, { moduleWidth: 2, height: 48 }) : null,
+    barcodeSvg: barcodeEncodable
+      ? renderCode128Svg(barcode!, { moduleWidth: 2, height: 48 })
+      : null,
     priceFormatted: formatMoney(input.price),
     qr,
   };

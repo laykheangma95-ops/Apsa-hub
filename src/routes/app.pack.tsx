@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Printer } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AppHeader, BottomNav, ListSkeleton, ScreenBleed } from "@/design-system";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState
 import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listReadyToPack, type ReadyToPackRow } from "@/lib/api";
+import { fulfillmentKeys } from "@/lib/fulfillment-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
 
@@ -121,19 +122,53 @@ function PackScreen() {
   const { session, organizationId } = Route.useRouteContext();
 
   const canRead = capabilities.can("orders.read");
-  // Parcel labels expose customer phone + address, so printing is gated on the
-  // same key the server enforces (§14). Without it the queue is still readable.
-  const canPrint = capabilities.can("customers.view_sensitive");
+  // Parcel labels expose customer name/phone/address, so printing is gated on the
+  // narrow fulfillment.print_label capability the server enforces (§14, §20),
+  // read fail-closed (canSensitive). Without it the queue is still readable.
+  const canPrint = capabilities.canSensitive("fulfillment.print_label");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [printIds, setPrintIds] = useState<string[] | null>(null);
 
   const query = useQuery({
-    queryKey: ["ready-to-pack", session.userId, organizationId],
+    queryKey: fulfillmentKeys.readyToPack(session.userId, organizationId),
     queryFn: () => listReadyToPack(),
     enabled: canRead,
   });
-  const rows = query.data ?? [];
+  const rows = useMemo(() => query.data ?? [], [query.data]);
+
+  // The set of order ids currently in the queue — the only ids a selection may
+  // legitimately contain right now.
+  const eligibleIds = useMemo(() => new Set(rows.map((r) => r.orderId)), [rows]);
+
+  /*
+   * Reconcile stale bulk selections (§18/§10). The queue refreshes on its own
+   * (refetch, another packer shipping an order, a cancellation), and a selected
+   * id can silently become one that is no longer eligible — cancelled, already
+   * fulfilled, or gone from this principal's view. Prune the selection down to
+   * what is actually in the queue now, so a bulk print can never carry a stale
+   * or now-ineligible order. The server still revalidates each order on print
+   * (getParcelLabelData's lifecycle + permission guards) — this keeps the client
+   * from even asking. Also drop everything if the print capability is lost.
+   */
+  useEffect(() => {
+    if (!canPrint) {
+      setSelected((prev) => (prev.size === 0 ? prev : new Set()));
+      setPrintIds(null);
+      return;
+    }
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => eligibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [canPrint, eligibleIds]);
+
+  // Never trust the raw selection for an action — always intersect with the
+  // current queue at the moment it is read.
+  const validSelected = useMemo(
+    () => [...selected].filter((id) => eligibleIds.has(id)),
+    [selected, eligibleIds],
+  );
 
   function toggle(orderId: string, checked: boolean) {
     setSelected((prev) => {
@@ -153,18 +188,18 @@ function PackScreen() {
 
         {canRead ? (
           <>
-            {canPrint && selected.size > 0 ? (
+            {canPrint && validSelected.length > 0 ? (
               <div className="glass-bar sticky top-2 z-10 mb-3 flex items-center justify-between gap-3 rounded-2xl border border-border-default px-4 py-2.5">
                 <span className="text-label text-text-primary">
-                  {t("pack.selectedCount", { count: selected.size })}
+                  {t("pack.selectedCount", { count: validSelected.length })}
                 </span>
                 <Button
                   type="button"
                   className="tap-target h-10 gap-2 rounded-xl"
-                  onClick={() => setPrintIds([...selected])}
+                  onClick={() => setPrintIds(validSelected)}
                 >
                   <Printer className="size-4" aria-hidden />
-                  {t("pack.printSelected", { count: selected.size })}
+                  {t("pack.printSelected", { count: validSelected.length })}
                 </Button>
               </div>
             ) : null}
@@ -194,7 +229,7 @@ function PackScreen() {
                 <PackCard
                   key={row.orderId}
                   row={row}
-                  selected={selected.has(row.orderId)}
+                  selected={selected.has(row.orderId) && eligibleIds.has(row.orderId)}
                   onToggle={(c) => toggle(row.orderId, c)}
                   onPrint={() => setPrintIds([row.orderId])}
                   canPrint={canPrint}
@@ -209,6 +244,8 @@ function PackScreen() {
         open={printIds !== null}
         onClose={() => setPrintIds(null)}
         orderIds={printIds ?? []}
+        userId={session.userId}
+        organizationId={organizationId}
       />
 
       <BottomNav />

@@ -148,6 +148,17 @@ export interface Code128RenderOptions {
   height?: number;
   /** Quiet-zone width in modules on each side. Default 10 (spec minimum). */
   quietModules?: number;
+  /**
+   * When true (the default), the SVG scales to the width of its container
+   * instead of pinning a fixed pixel width. The intrinsic module/quiet-zone
+   * geometry becomes the `viewBox`, and width/height are set to 100% with
+   * `preserveAspectRatio="none"`, so a long barcode on a narrow 50×30 mm label
+   * shrinks to fit rather than being clipped by the label's `overflow:hidden`.
+   * The bar-to-bar proportions and the quiet zones are preserved because every
+   * bar scales by the same factor. Set false for a fixed intrinsic-size SVG
+   * (e.g. a width-assertion unit test).
+   */
+  responsive?: boolean;
 }
 
 /**
@@ -183,6 +194,26 @@ export function encodeCode128B(value: string): number[] {
   symbols.push(checksum);
   symbols.push(STOP);
   return symbols;
+}
+
+/**
+ * Whether every character of `value` is representable in Code Set B (printable
+ * ASCII 32–126) and the string is non-empty — i.e. whether renderCode128Svg /
+ * encodeCode128B can encode it WITHOUT throwing.
+ *
+ * Used to (a) validate a manual/manufacturer barcode before it is stored, so a
+ * value that would crash label generation is never persisted, and (b) guard the
+ * label view-model builder against any such value already in the data. Common
+ * manufacturer formats (EAN/UPC digits, alphanumeric codes) all pass; only
+ * non-ASCII or control characters fail.
+ */
+export function isCode128Encodable(value: string): boolean {
+  if (typeof value !== "string" || value.length === 0) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < MIN_ASCII || code > MAX_ASCII) return false;
+  }
+  return true;
 }
 
 /**
@@ -223,6 +254,7 @@ export function renderCode128Svg(value: string, options: Code128RenderOptions = 
   const moduleWidth = options.moduleWidth ?? 2;
   const height = options.height ?? 60;
   const quiet = options.quietModules ?? 10;
+  const responsive = options.responsive ?? true;
 
   const modules = code128Modules(value);
   const totalModules = modules.length + quiet * 2;
@@ -245,8 +277,17 @@ export function renderCode128Svg(value: string, options: Code128RenderOptions = 
     i += run;
   }
 
+  // Responsive: the intrinsic geometry lives entirely in the viewBox, and the
+  // SVG fills its container (100% × 100%), so the label's CSS box controls the
+  // physical size and a long code can never overflow/clip. The quiet zones are
+  // part of the viewBox, so they scale with the bars. Non-responsive: pin the
+  // intrinsic pixel size (used by width-assertion tests).
+  const sizeAttrs = responsive
+    ? `width="100%" height="100%"`
+    : `width="${width}" height="${height}"`;
+
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" ` +
+    `<svg xmlns="http://www.w3.org/2000/svg" ${sizeAttrs} ` +
     `viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" shape-rendering="crispEdges">` +
     rects.join("") +
     `</svg>`
