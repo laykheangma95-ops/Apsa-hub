@@ -51,6 +51,9 @@ const RPC_TYPES: Record<string, string> = {
   p_limit: "integer",
   p_lease_seconds: "integer",
   p_ids: "uuid[]",
+  p_token: "uuid",
+  p_tokens: "uuid[]",
+  p_alert_threshold: "integer",
 };
 
 function sqlClient(db: PGlite) {
@@ -73,7 +76,8 @@ function sqlClient(db: PGlite) {
         if (name === "take_product_image_upload_cleanup_v1") {
           return { data: JSON.parse(JSON.stringify(r.rows)), error: null };
         }
-        return { data: (r.rows[0]?.[name] as unknown) ?? null, error: null };
+        const v = (r.rows[0]?.[name] as unknown) ?? null;
+        return { data: v === null ? null : JSON.parse(JSON.stringify(v)), error: null };
       } catch (error) {
         return { data: null, error };
       }
@@ -154,6 +158,10 @@ class FakeStorage {
   signed: string[] = [];
   failAll = false;
   failPaths = new Set<string>();
+  /** Per-call gates for remove(): call N parks until removeGates[N] resolves. */
+  removeGates: Array<Promise<void> | null> = [];
+  removeStarted: (() => void) | null = null;
+  failNextRemoves = 0;
   inspectGate: Promise<void> | null = null;
   inspectStarted: (() => void) | null = null;
   put(p: string, head = JPEG) {
@@ -173,6 +181,13 @@ class FakeStorage {
     return found;
   }
   async remove(paths: string[]) {
+    const gate = this.removeGates.shift() ?? null;
+    this.removeStarted?.();
+    if (gate) await gate;
+    if (this.failNextRemoves > 0) {
+      this.failNextRemoves--;
+      throw new Error("remove down");
+    }
     for (const p of paths) {
       if (this.failAll || this.failPaths.has(p)) throw new Error("remove down");
       this.objects.delete(p);
@@ -231,14 +246,17 @@ async function seedTicket(opts: {
   const path = buildProductImagePath(org, product, objId(++seq), "image/jpeg");
   await db.query(
     `insert into product_image_uploads(organization_id,product_id,issued_by,object_path,expires_at,
-       state,claimed_at,claim_expires_at,consumed_at,cleanup_error_count,cleanup_retry_after)
+       state,claimed_at,claim_expires_at,consumed_at,cleanup_error_count,cleanup_retry_after,
+       claim_token,cleanup_token)
      values($1,$2,$3,$4, ${opts.expired ? "now() + interval '1 second'" : "now() + interval '3 hours'"},
        $5,
        ${opts.state === "claimed" ? "now()" : "null"},
        ${opts.state === "claimed" ? "now() + interval '2 minutes'" : "null"},
        ${opts.state === "consumed" ? "now()" : "null"},
        $6,
-       ${opts.retryAfterPast ? past : "null"})`,
+       ${opts.retryAfterPast ? past : "null"},
+       ${opts.state === "claimed" ? "gen_random_uuid()" : "null"},
+       ${opts.state === "cleaning" ? "gen_random_uuid()" : "null"})`,
     [org, product, uid(opts.user ?? 1), path, opts.state ?? "pending", opts.errors ?? 0],
   );
   if (opts.expired) {
@@ -293,10 +311,15 @@ beforeEach(async () => {
 
 // ══ Migration 050 ═════════════════════════════════════════════════════════════
 
-describe("migration 050 — schema and access", () => {
+describe("migrations 050 + 051 — schema and access", () => {
   it("has no SECURITY DEFINER, pins search_path, and grants execute only to service_role", async () => {
-    const sql = readFileSync("supabase/migrations/050_product_image_upload_lifecycle.sql", "utf8");
-    expect(/SECURITY\s+DEFINER/i.test(sql.replace(/--.*$/gm, ""))).toBe(false);
+    for (const f of [
+      "050_product_image_upload_lifecycle.sql",
+      "051_product_image_upload_ownership.sql",
+    ]) {
+      const sql = readFileSync(`supabase/migrations/${f}`, "utf8");
+      expect(/SECURITY\s+DEFINER/i.test(sql.replace(/--.*$/gm, ""))).toBe(false);
+    }
     const fns = (
       await db.query(
         `select p.proname, p.prosecdef, p.proconfig,
@@ -307,7 +330,7 @@ describe("migration 050 — schema and access", () => {
           where n.nspname = 'public' and p.proname like '%product_image_upload%'`,
       )
     ).rows;
-    expect(fns.length).toBe(5);
+    expect(fns.length).toBe(8);
     for (const f of fns) {
       expect(f.prosecdef).toBe(false);
       expect(String(f.proconfig)).toContain("search_path=public, pg_temp");
@@ -355,6 +378,33 @@ describe("migration 050 — schema and access", () => {
     const r = (await old.query("select state, cleanup_error_count from product_image_uploads"))
       .rows;
     expect(r).toEqual([{ state: "pending", cleanup_error_count: 0 }]);
+
+    // 050 -> 051: mid-flight rows get tokens; every other row keeps NULL tokens.
+    const mk = async (n: number, state: string, extra: string) => {
+      const p = buildProductImagePath(ORG_A, PRODUCT_A, objId(n), "image/jpeg");
+      await old.query(
+        `insert into product_image_uploads(organization_id,product_id,issued_by,object_path,expires_at,state${extra.split("|")[0]})
+         values($1,$2,$3,$4,now()+interval '3 hours','${state}'${extra.split("|")[1]})`,
+        [ORG_A, PRODUCT_A, actor, p],
+      );
+    };
+    await mk(2, "claimed", ",claimed_at,claim_expires_at|,now(),now()+interval '2 minutes'");
+    await mk(3, "cleaning", ",cleanup_retry_after|,now()");
+    await old.exec(
+      readFileSync("supabase/migrations/051_product_image_upload_ownership.sql", "utf8"),
+    );
+    const t = (
+      await old.query<{ state: string; claim_token: string | null; cleanup_token: string | null }>(
+        "select state, claim_token, cleanup_token from product_image_uploads order by state",
+      )
+    ).rows;
+    expect(t.map((x) => x.state)).toEqual(["claimed", "cleaning", "pending"]);
+    expect(t[0]!.claim_token).not.toBeNull();
+    expect(t[0]!.cleanup_token).toBeNull();
+    expect(t[1]!.cleanup_token).not.toBeNull();
+    expect(t[1]!.claim_token).toBeNull();
+    expect(t[2]!.claim_token).toBeNull();
+    expect(t[2]!.cleanup_token).toBeNull();
     await old.close();
   });
 
@@ -362,6 +412,11 @@ describe("migration 050 — schema and access", () => {
     const path = await seedTicket({});
     await expect(setCol(path, "state = 'bogus'")).rejects.toThrow();
     await expect(setCol(path, "state = 'claimed'")).rejects.toThrow();
+    // a claimed row must carry its ownership token; only a cleaning row may hold a cleanup token
+    await expect(
+      setCol(path, "state='claimed', claimed_at=now(), claim_expires_at=now()"),
+    ).rejects.toThrow();
+    await expect(setCol(path, "cleanup_token = gen_random_uuid()")).rejects.toThrow();
   });
 
   it("still denies anon/authenticated any table access", async () => {
@@ -380,9 +435,15 @@ describe("ticket state — atomic claim / finalize", () => {
     db
       .query("select claim_product_image_upload_v1($1,$2,$3,$4) as id", [org, product, path, secs])
       .then((r: { rows: Array<{ id: string | null }> }) => r.rows[0]!.id);
-  const finalize = (org: string, product: string, path: string) =>
+  /** Finalize with the CURRENT claim token unless one is given (stale-owner tests). */
+  const finalize = async (org: string, product: string, path: string, token?: string | null) =>
     db
-      .query("select finalize_product_image_upload_v1($1,$2,$3) as prev", [org, product, path])
+      .query("select finalize_product_image_upload_v1($1,$2,$3,$4) as prev", [
+        org,
+        product,
+        path,
+        token === undefined ? ((await ticketOf(path))?.claim_token ?? null) : token,
+      ])
       .then((r: { rows: Array<{ prev: string | null }> }) => r.rows[0]!.prev);
 
   it("pending -> claimed -> consumed; product updated in the same step", async () => {
@@ -510,8 +571,10 @@ describe("cleanup selection", () => {
     const path = await seedTicket({ expired: true });
     expect(await take()).toEqual([path]);
     expect(await take()).toEqual([]); // leased to the first sweep
-    await db.query("select fail_product_image_upload_cleanup_v1($1::uuid[])", [
-      `{${(await ticketOf(path)).id}}`,
+    const held = await ticketOf(path);
+    await db.query("select fail_product_image_upload_cleanup_v1($1::uuid[],$2::uuid[],5)", [
+      `{${held.id}}`,
+      `{${held.cleanup_token}}`,
     ]);
     const t = await ticketOf(path);
     expect(t.state).toBe("cleaning");
@@ -588,7 +651,10 @@ describe("attach vs sweep", () => {
   it("abandoned claim: after its window the ticket is recovered — cleaned once expired, re-attachable while live", async () => {
     const live = await ask();
     storage.put(live.path);
-    await setCol(live.path, `state='claimed', claimed_at=now(), claim_expires_at=${past}`); // crashed attach
+    await setCol(
+      live.path,
+      `state='claimed', claim_token=gen_random_uuid(), claimed_at=now(), claim_expires_at=${past}`,
+    ); // crashed attach
     await attach(live.path); // recoverable: re-claimed and attached
     expect(await productImage()).toBe(live.path);
 
@@ -596,7 +662,7 @@ describe("attach vs sweep", () => {
     storage.put(dead.path);
     await setCol(
       dead.path,
-      `state='claimed', claimed_at=now(), claim_expires_at=${past}, created_at = now() - interval '4 hours', expires_at = ${past}`,
+      `state='claimed', claim_token=gen_random_uuid(), claimed_at=now(), claim_expires_at=${past}, created_at = now() - interval '4 hours', expires_at = ${past}`,
     );
     await (await svc()).sweepExpiredProductImageUploads();
     expect(storage.objects.has(dead.path)).toBe(false);
@@ -805,6 +871,315 @@ describe("persistent cleanup failure", () => {
     await (await svc()).sweepExpiredProductImageUploads();
     expect((await rows()).length).toBe(0);
     expect(storage.removed.length).toBe(5);
+  });
+});
+
+// ══ Lease ownership (claim token / cleanup token) ════════════════════════════
+
+describe("ownership tokens — stale owners lose authority", () => {
+  const one = async (sql: string, args: unknown[]) =>
+    Object.values((await db.query(sql, args)).rows[0] as Record<string, unknown>)[0];
+  const claim = (path: string) =>
+    one("select claim_product_image_upload_v1($1,$2,$3,120)", [ORG_A, PRODUCT_A, path]) as Promise<
+      string | null
+    >;
+  const release = (path: string, token: string | null) =>
+    one("select release_product_image_upload_claim_v1($1,$2,$3,$4)", [
+      ORG_A,
+      PRODUCT_A,
+      path,
+      token,
+    ]);
+  const resolveClaim = (path: string, token: string | null) =>
+    one("select resolve_product_image_upload_claim_v1($1,$2,$3,$4)", [
+      ORG_A,
+      PRODUCT_A,
+      path,
+      token,
+    ]);
+  const finalize = (path: string, token: string | null) =>
+    one("select finalize_product_image_upload_v1($1,$2,$3,$4)", [ORG_A, PRODUCT_A, path, token]);
+  const take = async () =>
+    (await db.query("select * from take_product_image_upload_cleanup_v1(25, 600)")).rows as Array<{
+      id: string;
+      object_path: string;
+      cleanup_token: string;
+    }>;
+  const resolveCleanup = async (ids: string[], tokens: string[]) =>
+    (await one("select resolve_product_image_upload_cleanup_v1($1::uuid[],$2::uuid[])", [
+      `{${ids.join(",")}}`,
+      `{${tokens.join(",")}}`,
+    ])) as string[];
+  const failCleanup = async (ids: string[], tokens: string[], threshold = 5) =>
+    (await one("select fail_product_image_upload_cleanup_v1($1::uuid[],$2::uuid[],$3)", [
+      `{${ids.join(",")}}`,
+      `{${tokens.join(",")}}`,
+      threshold,
+    ])) as string[];
+  const unresolved = async () => (await rows("state <> 'consumed'")).length;
+
+  it("every successful claim mints a fresh token (including a re-claim after a lapse)", async () => {
+    const path = await seedTicket({});
+    const a = await claim(path);
+    await setCol(path, `claim_expires_at = ${past}`);
+    const b = await claim(path);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(b).not.toBe(a);
+    expect((await ticketOf(path)).claim_token).toBe(b);
+  });
+
+  it("ATTACH interleaving: A claims, lease lapses, B claims — A can neither release, resolve nor finalize; B finalizes", async () => {
+    const path = await seedTicket({});
+    const tokenA = await claim(path); // 1
+    await setCol(path, `claim_expires_at = ${past}`); // 2
+    const tokenB = await claim(path); // 3
+    expect(await release(path, tokenA)).toBe(false); // 4
+    let row = await ticketOf(path); // 5: still B's
+    expect(row.state).toBe("claimed");
+    expect(row.claim_token).toBe(tokenB);
+    expect(await resolveClaim(path, tokenA)).toBe(false);
+    expect(await ticketOf(path)).toBeDefined();
+    expect(await finalize(path, tokenA)).toBeNull(); // 6
+    expect(await productImage()).toBeNull();
+    expect((await ticketOf(path)).state).toBe("claimed");
+    expect(await finalize(path, tokenB)).toBe(""); // 7
+    row = await ticketOf(path);
+    expect(row.state).toBe("consumed");
+    expect(row.claim_token).toBeNull();
+    expect(await productImage()).toBe(path);
+    expect(await finalize(path, tokenB)).toBeNull(); // duplicate finalize is a no-op
+    expect(await finalize(path, tokenA)).toBeNull();
+  });
+
+  it("owned release: the current token releases; null / random / wrong-row tokens do not", async () => {
+    const path = await seedTicket({});
+    const other = await seedTicket({});
+    const token = await claim(path);
+    const otherToken = await claim(other);
+    expect(await release(path, null)).toBe(false);
+    expect(await release(path, otherToken)).toBe(false); // another ticket's token
+    expect(await release(path, "11111111-1111-4111-8111-111111111111")).toBe(false);
+    expect((await ticketOf(path)).state).toBe("claimed");
+    expect(await release(path, token)).toBe(true);
+    const row = await ticketOf(path);
+    expect(row.state).toBe("pending");
+    expect(row.claim_token).toBeNull();
+    expect(await release(path, token)).toBe(false); // token is dead once released
+    expect(await finalize(path, token)).toBeNull();
+  });
+
+  it("finalize needs the token even from a lapsed-but-untaken claim; a sweep-taken row rejects the old owner", async () => {
+    const path = await seedTicket({});
+    const token = await claim(path);
+    await setCol(
+      path,
+      `claim_expires_at = ${past}, created_at = now() - interval '4 hours', expires_at = ${past}`,
+    );
+    const taken = await take(); // sweep revokes the claim
+    expect(taken.map((t) => t.object_path)).toEqual([path]);
+    expect(await finalize(path, token)).toBeNull();
+    expect(await release(path, token)).toBe(false);
+    expect((await ticketOf(path)).state).toBe("cleaning");
+    expect(await productImage()).toBeNull();
+  });
+
+  it("CLEANUP interleaving: A takes, lease lapses, B re-takes — A's resolve and failure are rejected; B keeps authority", async () => {
+    const path = await seedTicket({ expired: true });
+    const [a] = await take(); // 1
+    expect(a).toBeDefined();
+    await setCol(path, `cleanup_retry_after = ${past}`); // 2
+    const [b] = await take(); // 3
+    expect(b!.id).toBe(a!.id);
+    expect(b!.cleanup_token).not.toBe(a!.cleanup_token);
+    expect(await resolveCleanup([a!.id], [a!.cleanup_token])).toEqual([]); // 4-5
+    expect(await failCleanup([a!.id], [a!.cleanup_token])).toEqual([]);
+    let row = await ticketOf(path);
+    expect(row.state).toBe("cleaning");
+    expect(row.cleanup_token).toBe(b!.cleanup_token);
+    expect(row.cleanup_error_count).toBe(0);
+    expect(await unresolved()).toBe(1); // backlog unchanged by the stale sweep
+    // B (current owner) may record a failure, which releases its ownership...
+    await failCleanup([b!.id], [b!.cleanup_token]);
+    row = await ticketOf(path);
+    expect(row.cleanup_error_count).toBe(1);
+    expect(row.cleanup_token).toBeNull();
+    // ...after which B's token is dead too, and a later owner is the only authority.
+    expect(await resolveCleanup([b!.id], [b!.cleanup_token])).toEqual([]);
+    await setCol(path, `cleanup_retry_after = ${past}`);
+    const [c] = await take();
+    expect(await resolveCleanup([c!.id], [c!.cleanup_token])).toEqual([c!.id]);
+    expect(await ticketOf(path)).toBeUndefined();
+  });
+
+  it("cleanup resolution is per row: one stale pair in a batch does not block the current pairs", async () => {
+    const p1 = await seedTicket({ expired: true });
+    const p2 = await seedTicket({ expired: true });
+    const first = await take();
+    await setCol(p1, `cleanup_retry_after = ${past}`);
+    const again = (await take()).filter((t) => t.object_path === p1);
+    const stale = first.find((t) => t.object_path === p1)!;
+    const live2 = first.find((t) => t.object_path === p2)!;
+    const done = await resolveCleanup(
+      [stale.id, live2.id],
+      [stale.cleanup_token, live2.cleanup_token],
+    );
+    expect(done).toEqual([live2.id]);
+    expect(await ticketOf(p2)).toBeUndefined();
+    expect((await ticketOf(p1)).cleanup_token).toBe(again[0]!.cleanup_token);
+  });
+
+  it("failure alert: only the failure that reaches the threshold reports the ticket", async () => {
+    const path = await seedTicket({ expired: true, errors: 3 });
+    for (const expected of [[], ["id"]]) {
+      const [t] = await take();
+      const crossed = await failCleanup([t!.id], [t!.cleanup_token], 5);
+      expect(crossed).toEqual(expected.length ? [t!.id] : []);
+      await setCol(path, `cleanup_retry_after = ${past}`);
+    }
+    const [t] = await take();
+    expect(await failCleanup([t!.id], [t!.cleanup_token], 5)).toEqual([]); // 6th: already past
+  });
+
+  // ── Service level, real interleaving through the production code ──
+
+  it("stale ATTACH after a re-claim: its late outcome cannot finalize or release the newer claim", async () => {
+    const t = await ask();
+    // A: parks inside inspect (object not there yet -> it will try to release its claim).
+    let releaseA!: () => void;
+    storage.inspectGate = new Promise<void>((r) => (releaseA = r));
+    const started = new Promise<void>((r) => (storage.inspectStarted = r));
+    const attachA = attach(t.path);
+    await started;
+    const tokenA = (await ticketOf(t.path)).claim_token as string;
+    await setCol(t.path, `claim_expires_at = ${past}`); // A's lease lapses
+    const tokenB = await claim(t.path); // B (another attach) re-claims
+    expect(tokenB).not.toBe(tokenA);
+    storage.inspectGate = null;
+    releaseA();
+    await expect(attachA).rejects.toMatchObject({ statusCode: 400 }); // A: object missing -> release(tokenA)
+    const row = await ticketOf(t.path);
+    expect(row.state).toBe("claimed"); // B's claim survived A's release
+    expect(row.claim_token).toBe(tokenB);
+    expect(await finalize(t.path, tokenB)).toBe("");
+    expect(await productImage()).toBe(t.path);
+  });
+
+  it("stale ATTACH that inspected the object: finalize is rejected, B's result stands, object kept", async () => {
+    const t = await ask();
+    storage.put(t.path);
+    let releaseA!: () => void;
+    storage.inspectGate = new Promise<void>((r) => (releaseA = r));
+    const started = new Promise<void>((r) => (storage.inspectStarted = r));
+    const attachA = attach(t.path);
+    await started;
+    await setCol(t.path, `claim_expires_at = ${past}`); // A's lease lapses
+    storage.inspectGate = null;
+    storage.inspectStarted = null;
+    await attach(t.path); // B: re-claims and finalizes the whole way
+    expect(await productImage()).toBe(t.path);
+    releaseA();
+    await expect(attachA).rejects.toMatchObject({ statusCode: 400 }); // A holds a dead token
+    expect(await productImage()).toBe(t.path);
+    expect(storage.objects.has(t.path)).toBe(true);
+    expect((await ticketOf(t.path)).state).toBe("consumed");
+  });
+
+  it("duplicate attach ownership: of 6 racing attaches exactly one owns the claim and finalizes", async () => {
+    const t = await ask();
+    storage.put(t.path);
+    const results = await Promise.allSettled(Array.from({ length: 6 }, () => attach(t.path)));
+    expect(results.filter((r) => r.status === "fulfilled").length).toBe(1);
+    expect(await productImage()).toBe(t.path);
+    expect(storage.objects.has(t.path)).toBe(true);
+    expect((await ticketOf(t.path)).claim_token).toBeNull();
+  });
+
+  const sweepHarness = async (path: string) => {
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    storage.removeGates = [
+      new Promise<void>((r) => (releaseA = r)),
+      new Promise<void>((r) => (releaseB = r)),
+    ];
+    const s = await svc();
+    let started!: () => void;
+    let startedP = new Promise<void>((r) => (started = r));
+    storage.removeStarted = () => started();
+    const sweepA = s.sweepExpiredProductImageUploads();
+    await startedP;
+    const tokenA = (await ticketOf(path)).cleanup_token as string;
+    await setCol(path, `cleanup_retry_after = ${past}`); // A's lease lapses
+    startedP = new Promise<void>((r) => (started = r));
+    const sweepB = s.sweepExpiredProductImageUploads(); // B re-takes the row
+    await startedP;
+    const tokenB = (await ticketOf(path)).cleanup_token as string;
+    expect(tokenB).not.toBe(tokenA);
+    return { sweepA, sweepB, releaseA, releaseB, tokenB };
+  };
+
+  it("stale SWEEP success (service): A's late delete-resolution is a no-op; B still owns and resolves", async () => {
+    const path = await seedTicket({ expired: true });
+    const h = await sweepHarness(path);
+    h.releaseA();
+    await h.sweepA; // A deleted the object and tried to resolve with token A
+    const row = await ticketOf(path);
+    expect(row).toBeDefined(); // A did not delete the row
+    expect(row.state).toBe("cleaning");
+    expect(row.cleanup_token).toBe(h.tokenB);
+    expect(await unresolved()).toBe(1);
+    h.releaseB();
+    expect(await h.sweepB).toEqual({ resolved: 1, failed: 0 });
+    expect(await ticketOf(path)).toBeUndefined();
+  });
+
+  it("stale SWEEP failure (service): A's late failure is not recorded against B's row", async () => {
+    const path = await seedTicket({ expired: true });
+    storage.failNextRemoves = 1; // the first remove() call (A's) fails
+    const h = await sweepHarness(path);
+    h.releaseA();
+    expect(await h.sweepA).toEqual({ resolved: 0, failed: 1 });
+    const row = await ticketOf(path);
+    expect(row.cleanup_error_count).toBe(0); // not recorded
+    expect(row.cleanup_token).toBe(h.tokenB); // B still owns it
+    h.releaseB();
+    expect(await h.sweepB).toEqual({ resolved: 1, failed: 0 });
+  });
+
+  it("current cleanup owner succeeds end to end and backlog shrinks", async () => {
+    const path = await seedTicket({ expired: true });
+    expect(await unresolved()).toBe(1);
+    expect(await (await svc()).sweepExpiredProductImageUploads()).toEqual({
+      resolved: 1,
+      failed: 0,
+    });
+    expect(storage.objects.has(path)).toBe(false);
+    expect(await unresolved()).toBe(0);
+  });
+
+  it("operator signal: a ticket crossing the failure threshold logs its id once, never paths, URLs or tokens", async () => {
+    const path = await seedTicket({ expired: true, errors: 4 });
+    storage.failAll = true;
+    const lines: string[] = [];
+    const { setLogSink } = await import("../server/observability/logger");
+    const undo = setLogSink((_l, line) => void lines.push(line));
+    try {
+      const s = await svc();
+      await s.sweepExpiredProductImageUploads(); // 5th failure: crosses
+      await setCol(path, `cleanup_retry_after = ${past}`);
+      await s.sweepExpiredProductImageUploads(); // 6th: already past, silent
+    } finally {
+      undo();
+    }
+    const id = (await ticketOf(path)).id as string;
+    const alerts = lines.filter((l) => l.includes("product_image.cleanup_persistent_failure"));
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]).toContain(id);
+    const row = await ticketOf(path);
+    expect(alerts[0]).not.toContain(path);
+    expect(alerts[0]).not.toContain(String(row.claim_token ?? "\u0000"));
+    expect(alerts[0]).not.toContain("https://");
+    expect(await unresolved()).toBe(1); // still counted toward the caps
   });
 });
 

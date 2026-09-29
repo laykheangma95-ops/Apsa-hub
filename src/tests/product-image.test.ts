@@ -248,14 +248,32 @@ class FakeDb {
       }
       Object.assign(r, {
         state: "claimed",
+        claim_token: crypto.randomUUID(),
         claimed_at: iso(now),
         claim_expires_at: iso(now + Number(a.p_claim_seconds) * 1000),
       });
-      return ok(r.id);
+      return ok(r.claim_token);
+    }
+    if (name === "release_product_image_upload_claim_v1") {
+      const r = find(a.p_org, a.p_product, a.p_path);
+      if (!r || r.state !== "claimed" || r.claim_token !== a.p_token) return ok(false);
+      Object.assign(r, {
+        state: "pending",
+        claim_token: null,
+        claimed_at: null,
+        claim_expires_at: null,
+      });
+      return ok(true);
+    }
+    if (name === "resolve_product_image_upload_claim_v1") {
+      const r = find(a.p_org, a.p_product, a.p_path);
+      if (!r || r.state !== "claimed" || r.claim_token !== a.p_token) return ok(false);
+      this.uploads.splice(this.uploads.indexOf(r), 1);
+      return ok(true);
     }
     if (name === "finalize_product_image_upload_v1") {
       const r = find(a.p_org, a.p_product, a.p_path);
-      if (!r || r.state !== "claimed") return ok(null);
+      if (!r || r.state !== "claimed" || r.claim_token !== a.p_token) return ok(null);
       if (this.failNextProductUpdate) {
         this.failNextProductUpdate = false;
         return Promise.resolve({ data: null, error: { message: "db down" } });
@@ -291,20 +309,42 @@ class FakeDb {
         }
         Object.assign(r, {
           state: "cleaning",
+          claim_token: null,
+          cleanup_token: crypto.randomUUID(),
           cleanup_retry_after: iso(now + Number(a.p_lease_seconds) * 1000),
         });
         out.push({ ...r });
       }
       return ok(out);
     }
+    if (name === "resolve_product_image_upload_cleanup_v1") {
+      const ids = a.p_ids as string[];
+      const tokens = a.p_tokens as string[];
+      const done = this.uploads.filter(
+        (x) =>
+          x.state === "cleaning" &&
+          ids.some((id, i) => id === x.id && tokens[i] === x.cleanup_token),
+      );
+      for (const r of done) this.uploads.splice(this.uploads.indexOf(r), 1);
+      return ok(done.map((r) => r.id));
+    }
     if (name === "fail_product_image_upload_cleanup_v1") {
-      for (const r of this.uploads.filter((x) => (a.p_ids as string[]).includes(x.id as string))) {
+      const ids = a.p_ids as string[];
+      const tokens = a.p_tokens as string[];
+      const crossed: unknown[] = [];
+      for (const r of this.uploads.filter(
+        (x) =>
+          x.state === "cleaning" &&
+          ids.some((id, i) => id === x.id && tokens[i] === x.cleanup_token),
+      )) {
+        r.cleanup_token = null;
         r.cleanup_error_count = Number(r.cleanup_error_count) + 1;
+        if (r.cleanup_error_count === Number(a.p_alert_threshold)) crossed.push(r.id);
         r.cleanup_retry_after = iso(
           now + 5 * 60_000 * 2 ** Math.min(Number(r.cleanup_error_count) - 1, 6),
         );
       }
-      return ok(null);
+      return ok(crossed);
     }
     return Promise.resolve({ data: null, error: { message: `unknown rpc ${name}` } });
   }

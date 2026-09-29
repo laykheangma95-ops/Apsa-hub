@@ -1924,9 +1924,10 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // UI is built entirely on migrations 017-019, which already exist; it added
     // none of its own, and a new file beyond 047 would move this pin and fail
     // the test on purpose. 050 (V1 product images — supabase/migrations/
-    // 048_product_images.sql + 049_product_image_uploads.sql + 050_product_image_upload_lifecycle.sql) is the current head; it does not change the
+    // 048_product_images.sql + 049_product_image_uploads.sql + 050_product_image_upload_lifecycle.sql +
+    // 051_product_image_upload_ownership.sql) is the current head; it does not change the
     // catalog UI's own migration dependencies (017-019).
-    expect(migrations.at(-1)).toBe("050_product_image_upload_lifecycle.sql");
+    expect(migrations.at(-1)).toBe("051_product_image_upload_ownership.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

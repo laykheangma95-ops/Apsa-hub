@@ -71,6 +71,8 @@ export const PRODUCT_IMAGE_SWEEP_BATCH = 25;
 export const PRODUCT_IMAGE_CLAIM_SECONDS = 120;
 /** How long a sweep owns a ticket before a crashed sweep is retried. */
 export const PRODUCT_IMAGE_CLEANUP_LEASE_SECONDS = 10 * 60;
+/** Consecutive failed deletes of one ticket after which an operator warning is logged (once). */
+export const PRODUCT_IMAGE_CLEANUP_ALERT_THRESHOLD = 5;
 
 // ── Reads ────────────────────────────────────────────────────────────────────
 
@@ -134,28 +136,39 @@ export async function sweepExpiredProductImageUploads(): Promise<{
     if (taken.length === 0) return { resolved: 0, failed: 0 };
 
     const referenced = await repo.findReferencedImagePaths(taken.map((t) => t.object_path));
-    const resolved: string[] = [];
-    const failed: string[] = [];
+    const resolved: typeof taken = [];
+    const failed: typeof taken = [];
     await Promise.all(
       taken.map(async (t) => {
         const ownedShape = isOwnedProductImagePath(t.object_path, t.organization_id, t.product_id);
         if (referenced.has(t.object_path) || !ownedShape) {
           // Never delete an object we cannot prove is an abandoned upload.
-          resolved.push(t.id);
+          resolved.push(t);
           return;
         }
         try {
           await getProductImageStorage().remove([t.object_path]);
-          resolved.push(t.id);
+          resolved.push(t);
         } catch {
-          failed.push(t.id);
+          failed.push(t);
         }
       }),
     );
-    await repo.deleteCleanedTickets(resolved);
-    await repo.recordCleanupFailures(failed);
+    // Token-checked: a row this sweep lost (lease lapsed, re-taken) is left alone.
+    await repo.resolveCleanedTickets(resolved);
+    const persistent = await repo.recordCleanupFailures(
+      failed,
+      PRODUCT_IMAGE_CLEANUP_ALERT_THRESHOLD,
+    );
     if (failed.length > 0)
       serverLog.warn("product_image.sweep_delete_failed", { count: failed.length });
+    // Operator signal: ticket ids only (never paths, URLs or tokens). See docs/PRODUCT_IMAGES.md.
+    if (persistent.length > 0) {
+      serverLog.warn("product_image.cleanup_persistent_failure", {
+        ticketIds: persistent,
+        threshold: PRODUCT_IMAGE_CLEANUP_ALERT_THRESHOLD,
+      });
+    }
     return { resolved: resolved.length, failed: failed.length };
   } catch {
     serverLog.warn("product_image.sweep_failed", {});
@@ -254,8 +267,13 @@ async function bestEffortRemove(paths: string[], event: string, productId: strin
 }
 
 /** Give a claim back so the ticket stays usable/cleanable; a failure just lets the claim lapse. */
-async function releaseClaim(orgId: string, productId: string, path: string): Promise<void> {
-  await repo.releaseUploadClaim(orgId, productId, path).catch(() => undefined);
+async function releaseClaim(
+  orgId: string,
+  productId: string,
+  path: string,
+  claimToken: string,
+): Promise<void> {
+  await repo.releaseUploadClaim(orgId, productId, path, claimToken).catch(() => undefined);
 }
 
 /**
@@ -267,16 +285,17 @@ async function discardUpload(
   orgId: string,
   productId: string,
   path: string,
+  claimToken: string,
   event: string,
 ): Promise<void> {
   try {
     await getProductImageStorage().remove([path]);
   } catch {
     serverLog.warn(event, { productId, count: 1 });
-    await releaseClaim(orgId, productId, path);
+    await releaseClaim(orgId, productId, path, claimToken);
     return;
   }
-  await repo.resolveUploadTicket(orgId, productId, path).catch(() => undefined);
+  await repo.resolveUploadTicket(orgId, productId, path, claimToken).catch(() => undefined);
 }
 
 /**
@@ -310,9 +329,9 @@ export async function attachProductImage(
     throw publicError("The uploaded image could not be verified. Please try again.", 400);
   }
 
-  let claimed: boolean;
+  let claimToken: string | null;
   try {
-    claimed = await repo.claimUploadTicket(
+    claimToken = await repo.claimUploadTicket(
       ctx.organizationId,
       product.id,
       path,
@@ -324,7 +343,7 @@ export async function attachProductImage(
   }
   // No live pending ticket for exactly this org + product + path (never issued,
   // expired, already claimed or consumed): fail closed.
-  if (!claimed) {
+  if (!claimToken) {
     throw publicError("The uploaded image could not be verified. Please try again.", 400);
   }
 
@@ -337,12 +356,12 @@ export async function attachProductImage(
     inspection = await storage.inspect(path);
   } catch {
     serverLog.error("product_image.inspect_failed", { productId });
-    await releaseClaim(ctx.organizationId, product.id, path);
+    await releaseClaim(ctx.organizationId, product.id, path, claimToken);
     throw publicError("Could not verify the upload. Please try again.", 503);
   }
   if (!inspection) {
     // Nothing landed (yet): give the claim back so the client may retry.
-    await releaseClaim(ctx.organizationId, product.id, path);
+    await releaseClaim(ctx.organizationId, product.id, path, claimToken);
     throw invalid();
   }
 
@@ -356,6 +375,7 @@ export async function attachProductImage(
       ctx.organizationId,
       product.id,
       path,
+      claimToken,
       "product_image.reject_cleanup_failed",
     );
     throw publicError(
@@ -366,13 +386,13 @@ export async function attachProductImage(
 
   let finalized: { previousPath: string | null } | null;
   try {
-    finalized = await repo.finalizeUploadTicket(ctx.organizationId, product.id, path);
+    finalized = await repo.finalizeUploadTicket(ctx.organizationId, product.id, path, claimToken);
   } catch {
     // Nothing changed (the database function is one transaction): the product
     // keeps its previous image and the upload stays retryable / cleanable. The
     // object is NOT deleted here — the outcome may be unknown to us.
     serverLog.error("product_image.attach_failed", { productId });
-    await releaseClaim(ctx.organizationId, product.id, path);
+    await releaseClaim(ctx.organizationId, product.id, path, claimToken);
     throw publicError("Could not save the photo. Please try again.", 500);
   }
   // Lost the ticket (e.g. cleanup took it after a lapsed claim): nothing changed.

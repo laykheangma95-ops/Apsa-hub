@@ -17,7 +17,7 @@ never an image URL or filename.
   `anon`/`authenticated`, so browsers have no direct read or write access.
 - A future gallery would add a `product_images` table; nothing here blocks it.
 
-## Upload tickets + abuse bounds (migrations `049` + `050`, repo-only)
+## Upload tickets + abuse bounds (migrations `049` + `050` + `051`, repo-only)
 
 A signed upload URL is cost-bearing write authority (up to 5 MiB), so issuing
 one is bounded and recorded.
@@ -76,6 +76,55 @@ untouched — it can never point at an object the sweep deleted.
 Failure before the product changed: invalid/spoofed content → object deleted,
 ticket resolved; transient failure (storage inspect, finalize) → claim released
 (retryable), object kept. Once finalized the object is never deleted by attach.
+
+### Lease ownership (migration 051)
+
+Authority over a ticket row is a **server-generated token**, never timing.
+
+- **Claim token.** Every successful `claim_product_image_upload_v1` (including a
+  re-claim after a lapsed claim) sets a fresh `claim_token` and returns it. The
+  attach flow carries it through every later step. `release_…_claim_v1`,
+  `resolve_…_claim_v1` and `finalize_product_image_upload_v1` succeed only for
+  `state='claimed' AND claim_token = <caller's token>` with matching
+  org/product/path; otherwise they change nothing. A stale attach can therefore
+  never release, resolve or finalize a newer attach's claim, and a duplicate
+  stale finalize fails safely. Finalize (ticket → `consumed` + product update)
+  is still one transaction.
+- **Cleanup token.** Every time a sweep takes a row (from `pending`, a lapsed
+  claim, or another sweep's lapsed lease) it gets a fresh `cleanup_token`
+  (`cleanup_retry_after` is the lease). `resolve_…_cleanup_v1` and
+  `fail_…_cleanup_v1` take `(id, token)` pairs and act only on rows still
+  `cleaning` with that exact token, per row. A failure records the backoff and
+  clears the token (ownership released). A sweep that lost its lease resolves or
+  fails nothing.
+- Tokens are NULL on every row that is not currently claimed / cleaning, and are
+  never returned to a browser, logged, or included in an error.
+
+**Expiry vs. ownership.** Ticket expiry (`expires_at`) governs whether a ticket
+can be _claimed_ or is _eligible for cleanup_. Once a claim is held, it may
+continue through its lease window (`claim_expires_at`, 120 s) even if the
+ticket's `expires_at` passes meanwhile: finalize checks the claim token, not the
+clock. After the lease lapses another attach may re-claim (live ticket) or a
+sweep may take the row (expired ticket); either revokes the old token. So a
+stale owner loses authority by token mismatch, and an untaken lapsed claim can
+still finish — it is the takeover, not the clock, that ends ownership.
+
+### Operator visibility and manual procedure
+
+- When one ticket's `cleanup_error_count` reaches
+  `PRODUCT_IMAGE_CLEANUP_ALERT_THRESHOLD` (5) the sweep logs a single
+  `product_image.cleanup_persistent_failure` warning with the ticket ids and the
+  threshold. Ticket ids only — never paths, signed URLs or tokens.
+- Manual inspection (service role, staging/prod SQL): `select id, organization_id,
+product_id, cleanup_error_count, cleanup_attempted_at, cleanup_retry_after from
+product_image_uploads where state = 'cleaning' and cleanup_error_count >= 5;`.
+  Find the storage object via the row's `object_path`, confirm no product
+  references it (`products.image_path`), delete it in the storage console, then
+  delete the ticket row. Never delete an object a product references.
+- **No scheduler.** Cleanup remains issuance-triggered (each ticket request
+  sweeps a bounded batch). A tenant that stops uploading stops sweeping;
+  staging/ops should verify whether a scheduled maintenance sweep is needed
+  before production. Not added here.
 
 ## Abandoned-upload cleanup
 
@@ -182,7 +231,7 @@ list rows never load the 1600 px original.
 
 ## Pending staging QA (needs hosted credentials — NOT done)
 
-Apply 048, 049 then 050 to staging, then verify: bucket exists and is private with
+Apply 048, 049, 050 then 051 to staging, then verify: bucket exists and is private with
 the limits; signed upload/read URLs work and expire; a cross-tenant path cannot
 be read or written; real upload/replace/remove lifecycle; the **Range request
 on a signed URL** — the exact status (200 vs 206), `Content-Range` behaviour and
