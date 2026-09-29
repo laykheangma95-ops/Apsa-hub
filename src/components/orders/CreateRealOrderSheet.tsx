@@ -28,11 +28,12 @@ import { Input } from "@/components/ui/input";
 import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
-import { ShippingDestinationFields } from "@/components/orders/ShippingDestinationFields";
+import { ShippingIntentSection } from "@/components/orders/ShippingIntentSection";
 import {
   type ShippingDestinationValue,
   EMPTY_SHIPPING_DESTINATION,
-  shippingDestinationPayload,
+  orderShippingPayload,
+  shippingIntentReady,
 } from "@/lib/shipping-destination";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import {
@@ -126,6 +127,9 @@ export function CreateRealOrderSheet({
    * since the customer's on-file address is not the order's destination truth.
    */
   const [shipping, setShipping] = useState<ShippingDestinationValue>(EMPTY_SHIPPING_DESTINATION);
+  // Shipping is an explicit choice — a chosen customer's prefilled name/phone
+  // never turn a pickup order into a shipment.
+  const [shipIntent, setShipIntent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
@@ -278,8 +282,8 @@ export function CreateRealOrderSheet({
   }
 
   /*
-   * Prefill the shipping recipient from the chosen customer as a convenience,
-   * but only into blank fields so a merchant's own edits are never overwritten.
+   * Prefill the shipping recipient from the chosen customer as a convenience
+   * (dormant unless the merchant turns shipping on), but only into blank fields so a merchant's own edits are never overwritten.
    * The address is deliberately never prefilled from the customer profile — the
    * order's destination is the merchant's to confirm, not the mutable default.
    */
@@ -316,6 +320,7 @@ export function CreateRealOrderSheet({
     setCustomerQuery("");
     setCustomer(null);
     setShipping(EMPTY_SHIPPING_DESTINATION);
+    setShipIntent(false);
     setSubmitting(false);
     setFailure(null);
     setCreated(null);
@@ -332,17 +337,19 @@ export function CreateRealOrderSheet({
    * product that means an EXPLICIT choice; `product.variantId` is deliberately
    * not consulted here, so restoring it would fail the regression tests.
    */
-  const readyToSubmit = Boolean(product) && Boolean(variantId) && deliveryMinor !== null;
+  const shippingReady = shippingIntentReady(shipIntent, shipping);
+  const orderInputsReady = deliveryMinor !== null && shippingReady;
+  const readyToSubmit = Boolean(product) && Boolean(variantId) && orderInputsReady;
 
   async function submit() {
     if (!product || !variantId) return;
-    if (deliveryMinor === null) return;
+    if (deliveryMinor === null || !shippingReady) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
     try {
-      const shippingPayload = shippingDestinationPayload(shipping);
+      const shippingPayload = orderShippingPayload(shipIntent, shipping);
       const detail = await createRealOrder({
         source,
         items: [{ variantId, quantity, productId: product.id }],
@@ -688,9 +695,10 @@ export function CreateRealOrderSheet({
 
           <div>
             <p className="text-label text-text-secondary">{t("shipping.title")}</p>
-            <p className="text-caption mb-2 text-text-muted">{t("shipping.optional")}</p>
-            <ShippingDestinationFields
+            <ShippingIntentSection
               idPrefix="order-create"
+              intent={shipIntent}
+              onIntentChange={setShipIntent}
               value={shipping}
               onChange={setShipping}
             />

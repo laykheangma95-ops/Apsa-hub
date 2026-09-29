@@ -2258,7 +2258,8 @@
       "confirmCta": "Confirm shipping address",
       "needsConfirmTitle": "Destination not confirmed",
       "needsConfirmBody": "{{count}} order(s) need a confirmed shipping address before their labels can print.",
-      "needsConfirmOne": "This order needs a confirmed shipping address before its label can print."
+      "needsConfirmOne": "This order needs a confirmed shipping address before its label can print.",
+      "editCta": "Edit shipping address"
     }
   },
   "pack": {
@@ -2300,6 +2301,9 @@
     "saved": "Shipping address saved",
     "error": "Could not save the shipping address. Try again.",
     "nameRequired": "Enter a recipient name.",
-    "addressRequired": "Enter a delivery address."
+    "addressRequired": "Enter a delivery address.",
+    "intent": "Ship this order",
+    "intentHint": "Off = in-store pickup. Turn on to send it to a delivery address.",
+    "intentNeedsDestination": "Enter a recipient name and delivery address to ship this order."
   }
 }

@@ -431,3 +431,169 @@ describe("normalizeShippingSnapshot (pure validation, §19)", () => {
     expect(out?.address).toBe("Line one two");
   });
 });
+
+describe("normalizeShippingSnapshot phone validation", () => {
+  const ship = async (phone: string) => {
+    const { normalizeShippingSnapshot } = await import("../server/orders/service");
+    return normalizeShippingSnapshot({ name: "N", phone, address: "A" });
+  };
+
+  it("rejects alphabetic content and stray symbols", async () => {
+    for (const bad of [
+      "abc",
+      "012ABC123",
+      "phone123",
+      "012 345 678 ext",
+      "012#345678",
+      "01234*678",
+    ]) {
+      await expect(ship(bad)).rejects.toMatchObject({ statusCode: 400 });
+    }
+  });
+
+  it("rejects a misplaced plus, and implausible digit counts", async () => {
+    for (const bad of ["012+345678", "12345", "1234567890123456", "++85512345678"]) {
+      await expect(ship(bad)).rejects.toMatchObject({ statusCode: 400 });
+    }
+  });
+
+  it("keeps legitimate local and international formatting, incl. Khmer numerals", async () => {
+    for (const good of [
+      "012345678",
+      "012 345 678",
+      "+855 12 345 678",
+      "+855-12-345-678",
+      "(023) 123-456",
+      "012.345.678",
+      "០១២ ៣៤៥ ៦៧៨",
+    ]) {
+      expect((await ship(good))?.phone).toBe(good);
+    }
+  });
+});
+
+// ── Label destination authority, through the real fulfillment service ─────────────
+
+describe("parcel label uses the ORDER's shipping snapshot, never the customer profile", () => {
+  const perms = ["orders.create", "orders.read", "orders.update", "fulfillment.print_label"];
+  const ctx = () => context(orgA, actorA, perms);
+
+  async function newOrder(shipping?: { name: string; phone: string; address: string }) {
+    const orders = await import("../server/orders/service");
+    const created = await orders.createOrder(ctx(), {
+      source: "MANUAL",
+      items: [{ variantId: A.variant, quantity: 1 }],
+      customerId: A.customer,
+      idempotencyKey: crypto.randomUUID(),
+      ...(shipping ? { shipping } : {}),
+    });
+    // A label exists only for a confirmed order (parcelLabelPrintability).
+    await f.db.query(`update orders set lifecycle_status='confirmed' where id=$1`, [created.id]);
+    return created;
+  }
+  async function label(orderId: string) {
+    const { getParcelLabelData } = await import("../server/fulfillment/service");
+    return getParcelLabelData(ctx(), orderId);
+  }
+  const setCustomerAddress = (street: string) =>
+    f.db.query(
+      `update customer_addresses set street=$2, house_no='9' where customer_id=$1 and is_default`,
+      [A.customer, street],
+    );
+
+  it("Order A keeps destination A after the customer moves to B; a new Order B captures B", async () => {
+    await setCustomerAddress("Address A Street");
+    const orderA = await newOrder({
+      name: "Recipient A",
+      phone: "012111222",
+      address: "Address A Street, Phnom Penh",
+    });
+    expect((await label(orderA.id)).customer).toMatchObject({
+      name: "Recipient A",
+      address: "Address A Street, Phnom Penh",
+      addressConfirmed: true,
+    });
+
+    // The customer's profile changes to B (and they are renamed).
+    await setCustomerAddress("Address B Street");
+    await f.db.query(`update customers set display_name='Moved Customer' where id=$1`, [
+      A.customer,
+    ]);
+    const stillA = (await label(orderA.id)).customer;
+    expect(stillA.address).toBe("Address A Street, Phnom Penh");
+    expect(stillA.name).toBe("Recipient A");
+    expect(JSON.stringify(stillA)).not.toContain("Address B Street");
+
+    // A new order captures the new destination B.
+    const orderB = await newOrder({
+      name: "Recipient B",
+      phone: "012333444",
+      address: "Address B Street, Siem Reap",
+    });
+    expect((await label(orderB.id)).customer.address).toBe("Address B Street, Siem Reap");
+    // …and A is still A.
+    expect((await label(orderA.id)).customer.address).toBe("Address A Street, Phnom Penh");
+  });
+
+  it("an order with NO snapshot fails closed: no label address, never the latest customer address", async () => {
+    await setCustomerAddress("Latest Profile Street");
+    // A pre-047 / pickup order: no shipping snapshot at all.
+    const old = await newOrder();
+    await f.db.query(
+      `update orders set shipping_name=null, shipping_phone=null, shipping_address=null where id=$1`,
+      [old.id],
+    );
+    const data = await label(old.id);
+    expect(data.customer.addressConfirmed).toBe(false);
+    expect(data.customer.address).toBeNull();
+    expect(JSON.stringify(data)).not.toContain("Latest Profile Street");
+  });
+
+  it("correcting a destination rewrites only the order snapshot: no customer mutation, audited by presence", async () => {
+    await setCustomerAddress("Profile Stays Street");
+    const orders = await import("../server/orders/service");
+    const order = await newOrder({
+      name: "Wrong Person",
+      phone: "012555666",
+      address: "Wrong Address 1",
+    });
+    const profileBefore = (
+      await f.db.query(`select * from customer_addresses where customer_id=$1 order by id`, [
+        A.customer,
+      ])
+    ).rows;
+    const auditsBefore = audits.length;
+
+    await orders.updateOrderShippingSnapshot(ctx(), order.id, {
+      name: "Right Person",
+      phone: "012777888",
+      address: "Corrected Address 2",
+    });
+
+    expect((await label(order.id)).customer).toMatchObject({
+      name: "Right Person",
+      address: "Corrected Address 2",
+      addressConfirmed: true,
+    });
+    const profileAfter = (
+      await f.db.query(`select * from customer_addresses where customer_id=$1 order by id`, [
+        A.customer,
+      ])
+    ).rows;
+    expect(profileAfter).toEqual(profileBefore);
+    const written = JSON.stringify(audits.slice(auditsBefore));
+    expect(written).toContain("shipping_snapshot");
+    expect(written).not.toContain("Corrected Address 2");
+    expect(written).not.toContain("Right Person");
+
+    // Without orders.update, the correction is refused and nothing changes.
+    await expect(
+      orders.updateOrderShippingSnapshot(
+        context(orgA, actorA, ["orders.read", "fulfillment.print_label"]),
+        order.id,
+        { name: "Nope", address: "Nowhere" },
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect((await label(order.id)).customer.address).toBe("Corrected Address 2");
+  });
+});

@@ -289,6 +289,15 @@ function shippingPhoneDigits(value: string): string {
 }
 
 /**
+ * Phone formatting a merchant may reasonably type: digits (ASCII or Khmer),
+ * spaces, and the separators ( ) - . — with one optional leading "+". Anything
+ * else (letters, "ext", stray symbols) is decoration a courier cannot dial, so
+ * it is rejected rather than stored on a printed label. Not tied to a single
+ * national format; the digit count below bounds plausibility.
+ */
+const SHIPPING_PHONE_FORMAT = /^\+?[\d០-៩\s().-]+$/u;
+
+/**
  * Validate and normalize a shipping destination snapshot.
  *
  * Returns null when nothing at all was supplied (a pickup / no-delivery order —
@@ -337,7 +346,7 @@ export function normalizeShippingSnapshot(
       throw badRequest(`Phone must be at most ${SHIPPING_PHONE_MAX} characters`);
     }
     const digits = shippingPhoneDigits(rawPhone);
-    if (digits.length < 6 || digits.length > 15) {
+    if (!SHIPPING_PHONE_FORMAT.test(rawPhone) || digits.length < 6 || digits.length > 15) {
       throw badRequest("A valid phone number is required");
     }
     phone = rawPhone;

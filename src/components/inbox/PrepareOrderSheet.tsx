@@ -6,11 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BottomSheet, ErrorState, QuantityStepper } from "@/design-system";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
-import { ShippingDestinationFields } from "@/components/orders/ShippingDestinationFields";
+import { ShippingIntentSection } from "@/components/orders/ShippingIntentSection";
 import {
   type ShippingDestinationValue,
   EMPTY_SHIPPING_DESTINATION,
-  shippingDestinationPayload,
+  orderShippingPayload,
+  shippingIntentReady,
 } from "@/lib/shipping-destination";
 import {
   createOrder,
@@ -145,8 +146,11 @@ export function PrepareOrderSheet({
   /*
    * Optional order shipping destination for the production path — the parcel's
    * authoritative destination, snapshotted onto the order (§13). Prefilled with
-   * the conversation customer's name/phone as a convenience; blank for pickup.
+   * the conversation customer's name/phone as a convenience. That prefill is
+   * dormant: shipping is sent only when the merchant explicitly turns it on, so
+   * partial Inbox contact details never turn a pickup order into a shipment.
    */
+  const [shipIntent, setShipIntent] = useState(false);
   const [shipping, setShipping] = useState<ShippingDestinationValue>(() => ({
     ...EMPTY_SHIPPING_DESTINATION,
     name: displayName,
@@ -171,6 +175,7 @@ export function PrepareOrderSheet({
     setBlocker(null);
     setDeliveryFeeText("");
     setShipping({ ...EMPTY_SHIPPING_DESTINATION, name: displayName, phone: customer.phone ?? "" });
+    setShipIntent(false);
     submittingRef.current = false;
   }
 
@@ -226,7 +231,8 @@ export function PrepareOrderSheet({
   const deliveryFee: Money = { amount: deliveryMinor ?? 0, currency: estimatedTotal.currency };
   const previewTotal = addMoney(estimatedTotal, deliveryFee);
 
-  const readyToSubmit = itemsReady && deliveryMinor !== null;
+  const readyToSubmit =
+    itemsReady && deliveryMinor !== null && shippingIntentReady(shipIntent, shipping);
 
   /** The chosen lines, for naming the ones that blocked the order. */
   const readyLinesForDisplay = useMemo(
@@ -291,8 +297,8 @@ export function PrepareOrderSheet({
           ...(sourceConversationRef ? { sourceConversationRef } : {}),
           // readyToSubmit guarantees a parsed fee on this (production) path.
           ...(deliveryMinor! > 0 ? { deliveryMinor: deliveryMinor! } : {}),
-          ...(shippingDestinationPayload(shipping)
-            ? { shipping: shippingDestinationPayload(shipping)! }
+          ...(orderShippingPayload(shipIntent, shipping)
+            ? { shipping: orderShippingPayload(shipIntent, shipping)! }
             : {}),
           idempotency: idempotencyKeys.current,
         });
@@ -597,9 +603,10 @@ export function PrepareOrderSheet({
           {realCustomer ? (
             <div>
               <p className="text-label text-text-secondary">{t("shipping.title")}</p>
-              <p className="text-caption mb-2 text-text-muted">{t("shipping.optional")}</p>
-              <ShippingDestinationFields
+              <ShippingIntentSection
                 idPrefix="prepare-order"
+                intent={shipIntent}
+                onIntentChange={setShipIntent}
                 value={shipping}
                 onChange={setShipping}
               />

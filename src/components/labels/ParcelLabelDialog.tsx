@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { ParcelLabel } from "./ParcelLabel";
@@ -25,6 +25,15 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  * captures the destination (updateOrderShipping). Only once every selected
  * order is confirmed does the batch print — so a first-time label can never go
  * out with an unverified address.
+ *
+ * ── CORRECTING A DESTINATION ──────────────────────────────────────────────────
+ *
+ * A wrong (already confirmed) destination is corrected through the same explicit
+ * "Edit shipping address" action (updateOrderShipping → update_order_shipping_v1,
+ * orders.update, refused once fulfillment is terminal, audited by field
+ * presence). It rewrites only the ORDER's snapshot; the customer's default
+ * address is never touched, and the label always reads the order's current
+ * snapshot.
  *
  * ── PII IS FAIL-CLOSED (§12) ──────────────────────────────────────────────────
  *
@@ -60,9 +69,15 @@ export function ParcelLabelDialog({
   // Correcting a destination needs orders.update (same server gate).
   const canConfirm = capabilities.can("orders.update");
 
-  const [confirmOrder, setConfirmOrder] = useState<{
-    input: ParcelLabelInput;
-  } | null>(null);
+  // Only the order id is held here — never the name/phone/address. The PII the
+  // child sheet shows is re-derived from the (permission-gated) query result on
+  // every render, so nothing sensitive is parked in component state.
+  const [confirmOrderId, setConfirmOrderId] = useState<string | null>(null);
+
+  // Revocation (or the dialog closing) drops the target immediately.
+  useEffect(() => {
+    if (!canPrint || !open) setConfirmOrderId(null);
+  }, [canPrint, open]);
 
   const query = useQuery({
     // Principal-partitioned + sorted id set (see fulfillmentKeys.parcelLabels).
@@ -73,7 +88,13 @@ export function ParcelLabelDialog({
 
   if (!open) return null;
 
-  const data = query.data ?? [];
+  // Fail-closed: without the capability, never read whatever the observer still
+  // holds — the label is treated as empty regardless of cache timing.
+  const data: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
+  const confirmTarget =
+    canPrint && canConfirm && confirmOrderId
+      ? (data.find((d) => d.order.id === confirmOrderId) ?? null)
+      : null;
   const unconfirmed = data.filter((d) => !d.customer.addressConfirmed);
   const confirmed = data.filter((d) => d.customer.addressConfirmed);
   const allConfirmed = data.length > 0 && unconfirmed.length === 0;
@@ -102,40 +123,47 @@ export function ParcelLabelDialog({
         title={title}
         pageSize={PARCEL_LABEL_SIZE_MM}
         printable={canPrint && allConfirmed}
+        active={confirmTarget === null}
         controls={
-          canPrint && query.isSuccess && unconfirmed.length > 0 ? (
+          canPrint && query.isSuccess && (unconfirmed.length > 0 || canConfirm) ? (
             <div className="space-y-2">
-              <div>
-                <p className="text-label text-text-primary">
-                  {t("labels.parcel.needsConfirmTitle")}
-                </p>
-                <p className="text-caption text-text-muted">
-                  {unconfirmed.length === 1
-                    ? t("labels.parcel.needsConfirmOne")
-                    : t("labels.parcel.needsConfirmBody", { count: unconfirmed.length })}
-                </p>
-              </div>
+              {unconfirmed.length > 0 ? (
+                <div>
+                  <p className="text-label text-text-primary">
+                    {t("labels.parcel.needsConfirmTitle")}
+                  </p>
+                  <p className="text-caption text-text-muted">
+                    {unconfirmed.length === 1
+                      ? t("labels.parcel.needsConfirmOne")
+                      : t("labels.parcel.needsConfirmBody", { count: unconfirmed.length })}
+                  </p>
+                </div>
+              ) : null}
               <ul className="space-y-1.5">
-                {unconfirmed.map((d) => (
-                  <li
-                    key={d.order.id}
-                    className="flex items-center justify-between gap-2 rounded-xl border border-border-default px-3 py-2"
-                  >
-                    <span className="text-label tnum min-w-0 flex-1 truncate text-text-primary">
-                      {d.order.orderNumber}
-                    </span>
-                    {canConfirm ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="tap-target h-9 shrink-0 rounded-xl"
-                        onClick={() => setConfirmOrder({ input: d })}
-                      >
-                        {t("labels.parcel.confirmCta")}
-                      </Button>
-                    ) : null}
-                  </li>
-                ))}
+                {data
+                  .filter((d) => !d.customer.addressConfirmed || canConfirm)
+                  .map((d) => (
+                    <li
+                      key={d.order.id}
+                      className="flex items-center justify-between gap-2 rounded-xl border border-border-default px-3 py-2"
+                    >
+                      <span className="text-label tnum min-w-0 flex-1 truncate text-text-primary">
+                        {d.order.orderNumber}
+                      </span>
+                      {canConfirm ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="tap-target h-9 shrink-0 rounded-xl"
+                          onClick={() => setConfirmOrderId(d.order.id)}
+                        >
+                          {d.customer.addressConfirmed
+                            ? t("labels.parcel.editCta")
+                            : t("labels.parcel.confirmCta")}
+                        </Button>
+                      ) : null}
+                    </li>
+                  ))}
               </ul>
             </div>
           ) : undefined
@@ -161,22 +189,23 @@ export function ParcelLabelDialog({
         )}
       </LabelSheet>
 
-      {confirmOrder ? (
+      {confirmTarget ? (
         <ShippingDestinationSheet
-          open={confirmOrder !== null}
+          key={confirmTarget.order.id}
+          open
           onOpenChange={(next) => {
-            if (!next) setConfirmOrder(null);
+            if (!next) setConfirmOrderId(null);
           }}
-          orderId={confirmOrder.input.order.id}
-          orderNumber={confirmOrder.input.order.orderNumber}
+          orderId={confirmTarget.order.id}
+          orderNumber={confirmTarget.order.orderNumber}
           initial={{
-            name: confirmOrder.input.customer.name ?? "",
-            phone: confirmOrder.input.customer.phone ?? "",
-            address: confirmOrder.input.customer.address ?? "",
+            name: confirmTarget.customer.name ?? "",
+            phone: confirmTarget.customer.phone ?? "",
+            address: confirmTarget.customer.address ?? "",
           }}
-          editing={confirmOrder.input.customer.addressConfirmed}
+          editing={confirmTarget.customer.addressConfirmed}
           onSaved={() => {
-            setConfirmOrder(null);
+            setConfirmOrderId(null);
             evictAndRefetch();
           }}
         />

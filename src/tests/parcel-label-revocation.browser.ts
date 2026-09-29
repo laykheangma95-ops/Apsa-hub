@@ -1,28 +1,22 @@
 /**
- * POS checkout → Record Payment sheet stacking — real-browser regression.
+ * Parcel label — permission revocation and nested-focus regressions, in a real
+ * browser against the real <ParcelLabelDialog>.
  *
- * The defect this pins: <BottomSheet> registers its Escape and focusin
- * handlers on `document` (see its open effect), not on its own panel. The POS
- * checkout sheet stayed open while RecordOrderPaymentSheet opened over it, so
- * two document-level focus traps ran at once. Each one's containment rule is
- * "if focus is not inside MY overlay, pull it back to MY panel", and as
- * siblings neither contains the other — so focus ping-ponged between them and
- * the amount field could not be typed into. Escape was worse: both handlers
- * fired, so dismissing the payment sheet also tore down the checkout sheet,
- * discarding the confirmed-but-unpaid order the merchant was settling.
+ * 1. PII fail-closed. With the dialog OPEN and showing the recipient's name,
+ *    phone and address (and the Edit sheet holding them in form fields),
+ *    `fulfillment.print_label` is revoked. Every trace must leave the page at
+ *    once — text, input values, the Print action — and reopening must stay
+ *    denied without a fetch, then refetch afresh once the capability returns.
+ * 2. One focus trap at a time. The label overlay and the child shipping sheet
+ *    both trap focus; only one may be live. Tab / Shift+Tab stay inside the
+ *    child, Escape closes ONLY the child, the label dialog is usable again, and
+ *    closing it returns focus to its trigger.
  *
- * None of that is visible to a source-string assertion, and none of it is
- * visible to a stub: the yank is a real `focusin` event racing a real
- * `.focus()`, and the double-close is two real listeners on one real key. So
- * this file drives real Chromium over the DevTools protocol against the real
- * <PosCheckoutSheet> — real handlers, real key events, real focus. Only
- * `@/lib/api` is aliased away (see fixtures/pos-payment-stacking-api-stub.ts),
- * because reaching a confirmed-unpaid order otherwise needs a server function
- * and a database.
+ * Only `@/lib/api` (and the server-function import of use-capabilities) is
+ * aliased away — see fixtures/parcel-label-api-stub.ts. Skips loudly when no
+ * Chromium exists.
  *
- * Skips (loudly) when no Chromium/Chrome binary can be found.
- *
- * Run: bun test src/tests/pos-payment-stacking.browser.ts
+ * Run: bun test src/tests/parcel-label-revocation.browser.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import fs from "node:fs";
@@ -56,21 +50,18 @@ function findBrowser(): string | null {
 const BROWSER = findBrowser();
 if (!BROWSER) {
   console.warn(
-    "[pos-payment-stacking.browser] SKIPPED — no Chromium/Chrome binary found. " +
-      "Set APSA_CHROME_PATH to run the real-browser sheet-stacking regression.",
+    "[parcel-label-revocation.browser] SKIPPED — no Chromium/Chrome binary found. " +
+      "Set APSA_CHROME_PATH to run the real-browser parcel-label regressions.",
   );
 }
 
-// ── The merchant-visible strings, in APSA's default language ─────────────────
-//
-// Read from the shipped locale rather than hard-coded, so this suite keeps
-// clicking the right controls when copy changes, and exercises the Khmer UI the
-// merchant actually sees.
 const T = {
-  confirmSale: km.pos.confirmSale,
-  recordPayment: km.pos.success.recordPayment,
-  newSale: km.pos.success.newSale,
+  edit: km.labels.parcel.editCta,
+  print: km.labels.print,
+  close: km.common.close,
+  denied: km.labels.parcel.denied,
 };
+const PII = ["Sokha Chan", "+855 12 345 678", "Toul Tompoung"];
 
 // ── CDP session ───────────────────────────────────────────────────────────────
 
@@ -157,7 +148,7 @@ async function startSession(browser: string): Promise<Session> {
       return await startSessionOnce(browser);
     } catch (error) {
       lastError = error;
-      console.warn(`[pos-payment-stacking.browser] session attempt ${attempt} failed: ${error}`);
+      console.warn(`[parcel-label-revocation.browser] session attempt ${attempt} failed: ${error}`);
     }
   }
   throw lastError;
@@ -171,12 +162,12 @@ async function startSessionOnce(browser: string): Promise<Session> {
    * src/components is aware a test is running, and no production build can
    * reach the stub.
    */
-  const apiStub = path.resolve("src/tests/fixtures/pos-payment-stacking-api-stub.ts");
+  const apiStub = path.resolve("src/tests/fixtures/parcel-label-api-stub.ts");
   const capabilitiesStub = path.resolve(
     "src/tests/fixtures/pos-payment-stacking-capabilities-stub.ts",
   );
   const build = await Bun.build({
-    entrypoints: [path.resolve("src/tests/fixtures/pos-payment-stacking-page.tsx")],
+    entrypoints: [path.resolve("src/tests/fixtures/parcel-label-revocation-page.tsx")],
     target: "browser",
     define: { "process.env.NODE_ENV": JSON.stringify("development") },
     plugins: [
@@ -197,7 +188,7 @@ async function startSessionOnce(browser: string): Promise<Session> {
   if (!build.success) throw new Error(build.logs.map(String).join("\n"));
   const js = await build.outputs[0]!.text();
   const html =
-    '<!doctype html><meta charset="utf-8"><title>pos payment stacking fixture</title>' +
+    '<!doctype html><meta charset="utf-8"><title>parcel label revocation fixture</title>' +
     '<body><div id="root"></div><script type="module" src="/app.js"></script>';
 
   const server = Bun.serve({
@@ -211,7 +202,7 @@ async function startSessionOnce(browser: string): Promise<Session> {
     },
   });
 
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-pos-stacking-"));
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-label-"));
   const child = Bun.spawn(
     [
       browser,
@@ -381,7 +372,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
 
 // ── Page helpers ──────────────────────────────────────────────────────────────
 
-/** Click the first button whose trimmed text is exactly `label`. */
+const click = (id: string) =>
+  `(() => { const e = document.getElementById(${JSON.stringify(id)}); e.focus(); e.click(); return true; })()`;
 const clickByText = (label: string) => `(() => {
   const target = [...document.querySelectorAll('button')]
     .find((b) => b.textContent.trim() === ${JSON.stringify(label)});
@@ -390,205 +382,144 @@ const clickByText = (label: string) => `(() => {
   target.click();
   return true;
 })()`;
-
-const DIALOG_COUNT = "document.querySelectorAll('[role=\"dialog\"]').length";
-const ACTIVE_ID = "document.activeElement ? document.activeElement.id : 'none'";
-/** Is focus inside the dialog that owns the payment amount field? */
-const FOCUS_IN_PAYMENT_SHEET = `(() => {
-  const amount = document.getElementById('order-payment-amount');
-  if (!amount) return false;
-  return amount.closest('[role="dialog"]').contains(document.activeElement);
+const hasButton = (label: string) =>
+  `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === ${JSON.stringify(label)} || b.getAttribute('aria-label') === ${JSON.stringify(label)})`;
+const DIALOGS = "document.querySelectorAll('[role=\"dialog\"]').length";
+/** Everything a denied user could read: text AND every form control's value. */
+const VISIBLE_PII_DUMP = `(() => {
+  const fields = [...document.querySelectorAll('input,textarea')].map((e) => e.value).join('|');
+  return document.body.textContent + '|' + fields + '|' + document.body.innerHTML;
 })()`;
-const ORDER_CODE_SHOWN = "document.body.textContent.includes('APSA-ORD-0042')";
+const ACTIVE_IN = (selector: string) =>
+  `(() => { const d = document.querySelector(${JSON.stringify(selector)}); return !!d && d.contains(document.activeElement); })()`;
+/** The child sheet is the dialog that holds the shipping form. */
+const CHILD = '[role="dialog"]:has(textarea)';
+const LABEL = '[role="dialog"]:not(:has(textarea))';
 
-// ── Suite ─────────────────────────────────────────────────────────────────────
+const test60 = (name: string, fn: () => Promise<void>) => it(name, fn, 60000);
 
 const describeBrowser = BROWSER ? describe : describe.skip;
 
-describeBrowser("POS checkout → Record Payment, real Chromium", () => {
+describeBrowser("parcel label dialog, real Chromium", () => {
   let page: Session;
-
-  /**
-   * Ring up the fixture's production cart and confirm it, leaving the merchant
-   * on the confirmed-but-unpaid success surface — the state the whole
-   * regression lives in.
-   */
-  async function reachConfirmedUnpaidSale(): Promise<void> {
-    await page.evaluate(
-      "document.getElementById('trigger').focus(); document.getElementById('trigger').click();",
-    );
-    await page.waitFor("document.querySelector('[role=\"dialog\"]')", "checkout sheet");
-    await page.evaluate(clickByText(T.confirmSale));
-    await page.waitFor(ORDER_CODE_SHOWN, "real order code on the success surface");
-  }
-
-  async function openPaymentSheet(): Promise<void> {
-    await page.evaluate(clickByText(T.recordPayment));
-    await page.waitFor("document.getElementById('order-payment-amount')", "payment sheet");
-    /*
-     * A generous fixed settle, not a wait on the assertion itself: the
-     * checkout sheet leaves through an exit animation, so counting dialogs
-     * immediately would be a race. Deliberately NOT `waitFor(count === 1)`,
-     * which would make the assertion in A tautological — pre-fix the checkout
-     * sheet never leaves at all, so no settle time rescues it.
-     */
-    await Bun.sleep(1500);
-  }
-
   beforeAll(async () => {
     page = await startSession(BROWSER!);
   }, 200000);
-
   afterAll(async () => {
     await page?.close();
   });
 
-  /*
-   * Harness guard. Every assertion here is about where focus goes, and an
-   * unfocused document delivers no focus events at all — so a suite that
-   * forgot to activate its page would still pass the parts that only read
-   * `activeElement`, while silently covering none of the `focusin`
-   * containment that is the actual bug.
-   */
-  it("drives an activated page, so real focus events are delivered", async () => {
-    await page.reload();
-    expect(await page.evaluate<boolean>("document.hasFocus()")).toBe(true);
-  });
+  async function openLabel() {
+    await page.evaluate(click("trigger"));
+    await page.waitFor(hasButton(T.print), "label dialog with a Print action");
+  }
 
-  it("a production cart produces an authoritative order, not a fabricated one", async () => {
+  test60(
+    "A. revoking print_label while open (and mid-edit) clears every trace of PII",
+    async () => {
+      await page.reload();
+      await openLabel();
+      const before = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(before).toContain(value);
+
+      // Open the correction sheet: the PII is now also in form-field values.
+      await page.evaluate(clickByText(T.edit));
+      await page.waitFor("document.querySelector('textarea')", "shipping sheet");
+      const inFields = await page.evaluate<string>(
+        "[...document.querySelectorAll('input,textarea')].map((e) => e.value).join('|')",
+      );
+      for (const value of PII) expect(inFields).toContain(value);
+
+      await page.evaluate(click("revoke"));
+      await page.waitFor(`!${hasButton(T.print)}`, "Print action to disappear");
+      await Bun.sleep(400);
+
+      const after = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(after).not.toContain(value);
+      // The child sheet is gone; only the (now denied) label overlay remains.
+      expect(await page.evaluate<number>(DIALOGS)).toBe(1);
+      expect(await page.evaluate<boolean>("!document.querySelector('textarea,input')")).toBe(true);
+      expect(await page.evaluate<boolean>(hasButton(T.print))).toBe(false);
+      expect(await page.evaluate<boolean>(hasButton(T.edit))).toBe(false);
+      expect(
+        await page.evaluate<boolean>(
+          `document.body.textContent.includes(${JSON.stringify(T.denied)})`,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  test60(
+    "B. reopening stays denied with no fetch, then refetches afresh once re-granted",
+    async () => {
+      // Still revoked from A. Close, then reopen.
+      await page.key("Escape");
+      await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+      const fetchesBefore = await page.evaluate<number>("window.apsaLabelFetches.length");
+      await page.evaluate(click("trigger"));
+      await page.waitFor(`${DIALOGS} === 1`, "denied dialog");
+      await Bun.sleep(400);
+      const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(dump).not.toContain(value);
+      expect(await page.evaluate<boolean>(hasButton(T.print))).toBe(false);
+      expect(await page.evaluate<number>("window.apsaLabelFetches.length")).toBe(fetchesBefore);
+
+      // Re-granting alone must not resurrect old data: the label is fetched anew.
+      await page.evaluate(click("grant"));
+      await page.waitFor(hasButton(T.print), "Print action after re-grant");
+      expect(await page.evaluate<number>("window.apsaLabelFetches.length")).toBe(fetchesBefore + 1);
+      await page.key("Escape");
+      await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+    },
+  );
+
+  test60("C. only ONE focus trap is live: Tab / Shift+Tab / Escape / focus return", async () => {
     await page.reload();
-    await reachConfirmedUnpaidSale();
-    // The code on screen is the server's, and the Record Payment step is
-    // offered because the server's own payment axis says unpaid.
-    expect(await page.evaluate<boolean>(ORDER_CODE_SHOWN)).toBe(true);
+    await openLabel();
+    expect(await page.evaluate<boolean>(ACTIVE_IN(LABEL))).toBe(true);
+
+    await page.evaluate(clickByText(T.edit));
+    await page.waitFor("document.querySelector('textarea')", "shipping sheet");
+    await Bun.sleep(400);
+    // The child owns focus, and keeps it through a full Tab and Shift+Tab loop.
+    for (let i = 0; i < 8; i++) {
+      await page.key("Tab");
+      expect(await page.evaluate<boolean>(ACTIVE_IN(CHILD))).toBe(true);
+    }
+    for (let i = 0; i < 8; i++) {
+      await page.key("Tab", true);
+      expect(await page.evaluate<boolean>(ACTIVE_IN(CHILD))).toBe(true);
+    }
+    // The stood-down label overlay is no longer an honest aria-modal.
     expect(
       await page.evaluate<boolean>(
-        `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === ${JSON.stringify(T.recordPayment)})`,
+        `document.querySelector(${JSON.stringify(LABEL)}).getAttribute('aria-modal') === null`,
       ),
     ).toBe(true);
-  });
 
-  it("A. only ONE sheet is mounted once payment entry opens", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    expect(await page.evaluate<number>(DIALOG_COUNT)).toBe(1);
-    await openPaymentSheet();
-    // Two dialogs here means two document-level traps — the defect itself.
-    expect(await page.evaluate<number>(DIALOG_COUNT)).toBe(1);
-  });
-
-  it("B. the surviving trap is the payment sheet's, and it owns focus", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    expect(await page.evaluate<boolean>("!!document.getElementById('order-payment-amount')")).toBe(
+    // Escape closes ONLY the child.
+    await page.key("Escape");
+    await page.waitFor(`!document.querySelector('textarea')`, "child closed");
+    expect(await page.evaluate<boolean>(`!!document.querySelector(${JSON.stringify(LABEL)})`)).toBe(
       true,
     );
-    expect(await page.evaluate<boolean>(FOCUS_IN_PAYMENT_SHEET)).toBe(true);
-  });
+    expect(await page.evaluate<boolean>(ACTIVE_IN(LABEL))).toBe(true);
+    expect(
+      await page.evaluate<boolean>(
+        `document.querySelector(${JSON.stringify(LABEL)}).getAttribute('aria-modal') === 'true'`,
+      ),
+    ).toBe(true);
 
-  it("D. the amount field takes focus and KEEPS it", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    await page.evaluate("document.getElementById('order-payment-amount').focus()");
-    // The yank was a focusin handler racing the focus, so settle before
-    // reading: pre-fix the checkout trap pulls focus to its own panel here.
-    await Bun.sleep(400);
-    expect(await page.evaluate<string>(ACTIVE_ID)).toBe("order-payment-amount");
-  });
-
-  it("E. Tab stays inside the payment sheet", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    await page.evaluate("document.getElementById('order-payment-amount').focus()");
-    await Bun.sleep(200);
-    for (let press = 0; press < 6; press++) {
+    // The label trap works again: Tab stays inside it.
+    for (let i = 0; i < 6; i++) {
       await page.key("Tab");
-      expect(await page.evaluate<boolean>(FOCUS_IN_PAYMENT_SHEET)).toBe(true);
+      expect(await page.evaluate<boolean>(ACTIVE_IN(LABEL))).toBe(true);
     }
-  });
-
-  it("C. Escape closes ONLY the payment sheet — the sale is not completed away", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    /*
-     * completeReal() clears the cart as soon as the order exists on the
-     * server, so onCompleted has legitimately fired once by now. What must not
-     * happen is a SECOND call: that one would come from the checkout sheet
-     * being torn down, taking the merchant out of an order they have not been
-     * paid for.
-     */
-    const completedBeforeEscape = await page.evaluate<number>("window.apsaCompletedCount");
-    await page.key("Escape");
-    await page.waitFor("!document.getElementById('order-payment-amount')", "payment sheet closed");
-    // The checkout sheet must come back, carrying the same order...
-    await page.waitFor(ORDER_CODE_SHOWN, "checkout success surface restored");
-    expect(await page.evaluate<number>(DIALOG_COUNT)).toBe(1);
-    // ...and Escape must not have completed the sale away.
-    expect(await page.evaluate<number>("window.apsaCompletedCount")).toBe(completedBeforeEscape);
-    expect(await page.evaluate<boolean>("window.apsaCheckoutOpen")).toBe(true);
-  });
-
-  it("F. closing payment restores the success surface for the SAME order", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    await page.key("Escape");
-    await page.waitFor(ORDER_CODE_SHOWN, "same order still on screen");
-    // Still the merchant's next step, and still their way out of the sale.
-    expect(
-      await page.evaluate<boolean>(
-        `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === ${JSON.stringify(T.recordPayment)})`,
-      ),
-    ).toBe(true);
-    expect(
-      await page.evaluate<boolean>(
-        `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === ${JSON.stringify(T.newSale)})`,
-      ),
-    ).toBe(true);
-  });
-
-  it("G. Record Payment reopens cleanly, with no stale state", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    await page.key("Escape");
-    await page.waitFor("!document.getElementById('order-payment-amount')", "payment sheet closed");
-    await openPaymentSheet();
-    expect(await page.evaluate<number>(DIALOG_COUNT)).toBe(1);
-    expect(
-      await page.evaluate<string>("document.getElementById('order-payment-amount').value"),
-    ).toBe("");
-    await page.evaluate("document.getElementById('order-payment-amount').focus()");
-    await Bun.sleep(400);
-    expect(await page.evaluate<string>(ACTIVE_ID)).toBe("order-payment-amount");
-  });
-
-  it("records through the shared Payment path, idempotency key and all", async () => {
-    await page.reload();
-    await reachConfirmedUnpaidSale();
-    await openPaymentSheet();
-    await page.evaluate(`(() => {
-      const amount = document.getElementById('order-payment-amount');
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(amount, '12.00');
-      amount.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    })()`);
-    await page.evaluate(`(() => {
-      const submit = [...document.querySelectorAll('[role="dialog"] button')]
-        .find((b) => b.getAttribute('type') !== 'button' || b.textContent.trim().length > 0);
-      return !!submit;
-    })()`);
-    await page.evaluate(clickByText(km.order.recordPaymentSheet.submit));
-    await page.waitFor("window.apsaRecordedPayments.length === 1", "payment recorded");
-    const recorded = await page.evaluate<Array<{ idempotencyKey: string; amountMinor: number }>>(
-      "window.apsaRecordedPayments",
+    // The close button closes it and focus returns to the trigger.
+    await page.evaluate(
+      `(() => { const b = [...document.querySelectorAll('[aria-label]')].find((e) => e.getAttribute('aria-label') === ${JSON.stringify(T.close)}); b.focus(); b.click(); return true; })()`,
     );
-    expect(recorded[0]!.amountMinor).toBe(1200);
-    expect(recorded[0]!.idempotencyKey.length).toBeGreaterThan(0);
+    await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+    expect(await page.evaluate<string>("document.activeElement.id")).toBe("trigger");
   });
 });

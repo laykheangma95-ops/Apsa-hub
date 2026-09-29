@@ -20,6 +20,15 @@ import { collectTrapFocusables, resolveTrapFocus } from "@/design-system/focus-t
  * resolveTrapFocus utility the design-system BottomSheet uses, so there is one
  * proven trap, not a second hand-rolled one); Escape closes; and on close focus
  * returns to the control that opened it.
+ *
+ * ── ONE TRAP AT A TIME ────────────────────────────────────────────────────────
+ * The design-system BottomSheet registers its own document-level Escape/focus
+ * handling. If a child sheet (e.g. "Confirm shipping address") opens while this
+ * overlay's window-level Tab/Escape trap is still live, the two compete: focus
+ * ping-pongs and one Escape closes both. `active={false}` makes this overlay
+ * stand down — presentation only, nothing is unmounted or reset — while a child
+ * modal is up, leaving exactly one live trap; on becoming active again, focus
+ * returns inside this dialog if the child's teardown left it outside.
  */
 export interface LabelSheetProps {
   open: boolean;
@@ -36,6 +45,11 @@ export interface LabelSheetProps {
    * printer.
    */
   printable?: boolean;
+  /**
+   * False while a child modal owns focus: this overlay's Tab/Escape trap stands
+   * down so only ONE trap is live. Defaults to true.
+   */
+  active?: boolean;
   /** Each child is rendered as its own physical page. */
   children: React.ReactNode;
 }
@@ -49,6 +63,7 @@ export function LabelSheet({
   pageSize,
   controls,
   printable = true,
+  active = true,
   children,
 }: LabelSheetProps) {
   const { t } = useTranslation();
@@ -58,14 +73,35 @@ export function LabelSheet({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  // Focus in on open, back to the invoking control on close (§21). Keyed to
+  // `open` only — a child modal standing this overlay down must not restore
+  // focus to the page behind it.
   useEffect(() => {
     if (!open) return;
-    const panel = panelRef.current;
-    // Remember the control that opened the dialog, to restore focus on close.
     const restore = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
+    return () => {
+      restore?.focus?.();
+    };
+  }, [open]);
+
+  // The Tab/Escape trap — live only while this overlay is the active modal.
+  useEffect(() => {
+    if (!open || !active) return;
+    const panel = panelRef.current;
+    // Returning from a child modal: if its teardown left focus outside this
+    // dialog (e.g. its trigger was unmounted by a refetch), bring it back in.
+    if (panel && !panel.contains(document.activeElement)) closeRef.current?.focus();
+
+    // A key event that began BEFORE this trap was armed belongs to whichever
+    // modal was active then. Without this, the Escape that closes a child sheet
+    // re-arms this overlay mid-dispatch (React flushes the effect synchronously
+    // for a discrete event) and the same keystroke reaches this window listener
+    // too — closing the label dialog along with the child.
+    const armedAt = performance.now();
 
     const onKey = (e: KeyboardEvent) => {
+      if (e.timeStamp < armedAt) return;
       if (e.key === "Escape") {
         e.preventDefault();
         onCloseRef.current();
@@ -89,12 +125,8 @@ export function LabelSheet({
     };
 
     window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      // Return focus to the invoking control (§21).
-      restore?.focus?.();
-    };
-  }, [open]);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, active]);
 
   if (!open) return null;
 
@@ -115,7 +147,7 @@ export function LabelSheet({
     <div
       ref={panelRef}
       role="dialog"
-      aria-modal="true"
+      aria-modal={active ? "true" : undefined}
       aria-label={title}
       tabIndex={-1}
       className="fixed inset-0 z-[60] flex flex-col bg-surface-secondary"

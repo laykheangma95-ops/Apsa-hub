@@ -35,3 +35,24 @@ export function shippingDestinationPayload(
     address: v.address.trim(),
   };
 }
+
+/**
+ * The destination to send with a NEW order — only when the merchant explicitly
+ * chose to ship it.
+ *
+ * Shipping is an explicit intent, never inferred from which fields happen to be
+ * filled: a customer's name/phone are prefilled as a convenience, and that
+ * alone must not turn an in-store pickup into a shipment. With `intent` false
+ * this is always null, whatever the fields hold.
+ */
+export function orderShippingPayload(
+  intent: boolean,
+  v: ShippingDestinationValue,
+): { name: string; phone: string | null; address: string } | null {
+  return intent ? shippingDestinationPayload(v) : null;
+}
+
+/** A shipping order needs a recipient name and an address; pickup needs nothing. */
+export function shippingIntentReady(intent: boolean, v: ShippingDestinationValue): boolean {
+  return !intent || (v.name.trim().length > 0 && v.address.trim().length > 0);
+}
