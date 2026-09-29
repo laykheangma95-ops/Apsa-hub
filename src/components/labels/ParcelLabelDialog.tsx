@@ -6,7 +6,11 @@ import { ParcelLabel } from "./ParcelLabel";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/design-system";
 import { ShippingDestinationSheet } from "@/components/orders/ShippingDestinationSheet";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import {
+  reauthorizeCapability,
+  useCapabilities,
+  useSensitiveCapabilityRevalidation,
+} from "@/hooks/use-capabilities";
 import { getParcelLabelData } from "@/lib/api";
 import { buildParcelLabel, PARCEL_LABEL_SIZE_MM } from "@/lib/labels/parcel-label";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
@@ -69,6 +73,10 @@ export function ParcelLabelDialog({
   // Correcting a destination needs orders.update (same server gate).
   const canConfirm = capabilities.can("orders.update");
 
+  // A server-side revocation reaches an open label through this bounded poll of
+  // the production capability query — only while the dialog is open.
+  useSensitiveCapabilityRevalidation(userId, organizationId, open);
+
   // Only the order id is held here — never the name/phone/address. The PII the
   // child sheet shows is re-derived from the (permission-gated) query result on
   // every render, so nothing sensitive is parked in component state.
@@ -87,6 +95,24 @@ export function ParcelLabelDialog({
   });
 
   if (!open) return null;
+
+  // Immediately before printing: a fresh server check, never the cached view.
+  // Denied or unverifiable → clear the label PII and do not print.
+  async function reauthorizePrint(): Promise<boolean> {
+    const ok = await reauthorizeCapability(
+      queryClient,
+      userId,
+      organizationId,
+      "fulfillment.print_label",
+    );
+    if (!ok) {
+      setConfirmOrderId(null);
+      const queryKey = fulfillmentKeys.parcelLabelsPrefix(userId, organizationId);
+      void queryClient.cancelQueries({ queryKey }).catch(() => undefined);
+      queryClient.removeQueries({ queryKey });
+    }
+    return ok;
+  }
 
   // Fail-closed: without the capability, never read whatever the observer still
   // holds — the label is treated as empty regardless of cache timing.
@@ -124,6 +150,7 @@ export function ParcelLabelDialog({
         pageSize={PARCEL_LABEL_SIZE_MM}
         printable={canPrint && allConfirmed}
         active={confirmTarget === null}
+        onBeforePrint={reauthorizePrint}
         controls={
           canPrint && query.isSuccess && (unconfirmed.length > 0 || canConfirm) ? (
             <div className="space-y-2">

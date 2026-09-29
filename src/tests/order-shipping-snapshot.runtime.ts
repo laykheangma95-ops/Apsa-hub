@@ -535,18 +535,78 @@ describe("parcel label uses the ORDER's shipping snapshot, never the customer pr
     expect((await label(orderA.id)).customer.address).toBe("Address A Street, Phnom Penh");
   });
 
-  it("an order with NO snapshot fails closed: no label address, never the latest customer address", async () => {
-    await setCustomerAddress("Latest Profile Street");
+  it("an order with NO snapshot infers NOTHING from the customer: no name, phone or address", async () => {
+    // The customer as they were when the old order was placed: Name A / Phone A / Address A.
+    await f.db.query(
+      `update customers set display_name='Customer Name A', primary_phone='011000001' where id=$1`,
+      [A.customer],
+    );
+    await setCustomerAddress("Address A Street");
     // A pre-047 / pickup order: no shipping snapshot at all.
     const old = await newOrder();
     await f.db.query(
       `update orders set shipping_name=null, shipping_phone=null, shipping_address=null where id=$1`,
       [old.id],
     );
+    // Later the profile becomes Name B / Phone B / Address B.
+    await f.db.query(
+      `update customers set display_name='Customer Name B', primary_phone='099000002' where id=$1`,
+      [A.customer],
+    );
+    await setCustomerAddress("Address B Street");
+    const customerRows = async () => ({
+      customer: (await f.db.query(`select * from customers where id=$1`, [A.customer])).rows,
+      addresses: (
+        await f.db.query(`select * from customer_addresses where customer_id=$1 order by id`, [
+          A.customer,
+        ])
+      ).rows,
+    });
+    const profileBefore = await customerRows();
+
     const data = await label(old.id);
-    expect(data.customer.addressConfirmed).toBe(false);
-    expect(data.customer.address).toBeNull();
-    expect(JSON.stringify(data)).not.toContain("Latest Profile Street");
+    expect(data.customer).toEqual({
+      name: null,
+      phone: null,
+      address: null,
+      addressConfirmed: false,
+    });
+    const payload = JSON.stringify(data);
+    for (const leaked of [
+      "Customer Name A",
+      "Customer Name B",
+      "011000001",
+      "099000002",
+      "Address A Street",
+      "Address B Street",
+    ]) {
+      expect(payload).not.toContain(leaked);
+    }
+
+    // Explicit merchant entry creates the Order-owned snapshot…
+    const orders = await import("../server/orders/service");
+    await orders.updateOrderShippingSnapshot(ctx(), old.id, {
+      name: "Entered Recipient",
+      phone: "012999000",
+      address: "Entered Address, Phnom Penh",
+    });
+    expect((await label(old.id)).customer).toMatchObject({
+      name: "Entered Recipient",
+      address: "Entered Address, Phnom Penh",
+      addressConfirmed: true,
+    });
+    // Confirmation touched only the Order: the Customer profile is byte-identical.
+    expect(await customerRows()).toEqual(profileBefore);
+
+    // …and a later Customer change no longer touches it, nor is the profile mutated.
+    await f.db.query(
+      `update customers set display_name='Customer Name C', primary_phone='088000003' where id=$1`,
+      [A.customer],
+    );
+    await setCustomerAddress("Address C Street");
+    const after = (await label(old.id)).customer;
+    expect(after).toMatchObject({ name: "Entered Recipient", addressConfirmed: true });
+    expect(JSON.stringify(after)).not.toMatch(/Customer Name|088000003|Address C Street/);
   });
 
   it("correcting a destination rewrites only the order snapshot: no customer mutation, audited by presence", async () => {

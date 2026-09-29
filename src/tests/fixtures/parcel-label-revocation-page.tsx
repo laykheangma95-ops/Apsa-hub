@@ -1,8 +1,9 @@
 /**
  * Browser fixture for the parcel-label permission-revocation and nested-focus
  * regressions. Mounts the REAL <ParcelLabelDialog> under the REAL
- * <FulfillmentSensitiveCacheGuard>; only the capability set is driven by a
- * button (`#revoke` / `#grant`), standing in for a live permission change.
+ * <FulfillmentSensitiveCacheGuard> and the REAL <CapabilityProvider>. The
+ * grant lives in an in-page fake server (parcel-label-capabilities-stub.ts), so
+ * a revocation is discovered through the production capability query.
  */
 import { DEFAULT_LANGUAGE } from "@/lib/i18n";
 import { StrictMode, useState } from "react";
@@ -10,34 +11,33 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
 import { FulfillmentSensitiveCacheGuard } from "@/components/fulfillment/FulfillmentSensitiveCacheGuard";
-import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
-import type { UiPermissionKey } from "@/lib/capabilities";
+import { CapabilityProvider } from "@/hooks/use-capabilities";
+import { ALL_GRANTED, ORG_ID, USER_ID } from "./parcel-label-capabilities-stub";
 
-const USER_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3303";
-const ORG_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3304";
 const ORDER_ID = "6f1a6a2e-1f9c-4a6d-9a3b-2c5d7e8f9a01";
-
-const GRANTED: UiPermissionKey[] = ["orders.read", "orders.update", "fulfillment.print_label"];
-const REVOKED: UiPermissionKey[] = ["orders.read", "orders.update"];
 
 function Fixture() {
   const [open, setOpen] = useState(false);
-  const [granted, setGranted] = useState(true);
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   );
   return (
     <QueryClientProvider client={client}>
-      <CapabilityFixtureProvider permissions={granted ? GRANTED : REVOKED}>
+      {/* The REAL provider, seeded like the /app loader's SSR snapshot. */}
+      <CapabilityProvider
+        userId={USER_ID}
+        organizationId={ORG_ID}
+        initialResult={{
+          status: "active",
+          userId: USER_ID,
+          organizationId: ORG_ID,
+          role: "STAFF",
+          permissions: ALL_GRANTED,
+        }}
+      >
         <FulfillmentSensitiveCacheGuard userId={USER_ID} organizationId={ORG_ID}>
           <button id="trigger" type="button" onClick={() => setOpen(true)}>
             Print label
-          </button>
-          <button id="revoke" type="button" onClick={() => setGranted(false)}>
-            Revoke
-          </button>
-          <button id="grant" type="button" onClick={() => setGranted(true)}>
-            Grant
           </button>
           <ParcelLabelDialog
             open={open}
@@ -47,7 +47,7 @@ function Fixture() {
             organizationId={ORG_ID}
           />
         </FulfillmentSensitiveCacheGuard>
-      </CapabilityFixtureProvider>
+      </CapabilityProvider>
     </QueryClientProvider>
   );
 }

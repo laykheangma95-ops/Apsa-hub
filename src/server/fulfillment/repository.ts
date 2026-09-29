@@ -72,30 +72,6 @@ export async function customerNamesByIds(
   return names;
 }
 
-export interface CustomerContactRow {
-  display_name: string;
-  primary_phone: string | null;
-}
-
-/** One customer's contact (name + phone), org-scoped. Null when not found in this org. */
-export async function customerContact(
-  organizationId: string,
-  customerId: string,
-): Promise<CustomerContactRow | null> {
-  const { data, error } = await db
-    .from("customers")
-    .select("display_name, primary_phone")
-    .eq("organization_id", organizationId)
-    .eq("id", customerId)
-    .single();
-
-  if (error) {
-    if ((error as { code?: string }).code === PGRST_NO_ROW) return null;
-    throw new Error(`customerContact: ${errMessage(error)}`);
-  }
-  return (data ?? null) as CustomerContactRow | null;
-}
-
 export interface CustomerAddressRow {
   house_no: string | null;
   street: string | null;

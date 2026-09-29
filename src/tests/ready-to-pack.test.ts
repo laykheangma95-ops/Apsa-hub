@@ -359,11 +359,11 @@ describe("getParcelLabelData — assembly", () => {
       () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
     );
     expect(data.merchant.businessName).toBe("Dara Shop");
-    // No order snapshot on this order → name/phone fall back to the customer
-    // contact for display, but the mutable on-file address is NEVER used as the
-    // destination (§13, migration 047): address is null and unconfirmed.
-    expect(data.customer.name).toBe("Sokha");
-    expect(data.customer.phone).toBe("012345678");
+    // No order snapshot on this order → NO recipient field is inferred from the
+    // mutable customer profile (§13, migration 047): name, phone and address are
+    // all null and the destination is unconfirmed.
+    expect(data.customer.name).toBeNull();
+    expect(data.customer.phone).toBeNull();
     expect(data.customer.address).toBeNull();
     expect(data.customer.addressConfirmed).toBe(false);
     expect(data.order.itemCount).toBe(2);

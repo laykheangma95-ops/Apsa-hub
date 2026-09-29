@@ -9,7 +9,7 @@
  * Outside a provider the default view is "pending", so nothing is offered.
  */
 import { createContext, useContext, useMemo, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import {
   capabilityQueryKey,
@@ -25,6 +25,14 @@ const CapabilityContext = createContext<CapabilityView>(UNRESOLVED_CAPABILITIES)
 
 /** Re-fetch rather than trust a long-lived snapshot: access can be revoked. */
 const CAPABILITY_STALE_MS = 60_000;
+
+/**
+ * How often a surface that displays sensitive data re-asks the server whether
+ * access still holds, while it is open. staleTime alone never triggers a
+ * refetch, so without this an already-open view would learn of a server-side
+ * revocation only by unrelated navigation or focus changes.
+ */
+export const SENSITIVE_CAPABILITY_REVALIDATE_MS = 15_000;
 
 interface CapabilityProviderProps {
   /** From the /app route context — validated server-side, never from the URL. */
@@ -65,6 +73,61 @@ export function CapabilityProvider({
   );
 
   return <CapabilityContext.Provider value={view}>{children}</CapabilityContext.Provider>;
+}
+
+/**
+ * Keep the ONE production capability query fresh while a sensitive surface is
+ * open. Same query key and queryFn as CapabilityProvider (so there is a single
+ * source of truth and one request per tick); the provider's view — and with it
+ * canSensitive() — updates from the result. A failed refresh leaves the
+ * snapshot `stale`, which canSensitive() refuses. Polls only while `active`.
+ */
+export function useSensitiveCapabilityRevalidation(
+  userId: string,
+  organizationId: string,
+  active: boolean,
+): void {
+  useQuery({
+    queryKey: capabilityQueryKey(userId, organizationId),
+    queryFn: () => getActiveMemberCapabilitiesFn(),
+    enabled: active,
+    // Always treat the held snapshot as stale: refetch on open/mount and focus.
+    staleTime: 0,
+    refetchInterval: active ? SENSITIVE_CAPABILITY_REVALIDATE_MS : false,
+    refetchIntervalInBackground: true,
+    retry: false,
+  });
+}
+
+/**
+ * Fresh, server-authoritative check that `key` still holds — for the moment
+ * before an irreversible sensitive action (printing). Cancels any in-flight
+ * capability request (which may predate a revocation), refetches, and reads the
+ * outcome. Fails closed: an error, a non-active result, another principal's
+ * snapshot, or a missing key all return false. Never throws.
+ */
+export async function reauthorizeCapability(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  key: UiPermissionKey,
+): Promise<boolean> {
+  try {
+    const queryKey = capabilityQueryKey(userId, organizationId);
+    await queryClient.refetchQueries({ queryKey, exact: true }, { cancelRefetch: true });
+    const state = queryClient.getQueryState<CapabilityResult>(queryKey);
+    const result = state?.data;
+    return (
+      state?.status === "success" &&
+      !!result &&
+      result.status === "active" &&
+      result.userId === userId &&
+      result.organizationId === organizationId &&
+      result.permissions.includes(key)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

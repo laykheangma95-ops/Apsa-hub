@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Printer, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -46,6 +46,12 @@ export interface LabelSheetProps {
    */
   printable?: boolean;
   /**
+   * Runs immediately before window.print(); printing proceeds only if it
+   * resolves true. Used for a fresh server-side authorization so a stale
+   * client view alone can never print sensitive data. A rejection is a refusal.
+   */
+  onBeforePrint?: () => Promise<boolean>;
+  /**
    * False while a child modal owns focus: this overlay's Tab/Escape trap stands
    * down so only ONE trap is live. Defaults to true.
    */
@@ -64,6 +70,7 @@ export function LabelSheet({
   controls,
   printable = true,
   active = true,
+  onBeforePrint,
   children,
 }: LabelSheetProps) {
   const { t } = useTranslation();
@@ -72,6 +79,24 @@ export function LabelSheet({
   // Latest onClose without re-running the effect between renders.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const [checking, setChecking] = useState(false);
+
+  async function handlePrint() {
+    if (checking) return;
+    if (!onBeforePrint) {
+      window.print();
+      return;
+    }
+    setChecking(true);
+    let allowed = false;
+    try {
+      allowed = await onBeforePrint();
+    } catch {
+      allowed = false;
+    }
+    setChecking(false);
+    if (allowed) window.print();
+  }
 
   // Focus in on open, back to the invoking control on close (§21). Keyed to
   // `open` only — a child modal standing this overlay down must not restore
@@ -168,7 +193,8 @@ export function LabelSheet({
         {printable ? (
           <Button
             type="button"
-            onClick={() => window.print()}
+            onClick={() => void handlePrint()}
+            disabled={checking}
             className="press-tactile tap-target h-10 gap-2 rounded-full px-4"
           >
             <Printer className="size-4" aria-hidden />

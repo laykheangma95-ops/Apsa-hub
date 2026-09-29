@@ -39,15 +39,48 @@ describe("the browser suite drives the shipped dialog, not a copy", () => {
     expect(fixture).not.toContain("<LabelSheet");
   });
 
+  it("uses the REAL CapabilityProvider — never the fixture provider or a prop swap", () => {
+    expect(fixture).toContain("<CapabilityProvider");
+    expect(fixture).not.toContain("CapabilityFixtureProvider");
+    expect(fixture).not.toContain("setGranted");
+  });
+
   it("substitutes only the server boundary and covers every required transition", () => {
     expect((suite.match(/builder\.onResolve\(/g) ?? []).length).toBe(2);
     for (const proof of [
-      "A. revoking print_label while open",
+      "A. a SERVER-side revocation reaches the open label",
       "B. reopening stays denied",
+      "D. print-time re-authorization",
+      "E. if the fresh authorization request FAILS",
+      "F. a snapshotless order shows NO inferred recipient",
       "C. only ONE focus trap is live",
     ]) {
       expect(suite).toContain(proof);
     }
+  });
+});
+
+describe("capability revalidation source rules", () => {
+  const dialog = read("src/components/labels/ParcelLabelDialog.tsx");
+  const hook = read("src/hooks/use-capabilities.tsx");
+
+  it("polls the production capability query only while the dialog is open", () => {
+    expect(dialog).toContain("useSensitiveCapabilityRevalidation(userId, organizationId, open)");
+    expect(hook).toContain("refetchInterval: active ? SENSITIVE_CAPABILITY_REVALIDATE_MS : false");
+    expect(hook).toContain("queryKey: capabilityQueryKey(userId, organizationId)");
+  });
+
+  it("re-authorizes against the server immediately before printing, failing closed", () => {
+    expect(dialog).toContain("onBeforePrint={reauthorizePrint}");
+    expect(hook).toContain("cancelRefetch: true");
+    expect(hook).toMatch(/state\?\.status === "success"/);
+    expect(read("src/components/labels/LabelSheet.tsx")).toMatch(
+      /if \(allowed\) window\.print\(\)/,
+    );
+  });
+
+  it("never persists capabilities in browser storage", () => {
+    expect(hook).not.toMatch(/localStorage|sessionStorage/);
   });
 });
 

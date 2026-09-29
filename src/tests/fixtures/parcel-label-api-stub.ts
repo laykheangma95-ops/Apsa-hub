@@ -6,6 +6,7 @@
  * two server calls they make resolve locally.
  */
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
+import "./parcel-label-capabilities-stub";
 
 export const PII = {
   name: "Sokha Chan",
@@ -13,19 +14,19 @@ export const PII = {
   address: "Street 271, Toul Tompoung, Phnom Penh",
 };
 
-declare global {
-  interface Window {
-    /** Every getParcelLabelData call — a reopen after revocation must add none. */
-    apsaLabelFetches?: string[];
-  }
-}
-window.apsaLabelFetches = [];
-
 export async function getParcelLabelData(orderId: string): Promise<ParcelLabelInput> {
-  window.apsaLabelFetches!.push(orderId);
+  const server = window.apsaServer;
+  server.labelFetches.push(orderId);
+  // The server refuses a label read once the grant is gone (migration 046).
+  if (!server.permissions.includes("fulfillment.print_label")) {
+    throw new Error("403 forbidden");
+  }
   return {
     merchant: { businessName: "Dara Shop" },
-    customer: { ...PII, addressConfirmed: true },
+    // A snapshotless order carries NO recipient data (service never infers it).
+    customer: server.snapshotless
+      ? { name: null, phone: null, address: null, addressConfirmed: false }
+      : { ...PII, addressConfirmed: true },
     order: { id: orderId, orderNumber: "APSA-2026-001048", itemCount: 1, items: [] },
     reprint: false,
     payment: { paid: true, collect: null },

@@ -12,8 +12,10 @@
  *    child, Escape closes ONLY the child, the label dialog is usable again, and
  *    closing it returns focus to its trigger.
  *
- * Only `@/lib/api` (and the server-function import of use-capabilities) is
- * aliased away — see fixtures/parcel-label-api-stub.ts. Skips loudly when no
+ * Capabilities flow through the REAL <CapabilityProvider> and its production
+ * query; revocation is a change in the in-page fake SERVER (never a React prop),
+ * which the client discovers by polling / print-time re-authorization. Only
+ * `@/lib/api` and `@/api/capabilities` are aliased — see fixtures/. Skips loudly when no
  * Chromium exists.
  *
  * Run: bun test src/tests/parcel-label-revocation.browser.ts
@@ -68,7 +70,7 @@ const PII = ["Sokha Chan", "+855 12 345 678", "Toul Tompoung"];
 interface Session {
   evaluate<T>(expression: string): Promise<T>;
   /** Wait until an expression evaluates truthy, else throw with `label`. */
-  waitFor(expression: string, label: string): Promise<void>;
+  waitFor(expression: string, label: string, timeoutMs?: number): Promise<void>;
   key(name: "Escape" | "Tab", shiftKey?: boolean): Promise<void>;
   reload(): Promise<void>;
   close(): Promise<void>;
@@ -163,9 +165,7 @@ async function startSessionOnce(browser: string): Promise<Session> {
    * reach the stub.
    */
   const apiStub = path.resolve("src/tests/fixtures/parcel-label-api-stub.ts");
-  const capabilitiesStub = path.resolve(
-    "src/tests/fixtures/pos-payment-stacking-capabilities-stub.ts",
-  );
+  const capabilitiesStub = path.resolve("src/tests/fixtures/parcel-label-capabilities-stub.ts");
   const build = await Bun.build({
     entrypoints: [path.resolve("src/tests/fixtures/parcel-label-revocation-page.tsx")],
     target: "browser",
@@ -175,9 +175,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
         name: "apsa-api-stub",
         setup(builder) {
           builder.onResolve({ filter: /^@\/lib\/api$/ }, () => ({ path: apiStub }));
-          // use-capabilities imports this server function at module scope, so
-          // it must resolve for the bundle even though the fixture supplies
-          // capabilities through CapabilityFixtureProvider and never calls it.
+          // The server function behind the REAL capability query resolves to an
+          // in-page fake server whose grant the tests revoke/restore.
           builder.onResolve({ filter: /^@\/api\/capabilities$/ }, () => ({
             path: capabilitiesStub,
           }));
@@ -329,8 +328,8 @@ async function startSessionOnce(browser: string): Promise<Session> {
     await Bun.sleep(60);
   }
 
-  async function waitFor(expression: string, label: string): Promise<void> {
-    for (let attempt = 0; attempt < 200; attempt++) {
+  async function waitFor(expression: string, label: string, timeoutMs = 5000): Promise<void> {
+    for (let attempt = 0; attempt < timeoutMs / 25; attempt++) {
       await Bun.sleep(25);
       if (await evaluate<boolean>(`!!(${expression})`)) return;
     }
@@ -397,6 +396,7 @@ const CHILD = '[role="dialog"]:has(textarea)';
 const LABEL = '[role="dialog"]:not(:has(textarea))';
 
 const test60 = (name: string, fn: () => Promise<void>) => it(name, fn, 60000);
+const test90 = (name: string, fn: () => Promise<void>) => it(name, fn, 90000);
 
 const describeBrowser = BROWSER ? describe : describe.skip;
 
@@ -414,8 +414,14 @@ describeBrowser("parcel label dialog, real Chromium", () => {
     await page.waitFor(hasButton(T.print), "label dialog with a Print action");
   }
 
-  test60(
-    "A. revoking print_label while open (and mid-edit) clears every trace of PII",
+  // Revalidation cadence is 15s; allow one full tick plus margin.
+  const POLL_WAIT = 25_000;
+  const REVOKE = "window.apsaServer.revoke()";
+  const GRANT = "window.apsaServer.grant()";
+  const EDIT_OPEN = "document.querySelector('textarea')";
+
+  test90(
+    "A. a SERVER-side revocation reaches the open label (no manual prop swap) and clears every trace of PII",
     async () => {
       await page.reload();
       await openLabel();
@@ -424,14 +430,19 @@ describeBrowser("parcel label dialog, real Chromium", () => {
 
       // Open the correction sheet: the PII is now also in form-field values.
       await page.evaluate(clickByText(T.edit));
-      await page.waitFor("document.querySelector('textarea')", "shipping sheet");
+      await page.waitFor(EDIT_OPEN, "shipping sheet");
       const inFields = await page.evaluate<string>(
         "[...document.querySelectorAll('input,textarea')].map((e) => e.value).join('|')",
       );
       for (const value of PII) expect(inFields).toContain(value);
 
-      await page.evaluate(click("revoke"));
-      await page.waitFor(`!${hasButton(T.print)}`, "Print action to disappear");
+      // Only the "server" changes. The client must notice on its own.
+      const requestsBefore = await page.evaluate<number>("window.apsaServer.capabilityRequests");
+      await page.evaluate(REVOKE);
+      await page.waitFor(`!${hasButton(T.print)}`, "poll to observe the revocation", POLL_WAIT);
+      expect(await page.evaluate<number>("window.apsaServer.capabilityRequests")).toBeGreaterThan(
+        requestsBefore,
+      );
       await Bun.sleep(400);
 
       const after = await page.evaluate<string>(VISIBLE_PII_DUMP);
@@ -446,30 +457,113 @@ describeBrowser("parcel label dialog, real Chromium", () => {
           `document.body.textContent.includes(${JSON.stringify(T.denied)})`,
         ),
       ).toBe(true);
+      // Print DOM: nothing sensitive remains in the print root either.
+      expect(
+        await page.evaluate<string>(
+          "(document.getElementById('apsa-print-root') || document.body).textContent",
+        ),
+      ).not.toContain("Sokha");
     },
   );
 
-  test60(
-    "B. reopening stays denied with no fetch, then refetches afresh once re-granted",
+  test90(
+    "B. reopening stays denied with no fetch, then a re-grant is detected and the label is fetched afresh",
     async () => {
-      // Still revoked from A. Close, then reopen.
+      // Still revoked (server-side) from A. Close, then reopen.
       await page.key("Escape");
       await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
-      const fetchesBefore = await page.evaluate<number>("window.apsaLabelFetches.length");
+      const fetchesBefore = await page.evaluate<number>("window.apsaServer.labelFetches.length");
       await page.evaluate(click("trigger"));
       await page.waitFor(`${DIALOGS} === 1`, "denied dialog");
       await Bun.sleep(400);
       const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
       for (const value of PII) expect(dump).not.toContain(value);
       expect(await page.evaluate<boolean>(hasButton(T.print))).toBe(false);
-      expect(await page.evaluate<number>("window.apsaLabelFetches.length")).toBe(fetchesBefore);
+      expect(await page.evaluate<number>("window.apsaServer.labelFetches.length")).toBe(
+        fetchesBefore,
+      );
 
-      // Re-granting alone must not resurrect old data: the label is fetched anew.
-      await page.evaluate(click("grant"));
-      await page.waitFor(hasButton(T.print), "Print action after re-grant");
-      expect(await page.evaluate<number>("window.apsaLabelFetches.length")).toBe(fetchesBefore + 1);
+      // Restore the grant on the server only. The open (denied) dialog must
+      // notice by itself, and must fetch the label anew — never resurrect data.
+      await page.evaluate(GRANT);
+      await page.waitFor(hasButton(T.print), "Print action after re-grant", POLL_WAIT);
+      expect(await page.evaluate<number>("window.apsaServer.labelFetches.length")).toBe(
+        fetchesBefore + 1,
+      );
       await page.key("Escape");
       await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+    },
+  );
+
+  test90(
+    "D. print-time re-authorization: revoked immediately before Print → server check denies, window.print() NOT called, PII cleared",
+    async () => {
+      await page.reload();
+      await openLabel();
+      const printsBefore = await page.evaluate<number>("window.apsaServer.printCalls");
+
+      // Sanity: an authorized Print does reach window.print() after a fresh check.
+      const checksBefore = await page.evaluate<number>("window.apsaServer.capabilityRequests");
+      await page.evaluate(clickByText(T.print));
+      await page.waitFor(
+        `window.apsaServer.printCalls === ${printsBefore + 1}`,
+        "authorized print",
+      );
+      expect(await page.evaluate<number>("window.apsaServer.capabilityRequests")).toBeGreaterThan(
+        checksBefore,
+      );
+
+      // Now revoke and click Print in the SAME tick: the cached client view still
+      // says "granted" (no poll can have run), so only the fresh check can stop it.
+      await page.evaluate(
+        `(() => { ${REVOKE}; const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === ${JSON.stringify(T.print)}); b.click(); return true; })()`,
+      );
+      await page.waitFor(`!${hasButton(T.print)}`, "denied state after failed re-authorization");
+      await Bun.sleep(300);
+      expect(await page.evaluate<number>("window.apsaServer.printCalls")).toBe(printsBefore + 1);
+      const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(dump).not.toContain(value);
+      await page.evaluate(GRANT);
+    },
+  );
+
+  test90(
+    "E. if the fresh authorization request FAILS, printing is refused and PII is cleared",
+    async () => {
+      await page.reload();
+      await openLabel();
+      const printsBefore = await page.evaluate<number>("window.apsaServer.printCalls");
+      await page.evaluate("window.apsaServer.capabilityFails = true");
+      await page.evaluate(clickByText(T.print));
+      await page.waitFor(`!${hasButton(T.print)}`, "denied state after failed check");
+      await Bun.sleep(300);
+      expect(await page.evaluate<number>("window.apsaServer.printCalls")).toBe(printsBefore);
+      const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(dump).not.toContain(value);
+      await page.evaluate("window.apsaServer.capabilityFails = false");
+      await page.key("Escape");
+      await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+    },
+  );
+
+  test90(
+    "F. a snapshotless order shows NO inferred recipient: the confirmation form is empty",
+    async () => {
+      await page.reload();
+      await page.evaluate("window.apsaServer.snapshotless = true");
+      await page.evaluate(click("trigger"));
+      // No printable label; the confirm action is offered instead.
+      await page.waitFor(hasButton(km.labels.parcel.confirmCta), "confirm action");
+      expect(await page.evaluate<boolean>(hasButton(T.print))).toBe(false);
+      await page.evaluate(clickByText(km.labels.parcel.confirmCta));
+      await page.waitFor(EDIT_OPEN, "shipping sheet");
+      const fields = await page.evaluate<string>(
+        "[...document.querySelectorAll('input,textarea')].map((e) => e.value).join('')",
+      );
+      expect(fields).toBe("");
+      const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
+      for (const value of PII) expect(dump).not.toContain(value);
+      await page.evaluate("window.apsaServer.snapshotless = false");
     },
   );
 

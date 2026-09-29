@@ -172,8 +172,8 @@ function printBlockError(reason: ParcelLabelBlockReason): Error {
  * (a pickup order, or an order created before migration 047), the mutable
  * customer default is DELIBERATELY NOT used as the destination — address is null,
  * addressConfirmed is false, and the UI blocks a first-time print until a human
- * confirms the destination (updateOrderShippingSnapshot). name/phone still fall
- * back to the customer contact purely as a display/prefill convenience.
+ * confirms the destination (updateOrderShippingSnapshot). name/phone are ALSO
+ * null then: no recipient field is ever inferred from the customer profile.
  */
 export async function getParcelLabelData(
   ctx: AuthorizationContext,
@@ -195,11 +195,8 @@ export async function getParcelLabelData(
     throw printBlockError(printability.reason);
   }
 
-  const [items, contact, businessName, delivery, totals] = await Promise.all([
+  const [items, businessName, delivery, totals] = await Promise.all([
     ordersRepo.listOrderItems(ctx.organizationId, orderId),
-    order.customer_id
-      ? repo.customerContact(ctx.organizationId, order.customer_id)
-      : Promise.resolve(null),
     repo.organizationName(ctx.organizationId),
     ctx.can("delivery.read")
       ? repo.latestDeliveryForOrder(ctx.organizationId, orderId)
@@ -214,14 +211,11 @@ export async function getParcelLabelData(
       ? order.shipping_address
       : null;
   const addressConfirmed = snapshotAddress !== null;
-  // Name/phone come from the snapshot when it exists; otherwise from the
-  // customer contact as a display/prefill convenience only (never the address).
-  const shipName = addressConfirmed
-    ? (order.shipping_name ?? null)
-    : (contact?.display_name ?? null);
-  const shipPhone = addressConfirmed
-    ? (order.shipping_phone ?? null)
-    : (contact?.primary_phone ?? null);
+  // Name/phone come ONLY from the order-owned snapshot. Without one, nothing is
+  // inferred from the mutable customer profile (historical-inference risk): the
+  // merchant must enter the recipient explicitly.
+  const shipName = addressConfirmed ? (order.shipping_name ?? null) : null;
+  const shipPhone = addressConfirmed ? (order.shipping_phone ?? null) : null;
 
   const labelItems: ParcelLabelItem[] = items.map((line) => ({
     quantity: line.quantity,
