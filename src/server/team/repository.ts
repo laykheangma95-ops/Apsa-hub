@@ -19,7 +19,11 @@ import type { InvitationRow, MembershipWithProfileAndRole } from "./types";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const db = supabaseAdmin as any;
 
-const MEMBERSHIP_SELECT = "*, profiles(display_name, email, phone), roles(name, system_role)";
+// `memberships` has TWO foreign keys to `profiles` (user_id and invited_by), so a bare
+// `profiles(...)` embed is ambiguous and PostgREST rejects it with PGRST201. The member's
+// own identity is the `user_id` relationship; `invited_by` is deliberately not embedded.
+const MEMBERSHIP_SELECT =
+  "*, profiles!memberships_user_id_fkey(display_name, email, phone), roles(name, system_role)";
 
 interface RawMembershipJoin {
   id: string;
