@@ -17,48 +17,82 @@ never an image URL or filename.
   `anon`/`authenticated`, so browsers have no direct read or write access.
 - A future gallery would add a `product_images` table; nothing here blocks it.
 
-## Upload tickets + abuse bounds (migration `049_product_image_uploads.sql`, repo-only)
+## Upload tickets + abuse bounds (migrations `049` + `050`, repo-only)
 
 A signed upload URL is cost-bearing write authority (up to 5 MiB), so issuing
 one is bounded and recorded.
 
 - **Ticket table** `product_image_uploads`: one row per issued URL (org, product,
-  issuing member, exact object path, `expires_at`). RLS on, no policies, no
-  client grants, no SECURITY DEFINER; org/member are set by the server from the
-  verified session. The row is written *before* the URL is signed.
-- **Attach requires a live ticket** for exactly that org + product + path, and
-  consumes (deletes) it once the product references the object.
+  issuing member, exact object path, `expires_at`, `state`). RLS on, no policies,
+  no client grants; org/member are set by the server from the verified session.
+  The row is written _before_ the URL is signed.
 - **Issuance rate limits** (durable, PostgreSQL `consume_rate_limit`, migration
   045; see `src/server/rate-limit/policies.ts`): 60 per member per hour and 200
-  per organization per hour — one per minute per member for an hour, several
-  staff at once. The organization bucket stops many staff bypassing the member
-  bucket. Buckets are scoped by the server-verified org/user; another
-  organization is unaffected.
-- **Outstanding-ticket caps**: 30 unattached tickets per member, 100 per
-  organization (≤ 500 MiB worst case per org). Under concurrency the cap can be
-  overshot by the number of simultaneous requests, which the rate limit bounds.
+  per organization per hour. These are burst limits; they are **not** a
+  substitute for the backlog caps below.
 - **Limiter unavailable ⇒ FAIL CLOSED** (`BACKEND_FAILURE_POLICY.productImageUpload`):
-  the request gets a retryable 503 and no ticket or URL is issued. A per-instance
-  memory fallback would multiply the limit by the instance count exactly when the
-  database is struggling, and photos are optional, so a short outage costs a
-  retry, not a sale.
+  retryable 503, no ticket, no URL.
+
+### Ticket lifecycle (migration 050)
+
+| state      | meaning                                                                                   |
+| ---------- | ----------------------------------------------------------------------------------------- |
+| `pending`  | issued, nobody is attaching it; live until `expires_at`                                   |
+| `claimed`  | ONE attach owns it; protected from cleanup until `claim_expires_at` (120 s)               |
+| `consumed` | the product references the object; never reusable, never cleaned (row pruned after 1 day) |
+| `cleaning` | a sweep owns it and is deleting the object; `cleanup_retry_after` is the lease / backoff  |
+
+All transitions are single database functions (SECURITY INVOKER, pinned
+`search_path`, `EXECUTE` for `service_role` only):
+
+- **Issue** `issue_product_image_upload_v1`: takes an organization-scoped
+  advisory transaction lock, counts the member's and the organization's
+  unresolved tickets, and inserts — one transaction, so 40 simultaneous requests
+  cannot create more than 30 tickets (member) or 100 (organization). The server
+  signs a URL only when it returns `ok`.
+- **Claim** `claim_product_image_upload_v1`: one `UPDATE … WHERE state='pending'
+AND expires_at > now() AND org/product/path match RETURNING`. No row ⇒ fail
+  closed. Two racing attaches: exactly one claims. The claim happens before any
+  storage inspection or product change.
+- **Finalize** `finalize_product_image_upload_v1`: ticket `claimed → consumed`
+  **and** `products.image_path = object` in one transaction, returning the
+  previous path for the best-effort delete. A product is never updated with its
+  ticket left unconsumed, or the reverse.
+- **Backlog caps** count every _unresolved_ ticket — `pending` (live **or
+  expired but not yet cleaned**), `claimed`, `cleaning` — 30 per member, 100 per
+  organization. Expiry does not remove a ticket from the count; only a real
+  successful delete (or consumption) does. A storage delete that fails forever
+  therefore ends in fail-closed issuance instead of unbounded storage growth.
+
+### Claim recovery
+
+A crashed attach leaves a `claimed` ticket. It cannot get stuck: after
+`claim_expires_at` the ticket is claimable again while live, and cleanable once
+also expired. An _active_ claim is never cleaned, even after the ticket's own
+expiry (the attach-vs-sweep race). If a slow attach's claim lapsed and the
+sweep took the ticket, its `finalize` returns nothing and the product is left
+untouched — it can never point at an object the sweep deleted.
+
+Failure before the product changed: invalid/spoofed content → object deleted,
+ticket resolved; transient failure (storage inspect, finalize) → claim released
+(retryable), object kept. Once finalized the object is never deleted by attach.
 
 ## Abandoned-upload cleanup
 
 - Ticket TTL is 3 h; Supabase signs an upload URL for 2 h, so once a ticket is
   expired no upload can still land.
-- Every ticket request first sweeps expired tickets: oldest first, **at most 25
-  per call**, across tenants (server housekeeping; nothing is returned). An
-  object is deleted only if its ticket is expired, its path has exactly its own
-  ticket's org/product shape, and **no product references it** — a current image
-  is never removed, even if a ticket row was left behind. The row is deleted
-  after the object; a failed storage delete keeps the row for the next sweep.
-- A sweep failure never blocks ticket issuance or any read. Cross-tenant
-  sweeping is deliberate: a per-org sweep would leave a dormant organization's
-  abandoned uploads forever.
-- Rejected uploads (spoofed/truncated/oversize) are deleted with their ticket
-  immediately. The failure modes that remain are bounded by the caps above and
-  cleared by the next sweep.
+- Every ticket request first sweeps: `take_product_image_upload_cleanup_v1`
+  row-locks (`FOR UPDATE SKIP LOCKED`) **at most 25** eligible tickets (expired
+  and not under an active claim) across tenants and marks them `cleaning`.
+  A row whose object some product references is resolved as `consumed`, never
+  returned for deletion; the server additionally re-checks `products.image_path`
+  and the path's org/product shape before every delete. **The product reference
+  is authoritative.**
+- Each row is deleted independently. A failure keeps that row unresolved (still
+  counted) with exponential backoff (5 min … 6 h) and an error count; selection
+  is ordered by fewest failures first, so undeletable rows cannot starve later
+  ones. A sweep failure never blocks issuance or reads.
+- Cross-tenant sweeping is internal only; nothing from the rows reaches a client.
 
 ## Flow
 
@@ -113,13 +147,13 @@ images just to hide the path. A signing failure yields `imageUrl: null`
 
 ## Failure model
 
-| Failure | Result |
-|---|---|
-| Upload interrupted / never lands | `attach` is not reached (or refused); old image untouched |
-| New object corrupt / wrong bytes / oversize | refused, stray object deleted, old image untouched |
-| DB save fails after upload | old image untouched; new object deleted |
-| Old-object delete fails | orphan object; product row is correct |
-| Remove: DB fails | image and object kept |
+| Failure                                     | Result                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------ |
+| Upload interrupted / never lands            | `attach` is not reached (or refused); old image untouched          |
+| New object corrupt / wrong bytes / oversize | refused, stray object deleted, old image untouched                 |
+| DB save fails after upload                  | old image untouched; claim released, object kept, attach retryable |
+| Old-object delete fails                     | orphan object; product row is correct                              |
+| Remove: DB fails                            | image and object kept                                              |
 
 ## Remaining orphans
 
@@ -148,7 +182,7 @@ list rows never load the 1600 px original.
 
 ## Pending staging QA (needs hosted credentials — NOT done)
 
-Apply 048 then 049 to staging, then verify: bucket exists and is private with
+Apply 048, 049 then 050 to staging, then verify: bucket exists and is private with
 the limits; signed upload/read URLs work and expire; a cross-tenant path cannot
 be read or written; real upload/replace/remove lifecycle; the **Range request
 on a signed URL** — the exact status (200 vs 206), `Content-Range` behaviour and
@@ -156,7 +190,8 @@ any CDN/proxy rewriting (the code fails closed on anything unexpected but has
 only been tested against fake responses, so hosted compatibility is unproven);
 signed-upload token expiry against the 3 h ticket TTL; real expired-ticket
 cleanup (objects actually removed); durable rate-limit behaviour across
-instances; cross-tenant storage attempts.
+instances; **concurrent issuance/claim under real multi-connection Postgres** (the
+local tests run on single-connection PGlite); cross-tenant storage attempts.
 
 ## Pending device QA (manual)
 

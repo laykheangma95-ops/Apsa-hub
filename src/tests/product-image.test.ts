@@ -200,6 +200,115 @@ class FakeDb {
     return [];
   }
 
+  /**
+   * JS model of the migration-050 functions, so the service-level tests below
+   * run without a database. The SQL itself (atomicity, locking, state machine)
+   * is exercised against a real PGlite replay in product-image-lifecycle-sql.test.ts.
+   */
+  rpc(name: string, a: Record<string, unknown>): Promise<{ data: unknown; error: unknown }> {
+    const now = Date.now();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const t = (v: unknown) => new Date(String(v)).getTime();
+    const ok = (data: unknown) => Promise.resolve({ data, error: null });
+    const down = () => Promise.resolve({ data: null, error: { message: "ticket db down" } });
+    const find = (org: unknown, product: unknown, path: unknown) =>
+      this.uploads.find(
+        (r) => r.organization_id === org && r.product_id === product && r.object_path === path,
+      );
+    if (this.failTicketWrites) return down();
+    if (name === "issue_product_image_upload_v1") {
+      const live = this.uploads.filter(
+        (r) => r.organization_id === a.p_org && r.state !== "consumed",
+      );
+      if (live.filter((r) => r.issued_by === a.p_user).length >= Number(a.p_member_cap)) {
+        return ok("member_cap");
+      }
+      if (live.length >= Number(a.p_org_cap)) return ok("org_cap");
+      this.uploads.push({
+        id: `t${this.uploads.length + 1}-${Math.random()}`,
+        organization_id: a.p_org,
+        product_id: a.p_product,
+        issued_by: a.p_user,
+        object_path: a.p_path,
+        state: "pending",
+        expires_at: iso(now + Number(a.p_ttl_seconds) * 1000),
+        cleanup_error_count: 0,
+        cleanup_retry_after: null,
+      });
+      return ok("ok");
+    }
+    if (name === "claim_product_image_upload_v1") {
+      const r = find(a.p_org, a.p_product, a.p_path);
+      if (
+        !r ||
+        t(r.expires_at) <= now ||
+        !(r.state === "pending" || (r.state === "claimed" && t(r.claim_expires_at) <= now))
+      ) {
+        return ok(null);
+      }
+      Object.assign(r, {
+        state: "claimed",
+        claimed_at: iso(now),
+        claim_expires_at: iso(now + Number(a.p_claim_seconds) * 1000),
+      });
+      return ok(r.id);
+    }
+    if (name === "finalize_product_image_upload_v1") {
+      const r = find(a.p_org, a.p_product, a.p_path);
+      if (!r || r.state !== "claimed") return ok(null);
+      if (this.failNextProductUpdate) {
+        this.failNextProductUpdate = false;
+        return Promise.resolve({ data: null, error: { message: "db down" } });
+      }
+      const prod = this.products.find((p) => p.id === a.p_product && p.organization_id === a.p_org);
+      if (!prod) return Promise.resolve({ data: null, error: { message: "product not found" } });
+      Object.assign(r, { state: "consumed", consumed_at: iso(now) });
+      const prev = (prod.image_path as string | null) ?? "";
+      prod.image_path = a.p_path;
+      this.log.push("db.update");
+      return ok(prev);
+    }
+    if (name === "take_product_image_upload_cleanup_v1") {
+      const eligible = this.uploads
+        .filter(
+          (r) =>
+            t(r.expires_at) <= now &&
+            (r.state === "pending" ||
+              (r.state === "claimed" && t(r.claim_expires_at) <= now) ||
+              (r.state === "cleaning" && t(r.cleanup_retry_after) <= now)),
+        )
+        .sort(
+          (x, y) =>
+            Number(x.cleanup_error_count) - Number(y.cleanup_error_count) ||
+            t(x.expires_at) - t(y.expires_at),
+        )
+        .slice(0, Number(a.p_limit));
+      const out: Row[] = [];
+      for (const r of eligible) {
+        if (this.products.some((p) => p.image_path === r.object_path)) {
+          Object.assign(r, { state: "consumed", consumed_at: iso(now) });
+          continue;
+        }
+        Object.assign(r, {
+          state: "cleaning",
+          cleanup_retry_after: iso(now + Number(a.p_lease_seconds) * 1000),
+        });
+        out.push({ ...r });
+      }
+      return ok(out);
+    }
+    if (name === "fail_product_image_upload_cleanup_v1") {
+      for (const r of this.uploads.filter((x) => (a.p_ids as string[]).includes(x.id as string))) {
+        r.cleanup_error_count = Number(r.cleanup_error_count) + 1;
+        r.cleanup_retry_after = iso(
+          now + 5 * 60_000 * 2 ** Math.min(Number(r.cleanup_error_count) - 1, 6),
+        );
+      }
+      return ok(null);
+    }
+    return Promise.resolve({ data: null, error: { message: `unknown rpc ${name}` } });
+  }
+
   from(name: string) {
     const rows = this.table(name);
     const filters: Array<(r: Row) => boolean> = [];
@@ -720,14 +829,19 @@ describe("D. a failed replace never destroys the existing image", () => {
     expect(storage.objects.has(first.ticket.path)).toBe(true);
   });
 
-  it("save fails AFTER a good upload: product keeps the old image; the new object is cleaned up", async () => {
+  it("save fails AFTER a good upload: product keeps the old image; the upload stays retryable", async () => {
     const first = await withExisting();
     const next = await uploadFor(editor(ORG_A), PRODUCT_A, PNG, "image/png");
     db.failNextProductUpdate = true;
     await expect(next.attach()).rejects.toThrow(/Could not save the photo/);
     expect(rowOf(PRODUCT_A)["image_path"]).toBe(first.ticket.path);
     expect(storage.objects.has(first.ticket.path)).toBe(true);
-    expect(storage.objects.has(next.ticket.path)).toBe(false);
+    // Transient failure: the object is kept and the claim released, so the
+    // same upload can be attached on retry (no permanent consume, no orphan).
+    expect(storage.objects.has(next.ticket.path)).toBe(true);
+    expect(db.uploads.find((r) => r.object_path === next.ticket.path)?.state).toBe("pending");
+    await next.attach();
+    expect(rowOf(PRODUCT_A)["image_path"]).toBe(next.ticket.path);
   });
 
   it("storage verification outage: old image kept, nothing deleted", async () => {
@@ -1264,7 +1378,8 @@ describe("I. abandoned-upload tickets and cleanup", () => {
     const up = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
     expect(db.uploads.length).toBe(1);
     await up.attach();
-    expect(db.uploads.length).toBe(0);
+    expect(db.uploads.length).toBe(1);
+    expect(db.uploads[0]?.state).toBe("consumed");
     expect(rowOf(PRODUCT_A).image_path).toBe(up.ticket.path);
   });
 
@@ -1294,9 +1409,12 @@ describe("I. abandoned-upload tickets and cleanup", () => {
   it("never deletes an attached/current image, even if a stale ticket row survives", async () => {
     const up = await uploadFor(editor(ORG_A), PRODUCT_A, JPEG);
     await up.attach();
-    // Simulate a failed consume: an expired ticket row for the CURRENT image.
+    // Simulate a ticket left unconsumed for the CURRENT image.
+    db.uploads.length = 0;
     db.uploads.push({
       id: "stale",
+      state: "pending",
+      cleanup_error_count: 0,
       organization_id: ORG_A,
       product_id: PRODUCT_A,
       issued_by: USER,
@@ -1305,10 +1423,11 @@ describe("I. abandoned-upload tickets and cleanup", () => {
     });
     const s = await svc();
     const out = await s.sweepExpiredProductImageUploads();
-    expect(out).toEqual({ removed: 0, released: 1 });
+    expect(out).toEqual({ resolved: 0, failed: 0 }); // the database resolved it as consumed
+    expect(storage.removed).not.toContain(up.ticket.path);
     expect(storage.objects.has(up.ticket.path)).toBe(true);
     expect(rowOf(PRODUCT_A).image_path).toBe(up.ticket.path);
-    expect(db.uploads.length).toBe(0);
+    expect(db.uploads[0]?.state).toBe("consumed"); // resolved, never handed out for deletion
   });
 
   it("never touches another tenant's attached image or live ticket", async () => {
@@ -1348,10 +1467,10 @@ describe("I. abandoned-upload tickets and cleanup", () => {
     }
     paths.forEach(expire); // expire together so no request sweeps them early
     const first = await s.sweepExpiredProductImageUploads();
-    expect(first.removed).toBe(s.PRODUCT_IMAGE_SWEEP_BATCH);
+    expect(first.resolved).toBe(s.PRODUCT_IMAGE_SWEEP_BATCH);
     expect(db.uploads.length).toBe(5);
     const second = await s.sweepExpiredProductImageUploads();
-    expect(second.removed).toBe(5);
+    expect(second.resolved).toBe(5);
     expect(db.uploads.length).toBe(0);
   });
 
@@ -1361,8 +1480,12 @@ describe("I. abandoned-upload tickets and cleanup", () => {
     storage.failRemove = true;
     const t = await askTicket(editor(ORG_A));
     expect(t.uploadUrl).toContain("storage.test");
-    expect(db.uploads.some((r) => r.object_path === abandoned.ticket.path)).toBe(true);
+    // Still unresolved (and therefore still counted) — with a retry delay.
+    const row = db.uploads.find((r) => r.object_path === abandoned.ticket.path)!;
+    expect(row.state).toBe("cleaning");
+    expect(row.cleanup_error_count).toBe(1);
     storage.failRemove = false;
+    row.cleanup_retry_after = new Date(Date.now() - 1000).toISOString();
     await (await svc()).sweepExpiredProductImageUploads();
     expect(storage.objects.has(abandoned.ticket.path)).toBe(false);
   });

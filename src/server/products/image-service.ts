@@ -57,11 +57,20 @@ const UPLOAD_MESSAGES: Partial<Record<ProductImageErrorKind, string>> = {
  * sweep can safely delete whatever object is there.
  */
 export const PRODUCT_IMAGE_TICKET_TTL_SECONDS = 3 * 60 * 60;
-/** Issued-but-unattached tickets one member / one organization may hold at once. */
+/**
+ * UNRESOLVED-ticket caps (migration 050): pending (live or expired but not yet
+ * cleaned), claimed and cleaning tickets all count. An expired ticket keeps
+ * counting until its object is really deleted, so cleanup that keeps failing
+ * eventually stops new upload authority instead of letting storage grow.
+ */
 export const PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER = 30;
 export const PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION = 100;
-/** Expired tickets swept per ticket request — bounds the work added to it. */
+/** Tickets a sweep takes per call — bounds the work added to a ticket request. */
 export const PRODUCT_IMAGE_SWEEP_BATCH = 25;
+/** How long one attach may own a ticket before a crashed attach is recoverable. */
+export const PRODUCT_IMAGE_CLAIM_SECONDS = 120;
+/** How long a sweep owns a ticket before a crashed sweep is retried. */
+export const PRODUCT_IMAGE_CLEANUP_LEASE_SECONDS = 10 * 60;
 
 // ── Reads ────────────────────────────────────────────────────────────────────
 
@@ -97,40 +106,60 @@ export interface ProductImageUploadTicket {
 }
 
 /**
- * Delete abandoned uploads: tickets that expired without being attached.
- * Oldest first, at most PRODUCT_IMAGE_SWEEP_BATCH per call, across tenants
- * (server housekeeping; nothing from the rows is returned to any caller).
+ * Delete abandoned uploads. The database takes a bounded batch of eligible
+ * tickets (expired, and not under an active claim) and marks them `cleaning`;
+ * see migration 050 for eligibility. Across tenants — server housekeeping,
+ * nothing from the rows is returned to any caller.
  *
- * Safety: an object is deleted only when (1) its ticket is expired, (2) its
- * path is in exactly the shape its own ticket's org + product produce, and
- * (3) NO product currently references it. A current product image is never
- * removed, even if its ticket row was left behind. The ticket row is removed
- * only after the object is gone (or was never deletable), so a failed storage
- * delete is retried by the next sweep. Never throws: a sweep failure must not
- * block ticket issuance, reads, or anything else.
+ * Safety: an object is deleted only when (1) the database handed its ticket out
+ * (so no attach owns it), (2) its path has exactly the shape its own ticket's
+ * org + product produce, and (3) NO product currently references it — this last
+ * check is independent of ticket state, so a current product image is never
+ * removed even if its ticket was left in any state.
+ *
+ * Every row is processed independently: a failed delete keeps that ticket
+ * unresolved (it still counts against the backlog caps) with a retry delay, and
+ * later rows are unaffected. Never throws: a sweep failure must not block ticket
+ * issuance, reads, or anything else.
  */
-export async function sweepExpiredProductImageUploads(
-  now: Date = new Date(),
-): Promise<{ removed: number; released: number }> {
+export async function sweepExpiredProductImageUploads(): Promise<{
+  resolved: number;
+  failed: number;
+}> {
   try {
-    const expired = await repo.listExpiredUploadTickets(
-      now.toISOString(),
+    const taken = await repo.takeUploadTicketsForCleanup(
       PRODUCT_IMAGE_SWEEP_BATCH,
+      PRODUCT_IMAGE_CLEANUP_LEASE_SECONDS,
     );
-    if (expired.length === 0) return { removed: 0, released: 0 };
+    if (taken.length === 0) return { resolved: 0, failed: 0 };
 
-    const wellFormed = expired.filter((t) =>
-      isOwnedProductImagePath(t.object_path, t.organization_id, t.product_id),
+    const referenced = await repo.findReferencedImagePaths(taken.map((t) => t.object_path));
+    const resolved: string[] = [];
+    const failed: string[] = [];
+    await Promise.all(
+      taken.map(async (t) => {
+        const ownedShape = isOwnedProductImagePath(t.object_path, t.organization_id, t.product_id);
+        if (referenced.has(t.object_path) || !ownedShape) {
+          // Never delete an object we cannot prove is an abandoned upload.
+          resolved.push(t.id);
+          return;
+        }
+        try {
+          await getProductImageStorage().remove([t.object_path]);
+          resolved.push(t.id);
+        } catch {
+          failed.push(t.id);
+        }
+      }),
     );
-    const referenced = await repo.findReferencedImagePaths(wellFormed.map((t) => t.object_path));
-    const deletable = wellFormed.map((t) => t.object_path).filter((p) => !referenced.has(p));
-
-    if (deletable.length > 0) await getProductImageStorage().remove(deletable);
-    await repo.deleteUploadTickets(expired.map((t) => t.object_path));
-    return { removed: deletable.length, released: expired.length - deletable.length };
+    await repo.deleteCleanedTickets(resolved);
+    await repo.recordCleanupFailures(failed);
+    if (failed.length > 0)
+      serverLog.warn("product_image.sweep_delete_failed", { count: failed.length });
+    return { resolved: resolved.length, failed: failed.length };
   } catch {
     serverLog.warn("product_image.sweep_failed", {});
-    return { removed: 0, released: 0 };
+    return { resolved: 0, failed: 0 };
   }
 }
 
@@ -178,38 +207,24 @@ export async function requestProductImageUpload(
     globalThis.crypto.randomUUID(),
     checked.mime,
   );
-  const nowIso = new Date().toISOString();
   try {
-    const [mine, org] = await Promise.all([
-      repo.countOutstandingUploadTickets(
-        ctx.organizationId,
-        ctx.userId,
-        nowIso,
-        PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER,
-      ),
-      repo.countOutstandingUploadTickets(
-        ctx.organizationId,
-        null,
-        nowIso,
-        PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION,
-      ),
-    ]);
-    if (
-      mine >= PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER ||
-      org >= PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION
-    ) {
+    // One atomic, serialized database operation: caps are counted over
+    // UNRESOLVED tickets and the ticket is inserted in the same transaction.
+    const issued = await repo.issueUploadTicket({
+      organizationId: ctx.organizationId,
+      productId: product.id,
+      issuedBy: ctx.userId,
+      objectPath: path,
+      ttlSeconds: PRODUCT_IMAGE_TICKET_TTL_SECONDS,
+      memberCap: PRODUCT_IMAGE_MAX_OUTSTANDING_MEMBER,
+      organizationCap: PRODUCT_IMAGE_MAX_OUTSTANDING_ORGANIZATION,
+    });
+    if (issued !== "ok") {
       throw publicError(
         "Too many photo uploads are waiting to be saved. Please try again later.",
         429,
       );
     }
-    await repo.insertUploadTicket({
-      organizationId: ctx.organizationId,
-      productId: product.id,
-      issuedBy: ctx.userId,
-      objectPath: path,
-      expiresAt: new Date(Date.now() + PRODUCT_IMAGE_TICKET_TTL_SECONDS * 1000).toISOString(),
-    });
   } catch (err) {
     if (isPublicDomainError(err)) throw err;
     serverLog.error("product_image.ticket_record_failed", { productId });
@@ -221,7 +236,8 @@ export async function requestProductImageUpload(
     return { path, uploadUrl: signed.signedUrl };
   } catch {
     serverLog.error("product_image.upload_ticket_failed", { productId });
-    await repo.deleteUploadTickets([path]).catch(() => undefined);
+    // The URL was never signed: the ticket is safe to drop.
+    await repo.deleteUnsignedTicket(ctx.organizationId, product.id, path).catch(() => undefined);
     throw publicError("Could not start the upload. Please try again.", 503);
   }
 }
@@ -237,23 +253,46 @@ async function bestEffortRemove(paths: string[], event: string, productId: strin
   }
 }
 
+/** Give a claim back so the ticket stays usable/cleanable; a failure just lets the claim lapse. */
+async function releaseClaim(orgId: string, productId: string, path: string): Promise<void> {
+  await repo.releaseUploadClaim(orgId, productId, path).catch(() => undefined);
+}
+
 /**
- * Remove a rejected object AND its ticket. If the object cannot be deleted the
- * ticket is kept, so the expiry sweep retries the deletion.
+ * Remove a rejected object AND resolve its (claimed) ticket. If the object
+ * cannot be deleted the claim is released, so the ticket stays unresolved — and
+ * counted — until the expiry sweep deletes the object.
  */
-async function discardUpload(path: string, event: string, productId: string): Promise<void> {
+async function discardUpload(
+  orgId: string,
+  productId: string,
+  path: string,
+  event: string,
+): Promise<void> {
   try {
     await getProductImageStorage().remove([path]);
   } catch {
     serverLog.warn(event, { productId, count: 1 });
+    await releaseClaim(orgId, productId, path);
     return;
   }
-  await repo.deleteUploadTickets([path]).catch(() => undefined);
+  await repo.resolveUploadTicket(orgId, productId, path).catch(() => undefined);
 }
 
 /**
- * Step 2 of upload/replace: verify the uploaded object, then attach it.
- * Returns the new display URL.
+ * Step 2 of upload/replace: claim the ticket, verify the uploaded object, then
+ * attach it. Returns the new display URL.
+ *
+ *   1. atomically CLAIM a live pending ticket (before any storage or product
+ *      access) — a duplicate or racing attach cannot claim it and fails safely;
+ *      an active claim protects the object from the cleanup sweep
+ *   2. inspect + validate the object
+ *   3. FINALIZE: ticket -> consumed AND product -> new image, one transaction
+ *   4. delete the previous object, best effort
+ *
+ * Invalid content: object deleted, ticket resolved. Transient failure before the
+ * product changed: the claim is released (retryable; otherwise it lapses after
+ * PRODUCT_IMAGE_CLAIM_SECONDS). Once finalized the object is never deleted here.
  */
 export async function attachProductImage(
   ctx: AuthorizationContext,
@@ -271,20 +310,21 @@ export async function attachProductImage(
     throw publicError("The uploaded image could not be verified. Please try again.", 400);
   }
 
-  // Only an object this server issued a live ticket for can be attached.
-  let ticket;
+  let claimed: boolean;
   try {
-    ticket = await repo.findLiveUploadTicket(
+    claimed = await repo.claimUploadTicket(
       ctx.organizationId,
       product.id,
       path,
-      new Date().toISOString(),
+      PRODUCT_IMAGE_CLAIM_SECONDS,
     );
   } catch {
-    serverLog.error("product_image.ticket_lookup_failed", { productId });
+    serverLog.error("product_image.ticket_claim_failed", { productId });
     throw publicError("Could not verify the upload. Please try again.", 503);
   }
-  if (!ticket) {
+  // No live pending ticket for exactly this org + product + path (never issued,
+  // expired, already claimed or consumed): fail closed.
+  if (!claimed) {
     throw publicError("The uploaded image could not be verified. Please try again.", 400);
   }
 
@@ -297,9 +337,14 @@ export async function attachProductImage(
     inspection = await storage.inspect(path);
   } catch {
     serverLog.error("product_image.inspect_failed", { productId });
+    await releaseClaim(ctx.organizationId, product.id, path);
     throw publicError("Could not verify the upload. Please try again.", 503);
   }
-  if (!inspection) throw invalid();
+  if (!inspection) {
+    // Nothing landed (yet): give the claim back so the client may retry.
+    await releaseClaim(ctx.organizationId, product.id, path);
+    throw invalid();
+  }
 
   const declaredMime = mimeFromProductImagePath(path);
   const tooBig = inspection.sizeBytes > PRODUCT_IMAGE_MAX_BYTES || inspection.sizeBytes <= 0;
@@ -307,39 +352,41 @@ export async function attachProductImage(
   if (!declaredMime || structure?.mime !== declaredMime || tooBig) {
     // Wrong/truncated/spoofed bytes for the claimed type (or oversize): delete
     // the stray object and refuse. The product is untouched.
-    await discardUpload(path, "product_image.reject_cleanup_failed", productId);
+    await discardUpload(
+      ctx.organizationId,
+      product.id,
+      path,
+      "product_image.reject_cleanup_failed",
+    );
     throw publicError(
       tooBig ? "This image is too large." : "This file is not a valid JPEG, PNG or WebP image.",
       400,
     );
   }
 
-  const previousPath = product.image_path;
-  let updated: ProductRow | null;
+  let finalized: { previousPath: string | null } | null;
   try {
-    updated = await repo.setProductImagePath(ctx.organizationId, product.id, path);
+    finalized = await repo.finalizeUploadTicket(ctx.organizationId, product.id, path);
   } catch {
-    // Save failed AFTER a successful upload: the product still points at its
-    // previous image (if any). Drop the new object so it is not orphaned.
+    // Nothing changed (the database function is one transaction): the product
+    // keeps its previous image and the upload stays retryable / cleanable. The
+    // object is NOT deleted here — the outcome may be unknown to us.
     serverLog.error("product_image.attach_failed", { productId });
-    await discardUpload(path, "product_image.attach_cleanup_failed", productId);
+    await releaseClaim(ctx.organizationId, product.id, path);
     throw publicError("Could not save the photo. Please try again.", 500);
   }
-  if (!updated) throw publicError("Product not found", 404);
+  // Lost the ticket (e.g. cleanup took it after a lapsed claim): nothing changed.
+  if (!finalized) throw invalid();
 
-  // The product references the object: consume the ticket. If this fails the
-  // sweep still cannot delete the object — it skips any referenced path.
-  await repo.deleteUploadTickets([path]).catch(() => {
-    serverLog.warn("product_image.ticket_consume_failed", { productId });
-  });
-
-  // Only now — the row already references the new object — retire the old one.
+  // The product references the object and the ticket is consumed. Only now
+  // retire the previous object, best effort.
+  const previousPath = finalized.previousPath;
   if (previousPath && previousPath !== path) {
     await bestEffortRemove([previousPath], "product_image.old_cleanup_failed", productId);
   }
 
-  const urls = await resolveImageUrls([updated]);
-  return { imageUrl: urls.get(updated.id) ?? null };
+  const urls = await resolveImageUrls([{ ...product, image_path: path }]);
+  return { imageUrl: urls.get(product.id) ?? null };
 }
 
 /** Clear the product's photo. DB reference first, object delete after. */

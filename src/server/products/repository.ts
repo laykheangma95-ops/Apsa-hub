@@ -198,97 +198,175 @@ export async function setProductImagePath(
   return data ? (data as ProductRow) : null;
 }
 
-// ── Signed-upload tickets (migration 049) ─────────────────────────────────────
+// ── Signed-upload tickets (migrations 049 + 050) ──────────────────────────────
 //
-// One row per signed upload URL issued. The row is permission to attach that
-// exact object path and the durable count of outstanding uploads; it is
-// deleted when the upload is attached or swept after it expires.
+// One row per signed upload URL issued: permission to attach that exact object
+// path and a durable count of UNRESOLVED uploads. State machine (see 050):
+// pending -> claimed -> consumed, plus cleaning while a sweep owns the row.
+// Every multi-step transition is a single database function so it is atomic;
+// the service never reads a ticket and then updates it.
 
-export interface UploadTicketRow {
+export interface UploadCleanupRow {
   id: string;
   organization_id: string;
   product_id: string;
-  issued_by: string;
   object_path: string;
-  expires_at: string;
 }
 
-const TICKET_COLUMNS = "id, organization_id, product_id, issued_by, object_path, expires_at";
+export type IssueUploadResult = "ok" | "member_cap" | "org_cap";
 
-export async function insertUploadTicket(ticket: {
+function rpcError(name: string, error: unknown): Error {
+  return new Error(`${name}: ${(error as { message?: string }).message ?? "rpc failed"}`);
+}
+
+/**
+ * Atomically enforce the member + organization unresolved-backlog caps and
+ * record the ticket (one serialized transaction). Nothing is signed by the
+ * caller unless this returns "ok".
+ */
+export async function issueUploadTicket(t: {
   organizationId: string;
   productId: string;
   issuedBy: string;
   objectPath: string;
-  expiresAt: string;
-}): Promise<void> {
-  const { error } = await db.from("product_image_uploads").insert({
-    organization_id: ticket.organizationId,
-    product_id: ticket.productId,
-    issued_by: ticket.issuedBy,
-    object_path: ticket.objectPath,
-    expires_at: ticket.expiresAt,
+  ttlSeconds: number;
+  memberCap: number;
+  organizationCap: number;
+}): Promise<IssueUploadResult> {
+  const { data, error } = await db.rpc("issue_product_image_upload_v1", {
+    p_org: t.organizationId,
+    p_product: t.productId,
+    p_user: t.issuedBy,
+    p_path: t.objectPath,
+    p_ttl_seconds: t.ttlSeconds,
+    p_member_cap: t.memberCap,
+    p_org_cap: t.organizationCap,
   });
-  if (error) throw new Error(`insertUploadTicket: ${(error as { message: string }).message}`);
+  if (error) throw rpcError("issueUploadTicket", error);
+  if (data !== "ok" && data !== "member_cap" && data !== "org_cap") {
+    throw new Error("issueUploadTicket: unexpected result");
+  }
+  return data;
 }
 
-/** Outstanding (unexpired) tickets for an org, optionally one member; capped at `limit` rows. */
-export async function countOutstandingUploadTickets(
-  organizationId: string,
-  issuedBy: string | null,
-  nowIso: string,
-  limit: number,
-): Promise<number> {
-  let q = db
-    .from("product_image_uploads")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .gt("expires_at", nowIso);
-  if (issuedBy) q = q.eq("issued_by", issuedBy);
-  const { data, error } = await q.limit(limit);
-  if (error)
-    throw new Error(`countOutstandingUploadTickets: ${(error as { message: string }).message}`);
-  return (data as unknown[] | null)?.length ?? 0;
-}
-
-/** The live (unexpired) ticket for exactly this org + product + path, or null. */
-export async function findLiveUploadTicket(
+/** Atomically claim a live pending ticket for exactly this org + product + path. Null = not claimable. */
+export async function claimUploadTicket(
   organizationId: string,
   productId: string,
   objectPath: string,
-  nowIso: string,
-): Promise<UploadTicketRow | null> {
-  const { data, error } = await db
+  claimSeconds: number,
+): Promise<boolean> {
+  const { data, error } = await db.rpc("claim_product_image_upload_v1", {
+    p_org: organizationId,
+    p_product: productId,
+    p_path: objectPath,
+    p_claim_seconds: claimSeconds,
+  });
+  if (error) throw rpcError("claimUploadTicket", error);
+  return typeof data === "string" && data.length > 0;
+}
+
+/**
+ * Atomically mark the claimed ticket consumed AND point the product at the
+ * object. Returns { previousPath } (null when the product had no image), or
+ * null when the ticket was no longer this flow's to finalize (nothing changed).
+ */
+export async function finalizeUploadTicket(
+  organizationId: string,
+  productId: string,
+  objectPath: string,
+): Promise<{ previousPath: string | null } | null> {
+  const { data, error } = await db.rpc("finalize_product_image_upload_v1", {
+    p_org: organizationId,
+    p_product: productId,
+    p_path: objectPath,
+  });
+  if (error) throw rpcError("finalizeUploadTicket", error);
+  if (data === null || data === undefined) return null;
+  return { previousPath: data === "" ? null : (data as string) };
+}
+
+/** Give a claim back (transient failure before the product changed). No-op unless still claimed. */
+export async function releaseUploadClaim(
+  organizationId: string,
+  productId: string,
+  objectPath: string,
+): Promise<void> {
+  const { error } = await db
     .from("product_image_uploads")
-    .select(TICKET_COLUMNS)
+    .update({ state: "pending", claimed_at: null, claim_expires_at: null })
     .eq("organization_id", organizationId)
     .eq("product_id", productId)
     .eq("object_path", objectPath)
-    .gt("expires_at", nowIso)
-    .limit(1);
-  if (error) throw new Error(`findLiveUploadTicket: ${(error as { message: string }).message}`);
-  return ((data as UploadTicketRow[] | null) ?? [])[0] ?? null;
+    .eq("state", "claimed");
+  if (error) throw rpcError("releaseUploadClaim", error);
 }
 
-export async function deleteUploadTickets(objectPaths: string[]): Promise<void> {
-  if (objectPaths.length === 0) return;
-  const { error } = await db.from("product_image_uploads").delete().in("object_path", objectPaths);
-  if (error) throw new Error(`deleteUploadTickets: ${(error as { message: string }).message}`);
-}
-
-/** Oldest expired tickets across all tenants, bounded. Server housekeeping only. */
-export async function listExpiredUploadTickets(
-  nowIso: string,
-  limit: number,
-): Promise<UploadTicketRow[]> {
-  const { data, error } = await db
+/** Resolve (delete) a ticket whose object is gone. Only a claimed or cleaning ticket can be resolved. */
+export async function resolveUploadTicket(
+  organizationId: string,
+  productId: string,
+  objectPath: string,
+): Promise<void> {
+  const { error } = await db
     .from("product_image_uploads")
-    .select(TICKET_COLUMNS)
-    .lte("expires_at", nowIso)
-    .order("expires_at", { ascending: true })
-    .limit(limit);
-  if (error) throw new Error(`listExpiredUploadTickets: ${(error as { message: string }).message}`);
-  return (data as UploadTicketRow[] | null) ?? [];
+    .delete()
+    .eq("organization_id", organizationId)
+    .eq("product_id", productId)
+    .eq("object_path", objectPath)
+    .in("state", ["claimed", "cleaning"]);
+  if (error) throw rpcError("resolveUploadTicket", error);
+}
+
+/**
+ * Take a bounded batch of eligible tickets for cleanup (server housekeeping,
+ * across tenants; nothing returned reaches a client). Rows whose object a
+ * product references are resolved as consumed inside the function.
+ */
+export async function takeUploadTicketsForCleanup(
+  limit: number,
+  leaseSeconds: number,
+): Promise<UploadCleanupRow[]> {
+  const { data, error } = await db.rpc("take_product_image_upload_cleanup_v1", {
+    p_limit: limit,
+    p_lease_seconds: leaseSeconds,
+  });
+  if (error) throw rpcError("takeUploadTicketsForCleanup", error);
+  return (data as UploadCleanupRow[] | null) ?? [];
+}
+
+/** Delete tickets (by id) whose object was deleted; only rows still owned by a sweep. */
+export async function deleteCleanedTickets(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const { error } = await db
+    .from("product_image_uploads")
+    .delete()
+    .in("id", ids)
+    .eq("state", "cleaning");
+  if (error) throw rpcError("deleteCleanedTickets", error);
+}
+
+/** Drop a ticket whose URL was never signed (pending only). */
+export async function deleteUnsignedTicket(
+  organizationId: string,
+  productId: string,
+  objectPath: string,
+): Promise<void> {
+  const { error } = await db
+    .from("product_image_uploads")
+    .delete()
+    .eq("organization_id", organizationId)
+    .eq("product_id", productId)
+    .eq("object_path", objectPath)
+    .eq("state", "pending");
+  if (error) throw rpcError("deleteUnsignedTicket", error);
+}
+
+/** Keep failed rows unresolved (still counted), with a retry delay so later rows advance. */
+export async function recordCleanupFailures(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const { error } = await db.rpc("fail_product_image_upload_cleanup_v1", { p_ids: ids });
+  if (error) throw rpcError("recordCleanupFailures", error);
 }
 
 /** Which of these object paths are some product's CURRENT image. */
