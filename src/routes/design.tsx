@@ -1,4 +1,4 @@
-import { createFileRoute, notFound } from "@tanstack/react-router";
+import { createFileRoute, notFound, Outlet, useRouterState } from "@tanstack/react-router";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -78,7 +78,7 @@ export const Route = createFileRoute("/design")({
       },
     ],
   }),
-  component: DesignReference,
+  component: DesignRouteLayout,
 });
 
 /** Component-gallery fixtures only; never used by the production Home data path. */
@@ -171,6 +171,11 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
       </div>
     </section>
   );
+}
+
+function DesignRouteLayout() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  return pathname === "/design" ? <DesignReference /> : <Outlet />;
 }
 
 function DesignReference() {

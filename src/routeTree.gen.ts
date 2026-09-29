@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccessDeniedRouteImport } from './routes/access-denied'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
+import { Route as DesignInboxSimulatorRouteImport } from './routes/design.inbox-simulator'
 import { Route as DesignMascotRouteImport } from './routes/design-mascot'
 import { Route as DesignStatusBadgeRouteImport } from './routes/design-status-badge'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
@@ -62,6 +63,11 @@ const DesignRoute = DesignRouteImport.update({
   id: '/design',
   path: '/design',
   getParentRoute: () => rootRouteImport,
+} as any)
+const DesignInboxSimulatorRoute = DesignInboxSimulatorRouteImport.update({
+  id: '/inbox-simulator',
+  path: '/inbox-simulator',
+  getParentRoute: () => DesignRoute,
 } as any)
 const DesignMascotRoute = DesignMascotRouteImport.update({
   id: '/design-mascot',
@@ -213,7 +219,8 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/access-denied': typeof AccessDeniedRoute
   '/app': typeof AppRouteWithChildren
-  '/design': typeof DesignRoute
+  '/design': typeof DesignRouteWithChildren
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -247,7 +254,8 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/access-denied': typeof AccessDeniedRoute
-  '/design': typeof DesignRoute
+  '/design': typeof DesignRouteWithChildren
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -283,7 +291,8 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/access-denied': typeof AccessDeniedRoute
   '/app': typeof AppRouteWithChildren
-  '/design': typeof DesignRoute
+  '/design': typeof DesignRouteWithChildren
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -321,6 +330,7 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/app'
     | '/design'
+    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -355,6 +365,7 @@ export interface FileRouteTypes {
     | '/'
     | '/access-denied'
     | '/design'
+    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -390,6 +401,7 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/app'
     | '/design'
+    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -425,7 +437,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccessDeniedRoute: typeof AccessDeniedRoute
   AppRoute: typeof AppRouteWithChildren
-  DesignRoute: typeof DesignRoute
+  DesignRoute: typeof DesignRouteWithChildren
   DesignMascotRoute: typeof DesignMascotRoute
   DesignStatusBadgeRoute: typeof DesignStatusBadgeRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
@@ -466,6 +478,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/design'
       preLoaderRoute: typeof DesignRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/design/inbox-simulator': {
+      id: '/design/inbox-simulator'
+      path: '/inbox-simulator'
+      fullPath: '/design/inbox-simulator'
+      preLoaderRoute: typeof DesignInboxSimulatorRouteImport
+      parentRoute: typeof DesignRoute
     }
     '/design-mascot': {
       id: '/design-mascot'
@@ -673,6 +692,16 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface DesignRouteChildren {
+  DesignInboxSimulatorRoute: typeof DesignInboxSimulatorRoute
+}
+
+const DesignRouteChildren: DesignRouteChildren = {
+  DesignInboxSimulatorRoute: DesignInboxSimulatorRoute,
+}
+
+const DesignRouteWithChildren = DesignRoute._addFileChildren(DesignRouteChildren)
+
 interface AppDeliveriesRouteChildren {
   AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
 }
@@ -785,7 +814,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccessDeniedRoute: AccessDeniedRoute,
   AppRoute: AppRouteWithChildren,
-  DesignRoute: DesignRoute,
+  DesignRoute: DesignRouteWithChildren,
   DesignMascotRoute: DesignMascotRoute,
   DesignStatusBadgeRoute: DesignStatusBadgeRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
