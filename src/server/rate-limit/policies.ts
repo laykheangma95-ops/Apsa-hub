@@ -98,6 +98,19 @@ export const RATE_LIMITS = {
    * and the bucket is skipped when the IP is unknown.
    */
   webhookIp: rule("webhooks.ip", 600, 60),
+
+  // ── Perf telemetry (staging/development diagnostics only) ─────────────────
+  //
+  // recordNavigationTimingFn is unauthenticated by design (the record carries
+  // no identity). These buckets only bound log spam and invocation abuse while
+  // APSA_PERF_INSTRUMENTATION=true; a refused hit drops one diagnostic line and
+  // nothing else. A tester clicking through the app sends well under one
+  // navigation per second (and the browser caps a page load at 200 sends).
+
+  /** 300 per client IP per minute (only when trusted): several testers behind one NAT. */
+  perfTelemetryIp: rule("perf.telemetry.ip", 300, 60),
+  /** 3000 per minute across all sources — the header-independent backstop. */
+  perfTelemetryGlobal: rule("perf.telemetry.global", 3000, 60),
 } as const satisfies Record<string, RateLimitRule>;
 
 /**
@@ -131,6 +144,7 @@ export const BACKEND_FAILURE_POLICY = {
   paymentMutation: "memory_fallback",
   financialReversal: "fail_closed",
   webhook: "memory_fallback",
+  perfTelemetry: "memory_fallback",
 } as const satisfies Record<string, BackendFailurePolicy>;
 
 export type RateLimitRuleName = keyof typeof RATE_LIMITS;

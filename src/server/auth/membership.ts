@@ -6,6 +6,7 @@
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
 import type { MembershipRow, RoleRow, PermissionRow } from "@/lib/supabase/types";
+import { timePhase } from "@/server/observability/perf";
 
 export interface MembershipContext {
   membership: MembershipRow;
@@ -27,30 +28,40 @@ export async function verifyActiveMembership(
   userId: string,
   organizationId: string,
 ): Promise<MembershipContext | null> {
-  const { data: rawMembership, error } = await supabaseAdmin
-    .from("memberships")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("organization_id", organizationId)
-    .eq("status", "active")
-    .single();
+  // Timing only (staging/development, APSA_PERF_INSTRUMENTATION): a
+  // pass-through when off; results and errors are never altered.
+  return timePhase("authz.verifyMembership", () => loadMembershipContext(userId, organizationId));
+}
+
+async function loadMembershipContext(
+  userId: string,
+  organizationId: string,
+): Promise<MembershipContext | null> {
+  const { data: rawMembership, error } = await timePhase("authz.membershipRow", async () =>
+    supabaseAdmin
+      .from("memberships")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("organization_id", organizationId)
+      .eq("status", "active")
+      .single(),
+  );
 
   if (error || !rawMembership) return null;
   const membership = rawMembership as unknown as MembershipRow;
 
-  const { data: rawRole, error: roleError } = await supabaseAdmin
-    .from("roles")
-    .select("*")
-    .eq("id", membership.role_id)
-    .single();
+  const { data: rawRole, error: roleError } = await timePhase("authz.roles", async () =>
+    supabaseAdmin.from("roles").select("*").eq("id", membership.role_id).single(),
+  );
 
   if (roleError || !rawRole) return null;
   const role = rawRole as unknown as RoleRow;
 
-  const { data: rolePermissions, error: rpError } = await supabaseAdmin
-    .from("role_permissions")
-    .select("permission_id")
-    .eq("role_id", role.id);
+  const { data: rolePermissions, error: rpError } = await timePhase(
+    "authz.rolePermissions",
+    async () =>
+      supabaseAdmin.from("role_permissions").select("permission_id").eq("role_id", role.id),
+  );
 
   if (rpError) return null;
 
@@ -60,10 +71,9 @@ export async function verifyActiveMembership(
 
   let permissions = new Set<string>();
   if (permissionIds.length > 0) {
-    const { data: permRows } = await supabaseAdmin
-      .from("permissions")
-      .select("key")
-      .in("id", permissionIds);
+    const { data: permRows } = await timePhase("authz.permissions", async () =>
+      supabaseAdmin.from("permissions").select("key").in("id", permissionIds),
+    );
 
     permissions = new Set(
       ((permRows ?? []) as unknown as Array<Pick<PermissionRow, "key">>).map((p) => p.key),

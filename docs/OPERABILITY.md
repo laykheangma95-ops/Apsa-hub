@@ -162,6 +162,7 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | Customer create/update | authenticated, `customers.*`, PII-gated (CORRECTION-002) | no financial effect, audited | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Reads (lists, details) | authenticated, tenant-scoped, `limit ≤ 200` caps | load only | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Future provider webhooks | public | forged/replayed events, floods | Primitive ready. **Signature verification + replay claim are the primary controls**; the per-provider IP bucket is secondary and skipped when the IP is unknown (§7) |
+| `recordNavigationTimingFn` (perf telemetry) | public, unauthenticated by design, staging/dev only (`APSA_PERF_INSTRUMENTATION`) | log spam, invocation flooding | **RATE LIMITED** (client IP when trusted + global backstop); a refused hit is dropped silently, one throttled `perf.navigation.rate_limited` line per instance per minute |
 
 ### 5.2 Values and rationale (`src/server/rate-limit/policies.ts`)
 
@@ -185,6 +186,8 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | `payments.mutate.member` | 60 | 60 s | organization + member | Far above any real counter |
 | `payments.reversal.member` | 20 | 60 s | organization + member | Refund/reverse/correct are rare and audited |
 | `webhooks.ip` | 600 | 60 s | provider + client IP (only when trusted) | Secondary to signature + replay checks |
+| `perf.telemetry.ip` | 300 | 60 s | client IP (only when trusted) | Diagnostics only; several testers behind one NAT never meet it (the browser caps a page load at 200 sends) |
+| `perf.telemetry.global` | 3000 | 60 s | all sources | Header-independent backstop; refusal only drops diagnostic lines |
 
 Every **auth** limit with an IP bucket also has an identity- or token-derived
 bucket that never depends on a header. That is not true of webhooks: their IP
@@ -349,7 +352,44 @@ Consequences to plan for:
 | Name | Required | Purpose |
 |---|---|---|
 | `RATE_LIMIT_KEY_SECRET` | optional | Dedicated HMAC pepper for rate-limit keys; otherwise derived from `SUPABASE_SERVICE_ROLE_KEY`. Server-only. |
-| `RATE_LIMIT_CLIENT_IP_HEADER` | **deployment requirement** for IP limits | The single forwarding header the deployment's proxy **overwrites** (e.g. `x-vercel-forwarded-for` on Vercel, `cf-connecting-ip` behind Cloudflare). **When unset, no forwarding header is trusted** — `x-forwarded-for`, `x-real-ip` and `cf-connecting-ip` are ignored, the client IP is "unknown", every IP bucket is skipped (never pooled), and the identity/token buckets carry auth protection alone. Set it only to a header the edge rewrites on every request; a header a client can send directly is spoofable. |
+| `RATE_LIMIT_CLIENT_IP_HEADER` | **deployment requirement** for IP limits | The single forwarding header the deployment's proxy **overwrites** (e.g. `x-vercel-forwarded-for` on Vercel, `cf-connecting-ip` behind Cloudflare). **When unset, no forwarding header is trusted** — `x-forwarded-for`, `x-real-ip` and `cf-connecting-ip` are ignored, the client IP is "unknown", every IP bucket is skipped (never pooled), and the identity/token buckets carry auth protection alone. Set it only to a header the edge rewrites on every request; a header a client can send directly is spoofable. || `APSA_PERF_INSTRUMENTATION` | optional, **staging/development only** | `true` enables `perf.server_function` timing lines (below). Server-only — deliberately not `VITE_`-prefixed. Default OFF; ignored when `VERCEL_ENV=production`. |
+| `VITE_APSA_PERF_NAV_TIMING` | optional, **staging/development builds only** | `true` enables client navigation timing in the browser console. Build-time and public by nature (it carries no secret). Default OFF. |
+
+### Latency instrumentation (diagnostics only)
+
+`src/server/observability/perf.ts` — when `APSA_PERF_INSTRUMENTATION=true`, the
+server-function boundary writes ONE `perf.server_function` line per outermost
+server-function call:
+
+```json
+{"event":"perf.server_function","requestId":"req_…","domain":"orders","operation":"listOrdersFn",
+ "route":"orders.listOrdersFn","identityMs":210.4,"getUserMs":205.1,"activeOrgMs":88.2,
+ "membershipMs":301.7,"membershipRowMs":80.3,"rolesMs":71.9,"rolePermissionsMs":74.0,
+ "permissionsMs":75.2,"authzMs":600.3,"queryMs":190.8,"totalMs":791.1,"outcome":"ok"}
+```
+
+| Field | Measures |
+|---|---|
+| `identityMs` | `getSessionFn` end to end (cookie read, `auth.getUser`, optional refresh) |
+| `getUserMs` / `refreshMs` | Supabase `auth.getUser()` / `auth.refreshSession()` round trips |
+| `guardMembershipsMs` | `/app` guard's memberships read (`checkAppGuardFn` only) |
+| `activeOrgMs` | `resolveActiveOrganizationId` |
+| `membershipMs` | `verifyActiveMembership` end to end, split into `membershipRowMs`, `rolesMs`, `rolePermissionsMs`, `permissionsMs` |
+| `authzMs` | sum of the top-level authorization phases above (sub-phases not double counted) |
+| `queryMs` | `totalMs − authzMs`: domain queries plus handler module loading and serialization |
+| `<phase>Count` | present only when a phase ran more than once in one call |
+
+Never logged: user or organization IDs, emails, phones, names, tokens, keys, SQL
+or error text. OFF means no collector and `timePhase` returns the wrapped promise
+itself. Tested in `src/tests/perf-instrumentation.test.ts` (+ `.runtime.ts`: the
+whole auth chain returns identical results and errors with the flag on and off).
+
+`src/lib/perf/navigation-timing.ts` — when built with `VITE_APSA_PERF_NAV_TIMING=true`,
+each in-app navigation logs `[apsa.perf] {"event":"perf.navigation","from":"home","to":"orders",
+"tracked":true,"navigateMs":…,"pendingMs":…,"loadedMs":…,"renderedMs":…,"contentMs":…}`
+(milliseconds from the click) and keeps the last 50 in `window.__apsaPerfNav`. Screens
+are coarse labels; IDs and search params are never recorded. `contentMs` is the first
+frame after render with no `aria-busy="true"` / `.animate-pulse` skeleton on screen.
 
 ## 10. Classification
 

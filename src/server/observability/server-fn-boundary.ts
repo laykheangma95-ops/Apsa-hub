@@ -12,7 +12,10 @@
  *      statusCode), real ZodErrors and TanStack control flow (redirect /
  *      notFound / Response) through unchanged — the UI's error classifiers
  *      depend on those messages;
- *   3. for anything else — the unexpected failures — writes ONE structured,
+ *   3. when APSA_PERF_INSTRUMENTATION is enabled (staging/development only,
+ *      src/server/observability/perf.ts), times the call and writes one
+ *      `perf.server_function` line — the call's value and error are untouched;
+ *   4. for anything else — the unexpected failures — writes ONE structured,
  *      redacted log line (and forwards it to the registered ErrorReporter, if
  *      any), then throws a PUBLIC error instead: a fixed message plus
  *      `[ref:<requestId>]`. The original message, stack, SQL text, table or
@@ -35,6 +38,7 @@ import {
   toPublicInternalError,
 } from "./errors";
 import { serverLog } from "./logger";
+import { createPerfCollector, isPerfInstrumentationEnabled, measureServerFn } from "./perf";
 
 export interface ServerFnMetaLike {
   name?: string;
@@ -61,18 +65,21 @@ export async function runServerFnBoundary<T>(
   // that request's ID and capture slot, so one request has one reference.
   const requestId = outer?.requestId ?? newRequestId();
   const domain = domainFromFilename(meta?.filename);
+  const perf = isPerfInstrumentationEnabled() ? createPerfCollector() : undefined;
   const context = {
     ...(outer?.capture ? { capture: outer.capture } : {}),
     requestId,
     serverFnBoundary: true,
     ...(meta?.name ? { operation: meta.name } : {}),
     ...(domain ? { domain } : {}),
+    ...(perf ? { perf } : {}),
   };
+  const run = perf ? () => measureServerFn(perf, next) : next;
 
   return runWithRequestContext(context, async () => {
     const startedAt = Date.now();
     try {
-      return await next();
+      return await run();
     } catch (error) {
       if (isControlFlowThrow(error)) throw error;
 

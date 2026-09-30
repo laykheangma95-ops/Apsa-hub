@@ -14,6 +14,7 @@
  * Server-only. Never import this from browser-bundled code.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { PerfCollector } from "./perf";
 
 export interface RequestContext {
   requestId: string;
@@ -33,6 +34,12 @@ export interface RequestContext {
    * request can never read or consume another request's captured error.
    */
   capture?: { error?: unknown };
+  /**
+   * Phase timings for this server-function call. Present only when
+   * APSA_PERF_INSTRUMENTATION is enabled (src/server/observability/perf.ts);
+   * diagnostics only, never read by any authorization decision.
+   */
+  perf?: PerfCollector;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();

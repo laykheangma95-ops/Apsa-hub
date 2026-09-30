@@ -25,15 +25,20 @@ import {
  */
 export async function resolveActiveOrganizationId(userId: string): Promise<string | null> {
   const { supabaseAdmin } = await import("@/lib/supabase/server");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabaseAdmin as any)
-    .from("memberships")
-    .select("organization_id, status, joined_at")
-    .eq("user_id", userId)
-    .eq("status", "active")
-    .order(CANONICAL_MEMBERSHIP_ORDER.column, {
-      ascending: CANONICAL_MEMBERSHIP_ORDER.ascending,
-    });
+  // Timing only (staging/development, APSA_PERF_INSTRUMENTATION); a
+  // pass-through when off. The query below is unchanged.
+  const { timePhase } = await import("@/server/observability/perf");
+  const { data, error } = await timePhase("authz.activeOrganization", async () =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabaseAdmin as any)
+      .from("memberships")
+      .select("organization_id, status, joined_at")
+      .eq("user_id", userId)
+      .eq("status", "active")
+      .order(CANONICAL_MEMBERSHIP_ORDER.column, {
+        ascending: CANONICAL_MEMBERSHIP_ORDER.ascending,
+      }),
+  );
 
   if (error) throw new Error("Unable to resolve active organization membership");
   const picked = pickCanonicalActiveMembership((data ?? []) as MembershipCandidate[]);

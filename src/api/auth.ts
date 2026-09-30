@@ -207,6 +207,15 @@ export async function resolveAuthenticatedRoute(
 //   - Supabase auth API is unreachable (treated as unauthenticated)
 
 export const getSessionFn = createServerFn().handler(async (): Promise<SessionResult> => {
+  // Timing only (staging/development, APSA_PERF_INSTRUMENTATION): a pass-through
+  // when off, and never alters the session result or any error.
+  const { timePhase } = await import("@/server/observability/perf");
+  return timePhase("session.total", () => readCookieSession(timePhase));
+});
+
+async function readCookieSession(
+  timePhase: typeof import("@/server/observability/perf").timePhase,
+): Promise<SessionResult> {
   const { getCookie } = await import("@tanstack/react-start/server");
   const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
   const refreshToken = getCookie(COOKIE_REFRESH_TOKEN);
@@ -221,7 +230,7 @@ export const getSessionFn = createServerFn().handler(async (): Promise<SessionRe
   const {
     data: { user },
     error,
-  } = await client.auth.getUser();
+  } = await timePhase("session.getUser", () => client.auth.getUser());
 
   if (!error && user) {
     return buildSessionResult(user, accessToken);
@@ -229,9 +238,11 @@ export const getSessionFn = createServerFn().handler(async (): Promise<SessionRe
 
   // Access token invalid or expired — try refresh.
   const refreshClient = createRefreshClient();
-  const { data: refreshData, error: refreshError } = await refreshClient.auth.refreshSession({
-    refresh_token: refreshToken,
-  });
+  const { data: refreshData, error: refreshError } = await timePhase("session.refresh", () =>
+    refreshClient.auth.refreshSession({
+      refresh_token: refreshToken,
+    }),
+  );
 
   if (refreshError || !refreshData.session) {
     // Refresh failed — session fully expired, clear cookies.
@@ -244,7 +255,7 @@ export const getSessionFn = createServerFn().handler(async (): Promise<SessionRe
   await writeSessionCookies(session.access_token, session.refresh_token);
 
   return buildSessionResult(session.user, session.access_token);
-});
+}
 
 // ── signInFn ──────────────────────────────────────────────────────────────────
 
