@@ -813,7 +813,7 @@
     "products": "ផលិតផល",
     "optional": "ស្រេចចិត្ត",
     "searchLabel": "ស្វែងរកផលិតផល",
-    "searchPlaceholder": "ឈ្មោះ លេខ SKU ឬបាកូដ",
+    "searchPlaceholder": "ឈ្មោះ SKU ឬបាកូដ",
     "scan": "ស្កេនបាកូដ",
     "categories": "ប្រភេទ",
     "view": {
@@ -828,7 +828,9 @@
       "drinks": "ភេសជ្ជៈ"
     },
     "addToCartLabel": "បញ្ចូល {{name}} ទៅកន្ត្រក",
+    "available": "នៅសល់ {{count}}",
     "stockAvailable": "នៅសល់ {{count}}",
+    "reserved": "កក់ទុក {{count}}",
     "stockReserved": "កក់ទុក {{count}}",
     "unitPrice": "តម្លៃឯកតា",
     "addToCart": "បញ្ចូលកន្ត្រក",
