@@ -5,13 +5,52 @@
  * The application layer — not RLS alone — is the authoritative authorization boundary.
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
-import type { MembershipRow, RoleRow, PermissionRow } from "@/lib/supabase/types";
+import type { MembershipRow, RoleRow } from "@/lib/supabase/types";
 import { timePhase } from "@/server/observability/perf";
+import { takePrefetchedMembership } from "./membership-prefetch";
 
 export interface MembershipContext {
   membership: MembershipRow;
   role: RoleRow;
   permissions: Set<string>;
+}
+
+/**
+ * One PostgREST select that returns a membership row together with its role
+ * and that role's permission keys, embedded through the real foreign keys
+ * (memberships.role_id → roles.id, role_permissions.role_id → roles.id,
+ * role_permissions.permission_id → permissions.id). It replaces the former
+ * four sequential reads (memberships → roles → role_permissions → permissions)
+ * with one round trip; every value still comes from the database.
+ */
+export const MEMBERSHIP_CONTEXT_SELECT =
+  "*, role:roles(*, role_permissions(permission:permissions(key)))";
+
+type EmbeddedRole = RoleRow & {
+  role_permissions?: Array<{ permission: { key: unknown } | null }> | null;
+};
+
+/** A memberships row as returned by MEMBERSHIP_CONTEXT_SELECT. */
+export type MembershipWithAuthority = MembershipRow & { role?: EmbeddedRole | null };
+
+/**
+ * Shape one embedded row into a MembershipContext, or null (fail closed) when
+ * any part of the authority chain is missing or inconsistent.
+ */
+export function toMembershipContext(row: MembershipWithAuthority): MembershipContext | null {
+  const { role: embeddedRole, ...membership } = row;
+  if (!embeddedRole) return null;
+  const { role_permissions: rolePermissions, ...role } = embeddedRole;
+  // The embedded role must be exactly the membership's role.
+  if (role.id !== membership.role_id) return null;
+  if (!Array.isArray(rolePermissions)) return null;
+
+  const permissions = new Set<string>();
+  for (const rp of rolePermissions) {
+    const key = rp?.permission?.key;
+    if (typeof key === "string") permissions.add(key);
+  }
+  return { membership: membership as MembershipRow, role: role as RoleRow, permissions };
 }
 
 /**
@@ -37,10 +76,16 @@ async function loadMembershipContext(
   userId: string,
   organizationId: string,
 ): Promise<MembershipContext | null> {
-  const { data: rawMembership, error } = await timePhase("authz.membershipRow", async () =>
+  // Same server-function call, same user AND organization, read moments ago by
+  // resolveActiveOrganizationId with the identical embedded select: reuse it
+  // once instead of reading it again (see ./membership-prefetch.ts).
+  const prefetched = takePrefetchedMembership(userId, organizationId);
+  if (prefetched) return prefetched;
+
+  const { data: rawMembership, error } = await timePhase("authz.membershipContext", async () =>
     supabaseAdmin
       .from("memberships")
-      .select("*")
+      .select(MEMBERSHIP_CONTEXT_SELECT)
       .eq("user_id", userId)
       .eq("organization_id", organizationId)
       .eq("status", "active")
@@ -48,39 +93,11 @@ async function loadMembershipContext(
   );
 
   if (error || !rawMembership) return null;
-  const membership = rawMembership as unknown as MembershipRow;
-
-  const { data: rawRole, error: roleError } = await timePhase("authz.roles", async () =>
-    supabaseAdmin.from("roles").select("*").eq("id", membership.role_id).single(),
-  );
-
-  if (roleError || !rawRole) return null;
-  const role = rawRole as unknown as RoleRow;
-
-  const { data: rolePermissions, error: rpError } = await timePhase(
-    "authz.rolePermissions",
-    async () =>
-      supabaseAdmin.from("role_permissions").select("permission_id").eq("role_id", role.id),
-  );
-
-  if (rpError) return null;
-
-  const permissionIds = (
-    (rolePermissions ?? []) as unknown as Array<{ permission_id: string }>
-  ).map((rp) => rp.permission_id);
-
-  let permissions = new Set<string>();
-  if (permissionIds.length > 0) {
-    const { data: permRows } = await timePhase("authz.permissions", async () =>
-      supabaseAdmin.from("permissions").select("key").in("id", permissionIds),
-    );
-
-    permissions = new Set(
-      ((permRows ?? []) as unknown as Array<Pick<PermissionRow, "key">>).map((p) => p.key),
-    );
-  }
-
-  return { membership, role, permissions };
+  const row = rawMembership as unknown as MembershipWithAuthority;
+  // Defense in depth: the row must be exactly what was asked for.
+  if (row.user_id !== userId || row.organization_id !== organizationId) return null;
+  if (row.status !== "active") return null;
+  return toMembershipContext(row);
 }
 
 /**

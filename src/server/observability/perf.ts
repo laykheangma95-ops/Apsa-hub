@@ -53,18 +53,19 @@ export const PERF_PHASES = {
   "session.refresh": "refresh",
   /** /app guard: the memberships read that picks the active organization. */
   "guard.memberships": "guardMemberships",
-  /** resolveActiveOrganizationId (src/server/auth/active-organization.ts). */
+  /**
+   * resolveActiveOrganizationId (src/server/auth/active-organization.ts): the
+   * active memberships read, with role and permission keys embedded.
+   */
   "authz.activeOrganization": "activeOrg",
   /** verifyActiveMembership end to end (src/server/auth/membership.ts). */
   "authz.verifyMembership": "membership",
-  /** verifyActiveMembership: the memberships row read. */
-  "authz.membershipRow": "membershipRow",
-  /** verifyActiveMembership: the roles read. */
-  "authz.roles": "roles",
-  /** verifyActiveMembership: the role_permissions read. */
-  "authz.rolePermissions": "rolePermissions",
-  /** verifyActiveMembership: the permissions read. */
-  "authz.permissions": "permissions",
+  /**
+   * verifyActiveMembership: the ONE embedded memberships+role+permissions
+   * read. Absent when the context resolveActiveOrganizationId just read in the
+   * same call was reused (src/server/auth/membership-prefetch.ts).
+   */
+  "authz.membershipContext": "membershipContext",
 } as const;
 
 export type PerfPhase = keyof typeof PERF_PHASES;

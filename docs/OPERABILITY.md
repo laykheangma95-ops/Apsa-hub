@@ -367,8 +367,7 @@ server-function call:
 ```json
 {"event":"perf.server_function","requestId":"req_…","domain":"orders","operation":"listOrdersFn",
  "route":"orders.listOrdersFn","identityMs":210.4,"getUserMs":205.1,"activeOrgMs":88.2,
- "membershipMs":301.7,"membershipRowMs":80.3,"rolesMs":71.9,"rolePermissionsMs":74.0,
- "permissionsMs":75.2,"authzMs":600.3,"queryMs":190.8,"totalMs":791.1,"outcome":"ok"}
+ "membershipMs":0.1,"authzMs":298.7,"queryMs":190.8,"totalMs":489.5,"outcome":"ok"}
 ```
 
 | Field | Measures |
@@ -376,11 +375,18 @@ server-function call:
 | `identityMs` | `getSessionFn` end to end (cookie read, `auth.getUser`, optional refresh) |
 | `getUserMs` / `refreshMs` | Supabase `auth.getUser()` / `auth.refreshSession()` round trips |
 | `guardMembershipsMs` | `/app` guard's memberships read (`checkAppGuardFn` only) |
-| `activeOrgMs` | `resolveActiveOrganizationId` |
-| `membershipMs` | `verifyActiveMembership` end to end, split into `membershipRowMs`, `rolesMs`, `rolePermissionsMs`, `permissionsMs` |
+| `activeOrgMs` | `resolveActiveOrganizationId`: ONE memberships read with role and permission keys embedded |
+| `membershipMs` | `verifyActiveMembership` end to end. ≈0 when it reuses the context `activeOrgMs` just read in the same call (`src/server/auth/membership-prefetch.ts`) |
+| `membershipContextMs` | `verifyActiveMembership`'s own single embedded read — present only when there was nothing to reuse (e.g. `forSlug`, `can`, a second verify in one call) |
 | `authzMs` | sum of the top-level authorization phases above (sub-phases not double counted) |
 | `queryMs` | `totalMs − authzMs`: domain queries plus handler module loading and serialization |
 | `<phase>Count` | present only when a phase ran more than once in one call |
+
+`membershipRowMs`, `rolesMs`, `rolePermissionsMs` and `permissionsMs` no longer
+appear: those four sequential reads were collapsed into the one embedded read
+above. `identityMs`, `getUserMs`, `activeOrgMs`, `membershipMs`, `authzMs`,
+`queryMs` and `totalMs` keep their meaning, so before/after staging lines
+compare directly.
 
 Never logged: user or organization IDs, emails, phones, names, tokens, keys, SQL
 or error text. OFF means no collector and `timePhase` returns the wrapped promise

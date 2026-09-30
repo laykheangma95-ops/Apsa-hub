@@ -152,10 +152,10 @@ describe("server gate", () => {
 describe("timePhase", () => {
   it("returns the very same promise when no collector is active (instrumentation off)", async () => {
     const promise = Promise.resolve({ value: 42 });
-    expect(timePhase("authz.roles", () => promise)).toBe(promise);
+    expect(timePhase("authz.membershipContext", () => promise)).toBe(promise);
     // Also inside a request context that has no collector.
     await runWithRequestContext({ requestId: "req_00000000000000000000" }, async () => {
-      expect(timePhase("authz.roles", () => promise)).toBe(promise);
+      expect(timePhase("authz.membershipContext", () => promise)).toBe(promise);
     });
   });
 
@@ -164,10 +164,10 @@ describe("timePhase", () => {
     const value = { rows: [1, 2, 3] };
     const result = await runWithRequestContext(
       { requestId: "req_00000000000000000000", perf: collector },
-      () => timePhase("authz.permissions", async () => value),
+      () => timePhase("authz.membershipContext", async () => value),
     );
     expect(result).toBe(value);
-    expect(collector.phases.get("authz.permissions")?.count).toBe(1);
+    expect(collector.phases.get("authz.membershipContext")?.count).toBe(1);
   });
 
   it("rethrows the exact same error object and still records the phase", async () => {
