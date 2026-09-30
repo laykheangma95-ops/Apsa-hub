@@ -21,3 +21,10 @@
 # not rewritten.
 d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:generic-api-key:59
 d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:stripe-access-token:64
+#
+# 22481e1 (PR #86) added a synthetic fake JWT as the ACCESS cookie fixture in
+# src/tests/perf-instrumentation.runtime.ts (line 41, jwt rule). It is not a
+# credential (payload {"sub":"user"}, dummy signature). The following commit
+# assembles it at runtime; this commit-pinned fingerprint only covers the
+# already-pushed commit, which is not rewritten.
+22481e1cad0bcbab841b1239adbde55d4137c0fa:src/tests/perf-instrumentation.runtime.ts:jwt:41

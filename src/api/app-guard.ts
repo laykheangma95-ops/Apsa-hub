@@ -31,13 +31,20 @@ export const checkAppGuardFn = createServerFn().handler(async (): Promise<AppGua
   // 3. Resolve memberships server-side with the service-role client kept behind
   //    a dynamic import so it never enters the browser bundle.
   const { supabaseAdmin } = await import("@/lib/supabase/server");
+  // Timing only (staging/development, APSA_PERF_INSTRUMENTATION); a
+  // pass-through when off. The query below is unchanged.
+  const { timePhase } = await import("@/server/observability/perf");
 
-  const { data: membershipRows, error } = await supabaseAdmin
-    .from("memberships")
-    .select("organization_id, status, joined_at")
-    .eq("user_id", session.userId)
-    .in("status", ["active", "suspended", "removed"])
-    .order(CANONICAL_MEMBERSHIP_ORDER.column, { ascending: CANONICAL_MEMBERSHIP_ORDER.ascending });
+  const { data: membershipRows, error } = await timePhase("guard.memberships", async () =>
+    supabaseAdmin
+      .from("memberships")
+      .select("organization_id, status, joined_at")
+      .eq("user_id", session.userId)
+      .in("status", ["active", "suspended", "removed"])
+      .order(CANONICAL_MEMBERSHIP_ORDER.column, {
+        ascending: CANONICAL_MEMBERSHIP_ORDER.ascending,
+      }),
+  );
 
   if (error) {
     throw new Error(error.message);
