@@ -435,7 +435,9 @@ describe("navigation ring buffer (real installer)", () => {
         return () => {};
       },
     };
-    installNavigationTiming(router);
+    // No-op telemetry transport: this suite covers the buffer, not the network
+    // (see navigation-telemetry.test.ts).
+    installNavigationTiming(router, { send: () => {}, schedule: () => {} });
     // Alternate two screens; every navigation changes the path and completes.
     const navigate = (index: number) => {
       // Unique screen per navigation so each record is identifiable.

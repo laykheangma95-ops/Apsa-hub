@@ -28,3 +28,11 @@ d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:stripe-
 # assembles it at runtime; this commit-pinned fingerprint only covers the
 # already-pushed commit, which is not rewritten.
 22481e1cad0bcbab841b1239adbde55d4137c0fa:src/tests/perf-instrumentation.runtime.ts:jwt:41
+#
+# 259cf1b (PR #87) added a synthetic JWT-shaped value under the `token` key in
+# the allowlist-rejection table of src/tests/navigation-telemetry.test.ts (line
+# 208, generic-api-key). It is not a credential (header {"alg":"HS256"}, empty
+# payload, dummy signature). The following commit assembles it at runtime; this
+# commit-pinned fingerprint only covers the already-pushed commit, which is not
+# rewritten.
+259cf1b146abddd13334e779a9541eb589bf5540:src/tests/navigation-telemetry.test.ts:generic-api-key:208
