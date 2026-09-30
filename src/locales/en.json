@@ -813,7 +813,7 @@
     "products": "Products",
     "optional": "Optional",
     "searchLabel": "Search products",
-    "searchPlaceholder": "Name, SKU or barcode",
+    "searchPlaceholder": "Name, SKU, barcode",
     "scan": "Scan barcode",
     "categories": "Categories",
     "view": {
@@ -828,7 +828,9 @@
       "drinks": "Drinks"
     },
     "addToCartLabel": "Add {{name}} to cart",
+    "available": "{{count}} available",
     "stockAvailable": "{{count}} available",
+    "reserved": "{{count}} reserved",
     "stockReserved": "{{count}} reserved",
     "unitPrice": "Unit price",
     "addToCart": "Add to cart",
