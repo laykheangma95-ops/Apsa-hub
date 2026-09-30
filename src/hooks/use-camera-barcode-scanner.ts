@@ -86,6 +86,150 @@ async function createFrameDecoder(): Promise<FrameDecoder> {
   };
 }
 
+// ── Camera session (startup, frame loop, release) ────────────────────────────
+
+/** The slice of a MediaStream the session touches: its tracks, to stop them. */
+export interface CameraStream {
+  getTracks(): Array<{ stop(): void }>;
+}
+
+/** The slice of an HTMLVideoElement the session touches. */
+export interface CameraVideo {
+  srcObject: unknown;
+  muted: boolean;
+  readonly readyState: number;
+  setAttribute(name: string, value: string): void;
+  play(): Promise<void>;
+}
+
+/** Everything a session needs from the device, injected so tests can drive it. */
+export interface CameraSessionEnv<V extends CameraVideo> {
+  /** getUserMedia exists only in a secure context (HTTPS / localhost). */
+  cameraAvailable: boolean;
+  getUserMedia: (constraints: MediaStreamConstraints) => Promise<CameraStream>;
+  createDecoder: () => Promise<(video: V) => Promise<string | null>>;
+  getVideo: () => V | null;
+  readStatus: () => CameraScanStatus;
+  dispatch: (event: CameraScanEvent) => void;
+  frameIntervalMs?: number;
+}
+
+export interface CameraSession {
+  /** Page hidden: release the camera and pause (Try again restarts). */
+  hide(): void;
+  /** Sheet closed or component unmounted: release the camera, end the session. */
+  stop(): void;
+}
+
+const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
+  audio: false,
+  video: {
+    facingMode: { ideal: "environment" },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+  },
+};
+
+/**
+ * One scanning session: load the decoder, open the camera, run the frame loop,
+ * and guarantee every acquired stream is stopped.
+ *
+ * The decoder is created BEFORE the camera is requested. When the two ran in
+ * parallel, a decoder that failed to load (ZXing chunk unreachable offline or
+ * gone after a deploy, no canvas) rejected the pair after getUserMedia had
+ * already resolved — that stream was never stored, so nothing ever stopped it
+ * and the camera light stayed on behind a "could not start" message. In this
+ * order a decoder failure never touches the camera or asks for a permission it
+ * could not use, and any stream that arrives after the session stopped wanting
+ * it (closed, unmounted, hidden) is stopped on arrival.
+ */
+export function startCameraSession<V extends CameraVideo>(env: CameraSessionEnv<V>): CameraSession {
+  let cancelled = false;
+  let stream: CameraStream | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const interval = env.frameIntervalMs ?? FRAME_INTERVAL_MS;
+
+  const stopTracks = (media: CameraStream) => media.getTracks().forEach((track) => track.stop());
+
+  const release = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (stream) stopTracks(stream);
+    stream = null;
+    const video = env.getVideo();
+    if (video) video.srcObject = null;
+  };
+
+  // Still wanted: not stopped, and not moved on by hide / stop / a failure.
+  const stillStarting = () => !cancelled && env.readStatus().kind === "starting";
+
+  void (async () => {
+    if (!env.cameraAvailable) {
+      env.dispatch({ type: "fail", reason: "unsupported" });
+      return;
+    }
+    try {
+      const decode = await env.createDecoder();
+      if (!stillStarting()) return;
+      const media = await env.getUserMedia(CAMERA_CONSTRAINTS);
+      if (!stillStarting()) {
+        stopTracks(media);
+        return;
+      }
+      stream = media;
+      const video = env.getVideo();
+      if (!video) throw Object.assign(new Error("video_unavailable"), { name: "AbortError" });
+      video.srcObject = media;
+      // iOS Safari only plays inline, muted, after an explicit play().
+      video.setAttribute("playsinline", "true");
+      video.muted = true;
+      await video.play();
+      if (cancelled) return;
+      env.dispatch({ type: "ready" });
+
+      const tick = async () => {
+        if (cancelled || env.readStatus().kind !== "scanning") return;
+        const v = env.getVideo();
+        if (v && v.readyState >= 2) {
+          try {
+            const raw = await decode(v);
+            if (cancelled) return;
+            if (raw !== null) env.dispatch({ type: "decoded", raw });
+          } catch {
+            // A single bad frame is not a failure; the next one is the retry.
+          }
+        }
+        // Re-read through a function: the dispatch above may have moved it.
+        const after = env.readStatus();
+        if (after.kind === "detected") {
+          release();
+          return;
+        }
+        if (!cancelled && after.kind === "scanning") {
+          timer = setTimeout(() => void tick(), interval);
+        }
+      };
+      void tick();
+    } catch (err) {
+      release();
+      if (!cancelled) env.dispatch({ type: "fail", reason: classifyCameraError(err) });
+    }
+  })();
+
+  return {
+    hide() {
+      release();
+      env.dispatch({ type: "hidden" });
+    },
+    stop() {
+      cancelled = true;
+      release();
+    },
+  };
+}
+
+// ── Hook ─────────────────────────────────────────────────────────────────────
+
 export interface UseCameraBarcodeScannerOptions {
   /** Whether the camera should be running (e.g. the scan sheet is open). */
   active: boolean;
@@ -124,96 +268,24 @@ export function useCameraBarcodeScanner({
       return;
     }
 
-    let cancelled = false;
-    const readStatus = (): CameraScanStatus => statusRef.current;
-    let stream: MediaStream | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const release = () => {
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
-      stream?.getTracks().forEach((track) => track.stop());
-      stream = null;
-      const video = videoRef.current;
-      if (video) video.srcObject = null;
-    };
+    dispatch({ type: "start" });
+    const session = startCameraSession<HTMLVideoElement>({
+      cameraAvailable: window.isSecureContext && !!navigator.mediaDevices?.getUserMedia,
+      getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+      createDecoder: createFrameDecoder,
+      getVideo: () => videoRef.current,
+      readStatus: () => statusRef.current,
+      dispatch,
+    });
 
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        release();
-        dispatch({ type: "hidden" });
-      }
+      if (document.visibilityState === "hidden") session.hide();
     };
-
-    dispatch({ type: "start" });
     document.addEventListener("visibilitychange", onVisibility);
 
-    void (async () => {
-      // getUserMedia exists only in a secure context (HTTPS / localhost).
-      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-        dispatch({ type: "fail", reason: "unsupported" });
-        return;
-      }
-      try {
-        const [media, decode] = await Promise.all([
-          navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          }),
-          createFrameDecoder(),
-        ]);
-        if (cancelled || statusRef.current.kind !== "starting") {
-          media.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        stream = media;
-        const video = videoRef.current;
-        if (!video) throw Object.assign(new Error("video_unavailable"), { name: "AbortError" });
-        video.srcObject = media;
-        // iOS Safari only plays inline, muted, after an explicit play().
-        video.setAttribute("playsinline", "true");
-        video.muted = true;
-        await video.play();
-        if (cancelled) return;
-        dispatch({ type: "ready" });
-
-        const tick = async () => {
-          if (cancelled || statusRef.current.kind !== "scanning") return;
-          const v = videoRef.current;
-          if (v && v.readyState >= 2) {
-            try {
-              const raw = await decode(v);
-              if (cancelled) return;
-              if (raw !== null) dispatch({ type: "decoded", raw });
-            } catch {
-              // A single bad frame is not a failure; the next one is the retry.
-            }
-          }
-          // Re-read through a function: the dispatch above may have moved it.
-          const after = readStatus();
-          if (after.kind === "detected") {
-            release();
-            return;
-          }
-          if (!cancelled && after.kind === "scanning") {
-            timer = setTimeout(() => void tick(), FRAME_INTERVAL_MS);
-          }
-        };
-        void tick();
-      } catch (err) {
-        release();
-        if (!cancelled) dispatch({ type: "fail", reason: classifyCameraError(err) });
-      }
-    })();
-
     return () => {
-      cancelled = true;
       document.removeEventListener("visibilitychange", onVisibility);
-      release();
+      session.stop();
     };
   }, [active, attempt, dispatch]);
 
