@@ -193,10 +193,29 @@ export interface PeriodStatusCounts extends OrderStatusCounts {
 /** Migration 049. Same filters as the per-value HEAD counts above, grouped in the database. */
 export const PERIOD_STATUS_COUNTS_RPC = "analytics_period_status_counts_v1";
 
-/** "Function does not exist" from PostgREST (schema cache) or Postgres itself. */
-function isMissingFunction(error: unknown): boolean {
-  const code = (error as { code?: string })?.code;
-  return code === "PGRST202" || code === "42883";
+/**
+ * True only when the error says THIS function (migration 049) is absent:
+ *   - PGRST202 (PostgREST schema cache): "Could not find the function
+ *     public.analytics_period_status_counts_v1(…) in the schema cache"
+ *   - 42883 (Postgres): "function [public.]analytics_period_status_counts_v1(…)
+ *     does not exist"
+ * Any other 42883 — an unrelated undefined function, an undefined operator, a
+ * bug inside a deployed function body — and any other failure is a real error
+ * and must surface, never be masked by the fallback.
+ */
+const MISSING_PERIOD_STATUS_COUNTS_RPC = {
+  PGRST202: new RegExp(
+    `^Could not find the function (?:public\\.)?${PERIOD_STATUS_COUNTS_RPC}(?:\\(| )`,
+  ),
+  "42883": new RegExp(
+    `^function (?:public\\.)?${PERIOD_STATUS_COUNTS_RPC}\\(.*\\) does not exist$`,
+  ),
+} as const;
+
+function isMissingPeriodStatusCountsRpc(error: unknown): boolean {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code !== "PGRST202" && code !== "42883") return false;
+  return typeof message === "string" && MISSING_PERIOD_STATUS_COUNTS_RPC[code].test(message);
 }
 
 function zeroCounts<S extends string>(values: readonly S[]): Record<S, number> {
@@ -226,7 +245,7 @@ export async function getPeriodStatusCounts(
   });
 
   if (error) {
-    if (!isMissingFunction(error)) {
+    if (!isMissingPeriodStatusCountsRpc(error)) {
       throw new Error(`getPeriodStatusCounts: ${errorMessage(error)}`);
     }
     const [statusCounts, paymentMethodCounts] = await Promise.all([

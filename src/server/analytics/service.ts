@@ -99,21 +99,26 @@ export async function getBusinessSummary(
 
   const bounds = rangeBounds(range);
 
-  // Only the settlement read depends on the qualifying cohort. The status
-  // mixes and the delivery mix are keyed on the period alone, so they start
-  // together with the cohort read instead of waiting behind it.
-  const [orders, statusCounts, deliveryResult] = await Promise.all([
-    dependencies.listQualifyingOrders(ctx.organizationId, bounds),
+  // Only the settlement read depends on the qualifying cohort, and only on it:
+  // it starts the moment the cohort resolves, without waiting for the status
+  // mixes or the delivery mix. Those two are keyed on the period alone, so
+  // they start together with the cohort read instead of waiting behind it.
+  const ordersRead = dependencies.listQualifyingOrders(ctx.organizationId, bounds);
+  // Not merely masked after the fact — the settlement read is never issued
+  // for an unauthorized caller, so protected money is not even loaded.
+  const financeRead = ordersRead.then((orders) =>
+    section<AnalyticsFinancialTotals>(canReadFinancials(ctx), () =>
+      dependencies.getSettlementTotals(ctx.organizationId, orders),
+    ),
+  );
+  const [orders, statusCounts, deliveryResult, finance] = await Promise.all([
+    ordersRead,
     dependencies.getPeriodStatusCounts(ctx.organizationId, bounds),
     section(ctx.can("delivery.read"), () =>
       dependencies.getDeliveryStatusCounts(ctx.organizationId, bounds),
     ),
+    financeRead,
   ]);
-  // Not merely masked after the fact — the settlement read is never issued
-  // for an unauthorized caller, so protected money is not even loaded.
-  const finance = await section<AnalyticsFinancialTotals>(canReadFinancials(ctx), () =>
-    dependencies.getSettlementTotals(ctx.organizationId, orders),
-  );
 
   // An unresolved latest attempt makes the mix incomplete, not wrong-but-certain.
   const delivery: BusinessSummary["delivery"] =

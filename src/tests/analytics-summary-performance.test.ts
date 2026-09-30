@@ -33,6 +33,17 @@ const ORG_B = "bbbbbbbb-0000-0000-0000-000000000002";
 const BOUNDS = { from: "2026-09-10T17:00:00.000Z", until: "2026-09-11T17:00:00.000Z" };
 
 type Row = Record<string, unknown>;
+type RpcError = { code: string; message: string; details?: string | null; hint?: string | null };
+
+/** PostgREST's real "not in the schema cache" error for migration 049's function. */
+const PGRST202_THIS_RPC: RpcError = {
+  code: "PGRST202",
+  message:
+    "Could not find the function public.analytics_period_status_counts_v1(p_from, p_organization_id, p_until) in the schema cache",
+  details:
+    "Searched for the function public.analytics_period_status_counts_v1 with parameters p_from, p_organization_id, p_until or with a single unnamed json/jsonb parameter, but no matches were found in the schema cache.",
+  hint: null,
+};
 
 function makeCtx(permissions: string[], organizationId = ORG_A) {
   const granted = new Set(permissions);
@@ -60,7 +71,7 @@ function makeCtx(permissions: string[], organizationId = ORG_A) {
  */
 function makeCountingDb(
   tables: Record<string, Row[]>,
-  rpcMode: "ok" | "missing" | "error" | { rows: unknown[] } = "ok",
+  rpcMode: "ok" | "missing" | "error" | { rows: unknown[] } | { error: RpcError } = "ok",
 ) {
   const calls: { kind: "from" | "rpc"; name: string; args?: Record<string, unknown> }[] = [];
 
@@ -77,12 +88,16 @@ function makeCountingDb(
     async rpc(name: string, args: Record<string, unknown>) {
       calls.push({ kind: "rpc", name, args });
       if (rpcMode === "missing") {
-        return { data: null, error: { code: "PGRST202", message: "function not found" } };
+        return { data: null, error: PGRST202_THIS_RPC };
       }
       if (rpcMode === "error") {
         return { data: null, error: { code: "57014", message: "statement timeout" } };
       }
-      if (typeof rpcMode === "object") return { data: rpcMode.rows, error: null };
+      if (typeof rpcMode === "object") {
+        return "error" in rpcMode
+          ? { data: null, error: rpcMode.error }
+          : { data: rpcMode.rows, error: null };
+      }
       const { p_organization_id: org, p_from: from, p_until: until } = args;
       const out: { axis: string; value: string; row_count: number }[] = [];
       const orders = (tables.orders ?? []).filter((r) => inPeriod(r, org, from, until));
@@ -240,6 +255,87 @@ describe("getPeriodStatusCounts — one round trip, same numbers", () => {
     expect(fake.calls.filter((c) => c.kind === "from")).toHaveLength(0);
   });
 
+  describe("missing-RPC fallback is specific to analytics_period_status_counts_v1", () => {
+    const fallsBack = async (error: RpcError) => {
+      const fake = makeCountingDb(DATASET, { error });
+      const counts = await withDb(fake, () => getPeriodStatusCounts(ORG_A, BOUNDS));
+      expect(counts).toEqual(EXPECTED);
+      expect(fake.calls.filter((c) => c.kind === "from")).toHaveLength(19);
+    };
+    const surfaces = async (error: RpcError) => {
+      const fake = makeCountingDb(DATASET, { error });
+      await expect(withDb(fake, () => getPeriodStatusCounts(ORG_A, BOUNDS))).rejects.toThrow(
+        `getPeriodStatusCounts: ${error.message}`,
+      );
+      expect(fake.calls.filter((c) => c.kind === "from")).toHaveLength(0);
+    };
+
+    it("A: 42883 naming exactly this function (both Postgres message shapes) → falls back", async () => {
+      // Verbatim Postgres messages (named-notation and positional call).
+      await fallsBack({
+        code: "42883",
+        message:
+          "function public.analytics_period_status_counts_v1(p_organization_id => uuid, p_from => timestamp with time zone, p_until => timestamp with time zone) does not exist",
+      });
+      await fallsBack({
+        code: "42883",
+        message:
+          "function analytics_period_status_counts_v1(uuid, timestamp with time zone, timestamp with time zone) does not exist",
+      });
+    });
+
+    it("B: PGRST202 for this function → falls back", async () => {
+      await fallsBack(PGRST202_THIS_RPC);
+    });
+
+    it("B': PGRST202 for some other function (or with no message) → surfaces", async () => {
+      await surfaces({
+        code: "PGRST202",
+        message:
+          "Could not find the function public.analytics_period_status_counts_v2(p_from, p_organization_id, p_until) in the schema cache",
+      });
+      await surfaces({
+        code: "PGRST202",
+        message:
+          "Could not find the function public.analytics_period_status_counts_v1_helper(p_x) in the schema cache",
+      });
+      await surfaces({ code: "PGRST202", message: "" });
+    });
+
+    it("C: 42883 for an unrelated function → surfaces", async () => {
+      await surfaces({
+        code: "42883",
+        message: "function public.some_other_function(uuid) does not exist",
+      });
+      // An undefined function raised from INSIDE a deployed body names the
+      // inner function, not ours — a real bug, not a missing migration.
+      await surfaces({
+        code: "42883",
+        message: "function lower(integer) does not exist",
+        hint: "No function matches the given name and argument types.",
+      });
+      await surfaces({
+        code: "42883",
+        message: "function public.analytics_period_status_counts_v1_helper(uuid) does not exist",
+      });
+    });
+
+    it("D: 42883 for an undefined operator / internal SQL error → surfaces", async () => {
+      await surfaces({ code: "42883", message: "operator does not exist: text - integer" });
+      await surfaces({
+        code: "42883",
+        message: "operator does not exist: order_lifecycle_status = text",
+      });
+    });
+
+    it("E: ordinary database / network errors → surface", async () => {
+      await surfaces({ code: "57014", message: "canceling statement due to statement timeout" });
+      await surfaces({ code: "42501", message: "permission denied for function" });
+      await surfaces({ code: "PGRST301", message: "JWT expired" });
+      await surfaces({ code: "", message: "TypeError: fetch failed" });
+    });
+  });
+
   it("rejects malformed RPC output instead of reporting it as a count", async () => {
     const cases: unknown[][] = [
       [{ axis: "mystery", value: "x", row_count: 1 }],
@@ -294,7 +390,11 @@ const ZERO_COUNTS: PeriodStatusCounts = {
   paymentMethodCounts: { cash: 0, khqr: 0, bank_transfer: 0, cod: 0 },
 };
 
-function tracingDeps(started: string[], orders: Promise<never[]>): AnalyticsDependencies {
+function tracingDeps(
+  started: string[],
+  orders: Promise<never[]>,
+  deliveryGate: Promise<void> = Promise.resolve(),
+): AnalyticsDependencies {
   return {
     listQualifyingOrders: async () => {
       started.push("orders");
@@ -310,6 +410,8 @@ function tracingDeps(started: string[], orders: Promise<never[]>): AnalyticsDepe
     },
     getDeliveryStatusCounts: async () => {
       started.push("delivery");
+      await deliveryGate;
+      started.push("delivery:resolved");
       return {
         statusCounts: {
           pending: 0,
@@ -344,13 +446,42 @@ describe("getBusinessSummary — no false serialization behind the order cohort"
       tracingDeps(started, cohort.promise),
     );
     await new Promise((r) => setTimeout(r, 0));
-    expect(new Set(started)).toEqual(new Set(["orders", "statusCounts", "delivery"]));
+    expect(new Set(started)).toEqual(
+      new Set(["orders", "statusCounts", "delivery", "delivery:resolved"]),
+    );
     expect(started).not.toContain("settlement");
 
     cohort.resolve([]);
     const summary = await pending;
     expect(started.at(-1)).toBe("settlement");
     expect(summary.finance.status).toBe("available");
+  });
+
+  it("starts settlement as soon as the cohort resolves — never waiting behind the delivery mix", async () => {
+    const started: string[] = [];
+    const deliveryGate = deferred<void>();
+    let settled = false;
+    const pending = getBusinessSummary(
+      makeCtx(["analytics.read", "orders.read", "payments.reconcile", "delivery.read"]),
+      "today",
+      tracingDeps(started, Promise.resolve([]), deliveryGate.promise),
+    ).then((summary) => {
+      settled = true;
+      return summary;
+    });
+    // Orders resolves immediately; delivery is still pending.
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(started).toContain("delivery");
+    expect(started).not.toContain("delivery:resolved");
+    expect(started).toContain("settlement");
+    // The response itself still waits for every section.
+    expect(settled).toBe(false);
+
+    deliveryGate.resolve();
+    const summary = await pending;
+    expect(started.indexOf("settlement")).toBeLessThan(started.indexOf("delivery:resolved"));
+    expect(summary.finance.status).toBe("available");
+    expect(summary.delivery.status).toBe("available");
   });
 
   it("still never issues the settlement read for a caller outside the financial boundary", async () => {
