@@ -39,7 +39,7 @@ import { MemoryRateLimitStore, type RateLimitStore } from "@/server/rate-limit/s
 
 const ROOT = process.cwd();
 const read = (file: string) => fs.readFileSync(path.join(ROOT, file), "utf8");
-const ON = { APSA_PERF_INSTRUMENTATION: "true" };
+const ON = { APSA_PERF_INSTRUMENTATION: "true", APSA_RUNTIME_ENV: "staging" };
 
 const VALID = {
   from: "home",
@@ -105,14 +105,36 @@ describe("server gate", () => {
     expect(lines).toEqual([]);
   });
 
-  it("refuses on a Vercel production deployment even with the flag set", async () => {
-    const { logged, lines } = await ingest(VALID, { ...ON, VERCEL_ENV: "production" });
-    expect(logged).toBe(false);
-    expect(lines).toEqual([]);
+  it("(G) logs nothing on staging unless the flag is exactly true", async () => {
+    for (const flag of [undefined, "", "false", "TRUE"]) {
+      const env = { APSA_PERF_INSTRUMENTATION: flag, APSA_RUNTIME_ENV: "staging" };
+      const { logged, lines } = await ingest(VALID, env);
+      expect(logged).toBe(false);
+      expect(lines).toEqual([]);
+    }
   });
 
-  it("logs on preview/staging when the flag is set", async () => {
-    expect((await ingest(VALID, { ...ON, VERCEL_ENV: "preview" })).logged).toBe(true);
+  it("(G) refuses without APSA_RUNTIME_ENV=staging, including real production", async () => {
+    for (const env of [
+      { APSA_PERF_INSTRUMENTATION: "true" },
+      { APSA_PERF_INSTRUMENTATION: "true", VERCEL_ENV: "production" },
+      { APSA_PERF_INSTRUMENTATION: "true", VERCEL_ENV: "preview" },
+      { APSA_PERF_INSTRUMENTATION: "true", APSA_RUNTIME_ENV: "production" },
+      {
+        APSA_PERF_INSTRUMENTATION: "true",
+        APSA_RUNTIME_ENV: "production",
+        VERCEL_ENV: "production",
+      },
+    ]) {
+      const { logged, lines } = await ingest(VALID, env);
+      expect(logged).toBe(false);
+      expect(lines).toEqual([]);
+    }
+  });
+
+  it("(G) logs on the dedicated staging project, which runs as VERCEL_ENV=production", async () => {
+    expect((await ingest(VALID, { ...ON, VERCEL_ENV: "production" })).logged).toBe(true);
+    expect((await ingest(VALID, ON)).logged).toBe(true);
   });
 
   it("the API handler goes through the gated ingest and returns nothing", () => {
@@ -303,7 +325,11 @@ describe("abuse limiter", () => {
     const restore = setPrimaryRateLimitStore(store);
     try {
       await ingest(VALID, {}, fromIp("203.0.113.7"));
-      await ingest(VALID, { ...ON, VERCEL_ENV: "production" }, fromIp("203.0.113.7"));
+      await ingest(
+        VALID,
+        { APSA_PERF_INSTRUMENTATION: "true", VERCEL_ENV: "production" },
+        fromIp("203.0.113.7"),
+      );
       expect(store.hits).toEqual([]);
     } finally {
       restore();

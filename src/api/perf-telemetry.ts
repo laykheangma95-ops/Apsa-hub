@@ -5,7 +5,7 @@
  * The browser (src/lib/perf/navigation-timing.ts, only when the build sets
  * VITE_APSA_PERF_NAV_TIMING=true) posts one allowlisted record per completed
  * navigation. The server logs it only when APSA_PERF_INSTRUMENTATION=true and
- * never on VERCEL_ENV=production (src/server/observability/navigation-telemetry.ts).
+ * APSA_RUNTIME_ENV=staging (src/server/observability/navigation-telemetry.ts).
  *
  * - No session read, no organization resolution, no database access: the
  *   record is not tied to any identity, so there is nothing to authorize.

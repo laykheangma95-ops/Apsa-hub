@@ -3,7 +3,7 @@
  * diagnostics ONLY. Called by recordNavigationTimingFn (src/api/perf-telemetry.ts).
  *
  * Gate: the same as server perf instrumentation (perf.ts) — OFF unless
- * APSA_PERF_INSTRUMENTATION=true, and always OFF when VERCEL_ENV=production.
+ * APSA_PERF_INSTRUMENTATION=true AND APSA_RUNTIME_ENV=staging.
  * When OFF, the body is not even parsed and nothing is logged.
  *
  * Abuse bound: when ON, every request (valid or not) first passes the durable
