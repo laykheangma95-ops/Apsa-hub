@@ -45,9 +45,8 @@ const MAX_TOP_SELLING_LIMIT = 100;
 
 export interface AnalyticsDependencies {
   listQualifyingOrders: typeof repo.listQualifyingOrders;
-  getOrderStatusCounts: typeof repo.getOrderStatusCounts;
+  getPeriodStatusCounts: typeof repo.getPeriodStatusCounts;
   getSettlementTotals: typeof repo.getSettlementTotals;
-  getPaymentMethodCounts: typeof repo.getPaymentMethodCounts;
   getDeliveryStatusCounts: typeof repo.getDeliveryStatusCounts;
   listTopSellingItems: typeof repo.listTopSellingItems;
   getCustomerCohort: typeof repo.getCustomerCohort;
@@ -55,9 +54,8 @@ export interface AnalyticsDependencies {
 
 const defaultDependencies: AnalyticsDependencies = {
   listQualifyingOrders: repo.listQualifyingOrders,
-  getOrderStatusCounts: repo.getOrderStatusCounts,
+  getPeriodStatusCounts: repo.getPeriodStatusCounts,
   getSettlementTotals: repo.getSettlementTotals,
-  getPaymentMethodCounts: repo.getPaymentMethodCounts,
   getDeliveryStatusCounts: repo.getDeliveryStatusCounts,
   listTopSellingItems: repo.listTopSellingItems,
   getCustomerCohort: repo.getCustomerCohort,
@@ -100,20 +98,22 @@ export async function getBusinessSummary(
   ctx.require("analytics.read");
 
   const bounds = rangeBounds(range);
-  const orders = await dependencies.listQualifyingOrders(ctx.organizationId, bounds);
 
-  const [statusCounts, finance, paymentMethodCounts, deliveryResult] = await Promise.all([
-    dependencies.getOrderStatusCounts(ctx.organizationId, bounds),
-    // Not merely masked after the fact — the settlement read is never issued
-    // for an unauthorized caller, so protected money is not even loaded.
-    section<AnalyticsFinancialTotals>(canReadFinancials(ctx), () =>
-      dependencies.getSettlementTotals(ctx.organizationId, orders),
-    ),
-    dependencies.getPaymentMethodCounts(ctx.organizationId, bounds),
+  // Only the settlement read depends on the qualifying cohort. The status
+  // mixes and the delivery mix are keyed on the period alone, so they start
+  // together with the cohort read instead of waiting behind it.
+  const [orders, statusCounts, deliveryResult] = await Promise.all([
+    dependencies.listQualifyingOrders(ctx.organizationId, bounds),
+    dependencies.getPeriodStatusCounts(ctx.organizationId, bounds),
     section(ctx.can("delivery.read"), () =>
       dependencies.getDeliveryStatusCounts(ctx.organizationId, bounds),
     ),
   ]);
+  // Not merely masked after the fact — the settlement read is never issued
+  // for an unauthorized caller, so protected money is not even loaded.
+  const finance = await section<AnalyticsFinancialTotals>(canReadFinancials(ctx), () =>
+    dependencies.getSettlementTotals(ctx.organizationId, orders),
+  );
 
   // An unresolved latest attempt makes the mix incomplete, not wrong-but-certain.
   const delivery: BusinessSummary["delivery"] =
@@ -133,7 +133,7 @@ export async function getBusinessSummary(
     paymentStatusCounts: statusCounts.paymentStatusCounts,
     fulfillmentStatusCounts: statusCounts.fulfillmentStatusCounts,
     refundStatusCounts: statusCounts.refundStatusCounts,
-    paymentMethodCounts,
+    paymentMethodCounts: statusCounts.paymentMethodCounts,
     delivery,
   };
 }
