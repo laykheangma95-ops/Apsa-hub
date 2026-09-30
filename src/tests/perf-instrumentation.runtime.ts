@@ -208,8 +208,13 @@ async function run(
   meta: { name: string; filename: string },
   fn: () => Promise<unknown>,
 ): Promise<{ outcome: Outcome; lines: string[]; error?: unknown }> {
-  if (flag) process.env["APSA_PERF_INSTRUMENTATION"] = "true";
-  else delete process.env["APSA_PERF_INSTRUMENTATION"];
+  if (flag) {
+    process.env["APSA_PERF_INSTRUMENTATION"] = "true";
+    process.env["APSA_RUNTIME_ENV"] = "staging";
+  } else {
+    delete process.env["APSA_PERF_INSTRUMENTATION"];
+    delete process.env["APSA_RUNTIME_ENV"];
+  }
   cookieWrites = [];
   cookieDeletes = [];
   const lines: string[] = [];
@@ -225,6 +230,7 @@ async function run(
   } finally {
     restore();
     delete process.env["APSA_PERF_INSTRUMENTATION"];
+    delete process.env["APSA_RUNTIME_ENV"];
   }
 }
 
@@ -274,6 +280,7 @@ const GUARD = { name: "checkAppGuardFn", filename: "src/api/app-guard.ts" };
 afterEach(() => {
   world = defaultWorld();
   delete process.env["APSA_PERF_INSTRUMENTATION"];
+  delete process.env["APSA_RUNTIME_ENV"];
 });
 
 describe("authorization chain: identical with instrumentation on and off", () => {
@@ -361,6 +368,7 @@ describe("authorization chain: identical with instrumentation on and off", () =>
   it("verifyActiveMembership returns the same context directly (outside a boundary)", async () => {
     const off = await verifyActiveMembership(USER_ID, ORG_ID);
     process.env["APSA_PERF_INSTRUMENTATION"] = "true";
+    process.env["APSA_RUNTIME_ENV"] = "staging";
     const on = await verifyActiveMembership(USER_ID, ORG_ID);
     expect(on).toEqual(off);
     expect([...(on?.permissions ?? [])].sort()).toEqual(["orders.create", "orders.view"]);

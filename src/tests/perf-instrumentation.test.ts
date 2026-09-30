@@ -12,6 +12,7 @@ import * as path from "node:path";
 import {
   PERF_FLAG,
   PERF_PHASES,
+  RUNTIME_ENV_VAR,
   buildPerfFields,
   createPerfCollector,
   isPerfInstrumentationEnabled,
@@ -46,28 +47,49 @@ const perfLines = (lines: string[]) =>
 
 afterEach(() => {
   delete process.env[PERF_FLAG];
+  delete process.env[RUNTIME_ENV_VAR];
 });
 
+const STAGING = { [PERF_FLAG]: "true", [RUNTIME_ENV_VAR]: "staging" };
+
 describe("server gate", () => {
-  it("is OFF by default and only ON for an explicit true", () => {
-    expect(isPerfInstrumentationEnabled({})).toBe(false);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "" })).toBe(false);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "false" })).toBe(false);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "1" })).toBe(false);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "yes" })).toBe(false);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "true" })).toBe(true);
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "TRUE" })).toBe(true);
+  it("(A) is ON on the dedicated staging project even though VERCEL_ENV=production", () => {
+    expect(isPerfInstrumentationEnabled({ ...STAGING, VERCEL_ENV: "production" })).toBe(true);
+    expect(isPerfInstrumentationEnabled(STAGING)).toBe(true);
   });
 
-  it("stays OFF on a Vercel production deployment even when the flag is set", () => {
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "true", VERCEL_ENV: "production" })).toBe(
-      false,
-    );
-    expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "true", VERCEL_ENV: "preview" })).toBe(true);
+  it("(B) is OFF when APSA_RUNTIME_ENV is missing or empty, whatever VERCEL_ENV says", () => {
+    for (const VERCEL_ENV of [undefined, "production", "preview", "development"]) {
+      expect(isPerfInstrumentationEnabled({ [PERF_FLAG]: "true", VERCEL_ENV })).toBe(false);
+      expect(
+        isPerfInstrumentationEnabled({ [PERF_FLAG]: "true", [RUNTIME_ENV_VAR]: "", VERCEL_ENV }),
+      ).toBe(false);
+    }
+  });
+
+  it("(C) is OFF when APSA_RUNTIME_ENV is anything other than exactly staging", () => {
+    for (const runtime of ["production", "preview", "development", "Staging", " staging", "1"]) {
+      expect(
+        isPerfInstrumentationEnabled({ [PERF_FLAG]: "true", [RUNTIME_ENV_VAR]: runtime }),
+      ).toBe(false);
+    }
+  });
+
+  it("(D) is OFF on staging unless APSA_PERF_INSTRUMENTATION is exactly true", () => {
+    for (const flag of [undefined, "", "false", "1", "yes", "TRUE", " true"]) {
+      expect(
+        isPerfInstrumentationEnabled({ [PERF_FLAG]: flag, [RUNTIME_ENV_VAR]: "staging" }),
+      ).toBe(false);
+    }
+  });
+
+  it("(E) is OFF with no env vars at all", () => {
+    expect(isPerfInstrumentationEnabled({})).toBe(false);
   });
 
   it("is OFF in this test process's default environment", () => {
     delete process.env[PERF_FLAG];
+    delete process.env[RUNTIME_ENV_VAR];
     expect(isPerfInstrumentationEnabled()).toBe(false);
   });
 
@@ -76,6 +98,32 @@ describe("server gate", () => {
     expect(PERF_FLAG.startsWith("VITE_")).toBe(false);
     expect(read("src/lib/perf/navigation-timing.ts")).not.toContain("APSA_PERF_INSTRUMENTATION=");
     expect(read("src/lib/perf/navigation-timing.ts")).not.toContain("process.env");
+  });
+
+  it("(F) the runtime marker is server-only: browser code cannot influence the gate", () => {
+    expect(RUNTIME_ENV_VAR).toBe("APSA_RUNTIME_ENV");
+    expect(RUNTIME_ENV_VAR.startsWith("VITE_")).toBe(false);
+    const clientDirs = ["src/api", "src/routes", "src/lib", "src/components", "src/hooks"];
+    const walk = (d: string): string[] =>
+      fs
+        .readdirSync(path.join(ROOT, d), { withFileTypes: true })
+        .flatMap((e) =>
+          e.isDirectory()
+            ? walk(path.join(d, e.name))
+            : /\.(ts|tsx)$/.test(e.name)
+              ? [path.join(d, e.name)]
+              : [],
+        );
+    for (const file of clientDirs.filter((d) => fs.existsSync(path.join(ROOT, d))).flatMap(walk)) {
+      const source = read(file);
+      // No browser-bundled file reads the marker (comments may name it).
+      expect(source).not.toMatch(/env\s*(\.|\[\s*["'`])\s*APSA_RUNTIME_ENV/);
+      expect(source).not.toContain("VITE_APSA_RUNTIME_ENV");
+    }
+    // The gate reads only the server env it is given — never a client payload.
+    const perf = read("src/server/observability/perf.ts");
+    expect(perf).not.toMatch(/import\.meta\.env/);
+    expect(perf).not.toMatch(/VERCEL_ENV"\]/);
   });
 
   it("is never statically imported by a browser-bundled file", () => {
@@ -195,6 +243,7 @@ describe("server-function boundary", () => {
 
   it("ON: one perf line, same value", async () => {
     process.env[PERF_FLAG] = "true";
+    process.env[RUNTIME_ENV_VAR] = "staging";
     const { lines, restore } = captureLines();
     const value = { ok: true };
     try {
@@ -212,6 +261,7 @@ describe("server-function boundary", () => {
 
   it("ON: a public domain error propagates as the same object", async () => {
     process.env[PERF_FLAG] = "true";
+    process.env[RUNTIME_ENV_VAR] = "staging";
     const error = new ForbiddenError("No active organization membership");
     const { lines, restore } = captureLines();
     let caught: unknown;
@@ -251,6 +301,7 @@ describe("server-function boundary", () => {
     };
     const off = await attempt();
     process.env[PERF_FLAG] = "true";
+    process.env[RUNTIME_ENV_VAR] = "staging";
     const on = await attempt();
     expect(on.name).toBe(off.name);
     expect(on.message).toBe(off.message);
@@ -264,6 +315,7 @@ describe("server-function boundary", () => {
 
   it("nested server-function calls produce one perf line for the outer call", async () => {
     process.env[PERF_FLAG] = "true";
+    process.env[RUNTIME_ENV_VAR] = "staging";
     const { lines, restore } = captureLines();
     try {
       await runServerFnBoundary(META, () =>
