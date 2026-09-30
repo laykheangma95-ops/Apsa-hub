@@ -26,6 +26,7 @@ import { ForbiddenError } from "@/server/auth/authorization";
 import {
   attachNavigationTiming,
   isNavTimingEnabled,
+  installNavigationTiming,
   isTrackedNavigation,
   screenOf,
   type NavigationTimingRecord,
@@ -400,5 +401,76 @@ describe("navigation timing", () => {
     const source = read("src/lib/perf/navigation-timing.ts");
     expect(source).toContain("isNavTimingEnabled(import.meta.env");
     expect(source).toContain('typeof window === "undefined"');
+  });
+});
+
+describe("navigation ring buffer (real installer)", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = {
+    window: g.window,
+    document: g.document,
+    flag: process.env.VITE_APSA_PERF_NAV_TIMING,
+    info: console.info,
+  };
+
+  afterEach(() => {
+    g.window = saved.window;
+    g.document = saved.document;
+    console.info = saved.info;
+    if (saved.flag === undefined) delete process.env.VITE_APSA_PERF_NAV_TIMING;
+    else process.env.VITE_APSA_PERF_NAV_TIMING = saved.flag;
+  });
+
+  function setup(flag: string | undefined) {
+    if (flag === undefined) delete process.env.VITE_APSA_PERF_NAV_TIMING;
+    else process.env.VITE_APSA_PERF_NAV_TIMING = flag;
+    const win: Record<string, unknown> = { requestAnimationFrame: (cb: () => void) => cb() };
+    g.window = win;
+    g.document = { addEventListener() {}, querySelector: () => null };
+    console.info = () => {};
+    const handlers: Record<string, Array<(e: unknown) => void>> = {};
+    const router: RouterLike = {
+      subscribe(type, fn) {
+        (handlers[type] ??= []).push(fn as (e: unknown) => void);
+        return () => {};
+      },
+    };
+    installNavigationTiming(router);
+    // Alternate two screens; every navigation changes the path and completes.
+    const navigate = (index: number) => {
+      // Unique screen per navigation so each record is identifiable.
+      const event = {
+        fromLocation: { pathname: `/app/s${index}` },
+        toLocation: { pathname: `/app/s${index + 1}` },
+        pathChanged: true,
+      };
+      for (const type of ["onBeforeNavigate", "onBeforeLoad", "onLoad", "onRendered"]) {
+        for (const fn of handlers[type] ?? []) fn(event);
+      }
+    };
+    return { win, navigate };
+  }
+
+  it("keeps at most 50 records, newest retained and oldest discarded", () => {
+    const { win, navigate } = setup("true");
+    const total = 75;
+    for (let i = 0; i < total; i++) navigate(i);
+    // Records are emitted when the next navigation starts or content appears;
+    // with no skeleton on screen each one is emitted immediately.
+    const buffer = win.__apsaPerfNav as NavigationTimingRecord[];
+    expect(buffer.length).toBeLessThanOrEqual(50);
+    expect(buffer.length).toBe(50);
+    const routes = buffer.map((r) => `${r.from}>${r.to}`);
+    // Navigation i is s{i} > s{i+1}; retained must be i = 25..74, oldest first.
+    expect(routes).toEqual(
+      Array.from({ length: 50 }, (_, k) => `s${total - 50 + k}>s${total - 50 + k + 1}`),
+    );
+    expect(routes).not.toContain("s0>s1");
+  });
+
+  it("writes nothing when the flag is off", () => {
+    const { win, navigate } = setup(undefined);
+    for (let i = 0; i < 10; i++) navigate(i);
+    expect(win.__apsaPerfNav).toBeUndefined();
   });
 });

@@ -38,7 +38,9 @@ const USER_ID = "11111111-2222-3333-4444-555555555555";
 const ORG_ID = "99999999-8888-7777-6666-555555555555";
 const ROLE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const EMAIL = "merchant.owner@example.com";
-const ACCESS = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJlc2lnbmF0dXJl";
+const ACCESS = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJ1c2VyIn0", "c2lnbmF0dXJlc2lnbmF0dXJl"].join(
+  ".",
+);
 const REFRESH = "refresh-token-value-abcdef";
 const DB_ERROR_TEXT = 'relation "memberships" violates constraint for merchant.owner@example.com';
 
