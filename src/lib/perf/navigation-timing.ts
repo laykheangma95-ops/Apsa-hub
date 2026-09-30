@@ -17,11 +17,16 @@
  *
  * Privacy: screens are reported as coarse labels ("orders", "orders.detail"),
  * never a raw path — record IDs in the URL and every search param are dropped.
- * Nothing is sent anywhere; records go to the browser console and to an
- * in-memory ring buffer (`window.__apsaPerfNav`) a staging script can read.
+ * Records go to the browser console, to an in-memory ring buffer
+ * (`window.__apsaPerfNav`) a staging script can read, and — one allowlisted
+ * payload per completed navigation (navigation-telemetry.ts) — fire-and-forget
+ * to the server, which logs it only when its own APSA_PERF_INSTRUMENTATION
+ * gate is on and never on a production deployment (src/api/perf-telemetry.ts).
  *
  * Observes the router only; it never changes navigation, loading or rendering.
  */
+
+import { toTelemetryPayload, type NavigationTelemetry } from "./navigation-telemetry";
 
 export const NAV_TIMING_FLAG = "VITE_APSA_PERF_NAV_TIMING";
 
@@ -191,15 +196,60 @@ declare global {
 
 const installed = new WeakSet<object>();
 
+/** Upper bound on telemetry sends per page load, whatever happens. */
+const MAX_TELEMETRY_SENDS = 200;
+
+export interface NavTelemetryTransport {
+  /** Posts one payload. May throw or reject; either is ignored. */
+  send: (payload: NavigationTelemetry) => unknown;
+  /** Runs `cb` later, off the navigation's call stack. */
+  schedule: (cb: () => void) => void;
+}
+
+const defaultTransport: NavTelemetryTransport = {
+  send: async (payload) => {
+    const { recordNavigationTimingFn } = await import("@/api/perf-telemetry");
+    await recordNavigationTimingFn({ data: payload });
+  },
+  schedule: (cb) => {
+    setTimeout(cb, 0);
+  },
+};
+
+/**
+ * Hand one record to the transport without waiting on it: scheduled on a
+ * later task, never retried, and every failure (sync throw, rejection,
+ * scheduling error) is swallowed so navigation can't observe it.
+ */
+function sendTelemetry(transport: NavTelemetryTransport, record: NavigationTimingRecord): void {
+  const payload = toTelemetryPayload(record, {
+    viewport: window.innerWidth,
+    locale: document.documentElement?.lang,
+    clientTs: Date.now(),
+  });
+  if (!payload) return;
+  transport.schedule(() => {
+    try {
+      Promise.resolve(transport.send(payload)).catch(() => {});
+    } catch {
+      // Diagnostics must never affect the app.
+    }
+  });
+}
+
 /**
  * Browser entry point. A no-op on the server, when the flag is off, or when
- * this router already has timing attached.
+ * this router already has timing attached. `transport` is replaceable for tests.
  */
-export function installNavigationTiming(router: RouterLike): void {
+export function installNavigationTiming(
+  router: RouterLike,
+  transport: NavTelemetryTransport = defaultTransport,
+): void {
   if (typeof window === "undefined" || typeof document === "undefined") return;
   if (!isNavTimingEnabled(import.meta.env as Record<string, unknown> | undefined)) return;
   if (installed.has(router)) return;
   installed.add(router);
+  let sends = 0;
 
   attachNavigationTiming(router, {
     now: () => performance.now(),
@@ -211,6 +261,14 @@ export function installNavigationTiming(router: RouterLike): void {
       buffer.push(record);
       if (buffer.length > RING_BUFFER_SIZE) buffer.splice(0, buffer.length - RING_BUFFER_SIZE);
       console.info("[apsa.perf]", JSON.stringify(record));
+      if (sends < MAX_TELEMETRY_SENDS) {
+        sends += 1;
+        try {
+          sendTelemetry(transport, record);
+        } catch {
+          // Diagnostics must never affect the app.
+        }
+      }
     },
   });
 }
