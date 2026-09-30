@@ -12,6 +12,9 @@
  * - The validator only passes the body through; the allowlist schema is
  *   applied inside the handler so a rejected payload is dropped silently
  *   instead of becoming an error log line.
+ * - Abuse-bounded: ingest runs every request through the durable limiter
+ *   (per trusted client IP + a global backstop) before parsing; a refused
+ *   request is dropped silently, never surfaced to the browser.
  * - Returns nothing, so the payload is never echoed.
  * - CSRF-protected like every server function (src/start.ts).
  */
@@ -22,5 +25,5 @@ export const recordNavigationTimingFn = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<void> => {
     const { ingestNavigationTelemetry } =
       await import("@/server/observability/navigation-telemetry");
-    ingestNavigationTelemetry(data);
+    await ingestNavigationTelemetry(data);
   });

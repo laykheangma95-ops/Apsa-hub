@@ -162,6 +162,7 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | Customer create/update | authenticated, `customers.*`, PII-gated (CORRECTION-002) | no financial effect, audited | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Reads (lists, details) | authenticated, tenant-scoped, `limit ≤ 200` caps | load only | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Future provider webhooks | public | forged/replayed events, floods | Primitive ready. **Signature verification + replay claim are the primary controls**; the per-provider IP bucket is secondary and skipped when the IP is unknown (§7) |
+| `recordNavigationTimingFn` (perf telemetry) | public, unauthenticated by design, staging/dev only (`APSA_PERF_INSTRUMENTATION`) | log spam, invocation flooding | **RATE LIMITED** (client IP when trusted + global backstop); a refused hit is dropped silently, one throttled `perf.navigation.rate_limited` line per instance per minute |
 
 ### 5.2 Values and rationale (`src/server/rate-limit/policies.ts`)
 
@@ -185,6 +186,8 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | `payments.mutate.member` | 60 | 60 s | organization + member | Far above any real counter |
 | `payments.reversal.member` | 20 | 60 s | organization + member | Refund/reverse/correct are rare and audited |
 | `webhooks.ip` | 600 | 60 s | provider + client IP (only when trusted) | Secondary to signature + replay checks |
+| `perf.telemetry.ip` | 300 | 60 s | client IP (only when trusted) | Diagnostics only; several testers behind one NAT never meet it (the browser caps a page load at 200 sends) |
+| `perf.telemetry.global` | 3000 | 60 s | all sources | Header-independent backstop; refusal only drops diagnostic lines |
 
 Every **auth** limit with an IP bucket also has an identity- or token-derived
 bucket that never depends on a header. That is not true of webhooks: their IP

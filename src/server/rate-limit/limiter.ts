@@ -91,6 +91,12 @@ function logDegraded(error: unknown, ruleId: string): void {
 export interface RateLimitOptions {
   /** What to do when the durable backend fails. Default: memory_fallback. */
   onBackendFailure?: BackendFailurePolicy;
+  /**
+   * Log `rate_limit.exceeded` for every refused hit. Default true. A caller
+   * whose refusals are themselves the flood (perf telemetry) turns it off and
+   * logs its own throttled summary.
+   */
+  logExceeded?: boolean;
 }
 
 export async function checkRateLimits(
@@ -121,13 +127,15 @@ export async function checkRateLimits(
     }
 
     if (!hit.allowed) {
-      serverLog.warn("rate_limit.exceeded", {
-        ruleId: check.rule.id,
-        limit: check.rule.limit,
-        windowSeconds: check.rule.windowSeconds,
-        retryAfterSeconds: hit.retryAfterSeconds,
-        degraded,
-      });
+      if (options.logExceeded !== false) {
+        serverLog.warn("rate_limit.exceeded", {
+          ruleId: check.rule.id,
+          limit: check.rule.limit,
+          windowSeconds: check.rule.windowSeconds,
+          retryAfterSeconds: hit.retryAfterSeconds,
+          degraded,
+        });
+      }
       return {
         allowed: false,
         retryAfterSeconds: hit.retryAfterSeconds,
