@@ -16,6 +16,7 @@ import {
   pickCanonicalActiveMembership,
   type MembershipCandidate,
 } from "@/lib/active-organization";
+import type { MembershipWithAuthority } from "./membership";
 
 /**
  * The organization id of the caller's canonical active membership, or null
@@ -26,13 +27,18 @@ import {
 export async function resolveActiveOrganizationId(userId: string): Promise<string | null> {
   const { supabaseAdmin } = await import("@/lib/supabase/server");
   // Timing only (staging/development, APSA_PERF_INSTRUMENTATION); a
-  // pass-through when off. The query below is unchanged.
+  // pass-through when off.
   const { timePhase } = await import("@/server/observability/perf");
+  const { MEMBERSHIP_CONTEXT_SELECT, toMembershipContext } = await import("./membership");
+  const { parkPrefetchedMembership } = await import("./membership-prefetch");
+  // The same active-membership read as before, with each row's role and
+  // permission keys embedded (one round trip), so the verifyActiveMembership
+  // that follows in this server-function call need not read it again.
   const { data, error } = await timePhase("authz.activeOrganization", async () =>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (supabaseAdmin as any)
       .from("memberships")
-      .select("organization_id, status, joined_at")
+      .select(MEMBERSHIP_CONTEXT_SELECT)
       .eq("user_id", userId)
       .eq("status", "active")
       .order(CANONICAL_MEMBERSHIP_ORDER.column, {
@@ -40,7 +46,19 @@ export async function resolveActiveOrganizationId(userId: string): Promise<strin
       }),
   );
 
-  if (error) throw new Error("Unable to resolve active organization membership");
-  const picked = pickCanonicalActiveMembership((data ?? []) as MembershipCandidate[]);
-  return picked ? picked.organization_id : null;
+  if (error) {
+    parkPrefetchedMembership(userId, null, null);
+    throw new Error("Unable to resolve active organization membership");
+  }
+  const rows = (data ?? []) as Array<MembershipCandidate & MembershipWithAuthority>;
+  const picked = pickCanonicalActiveMembership(rows);
+  if (!picked) {
+    parkPrefetchedMembership(userId, null, null);
+    return null;
+  }
+  // Hand the picked row's authority to the verify step of this same call. A
+  // row whose role or permissions could not be shaped is not parked, so the
+  // verify step reads the database itself and fails closed as before.
+  parkPrefetchedMembership(userId, picked.organization_id, toMembershipContext(picked));
+  return picked.organization_id;
 }

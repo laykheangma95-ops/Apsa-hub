@@ -90,44 +90,67 @@ const user = () => ({
   email_confirmed_at: world.emailVerified ? "2026-01-01T00:00:00.000Z" : null,
 });
 
-function tableResult(table: string, filters: Record<string, unknown>) {
+/** Every supabaseAdmin.from(table) call, in order — one per DB round trip. */
+let dbReads: string[] = [];
+/** Every Supabase Auth round trip (getUser). */
+let authReads: string[] = [];
+
+/** The membership row with its role and permission keys embedded, as PostgREST returns it. */
+function embeddedMembership(row: Record<string, unknown>) {
+  return {
+    ...row,
+    role: world.roleRow
+      ? {
+          ...world.roleRow,
+          role_permissions: world.permissionKeys.map((key) => ({ permission: { key } })),
+        }
+      : null,
+  };
+}
+
+function tableResult(table: string, filters: Record<string, unknown>, columns: string) {
   if (table === "memberships") {
+    const embedded = columns.includes("role:roles(");
+    // One embedded select fails as a whole when any joined read fails.
+    if (embedded && world.rolePermissionsError) {
+      return { data: null, error: { message: DB_ERROR_TEXT } };
+    }
     // The guard reads with .in("status", …); the resolver with .eq("status","active");
     // verifyActiveMembership adds .eq("organization_id", …) and .single().
     if ("organization_id" in filters) {
       return world.membershipRow
-        ? { data: world.membershipRow, error: null }
+        ? { data: embeddedMembership(world.membershipRow), error: null }
         : { data: null, error: { message: DB_ERROR_TEXT } };
     }
     if (filters["status"] === "active") {
       if (world.activeOrgError) return { data: null, error: { message: DB_ERROR_TEXT } };
-      return { data: world.guardRows.filter((r) => r.status === "active"), error: null };
+      const rows = world.guardRows.filter((r) => r.status === "active");
+      if (!embedded) return { data: rows, error: null };
+      // The resolver's embedded read returns the full row for each active membership.
+      return {
+        data: rows.map((r) =>
+          world.membershipRow && world.membershipRow["organization_id"] === r.organization_id
+            ? embeddedMembership({ ...world.membershipRow, joined_at: r.joined_at })
+            : { ...r, role: null },
+        ),
+        error: null,
+      };
     }
     if (world.guardError) return { data: null, error: { message: DB_ERROR_TEXT } };
     return { data: world.guardRows, error: null };
-  }
-  if (table === "roles") {
-    return world.roleRow
-      ? { data: world.roleRow, error: null }
-      : { data: null, error: { message: DB_ERROR_TEXT } };
-  }
-  if (table === "role_permissions") {
-    if (world.rolePermissionsError) return { data: null, error: { message: DB_ERROR_TEXT } };
-    return {
-      data: world.permissionKeys.map((_, i) => ({ permission_id: `p${i}` })),
-      error: null,
-    };
-  }
-  if (table === "permissions") {
-    return { data: world.permissionKeys.map((key) => ({ key })), error: null };
   }
   return { data: null, error: { message: "unknown table" } };
 }
 
 function builder(table: string) {
+  dbReads.push(table);
   const filters: Record<string, unknown> = {};
+  let columns = "";
   const b = {
-    select: () => b,
+    select: (cols: string) => {
+      columns = cols;
+      return b;
+    },
     eq: (column: string, value: unknown) => {
       filters[column] = value;
       return b;
@@ -137,9 +160,9 @@ function builder(table: string) {
       return b;
     },
     order: () => b,
-    single: async () => tableResult(table, filters),
+    single: async () => tableResult(table, filters, columns),
     then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
-      Promise.resolve(tableResult(table, filters)).then(resolve, reject),
+      Promise.resolve(tableResult(table, filters, columns)).then(resolve, reject),
   };
   return b;
 }
@@ -155,7 +178,7 @@ mock.module("@/lib/supabase/server", () => ({
   createServerClient: () => ({
     auth: {
       getUser: async () =>
-        world.userValid
+        (authReads.push("getUser"), world.userValid)
           ? { data: { user: user() }, error: null }
           : { data: { user: null }, error: new Error("expired") },
     },
@@ -302,10 +325,6 @@ describe("authorization chain: identical with instrumentation on and off", () =>
       "getUserMs",
       "activeOrgMs",
       "membershipMs",
-      "membershipRowMs",
-      "rolesMs",
-      "rolePermissionsMs",
-      "permissionsMs",
       "authzMs",
       "queryMs",
       "totalMs",
@@ -313,7 +332,31 @@ describe("authorization chain: identical with instrumentation on and off", () =>
       expect(typeof record[field], field).toBe("number");
     }
     expect(record["refreshMs"]).toBeUndefined();
+    // The verify step reused the context the active-organization read already
+    // fetched in this call, so it made no read of its own.
+    expect(record["membershipContextMs"]).toBeUndefined();
+    for (const removed of ["membershipRowMs", "rolesMs", "rolePermissionsMs", "permissionsMs"]) {
+      expect(record[removed], removed).toBeUndefined();
+    }
     expect(typeof record["requestId"]).toBe("string");
+  });
+
+  it("round trips: getUser + ONE memberships read (was getUser + 5 sequential reads)", async () => {
+    for (const flag of [false, true]) {
+      dbReads = [];
+      authReads = [];
+      const { outcome } = await run(flag, ORDERS, orderListHandler);
+      expect(outcome.ok).toBe(true);
+      expect(authReads).toEqual(["getUser"]);
+      expect(dbReads).toEqual(["memberships"]);
+    }
+  });
+
+  it("verifyActiveMembership alone (no prior resolve): ONE embedded read, not four", async () => {
+    dbReads = [];
+    const ctx = await run(false, ORDERS, () => verifyActiveMembership(USER_ID, ORG_ID));
+    expect(ctx.outcome.ok).toBe(true);
+    expect(dbReads).toEqual(["memberships"]);
   });
 
   it("missing permission: same ForbiddenError", async () => {
@@ -336,10 +379,13 @@ describe("authorization chain: identical with instrumentation on and off", () =>
     expect(on.outcome).toMatchObject({ ok: false, name: "UnauthorizedError" });
   });
 
-  it("role_permissions failure: same fail-closed result", async () => {
+  it("role_permissions failure: fails closed (the one embedded read fails as a whole)", async () => {
     world.rolePermissionsError = true;
     const { on } = await compare(ORDERS, orderListHandler);
-    expect(on.outcome).toMatchObject({ ok: false, name: "UnauthorizedError" });
+    expect(on.outcome.ok).toBe(false);
+    if (!on.outcome.ok) expect(on.outcome.message).not.toContain("violates");
+    // Called directly, verifyActiveMembership still returns null (denied).
+    expect(await verifyActiveMembership(USER_ID, ORG_ID)).toBeNull();
   });
 
   it("no active organization: same ForbiddenError", async () => {
