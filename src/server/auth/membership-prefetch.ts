@@ -18,6 +18,17 @@
  *     was parked before. A second verify in the same call (e.g. after a role
  *     change) always reads the database again.
  *   - Holds only what the database just returned for a session-derived user.
+ *
+ * Freshness — the one behavioral difference, accepted deliberately:
+ *   The first forRequest of a call sees authority as of the resolver's read,
+ *   not as of its own (formerly separate) read. A revocation or suspension
+ *   that commits between those two steps of the SAME invocation is not seen
+ *   by that invocation; the next invocation re-reads and sees it. This is the
+ *   same class of window every invocation already had (authority is read once
+ *   and held until the handler finishes); only its start moves earlier by the
+ *   in-process gap between resolve and verify. There is no cross-request
+ *   reuse. Tested in src/tests/authz-context-collapse.runtime.ts ("in-flight
+ *   revocation window").
  */
 import { currentRequestContext, type RequestContext } from "@/server/observability/request-context";
 import type { MembershipContext } from "./membership";
