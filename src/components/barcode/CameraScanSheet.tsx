@@ -3,7 +3,9 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { BottomSheet } from "@/design-system";
+// Direct module, not the barrel: the barrel re-exports BottomNav, whose Apsi
+// console renders this sheet — importing the barrel here would be a cycle.
+import { BottomSheet } from "@/design-system/BottomSheet";
 import { useCameraBarcodeScanner } from "@/hooks/use-camera-barcode-scanner";
 import { normalizeScannedCode, type CameraScanStatus } from "@/lib/barcode/camera-scan";
 import { cn } from "@/lib/utils";
