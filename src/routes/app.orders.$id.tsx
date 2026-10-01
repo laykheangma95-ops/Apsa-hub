@@ -1,9 +1,10 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Printer } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
 import {
   AppHeader,
   ChannelBadge,
@@ -62,6 +63,7 @@ import {
 import {
   canCancelOrder,
   canConfirmOrder,
+  canPrintParcelLabel,
   classifyOrderError,
   presentOrderSource,
   totalStockUnits,
@@ -227,6 +229,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
+  const [parcelLabelOpen, setParcelLabelOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   /*
@@ -449,6 +452,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   // (src/server/orders/state-machine.ts).
   const canConfirm = canConfirmOrder(order.lifecycleStatus) && capabilities.can("orders.confirm");
   const canCancel = canCancelOrder(order.lifecycleStatus) && capabilities.can("orders.cancel");
+  const showPrintLabel =
+    canPrintParcelLabel(order.lifecycleStatus) &&
+    capabilities.canSensitive("fulfillment.print_label");
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
 
@@ -817,6 +823,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : null}
         </Section>
 
+        {showPrintLabel ? (
+          <Section title={t("order.fulfillment")}>
+            <Button
+              type="button"
+              variant="outline"
+              className="tap-target h-11 w-full gap-2 rounded-xl"
+              onClick={() => setParcelLabelOpen(true)}
+            >
+              <Printer className="size-4" aria-hidden />
+              {t("order.printParcelLabel")}
+            </Button>
+          </Section>
+        ) : null}
+
         <Section title={t("order.history")}>
           {historyItems.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("customer360.noTimelineBody")}</p>
@@ -896,6 +916,13 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         pending={recordPaymentMutation.isPending}
         error={recordPaymentError}
         onConfirm={(submit) => recordPaymentMutation.mutate(submit)}
+      />
+      <ParcelLabelDialog
+        open={parcelLabelOpen}
+        onClose={() => setParcelLabelOpen(false)}
+        orderIds={parcelLabelOpen ? [id] : []}
+        userId={userId}
+        organizationId={routeOrganizationId}
       />
     </div>
   );
