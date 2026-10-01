@@ -21,6 +21,7 @@ const APP_SECTIONS = [
   "inventory",
   "orders",
   "pack",
+  "parcels",
   "payments",
   "pos",
   "products",
