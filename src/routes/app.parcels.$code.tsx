@@ -25,6 +25,8 @@ import {
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { resolveParcelIdentityFn } from "@/api/parcel-resolution";
+import { findCustomerConversationFn } from "@/api/customer-conversation";
+import { isProductionId } from "@/lib/api";
 import { fullTimestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { StatusKey } from "@/types";
@@ -60,6 +62,14 @@ function ParcelInvestigationScreen() {
     queryFn: () => resolveParcelIdentityFn({ data: { parcelCode: code } }),
     retry: false,
   });
+
+  const customerId = query.data?.customer?.id ?? null;
+  const conversationQuery = useQuery({
+    queryKey: ["customer-conversation", customerId],
+    queryFn: () => findCustomerConversationFn({ data: { customerId: customerId! } }),
+    enabled: Boolean(customerId) && isProductionId(customerId ?? ""),
+  });
+  const activeConversationId = conversationQuery.data?.conversationId ?? null;
 
   const back = () => navigate({ to: "/app" });
 
@@ -268,11 +278,20 @@ function ParcelInvestigationScreen() {
                 />
               ) : null}
 
-              <PlaceholderNavItem
-                icon={<MessageCircle className="size-5" aria-hidden />}
-                label={t("parcelInvestigation.conversation")}
-                hint={t("parcelInvestigation.conversationPlaceholder")}
-              />
+              {activeConversationId ? (
+                <QuickNavItem
+                  to="/app/inbox/$id"
+                  params={{ id: activeConversationId }}
+                  icon={<MessageCircle className="size-5" aria-hidden />}
+                  label={t("parcelInvestigation.openConversation")}
+                />
+              ) : result.customer ? (
+                <PlaceholderNavItem
+                  icon={<MessageCircle className="size-5" aria-hidden />}
+                  label={t("parcelInvestigation.conversation")}
+                  hint={t("parcelInvestigation.noConversation")}
+                />
+              ) : null}
 
               <PlaceholderNavItem
                 icon={<CreditCard className="size-5" aria-hidden />}

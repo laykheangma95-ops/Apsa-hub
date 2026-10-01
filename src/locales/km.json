@@ -2356,6 +2356,8 @@
     "viewCustomer": "មើលអតិថិជន",
     "viewDelivery": "មើលការដឹកជញ្ជូន",
     "conversation": "ការសន្ទនា",
+    "openConversation": "បើកការសន្ទនា",
+    "noConversation": "គ្មានការសន្ទនា",
     "conversationPlaceholder": "មកដល់ឆាប់ៗ",
     "paymentAction": "ការទូទាត់",
     "paymentPlaceholder": "មកដល់ឆាប់ៗ",

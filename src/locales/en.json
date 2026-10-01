@@ -2356,6 +2356,8 @@
     "viewCustomer": "View customer",
     "viewDelivery": "View delivery",
     "conversation": "Conversation",
+    "openConversation": "Open conversation",
+    "noConversation": "No conversation",
     "conversationPlaceholder": "Coming soon",
     "paymentAction": "Payment",
     "paymentPlaceholder": "Coming soon",
