@@ -71,7 +71,8 @@ describe("capability revalidation source rules", () => {
   });
 
   it("re-authorizes against the server immediately before printing, failing closed", () => {
-    expect(dialog).toContain("onBeforePrint={reauthorizePrint}");
+    expect(dialog).toContain("onBeforePrint={handleBeforePrint}");
+    expect(dialog).toContain("return reauthorizePrint()");
     expect(hook).toContain("cancelRefetch: true");
     expect(hook).toMatch(/state\?\.status === "success"/);
     expect(read("src/components/labels/LabelSheet.tsx")).toMatch(
