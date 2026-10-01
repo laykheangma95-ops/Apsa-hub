@@ -45,11 +45,6 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         ) : (
           <p className="text-[9pt] leading-snug font-semibold">{t("labels.parcel.noAddress")}</p>
         )}
-        {/*
-         * The on-file address is the customer's mutable default, not an
-         * order-authoritative destination (§13). Say so plainly — a word, not a
-         * colour — so staff verify the destination before shipping.
-         */}
         {!vm.customer.addressConfirmed ? (
           <p className="mt-[0.5mm] border border-black px-[1mm] py-[0.5mm] text-[7pt] font-bold leading-tight">
             ⚠ {t("labels.parcel.addressNotConfirmed")}
@@ -57,13 +52,7 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         ) : null}
       </div>
 
-      {/*
-       * Order + items. min-h-0 + overflow-hidden keeps a long item list bounded
-       * INSIDE this region so it can never push the payment / COD / QR row below
-       * off the fixed-height label (§22). The order number and item count sit
-       * above the scroll-free list and are never clipped; overflowCount already
-       * caps the list with a "+ N more" note upstream (buildParcelLabel).
-       */}
+      {/* Order + items */}
       <div className="flex min-h-0 flex-1 flex-col border-b border-black pb-[2mm]">
         <div className="flex shrink-0 items-baseline justify-between">
           <p className="text-[11pt] font-bold tabular-nums">{vm.orderNumber}</p>
@@ -85,7 +74,7 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         ) : null}
       </div>
 
-      {/* Payment + QR */}
+      {/* Payment + QR + Code128 */}
       <div className="flex items-end justify-between gap-[3mm]">
         <div className="min-w-0 flex-1">
           {vm.payment.paid ? (
@@ -109,11 +98,30 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
           ) : null}
         </div>
 
-        <div
-          className="size-[24mm] shrink-0"
-          // Generated QR SVG (rects only) — our own markup, never user HTML.
-          dangerouslySetInnerHTML={{ __html: vm.qr.svg }}
-        />
+        <div className="flex shrink-0 flex-col items-end gap-[1mm]">
+          <div
+            className="size-[24mm]"
+            dangerouslySetInnerHTML={{ __html: vm.qr.svg }}
+          />
+          {vm.code128 ? (
+            <div className="h-[10mm] w-[24mm]">
+              <div
+                className="h-full w-full"
+                dangerouslySetInnerHTML={{ __html: vm.code128.svg }}
+              />
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Human-readable parcel code + print timestamp */}
+      <div className="flex items-baseline justify-between gap-[2mm] border-t border-black pt-[1mm]">
+        {vm.parcelCode ? (
+          <p className="min-w-0 truncate text-[7pt] font-mono tabular-nums">{vm.parcelCode}</p>
+        ) : (
+          <span />
+        )}
+        <p className="shrink-0 text-[6pt] text-neutral-500 tabular-nums">{vm.printTimestamp}</p>
       </div>
     </div>
   );

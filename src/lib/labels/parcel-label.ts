@@ -20,6 +20,7 @@
 import type { Money } from "@/types";
 import { formatMoney } from "@/lib/money";
 import { renderQrSvg } from "@/lib/barcode/qr";
+import { renderCode128Svg, isCode128Encodable } from "@/lib/barcode/code128";
 import { orderQrPayload } from "@/lib/barcode/payload";
 
 /** Default physical target for a parcel label. */
@@ -59,6 +60,8 @@ export interface ParcelLabelInput {
    * parcel identity (backward-compatible).
    */
   parcelCode?: string | null;
+  /** Whether to render a Code 128 barcode encoding the same parcel identity as the QR. */
+  includeCode128?: boolean;
 }
 
 export interface ParcelLabelLine {
@@ -92,6 +95,12 @@ export interface ParcelLabelViewModel {
   };
   delivery: { providerName: string; trackingNumber: string | null; status: string } | null;
   qr: { payload: string; svg: string };
+  /** Code 128 barcode encoding the same parcel identity as the QR. Null unless requested. */
+  code128: { payload: string; svg: string } | null;
+  /** Human-readable parcel code (the full APSA:PCL:v1:<token> string), or null for legacy fallback. */
+  parcelCode: string | null;
+  /** ISO timestamp of when this label was generated. */
+  printTimestamp: string;
 }
 
 function formatItemLine(item: ParcelLabelItemInput): string {
@@ -102,7 +111,7 @@ function formatItemLine(item: ParcelLabelItemInput): string {
 
 export function buildParcelLabel(
   input: ParcelLabelInput,
-  options: { maxItemLines?: number } = {},
+  options: { maxItemLines?: number; now?: Date } = {},
 ): ParcelLabelViewModel {
   const maxLines = options.maxItemLines ?? PARCEL_LABEL_MAX_ITEM_LINES;
 
@@ -117,6 +126,15 @@ export function buildParcelLabel(
   const overflowCount = Math.max(0, allLines.length - shown.length);
 
   const payload = input.parcelCode ?? orderQrPayload(input.order.id);
+
+  const includeCode128 = input.includeCode128 === true;
+  let code128: ParcelLabelViewModel["code128"] = null;
+  if (includeCode128 && isCode128Encodable(payload)) {
+    code128 = {
+      payload,
+      svg: renderCode128Svg(payload, { moduleWidth: 2, height: 48 }),
+    };
+  }
 
   return {
     merchantName: input.merchant.businessName,
@@ -133,14 +151,13 @@ export function buildParcelLabel(
     overflowCount,
     payment: {
       paid: input.payment.paid,
-      // Formatted from the authoritative Money value only. When paid, there is
-      // nothing to collect — the amount is intentionally null, never printed.
       collectFormatted:
         input.payment.paid || !input.payment.collect ? null : formatMoney(input.payment.collect),
     },
     delivery: input.delivery,
-    // Quiet zone is the 4-module ISO minimum (renderQrSvg clamps to it) so the
-    // order QR stays decodable on a cheap camera (§3).
     qr: { payload, svg: renderQrSvg(payload, { moduleSize: 4, quietModules: 4, ecLevel: "M" }) },
+    code128,
+    parcelCode: input.parcelCode ?? null,
+    printTimestamp: (options.now ?? new Date()).toISOString(),
   };
 }

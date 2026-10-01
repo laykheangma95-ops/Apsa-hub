@@ -199,6 +199,10 @@ export function canCancelOrder(lifecycleStatus: OrderLifecycleStatus | undefined
   return lifecycleStatus === "draft" || lifecycleStatus === "confirmed";
 }
 
+export function canPrintParcelLabel(lifecycleStatus: OrderLifecycleStatus | undefined): boolean {
+  return lifecycleStatus === "confirmed";
+}
+
 /** Total units across every line — the exact quantity the DB ledger moves on confirm/cancel. */
 export function totalStockUnits(items: Pick<OrderItem, "quantity">[]): number {
   return items.reduce((sum, item) => sum + item.quantity, 0);

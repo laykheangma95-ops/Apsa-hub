@@ -130,6 +130,9 @@ export const UI_PERMISSION_KEYS = [
   // can print without unrestricted customer PII (migration 046, PR #80 §20).
   // getParcelLabelData feeds it straight into ctx.require.
   "fulfillment.print_label",
+  // Parcel identity — src/server/parcels/service.ts (migration 050).
+  "fulfillment.create_parcel",
+  "fulfillment.scan_parcel",
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",
