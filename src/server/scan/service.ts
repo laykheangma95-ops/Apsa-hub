@@ -33,10 +33,7 @@ import type { ScanResolution } from "./types";
  * { type: "unknown" } instead. Infrastructure errors (DB down, auth failure)
  * propagate as exceptions.
  */
-export async function resolveScan(
-  ctx: AuthorizationContext,
-  raw: string,
-): Promise<ScanResolution> {
+export async function resolveScan(ctx: AuthorizationContext, raw: string): Promise<ScanResolution> {
   const normalized = normalizeScanInput(raw);
   if (normalized === null) {
     return { type: "unknown", payload: String(raw ?? "").slice(0, 100), metadata: null };

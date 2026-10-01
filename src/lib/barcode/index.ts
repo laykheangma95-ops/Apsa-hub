@@ -52,8 +52,4 @@ export {
 
 export { classifyScan, type ScanIdentity } from "./scan-router";
 
-export {
-  normalizeScanInput,
-  upcAToEan13,
-  ean13ToUpcA,
-} from "./normalize";
+export { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "./normalize";
