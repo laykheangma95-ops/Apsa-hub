@@ -750,7 +750,8 @@ describe("No migration was required, and the schema says why", () => {
     // 048 or higher would mean THIS phase silently changed the schema — which it
     // must not do without first proving the change is required and reporting it.
     // 048 (explicit service_role table grants — an environment fix, not this
-    // phase's) is likewise unrelated; anything from 049 up would be new.
-    expect(migrations.filter((f) => /^049|^0[5-9]\d/.test(f))).toEqual([]);
+    // phase's) is likewise unrelated, and so is 049 (the Analytics performance
+    // phase's status-count RPC); anything from 050 up would be new.
+    expect(migrations.filter((f) => /^05\d|^0[6-9]\d/.test(f))).toEqual([]);
   });
 });

@@ -6,10 +6,15 @@
  * lookups, and everything else) before any auth or guard behavior is changed
  * for speed. It observes; it never decides anything.
  *
- * Gate: OFF unless the server environment sets APSA_PERF_INSTRUMENTATION=true,
- * and always OFF when VERCEL_ENV=production, whatever the flag says. The flag
- * is deliberately NOT `VITE_`-prefixed: it is server-only configuration and
- * must never be inlined into a browser bundle.
+ * Gate: ON only when the server environment sets BOTH
+ * APSA_PERF_INSTRUMENTATION=true AND APSA_RUNTIME_ENV=staging (exact values).
+ * Anything else — either variable missing, empty or any other value — is OFF.
+ * VERCEL_ENV is deliberately not consulted: the dedicated staging project runs
+ * in Vercel's Production slot (VERCEL_ENV=production), and the real production
+ * project stays OFF because it never sets APSA_RUNTIME_ENV=staging. There is
+ * no default runtime value and no hostname/branch detection. Both variables
+ * are deliberately NOT `VITE_`-prefixed: they are server-only configuration
+ * and must never be inlined into a browser bundle.
  *
  * When OFF, `timePhase` returns `fn()` itself — the very same promise, no
  * wrapper, no clock read — and the server-function boundary opens no collector.
@@ -31,6 +36,9 @@ import { currentRequestContext } from "./request-context";
 import { serverLog } from "./logger";
 
 export const PERF_FLAG = "APSA_PERF_INSTRUMENTATION";
+/** Server-only runtime marker; instrumentation requires exactly STAGING_RUNTIME. */
+export const RUNTIME_ENV_VAR = "APSA_RUNTIME_ENV";
+export const STAGING_RUNTIME = "staging";
 
 /**
  * Every phase that can be timed. The value is the log field its total lands
@@ -45,18 +53,19 @@ export const PERF_PHASES = {
   "session.refresh": "refresh",
   /** /app guard: the memberships read that picks the active organization. */
   "guard.memberships": "guardMemberships",
-  /** resolveActiveOrganizationId (src/server/auth/active-organization.ts). */
+  /**
+   * resolveActiveOrganizationId (src/server/auth/active-organization.ts): the
+   * active memberships read, with role and permission keys embedded.
+   */
   "authz.activeOrganization": "activeOrg",
   /** verifyActiveMembership end to end (src/server/auth/membership.ts). */
   "authz.verifyMembership": "membership",
-  /** verifyActiveMembership: the memberships row read. */
-  "authz.membershipRow": "membershipRow",
-  /** verifyActiveMembership: the roles read. */
-  "authz.roles": "roles",
-  /** verifyActiveMembership: the role_permissions read. */
-  "authz.rolePermissions": "rolePermissions",
-  /** verifyActiveMembership: the permissions read. */
-  "authz.permissions": "permissions",
+  /**
+   * verifyActiveMembership: the ONE embedded memberships+role+permissions
+   * read. Absent when the context resolveActiveOrganizationId just read in the
+   * same call was reused (src/server/auth/membership-prefetch.ts).
+   */
+  "authz.membershipContext": "membershipContext",
 } as const;
 
 export type PerfPhase = keyof typeof PERF_PHASES;
@@ -83,10 +92,9 @@ function defaultEnv(): Env {
   return typeof process !== "undefined" && process.env ? process.env : {};
 }
 
-/** True only when explicitly enabled, and never on a production deployment. */
+/** True only when explicitly enabled on an explicitly staging runtime. */
 export function isPerfInstrumentationEnabled(env: Env = defaultEnv()): boolean {
-  if (env["VERCEL_ENV"] === "production") return false;
-  return env[PERF_FLAG]?.trim().toLowerCase() === "true";
+  return env[PERF_FLAG] === "true" && env[RUNTIME_ENV_VAR] === STAGING_RUNTIME;
 }
 
 function now(): number {

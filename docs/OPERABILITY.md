@@ -162,7 +162,7 @@ unexpected failure; showing the reference there is a small Lovable follow-up.
 | Customer create/update | authenticated, `customers.*`, PII-gated (CORRECTION-002) | no financial effect, audited | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Reads (lists, details) | authenticated, tenant-scoped, `limit ≤ 200` caps | load only | **EXISTING DOMAIN CONTROLS SUFFICIENT FOR ALPHA** |
 | Future provider webhooks | public | forged/replayed events, floods | Primitive ready. **Signature verification + replay claim are the primary controls**; the per-provider IP bucket is secondary and skipped when the IP is unknown (§7) |
-| `recordNavigationTimingFn` (perf telemetry) | public, unauthenticated by design, staging/dev only (`APSA_PERF_INSTRUMENTATION`) | log spam, invocation flooding | **RATE LIMITED** (client IP when trusted + global backstop); a refused hit is dropped silently, one throttled `perf.navigation.rate_limited` line per instance per minute |
+| `recordNavigationTimingFn` (perf telemetry) | public, unauthenticated by design, dedicated-staging only (ingest accepts only when `APSA_PERF_INSTRUMENTATION=true` AND `APSA_RUNTIME_ENV=staging`) | log spam, invocation flooding | **RATE LIMITED** (client IP when trusted + global backstop); a refused hit is dropped silently, one throttled `perf.navigation.rate_limited` line per instance per minute |
 
 ### 5.2 Values and rationale (`src/server/rate-limit/policies.ts`)
 
@@ -352,20 +352,22 @@ Consequences to plan for:
 | Name | Required | Purpose |
 |---|---|---|
 | `RATE_LIMIT_KEY_SECRET` | optional | Dedicated HMAC pepper for rate-limit keys; otherwise derived from `SUPABASE_SERVICE_ROLE_KEY`. Server-only. |
-| `RATE_LIMIT_CLIENT_IP_HEADER` | **deployment requirement** for IP limits | The single forwarding header the deployment's proxy **overwrites** (e.g. `x-vercel-forwarded-for` on Vercel, `cf-connecting-ip` behind Cloudflare). **When unset, no forwarding header is trusted** — `x-forwarded-for`, `x-real-ip` and `cf-connecting-ip` are ignored, the client IP is "unknown", every IP bucket is skipped (never pooled), and the identity/token buckets carry auth protection alone. Set it only to a header the edge rewrites on every request; a header a client can send directly is spoofable. || `APSA_PERF_INSTRUMENTATION` | optional, **staging/development only** | `true` enables `perf.server_function` timing lines (below). Server-only — deliberately not `VITE_`-prefixed. Default OFF; ignored when `VERCEL_ENV=production`. |
+| `RATE_LIMIT_CLIENT_IP_HEADER` | **deployment requirement** for IP limits | The single forwarding header the deployment's proxy **overwrites** (e.g. `x-vercel-forwarded-for` on Vercel, `cf-connecting-ip` behind Cloudflare). **When unset, no forwarding header is trusted** — `x-forwarded-for`, `x-real-ip` and `cf-connecting-ip` are ignored, the client IP is "unknown", every IP bucket is skipped (never pooled), and the identity/token buckets carry auth protection alone. Set it only to a header the edge rewrites on every request; a header a client can send directly is spoofable. |
+| `APSA_PERF_INSTRUMENTATION` | optional, **dedicated-staging only** | Server performance instrumentation (`perf.server_function` lines below, and `perf.navigation` ingest). The value must be exactly `true` (no `TRUE`, no padding), and it takes effect **only** when `APSA_RUNTIME_ENV=staging` is also set. OFF everywhere else, including local development and real production. Server-only — deliberately not `VITE_`-prefixed. No default (unset = OFF). `VERCEL_ENV` is not consulted. |
+| `APSA_RUNTIME_ENV` | required for instrumentation, **dedicated staging project only** | Server-only runtime marker — deliberately not `VITE_`-prefixed. Set it to exactly `staging` on the dedicated staging project; leave it unset everywhere else. No default (unset = not staging). **Never set it to `staging` on the real production project.** Server performance instrumentation requires BOTH `APSA_PERF_INSTRUMENTATION=true` and `APSA_RUNTIME_ENV=staging`. |
 | `VITE_APSA_PERF_NAV_TIMING` | optional, **staging/development builds only** | `true` enables client navigation timing in the browser console. Build-time and public by nature (it carries no secret). Default OFF. |
 
 ### Latency instrumentation (diagnostics only)
 
-`src/server/observability/perf.ts` — when `APSA_PERF_INSTRUMENTATION=true`, the
+`src/server/observability/perf.ts` — dedicated-staging only: when BOTH
+`APSA_PERF_INSTRUMENTATION=true` and `APSA_RUNTIME_ENV=staging` are set, the
 server-function boundary writes ONE `perf.server_function` line per outermost
 server-function call:
 
 ```json
 {"event":"perf.server_function","requestId":"req_…","domain":"orders","operation":"listOrdersFn",
  "route":"orders.listOrdersFn","identityMs":210.4,"getUserMs":205.1,"activeOrgMs":88.2,
- "membershipMs":301.7,"membershipRowMs":80.3,"rolesMs":71.9,"rolePermissionsMs":74.0,
- "permissionsMs":75.2,"authzMs":600.3,"queryMs":190.8,"totalMs":791.1,"outcome":"ok"}
+ "membershipMs":0.1,"authzMs":298.7,"queryMs":190.8,"totalMs":489.5,"outcome":"ok"}
 ```
 
 | Field | Measures |
@@ -373,11 +375,18 @@ server-function call:
 | `identityMs` | `getSessionFn` end to end (cookie read, `auth.getUser`, optional refresh) |
 | `getUserMs` / `refreshMs` | Supabase `auth.getUser()` / `auth.refreshSession()` round trips |
 | `guardMembershipsMs` | `/app` guard's memberships read (`checkAppGuardFn` only) |
-| `activeOrgMs` | `resolveActiveOrganizationId` |
-| `membershipMs` | `verifyActiveMembership` end to end, split into `membershipRowMs`, `rolesMs`, `rolePermissionsMs`, `permissionsMs` |
+| `activeOrgMs` | `resolveActiveOrganizationId`: ONE memberships read with role and permission keys embedded |
+| `membershipMs` | `verifyActiveMembership` end to end. ≈0 when it reuses the context `activeOrgMs` just read in the same call (`src/server/auth/membership-prefetch.ts`) |
+| `membershipContextMs` | `verifyActiveMembership`'s own single embedded read — present only when there was nothing to reuse (e.g. `forSlug`, `can`, a second verify in one call) |
 | `authzMs` | sum of the top-level authorization phases above (sub-phases not double counted) |
 | `queryMs` | `totalMs − authzMs`: domain queries plus handler module loading and serialization |
 | `<phase>Count` | present only when a phase ran more than once in one call |
+
+`membershipRowMs`, `rolesMs`, `rolePermissionsMs` and `permissionsMs` no longer
+appear: those four sequential reads were collapsed into the one embedded read
+above. `identityMs`, `getUserMs`, `activeOrgMs`, `membershipMs`, `authzMs`,
+`queryMs` and `totalMs` keep their meaning, so before/after staging lines
+compare directly.
 
 Never logged: user or organization IDs, emails, phones, names, tokens, keys, SQL
 or error text. OFF means no collector and `timePhase` returns the wrapped promise

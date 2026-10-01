@@ -118,11 +118,12 @@ function order(overrides: Partial<AnalyticsOrderRow> = {}): AnalyticsOrderRow {
 function dependencies(overrides: Partial<AnalyticsDependencies> = {}): AnalyticsDependencies {
   return {
     listQualifyingOrders: async () => [],
-    getOrderStatusCounts: async () => ({
+    getPeriodStatusCounts: async () => ({
       lifecycleStatusCounts: { draft: 0, confirmed: 0, completed: 0, cancelled: 0 },
       paymentStatusCounts: { unpaid: 0, pending: 0, paid: 0, failed: 0 },
       fulfillmentStatusCounts: { unfulfilled: 0, processing: 0, fulfilled: 0, cancelled: 0 },
       refundStatusCounts: { none: 0, partial: 0, full: 0 },
+      paymentMethodCounts: { cash: 0, khqr: 0, bank_transfer: 0, cod: 0 },
     }),
     getSettlementTotals: async () => ({
       orderedGross: [],
@@ -130,7 +131,6 @@ function dependencies(overrides: Partial<AnalyticsDependencies> = {}): Analytics
       refundedAmount: [],
       outstandingAmount: [],
     }),
-    getPaymentMethodCounts: async () => ({ cash: 0, khqr: 0, bank_transfer: 0, cod: 0 }),
     getDeliveryStatusCounts: async () => ({
       statusCounts: {
         pending: 0,
@@ -658,13 +658,14 @@ describe("Analytics service — permissions and tenancy", () => {
         seen.push(organizationId);
         return [];
       },
-      getOrderStatusCounts: async (organizationId) => {
+      getPeriodStatusCounts: async (organizationId) => {
         seen.push(organizationId);
         return {
           lifecycleStatusCounts: { draft: 0, confirmed: 0, completed: 0, cancelled: 0 },
           paymentStatusCounts: { unpaid: 0, pending: 0, paid: 0, failed: 0 },
           fulfillmentStatusCounts: { unfulfilled: 0, processing: 0, fulfilled: 0, cancelled: 0 },
           refundStatusCounts: { none: 0, partial: 0, full: 0 },
+          paymentMethodCounts: { cash: 0, khqr: 0, bank_transfer: 0, cod: 0 },
         };
       },
       getSettlementTotals: async (organizationId) => {
@@ -685,10 +686,6 @@ describe("Analytics service — permissions and tenancy", () => {
           },
           unresolved: false,
         };
-      },
-      getPaymentMethodCounts: async (organizationId) => {
-        seen.push(organizationId);
-        return { cash: 0, khqr: 0, bank_transfer: 0, cod: 0 };
       },
     });
     // Fully-authorized caller, so every dependency — including the protected
@@ -969,13 +966,13 @@ describe("Analytics financial boundary — the established orders.read + payment
   it("preserves every non-financial metric for a caller with analytics.read only", async () => {
     const deps = dependencies({
       listQualifyingOrders: async () => [order({ id: "o-1" }), order({ id: "o-2" })],
-      getOrderStatusCounts: async () => ({
+      getPeriodStatusCounts: async () => ({
         lifecycleStatusCounts: { draft: 1, confirmed: 2, completed: 3, cancelled: 0 },
         paymentStatusCounts: { unpaid: 1, pending: 0, paid: 5, failed: 0 },
         fulfillmentStatusCounts: { unfulfilled: 2, processing: 0, fulfilled: 4, cancelled: 0 },
         refundStatusCounts: { none: 6, partial: 0, full: 0 },
+        paymentMethodCounts: { cash: 3, khqr: 4, bank_transfer: 0, cod: 1 },
       }),
-      getPaymentMethodCounts: async () => ({ cash: 3, khqr: 4, bank_transfer: 0, cod: 1 }),
     });
     const summary = await getBusinessSummary(makeCtx(["analytics.read"]), "today", deps);
 

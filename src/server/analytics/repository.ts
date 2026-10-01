@@ -186,6 +186,111 @@ export async function getPaymentMethodCounts(
   return Object.fromEntries(entries) as Record<PaymentMethod, number>;
 }
 
+export interface PeriodStatusCounts extends OrderStatusCounts {
+  paymentMethodCounts: Record<PaymentMethod, number>;
+}
+
+/** Migration 049. Same filters as the per-value HEAD counts above, grouped in the database. */
+export const PERIOD_STATUS_COUNTS_RPC = "analytics_period_status_counts_v1";
+
+/**
+ * True only when the error says THIS function (migration 049) is absent:
+ *   - PGRST202 (PostgREST schema cache): "Could not find the function
+ *     public.analytics_period_status_counts_v1(…) in the schema cache"
+ *   - 42883 (Postgres): "function [public.]analytics_period_status_counts_v1(…)
+ *     does not exist"
+ * Any other 42883 — an unrelated undefined function, an undefined operator, a
+ * bug inside a deployed function body — and any other failure is a real error
+ * and must surface, never be masked by the fallback.
+ */
+const MISSING_PERIOD_STATUS_COUNTS_RPC = {
+  PGRST202: new RegExp(
+    `^Could not find the function (?:public\\.)?${PERIOD_STATUS_COUNTS_RPC}(?:\\(| )`,
+  ),
+  "42883": new RegExp(
+    `^function (?:public\\.)?${PERIOD_STATUS_COUNTS_RPC}\\(.*\\) does not exist$`,
+  ),
+} as const;
+
+function isMissingPeriodStatusCountsRpc(error: unknown): boolean {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code !== "PGRST202" && code !== "42883") return false;
+  return typeof message === "string" && MISSING_PERIOD_STATUS_COUNTS_RPC[code].test(message);
+}
+
+function zeroCounts<S extends string>(values: readonly S[]): Record<S, number> {
+  return Object.fromEntries(values.map((value) => [value, 0])) as Record<S, number>;
+}
+
+/**
+ * Every Business Summary status mix — order lifecycle/payment/fulfillment/
+ * refund status and payment method — for one period, in ONE round trip.
+ *
+ * Replaces 19 parallel exact HEAD counts (one per enum value) with a single
+ * database-side GROUP BY over the identical filters (organization_id, and
+ * created_at in [from, until)). The numbers are the same exact counts; only
+ * the number of requests changes.
+ *
+ * Rollout-safe: if migration 049 is not applied yet, this falls back to the
+ * per-value HEAD counts. Any other RPC error fails closed, as before.
+ */
+export async function getPeriodStatusCounts(
+  organizationId: string,
+  bounds: AnalyticsBounds,
+): Promise<PeriodStatusCounts> {
+  const { data, error } = await db.rpc(PERIOD_STATUS_COUNTS_RPC, {
+    p_organization_id: organizationId,
+    p_from: bounds.from,
+    p_until: bounds.until,
+  });
+
+  if (error) {
+    if (!isMissingPeriodStatusCountsRpc(error)) {
+      throw new Error(`getPeriodStatusCounts: ${errorMessage(error)}`);
+    }
+    const [statusCounts, paymentMethodCounts] = await Promise.all([
+      getOrderStatusCounts(organizationId, bounds),
+      getPaymentMethodCounts(organizationId, bounds),
+    ]);
+    return { ...statusCounts, paymentMethodCounts };
+  }
+
+  const result: PeriodStatusCounts = {
+    lifecycleStatusCounts: zeroCounts(ORDER_LIFECYCLE_STATUSES),
+    paymentStatusCounts: zeroCounts(ORDER_PAYMENT_STATUSES),
+    fulfillmentStatusCounts: zeroCounts(ORDER_FULFILLMENT_STATUSES),
+    refundStatusCounts: zeroCounts(ORDER_REFUND_STATUSES),
+    paymentMethodCounts: zeroCounts(PAYMENT_METHODS),
+  };
+  const axes = new Map<unknown, Record<string, number>>([
+    ["lifecycle_status", result.lifecycleStatusCounts],
+    ["payment_status", result.paymentStatusCounts],
+    ["fulfillment_status", result.fulfillmentStatusCounts],
+    ["refund_status", result.refundStatusCounts],
+    ["payment_method", result.paymentMethodCounts],
+  ]);
+
+  const seen = new Set<string>();
+  for (const row of (data ?? []) as { axis: unknown; value: unknown; row_count: unknown }[]) {
+    const counts = axes.get(row.axis);
+    if (!counts) throw new Error("getPeriodStatusCounts: unknown axis");
+    const rowCount = Number(row.row_count);
+    if (!Number.isSafeInteger(rowCount) || rowCount < 0) {
+      throw new Error("getPeriodStatusCounts: invalid count");
+    }
+    const key = `${row.axis}:${String(row.value)}`;
+    if (seen.has(key)) throw new Error("getPeriodStatusCounts: duplicate group");
+    seen.add(key);
+    // A value outside the known enum (or NULL) was never counted by the HEAD
+    // counts either — they only ever asked about known values.
+    if (typeof row.value === "string" && Object.hasOwn(counts, row.value)) {
+      counts[row.value] = rowCount;
+    }
+  }
+
+  return result;
+}
+
 /** Orders per latest-attempt resolution round trip — mirrors LATEST_ATTEMPT_CHUNK in the Deliveries service. */
 const LATEST_ATTEMPT_CHUNK = 50;
 
