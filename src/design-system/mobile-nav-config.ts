@@ -96,7 +96,15 @@ export interface MobileNavActionConfig extends MobileNavRequirement {
   icon: LucideIcon;
   availability: MobileNavActionAvailability;
   to?: MobileNavRoute;
+  /**
+   * A capability the Apsi console opens in place instead of a route. Exactly
+   * one of `to` / `opens` makes an enabled row do something.
+   */
+  opens?: MobileNavConsoleCapability;
 }
+
+/** In-console capabilities a shortcut may open instead of navigating. */
+export type MobileNavConsoleCapability = "camera-scan";
 
 export interface MobileNavSheetGroup {
   id: string;
@@ -198,16 +206,16 @@ const ASK_GROUPS: readonly MobileNavSheetGroup[] = [
       },
       {
         /*
-         * Typed / pasted barcodes ARE looked up, by the console's own search
-         * field, against the real lookupByBarcode server function. What does
-         * not exist is CAMERA capture, and this row says only that. Wiring it
-         * to anything would be a simulated scanner.
+         * Opens the real phone-camera scanner (CameraScanSheet). The decoded
+         * code goes into the console's own search, so it is looked up by the
+         * same permission-gated lookupByBarcode probe as a typed barcode.
          */
         id: "scan-barcode",
         labelKey: "nav.askActions.scanBarcode.label",
         descriptionKey: "nav.askActions.scanBarcode.description",
         icon: ScanLine,
-        availability: "coming-soon",
+        availability: "live",
+        opens: "camera-scan",
         requiresAll: ["products.read"],
       },
     ],
@@ -559,4 +567,19 @@ export function filterBusinessNavConfig(
     askGroups: filterGroups(config.askGroups),
     salesGroups: filterGroups(config.salesGroups),
   };
+}
+
+/** What tapping an Apsi shortcut row does. */
+export type AskShortcutBehavior =
+  { kind: "route"; to: MobileNavRoute } | { kind: "camera-scan" } | { kind: "unavailable" };
+
+/**
+ * The single decision behind every Apsi shortcut tap. A coming-soon row, or a
+ * row with neither a route nor a capability, does nothing and says so.
+ */
+export function askShortcutBehavior(action: MobileNavActionConfig): AskShortcutBehavior {
+  if (action.availability === "coming-soon") return { kind: "unavailable" };
+  if (action.opens === "camera-scan") return { kind: "camera-scan" };
+  if (action.to) return { kind: "route", to: action.to };
+  return { kind: "unavailable" };
 }

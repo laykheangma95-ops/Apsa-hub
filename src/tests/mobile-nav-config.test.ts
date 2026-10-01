@@ -91,16 +91,18 @@ describe("mobile nav config", () => {
   });
 
   /*
-   * Camera scanning genuinely does not exist. It is the ONLY Apsi shortcut
-   * allowed to be unavailable, and it must never acquire a route — a row that
-   * navigates somewhere while claiming to scan is a simulated feature.
+   * Camera scanning exists (CameraScanSheet). The scan row opens it in place —
+   * it must never acquire a route, because a row that navigates somewhere
+   * while claiming to scan is a simulated feature.
    */
-  it("admits camera barcode scanning is the one thing it cannot do", () => {
+  it("opens the real camera scanner from the scan row, never a route", () => {
     const actions = getBusinessNavConfig("online-seller").askGroups.flatMap((g) => g.actions);
-    const unavailable = actions.filter((a) => a.availability === "coming-soon");
+    const scan = actions.find((a) => a.id === "scan-barcode")!;
 
-    expect(unavailable.map((a) => a.id)).toEqual(["scan-barcode"]);
-    expect(unavailable[0]!.to).toBeUndefined();
+    expect(actions.filter((a) => a.availability === "coming-soon")).toEqual([]);
+    expect(scan.availability).toBe("live");
+    expect(scan.opens).toBe("camera-scan");
+    expect(scan.to).toBeUndefined();
   });
 
   /*
@@ -117,14 +119,19 @@ describe("mobile nav config", () => {
 
       for (const action of actions) {
         if (action.availability === "coming-soon") {
-          expect({ id: action.id, to: action.to }).toEqual({ id: action.id, to: undefined });
-        } else {
-          // Conversely, anything not marked coming-soon must actually go
-          // somewhere — an enabled row with no route is a silent no-op.
-          expect({ id: action.id, hasRoute: Boolean(action.to) }).toEqual({
+          expect({ id: action.id, to: action.to, opens: action.opens }).toEqual({
             id: action.id,
-            hasRoute: true,
+            to: undefined,
+            opens: undefined,
           });
+        } else {
+          // Conversely, anything not marked coming-soon must actually do
+          // something — a route or an in-console capability, exactly one.
+          // An enabled row with neither is a silent no-op.
+          expect({
+            id: action.id,
+            doesExactlyOneThing: Boolean(action.to) !== Boolean(action.opens),
+          }).toEqual({ id: action.id, doesExactlyOneThing: true });
         }
       }
     }

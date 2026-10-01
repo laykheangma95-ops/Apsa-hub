@@ -262,7 +262,7 @@
       },
       "scanBarcode": {
         "label": "Scan barcode with camera",
-        "description": "Camera scanning is not in the app yet. Type or paste a barcode above and Apsi will look it up."
+        "description": "Point the camera at a barcode, or type it above, and Apsi will look up the product."
       }
     }
   },

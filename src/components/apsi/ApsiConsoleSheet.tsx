@@ -22,6 +22,7 @@ import { ChevronRight, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BottomSheet } from "@/design-system/BottomSheet";
+import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { StatusChip } from "@/design-system/StatusChip";
 import {
   PaymentStatusChip,
@@ -35,10 +36,11 @@ import { apsiSurfaceForPath, orderApsiActionIds } from "@/lib/apsi/context";
 import { apsiResultRoute, planApsiLookup, runApsiLookup, type ApsiResult } from "@/lib/apsi/lookup";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
-import type {
-  MobileNavActionConfig,
-  MobileNavRoute,
-  MobileNavSheetGroup,
+import {
+  askShortcutBehavior,
+  type MobileNavActionConfig,
+  type MobileNavRoute,
+  type MobileNavSheetGroup,
 } from "@/design-system/mobile-nav-config";
 import type { StatusKey } from "@/types";
 
@@ -103,6 +105,30 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
   function clear() {
     setDraft("");
     setSubmitted("");
+  }
+
+  /*
+   * Camera scanning. The console steps aside while the camera sheet is up and
+   * comes back when it closes: two open BottomSheets would each trap focus and
+   * Escape, so the console's trap would pull focus out of the scanner's manual
+   * field. A decoded (or typed) code lands in the console's own search, so it
+   * is looked up exactly like a typed barcode — same permission-gated probe.
+   */
+  const [cameraOpen, setCameraOpen] = useState(false);
+
+  function openCameraScan() {
+    onOpenChange(false);
+    setCameraOpen(true);
+  }
+
+  function onCameraOpenChange(next: boolean) {
+    setCameraOpen(next);
+    if (!next) onOpenChange(true);
+  }
+
+  function onScannedCode(code: string) {
+    setDraft(code);
+    submit(code);
   }
 
   function openResult(result: ApsiResult) {
@@ -172,146 +198,155 @@ export function ApsiConsoleSheet({ open, onOpenChange, groups, onRoute }: ApsiCo
   const moreMayExist = Boolean(outcome) && outcome!.incomplete && outcome!.results.length > 0;
 
   return (
-    <BottomSheet
-      open={open}
-      onOpenChange={onOpenChange}
-      title={t("apsi.title")}
-      description={t("apsi.lead")}
-      snap="full"
-    >
-      <form
-        role="search"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit(draft);
-        }}
-        className="sticky top-0 z-10 -mx-1 bg-surface-primary px-1 pb-3"
+    <>
+      <BottomSheet
+        open={open}
+        onOpenChange={onOpenChange}
+        title={t("apsi.title")}
+        description={t("apsi.lead")}
+        snap="full"
       >
-        <label htmlFor="apsi-console-search" className="sr-only">
-          {t("apsi.searchLabel")}
-        </label>
-        <div className="flex items-center gap-2 rounded-2xl border border-border-default bg-surface-secondary px-3 py-2 focus-within:border-action-primary">
-          <Search className="size-4 shrink-0 text-text-muted" aria-hidden />
-          <input
-            id="apsi-console-search"
-            type="search"
-            inputMode="search"
-            enterKeyHint="search"
-            autoComplete="off"
-            maxLength={APSI_QUERY_MAX_LENGTH}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={t("apsi.searchPlaceholder")}
-            aria-describedby="apsi-console-scope"
-            className="text-body min-w-0 flex-1 bg-transparent py-1 text-text-primary outline-none placeholder:text-text-muted"
-          />
-          {draft || submitted ? (
-            <button
-              type="button"
-              onClick={clear}
-              aria-label={t("apsi.clearSearch")}
-              className="tap-target flex size-8 items-center justify-center rounded-full text-text-muted hover:text-text-primary"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
-          ) : null}
-        </div>
-        {/*
-         * What the search actually covers, stated up front. A console that
-         * silently searches four of the six things a merchant expects returns
-         * "nothing found" for a customer who is right there in the database.
-         */}
-        <p id="apsi-console-scope" className="text-caption mt-2 px-1 text-text-muted">
-          {t("apsi.searchScope")}
-        </p>
-      </form>
-
-      {plan.empty ? (
-        <ShortcutGroups groups={orderedGroups} onRoute={onRoute} />
-      ) : (
-        <div className="space-y-4">
-          {withheld.length > 0 ? (
-            <ul className="space-y-2">
-              {[...new Set(withheld.map((probe) => probe.permission))].map((permission) => (
-                <li
-                  key={permission}
-                  className="text-body-sm rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-text-secondary"
-                >
-                  {t("apsi.withheld", { permission })}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {searching ? (
-            <div className="space-y-2" aria-live="polite">
-              {[0, 1].map((index) => (
-                <div
-                  key={index}
-                  className="h-[84px] animate-pulse rounded-2xl bg-surface-secondary"
-                />
-              ))}
-            </div>
-          ) : null}
-
-          {outcome && outcome.failed.length > 0 ? (
-            <div className="text-body-sm rounded-2xl border border-status-danger-soft bg-status-danger-soft px-4 py-3 text-status-danger-text">
-              <p>{t("apsi.partialFailure")}</p>
+        <form
+          role="search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit(draft);
+          }}
+          className="sticky top-0 z-10 -mx-1 bg-surface-primary px-1 pb-3"
+        >
+          <label htmlFor="apsi-console-search" className="sr-only">
+            {t("apsi.searchLabel")}
+          </label>
+          <div className="flex items-center gap-2 rounded-2xl border border-border-default bg-surface-secondary px-3 py-2 focus-within:border-action-primary">
+            <Search className="size-4 shrink-0 text-text-muted" aria-hidden />
+            <input
+              id="apsi-console-search"
+              type="search"
+              inputMode="search"
+              enterKeyHint="search"
+              autoComplete="off"
+              maxLength={APSI_QUERY_MAX_LENGTH}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder={t("apsi.searchPlaceholder")}
+              aria-describedby="apsi-console-scope"
+              className="text-body min-w-0 flex-1 bg-transparent py-1 text-text-primary outline-none placeholder:text-text-muted"
+            />
+            {draft || submitted ? (
               <button
                 type="button"
-                onClick={() => void lookup.refetch()}
-                className="tap-target mt-2 underline underline-offset-2"
+                onClick={clear}
+                aria-label={t("apsi.clearSearch")}
+                className="tap-target flex size-8 items-center justify-center rounded-full text-text-muted hover:text-text-primary"
               >
-                {t("apsi.retry")}
+                <X className="size-4" aria-hidden />
               </button>
-            </div>
-          ) : null}
-
-          {outcome && outcome.results.length > 0 ? (
-            <ul className="list-enter space-y-2" aria-live="polite">
-              {outcome.results.map((result) => (
-                <li key={`${result.kind}:${result.id}`}>
-                  <ResultCard result={result} onOpen={() => openResult(result)} />
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {moreMayExist ? (
-            <p className="text-body-sm px-1 text-text-muted" aria-live="polite">
-              {t("apsi.moreResults")}
-            </p>
-          ) : null}
-
-          {nothingFound ? (
-            <p
-              className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
-              aria-live="polite"
-            >
-              {t(emptyScopeKey, { query: plan.normalized })}
-            </p>
-          ) : null}
-
+            ) : null}
+          </div>
           {/*
-           * An incomplete search that matched nothing. Never the not-found
-           * line: the customer may exist beyond where the scan stopped.
+           * What the search actually covers, stated up front. A console that
+           * silently searches four of the six things a merchant expects returns
+           * "nothing found" for a customer who is right there in the database.
            */}
-          {boundedNoMatch ? (
-            <p
-              className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
-              aria-live="polite"
-            >
-              {t("apsi.empty.bounded")}
-            </p>
-          ) : null}
+          <p id="apsi-console-scope" className="text-caption mt-2 px-1 text-text-muted">
+            {t("apsi.searchScope")}
+          </p>
+        </form>
 
-          <section className="border-t border-border-default pt-4">
-            <h3 className="text-label px-1 pb-2 text-text-muted">{t("apsi.openDomain")}</h3>
-            <ShortcutGroups groups={orderedGroups} onRoute={onRoute} />
-          </section>
-        </div>
-      )}
-    </BottomSheet>
+        {plan.empty ? (
+          <ShortcutGroups groups={orderedGroups} onRoute={onRoute} onCameraScan={openCameraScan} />
+        ) : (
+          <div className="space-y-4">
+            {withheld.length > 0 ? (
+              <ul className="space-y-2">
+                {[...new Set(withheld.map((probe) => probe.permission))].map((permission) => (
+                  <li
+                    key={permission}
+                    className="text-body-sm rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-text-secondary"
+                  >
+                    {t("apsi.withheld", { permission })}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {searching ? (
+              <div className="space-y-2" aria-live="polite">
+                {[0, 1].map((index) => (
+                  <div
+                    key={index}
+                    className="h-[84px] animate-pulse rounded-2xl bg-surface-secondary"
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            {outcome && outcome.failed.length > 0 ? (
+              <div className="text-body-sm rounded-2xl border border-status-danger-soft bg-status-danger-soft px-4 py-3 text-status-danger-text">
+                <p>{t("apsi.partialFailure")}</p>
+                <button
+                  type="button"
+                  onClick={() => void lookup.refetch()}
+                  className="tap-target mt-2 underline underline-offset-2"
+                >
+                  {t("apsi.retry")}
+                </button>
+              </div>
+            ) : null}
+
+            {outcome && outcome.results.length > 0 ? (
+              <ul className="list-enter space-y-2" aria-live="polite">
+                {outcome.results.map((result) => (
+                  <li key={`${result.kind}:${result.id}`}>
+                    <ResultCard result={result} onOpen={() => openResult(result)} />
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {moreMayExist ? (
+              <p className="text-body-sm px-1 text-text-muted" aria-live="polite">
+                {t("apsi.moreResults")}
+              </p>
+            ) : null}
+
+            {nothingFound ? (
+              <p
+                className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
+                aria-live="polite"
+              >
+                {t(emptyScopeKey, { query: plan.normalized })}
+              </p>
+            ) : null}
+
+            {/*
+             * An incomplete search that matched nothing. Never the not-found
+             * line: the customer may exist beyond where the scan stopped.
+             */}
+            {boundedNoMatch ? (
+              <p
+                className="text-body-sm rounded-2xl border border-dashed border-border-default px-4 py-4 text-text-secondary"
+                aria-live="polite"
+              >
+                {t("apsi.empty.bounded")}
+              </p>
+            ) : null}
+
+            <section className="border-t border-border-default pt-4">
+              <h3 className="text-label px-1 pb-2 text-text-muted">{t("apsi.openDomain")}</h3>
+              <ShortcutGroups
+                groups={orderedGroups}
+                onRoute={onRoute}
+                onCameraScan={openCameraScan}
+              />
+            </section>
+          </div>
+        )}
+      </BottomSheet>
+
+      {/* A sibling, never nested: see openCameraScan. */}
+      <CameraScanSheet open={cameraOpen} onOpenChange={onCameraOpenChange} onCode={onScannedCode} />
+    </>
   );
 }
 
@@ -337,9 +372,11 @@ function orderGroups(
 function ShortcutGroups({
   groups,
   onRoute,
+  onCameraScan,
 }: {
   groups: readonly MobileNavSheetGroup[];
   onRoute: (to: MobileNavRoute) => void;
+  onCameraScan: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -358,7 +395,12 @@ function ShortcutGroups({
           <h3 className="text-label px-1 pb-2 text-text-muted">{t(group.titleKey)}</h3>
           <div className="list-enter space-y-2">
             {group.actions.map((action) => (
-              <ShortcutRow key={action.id} action={action} onRoute={onRoute} />
+              <ShortcutRow
+                key={action.id}
+                action={action}
+                onRoute={onRoute}
+                onCameraScan={onCameraScan}
+              />
             ))}
           </div>
         </section>
@@ -370,12 +412,21 @@ function ShortcutGroups({
 function ShortcutRow({
   action,
   onRoute,
+  onCameraScan,
 }: {
   action: MobileNavActionConfig;
   onRoute: (to: MobileNavRoute) => void;
+  onCameraScan: () => void;
 }) {
   const { t } = useTranslation();
-  const disabled = action.availability === "coming-soon";
+  const behavior = askShortcutBehavior(action);
+  const disabled = behavior.kind === "unavailable";
+  const onClick =
+    behavior.kind === "route"
+      ? () => onRoute(behavior.to)
+      : behavior.kind === "camera-scan"
+        ? onCameraScan
+        : undefined;
 
   return (
     <button
@@ -386,7 +437,7 @@ function ShortcutRow({
           ? "cursor-not-allowed border-border-default bg-surface-secondary/75 text-text-muted"
           : "border-border-default bg-surface-primary text-text-primary hover:bg-surface-secondary/72 active:bg-surface-secondary",
       )}
-      onClick={action.to ? () => onRoute(action.to!) : undefined}
+      onClick={onClick}
       disabled={disabled}
       aria-disabled={disabled}
     >
@@ -409,7 +460,7 @@ function ShortcutRow({
             </span>
           ) : (
             <span className="rounded-full bg-action-primary-soft px-2 py-0.5 text-[10px] font-medium leading-4 text-action-primary">
-              {t("nav.opensExisting")}
+              {t(behavior.kind === "camera-scan" ? "nav.availableNow" : "nav.opensExisting")}
             </span>
           )}
         </span>
