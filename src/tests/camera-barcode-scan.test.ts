@@ -165,10 +165,10 @@ describe("decoder choice (unsupported-API fallback)", () => {
     ).toBe("native");
   });
 
-  it("requests only formats the platform has, and never QR (label QR is not a barcode)", () => {
+  it("requests only formats the platform has, including QR for parcel code scanning", () => {
     const req = nativeFormatsToRequest(["code_128", "ean_13", "qr_code", "aztec"]);
-    expect(req).toEqual(["code_128", "ean_13"]);
-    expect(CAMERA_SCAN_FORMATS as readonly string[]).not.toContain("qr_code");
+    expect(req).toEqual(["code_128", "ean_13", "qr_code"]);
+    expect(CAMERA_SCAN_FORMATS as readonly string[]).toContain("qr_code");
   });
 });
 

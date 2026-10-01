@@ -195,13 +195,16 @@ export async function getParcelLabelData(
     throw printBlockError(printability.reason);
   }
 
-  const [items, businessName, delivery, totals] = await Promise.all([
+  const [items, businessName, delivery, totals, parcelCode] = await Promise.all([
     ordersRepo.listOrderItems(ctx.organizationId, orderId),
     repo.organizationName(ctx.organizationId),
     ctx.can("delivery.read")
       ? repo.latestDeliveryForOrder(ctx.organizationId, orderId)
       : Promise.resolve(null),
     repo.orderPaymentTotals(ctx.organizationId, orderId),
+    import("@/server/parcels/service").then((m) =>
+      m.getParcelCodeForOrder(ctx.organizationId, orderId),
+    ),
   ]);
 
   // The destination is the ORDER's snapshot, never the mutable customer default.
@@ -256,5 +259,6 @@ export async function getParcelLabelData(
           status: delivery.status,
         }
       : null,
+    parcelCode,
   };
 }

@@ -53,6 +53,12 @@ export interface ParcelLabelInput {
   reprint: boolean;
   payment: { paid: boolean; collect: Money | null };
   delivery: { providerName: string; trackingNumber: string | null; status: string } | null;
+  /**
+   * When present, the label QR encodes this parcel code (APSA:PCL:v1:<token>)
+   * instead of the order-id reference. Null for orders that do not yet have a
+   * parcel identity (backward-compatible).
+   */
+  parcelCode?: string | null;
 }
 
 export interface ParcelLabelLine {
@@ -110,7 +116,7 @@ export function buildParcelLabel(
   const shown = allLines.slice(0, maxLines);
   const overflowCount = Math.max(0, allLines.length - shown.length);
 
-  const payload = orderQrPayload(input.order.id);
+  const payload = input.parcelCode ?? orderQrPayload(input.order.id);
 
   return {
     merchantName: input.merchant.businessName,

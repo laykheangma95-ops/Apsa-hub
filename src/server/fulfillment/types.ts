@@ -89,4 +89,10 @@ export interface ParcelLabelData {
     trackingNumber: string | null;
     status: string;
   } | null;
+  /**
+   * The permanent opaque parcel code (APSA:PCL:v1:<token>) when the order has
+   * an active parcel identity, or null for orders without one. The label builder
+   * uses this to encode the parcel code in the QR instead of the order UUID.
+   */
+  parcelCode: string | null;
 }
