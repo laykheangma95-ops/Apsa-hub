@@ -132,7 +132,6 @@ export const UI_PERMISSION_KEYS = [
   "fulfillment.print_label",
   // Parcel identity — src/server/parcels/service.ts (migration 050).
   "fulfillment.create_parcel",
-  "fulfillment.scan_parcel",
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",

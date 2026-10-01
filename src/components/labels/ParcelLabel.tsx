@@ -99,16 +99,10 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-[1mm]">
-          <div
-            className="size-[24mm]"
-            dangerouslySetInnerHTML={{ __html: vm.qr.svg }}
-          />
+          <div className="size-[24mm]" dangerouslySetInnerHTML={{ __html: vm.qr.svg }} />
           {vm.code128 ? (
             <div className="h-[10mm] w-[24mm]">
-              <div
-                className="h-full w-full"
-                dangerouslySetInnerHTML={{ __html: vm.code128.svg }}
-              />
+              <div className="h-full w-full" dangerouslySetInnerHTML={{ __html: vm.code128.svg }} />
             </div>
           ) : null}
         </div>

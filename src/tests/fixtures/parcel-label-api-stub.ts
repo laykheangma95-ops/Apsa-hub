@@ -34,4 +34,8 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
   };
 }
 
+export async function createParcel(_orderId: string): Promise<{ parcelCode: string }> {
+  return { parcelCode: "APSA:PCL:v1:stub_parcel_code_abc" };
+}
+
 export async function updateOrderShipping(): Promise<void> {}

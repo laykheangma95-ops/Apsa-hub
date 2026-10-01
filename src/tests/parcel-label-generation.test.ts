@@ -10,10 +10,7 @@
 import { describe, it, expect } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { buildParcelLabel, type ParcelLabelInput } from "../lib/labels/parcel-label";
-import {
-  PARCEL_CODE_PREFIX,
-  isValidParcelCode,
-} from "../lib/barcode/parcel-code";
+import { PARCEL_CODE_PREFIX, isValidParcelCode } from "../lib/barcode/parcel-code";
 import { isCode128Encodable } from "../lib/barcode/code128";
 import { parseApsaQrPayload } from "../lib/barcode/payload";
 
@@ -126,35 +123,31 @@ describe("Code 128 barcode", () => {
   });
 
   it("is null when includeCode128 is false", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: false }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: false }), {
+      now: FIXED_NOW,
+    });
     expect(vm.code128).toBeNull();
   });
 
   it("is present when includeCode128 is true and parcel code exists", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     expect(vm.code128).not.toBeNull();
   });
 
   it("encodes the same parcel identity as the QR", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     expect(vm.code128!.payload).toBe(vm.qr.payload);
     expect(vm.code128!.payload).toBe(PARCEL_CODE);
   });
 
   it("Code 128 SVG is a valid SVG string", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     expect(vm.code128!.svg).toContain("<svg");
     expect(vm.code128!.svg).toContain("</svg>");
   });
@@ -167,10 +160,9 @@ describe("Code 128 barcode", () => {
   });
 
   it("falls back to order QR payload when no parcel code", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: null, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: null, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     expect(vm.code128).not.toBeNull();
     const parsed = parseApsaQrPayload(vm.code128!.payload);
     expect(parsed).toEqual({ kind: "order", id: ORDER_ID });
@@ -310,14 +302,12 @@ describe("reprint flag", () => {
   });
 
   it("reprint does not change the parcel identity", () => {
-    const first = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, reprint: false }),
-      { now: FIXED_NOW },
-    );
-    const reprint = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, reprint: true }),
-      { now: FIXED_NOW },
-    );
+    const first = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, reprint: false }), {
+      now: FIXED_NOW,
+    });
+    const reprint = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, reprint: true }), {
+      now: FIXED_NOW,
+    });
     expect(first.parcelCode).toBe(reprint.parcelCode);
     expect(first.qr.payload).toBe(reprint.qr.payload);
   });
@@ -338,30 +328,27 @@ describe("security: no PII in barcodes", () => {
   ];
 
   it("QR payload contains no PII from the label", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     for (const pii of PII_STRINGS) {
       expect(vm.qr.payload).not.toContain(pii);
     }
   });
 
   it("Code128 payload contains no PII from the label", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     for (const pii of PII_STRINGS) {
       expect(vm.code128!.payload).not.toContain(pii);
     }
   });
 
   it("QR and Code128 encode exactly the same payload", () => {
-    const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }),
-      { now: FIXED_NOW },
-    );
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+      now: FIXED_NOW,
+    });
     expect(vm.qr.payload).toBe(vm.code128!.payload);
   });
 

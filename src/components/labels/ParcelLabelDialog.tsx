@@ -242,10 +242,7 @@ export function ParcelLabelDialog({
           </div>
         ) : (
           confirmed.map((d) => (
-            <ParcelLabel
-              key={d.order.id}
-              vm={buildParcelLabel({ ...d, includeCode128 })}
-            />
+            <ParcelLabel key={d.order.id} vm={buildParcelLabel({ ...d, includeCode128 })} />
           ))
         )}
       </LabelSheet>
