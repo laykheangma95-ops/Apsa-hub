@@ -1925,8 +1925,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // none of its own, and a new file beyond 047 would move this pin and fail
     // the test on purpose.
     // 048 (explicit service_role table grants) is an unrelated environment fix;
-    // 049 (Analytics status-count RPC) belongs to the Analytics performance phase.
-    expect(migrations.at(-1)).toBe("049_analytics_period_status_counts.sql");
+    // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
+    // 050 (parcel identity) belongs to the fulfillment parcels phase.
+    expect(migrations.at(-1)).toBe("050_parcels.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

@@ -22,9 +22,9 @@
  *
  * code_128 is what APSA prints on its own labels (src/lib/barcode/code128.ts);
  * the EAN/UPC family is what manufacturer packaging carries; code_39 and itf
- * cover older retail and carton stock. QR is deliberately absent: APSA's label
- * QR carries a variant/order reference payload, not the barcode, so decoding it
- * here would send a value the barcode lookup can never match.
+ * cover older retail and carton stock. qr_code is included so the camera can
+ * decode APSA parcel QRs (APSA:PCL:v1:<token>) and variant/order QRs — the
+ * scan router (src/lib/barcode/scan-router.ts) classifies the decoded value.
  */
 export const CAMERA_SCAN_FORMATS = [
   "code_128",
@@ -34,6 +34,7 @@ export const CAMERA_SCAN_FORMATS = [
   "upc_e",
   "code_39",
   "itf",
+  "qr_code",
 ] as const;
 
 export type CameraScanFormat = (typeof CAMERA_SCAN_FORMATS)[number];

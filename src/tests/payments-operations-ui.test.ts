@@ -917,8 +917,9 @@ describe("production boundary", () => {
     const beyond047 = migrations.filter((file) => {
       const prefix = Number.parseInt(file.slice(0, 3), 10);
       // 048 (explicit service_role table grants) is an unrelated environment fix;
-      // 049 (Analytics status-count RPC) belongs to the Analytics performance phase.
-      return Number.isFinite(prefix) && prefix > 49;
+      // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
+      // 050 (parcel identity) belongs to the fulfillment parcels phase.
+      return Number.isFinite(prefix) && prefix > 50;
     });
     expect(beyond047).toEqual([]);
   });

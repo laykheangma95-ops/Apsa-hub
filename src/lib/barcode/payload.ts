@@ -21,7 +21,7 @@
 
 export const APSA_QR_SCHEME = "apsa";
 
-export type ApsaQrKind = "variant" | "order";
+export type ApsaQrKind = "variant" | "order" | "parcel";
 
 export interface ApsaQrRef {
   kind: ApsaQrKind;
@@ -70,7 +70,7 @@ export function parseApsaQrPayload(payload: string): ApsaQrRef | null {
   if (slash <= 0) return null;
   const kind = rest.slice(0, slash);
   const id = rest.slice(slash + 1);
-  if (kind !== "variant" && kind !== "order") return null;
+  if (kind !== "variant" && kind !== "order" && kind !== "parcel") return null;
   if (!UUID_RE.test(id)) return null;
   return { kind, id: id.toLowerCase() };
 }

@@ -41,3 +41,13 @@ export {
   type QrEcLevel,
   type QrRenderOptions,
 } from "./qr";
+
+export {
+  PARCEL_CODE_PREFIX,
+  PARCEL_CODE_TOKEN_LENGTH,
+  PARCEL_CODE_LENGTH,
+  isValidParcelCode,
+  looksLikeParcelCode,
+} from "./parcel-code";
+
+export { classifyScan, type ScanIdentity } from "./scan-router";

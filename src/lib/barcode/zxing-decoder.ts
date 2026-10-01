@@ -33,6 +33,8 @@ function zxingFormat(lib: typeof ZXing, format: CameraScanFormat): ZXing.Barcode
       return F.CODE_39;
     case "itf":
       return F.ITF;
+    case "qr_code":
+      return F.QR_CODE;
   }
 }
 
@@ -40,10 +42,11 @@ export function createZxingDecoder(
   lib: typeof ZXing,
   formats: readonly CameraScanFormat[],
 ): LuminanceDecoder {
+  const oneD = formats.filter((f) => f !== "qr_code");
   const hints = new Map<ZXing.DecodeHintType, unknown>();
   hints.set(
     lib.DecodeHintType.POSSIBLE_FORMATS,
-    formats.map((f) => zxingFormat(lib, f)),
+    oneD.map((f) => zxingFormat(lib, f)),
   );
   // Phone frames are rarely square-on; TRY_HARDER scans more rows and also
   // tries the frame rotated, which is what makes a hand-held 1D scan work.
