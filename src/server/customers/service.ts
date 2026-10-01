@@ -160,13 +160,9 @@ export async function getCustomer360(
 
   let activeConversationId: string | null = null;
   if (ctx.can("messages.read")) {
-    const { findActiveConversationIdByCustomer } = await import(
-      "@/server/conversations/repository"
-    );
-    activeConversationId = await findActiveConversationIdByCustomer(
-      ctx.organizationId,
-      customerId,
-    );
+    const { findActiveConversationIdByCustomer } =
+      await import("@/server/conversations/repository");
+    activeConversationId = await findActiveConversationIdByCustomer(ctx.organizationId, customerId);
   }
 
   return {

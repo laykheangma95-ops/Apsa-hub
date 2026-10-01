@@ -50,9 +50,8 @@ export const findCustomerConversationFn = createServerFn()
     const customer = await customerRepo.findCustomerById(authCtx.organizationId, data.customerId);
     if (!customer) return { conversationId: null };
 
-    const { findActiveConversationIdByCustomer } = await import(
-      "@/server/conversations/repository"
-    );
+    const { findActiveConversationIdByCustomer } =
+      await import("@/server/conversations/repository");
     const conversationId = await findActiveConversationIdByCustomer(
       authCtx.organizationId,
       data.customerId,
