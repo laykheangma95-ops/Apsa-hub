@@ -71,10 +71,7 @@ export async function createParcelForOrder(
   if (!order) throw publicError("Order not found", 404);
 
   if (order.lifecycle_status !== "confirmed") {
-    throw publicError(
-      "A parcel identity can only be created for a confirmed order",
-      409,
-    );
+    throw publicError("A parcel identity can only be created for a confirmed order", 409);
   }
 
   const existing = await repo.findActiveParcelByOrder(ctx.organizationId, orderId);
@@ -83,12 +80,7 @@ export async function createParcelForOrder(
   const parcelCode = generateParcelCode();
 
   try {
-    const row = await repo.insertParcel(
-      ctx.organizationId,
-      orderId,
-      parcelCode,
-      ctx.userId,
-    );
+    const row = await repo.insertParcel(ctx.organizationId, orderId, parcelCode, ctx.userId);
     return rowToParcel(row);
   } catch (err: unknown) {
     // Race: another request created the parcel between our check and insert.

@@ -8,6 +8,7 @@
  * Run: bun test src/tests/scan-router.test.ts
  */
 import { describe, it, expect } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { classifyScan, type ScanIdentity } from "../lib/barcode/scan-router";
 import { PARCEL_CODE_PREFIX, PARCEL_CODE_LENGTH } from "../lib/barcode/parcel-code";
 
@@ -15,7 +16,6 @@ const VARIANT_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const ORDER_UUID = "12345678-90ab-4cde-8f01-234567890abc";
 
 function makeParcelCode(): string {
-  const { randomBytes } = require("node:crypto");
   return `${PARCEL_CODE_PREFIX}${randomBytes(16).toString("base64url")}`;
 }
 

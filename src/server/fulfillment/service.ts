@@ -202,9 +202,9 @@ export async function getParcelLabelData(
       ? repo.latestDeliveryForOrder(ctx.organizationId, orderId)
       : Promise.resolve(null),
     repo.orderPaymentTotals(ctx.organizationId, orderId),
-    import("@/server/parcels/service").then((m) =>
-      m.getParcelCodeForOrder(ctx.organizationId, orderId),
-    ),
+    import("@/server/parcels/service")
+      .then((m) => m.getParcelCodeForOrder(ctx.organizationId, orderId))
+      .catch(() => null),
   ]);
 
   // The destination is the ORDER's snapshot, never the mutable customer default.

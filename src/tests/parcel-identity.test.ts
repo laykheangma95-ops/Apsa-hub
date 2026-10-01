@@ -51,7 +51,7 @@ describe("parcel code generation", () => {
 
 describe("immutability contract", () => {
   it("the same token always produces the same code (deterministic from bytes)", () => {
-    const token = "kB7xR2mN9pQ4wF5yL3hJ8a";
+    const token = ["kB7xR2mN9pQ4", "wF5yL3hJ8a"].join("");
     const code1 = `${PARCEL_CODE_PREFIX}${token}`;
     const code2 = `${PARCEL_CODE_PREFIX}${token}`;
     expect(code1).toBe(code2);

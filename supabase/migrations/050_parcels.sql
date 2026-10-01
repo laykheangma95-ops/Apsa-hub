@@ -86,6 +86,8 @@ BEGIN
 END;
 $$;
 
+REVOKE EXECUTE ON FUNCTION public.check_parcel_cross_tenant_refs() FROM PUBLIC, anon, authenticated;
+
 CREATE TRIGGER parcel_cross_tenant_refs_check
   BEFORE INSERT OR UPDATE ON public.parcels
   FOR EACH ROW EXECUTE FUNCTION public.check_parcel_cross_tenant_refs();
@@ -107,6 +109,8 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+REVOKE EXECUTE ON FUNCTION public.check_parcel_code_immutable() FROM PUBLIC, anon, authenticated;
 
 CREATE TRIGGER parcel_code_immutable_check
   BEFORE UPDATE ON public.parcels

@@ -40,7 +40,9 @@ export async function findActiveParcelByOrder(
 ): Promise<ParcelRow | null> {
   const { data, error } = await db
     .from("parcels")
-    .select("id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at")
+    .select(
+      "id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at",
+    )
     .eq("organization_id", organizationId)
     .eq("order_id", orderId)
     .neq("status", "void")
@@ -57,7 +59,9 @@ export async function findParcelByCode(
 ): Promise<ParcelRow | null> {
   const { data, error } = await db
     .from("parcels")
-    .select("id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at")
+    .select(
+      "id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at",
+    )
     .eq("organization_id", organizationId)
     .eq("parcel_code", parcelCode)
     .limit(1);
@@ -82,7 +86,9 @@ export async function insertParcel(
       status: "created",
       created_by: createdBy,
     })
-    .select("id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at")
+    .select(
+      "id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at",
+    )
     .single();
 
   if (error) throw new Error(`insertParcel: ${errMessage(error)}`);
@@ -130,10 +136,7 @@ export async function findParcelWithOrder(
   };
 }
 
-export async function countOrderItems(
-  organizationId: string,
-  orderId: string,
-): Promise<number> {
+export async function countOrderItems(organizationId: string, orderId: string): Promise<number> {
   const { data, error } = await db
     .from("order_items")
     .select("quantity")

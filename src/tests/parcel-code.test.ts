@@ -7,6 +7,7 @@
  * Run: bun test src/tests/parcel-code.test.ts
  */
 import { describe, it, expect } from "bun:test";
+import { randomBytes } from "node:crypto";
 import {
   PARCEL_CODE_PREFIX,
   PARCEL_CODE_LENGTH,
@@ -102,7 +103,6 @@ describe("server code generation produces valid codes", () => {
   it("crypto.randomBytes(16).toString('base64url') is 22 chars", () => {
     // Simulating what the server does — 16 bytes → base64url is always 22 chars
     // (128 bits / 6 bits per char = 21.33, padded to 22 without trailing =)
-    const { randomBytes } = require("node:crypto");
     for (let i = 0; i < 100; i++) {
       const token = randomBytes(16).toString("base64url");
       expect(token.length).toBe(22);
@@ -112,7 +112,6 @@ describe("server code generation produces valid codes", () => {
   });
 
   it("generates unique codes (100 codes, no collisions)", () => {
-    const { randomBytes } = require("node:crypto");
     const codes = new Set<string>();
     for (let i = 0; i < 100; i++) {
       const token = randomBytes(16).toString("base64url");

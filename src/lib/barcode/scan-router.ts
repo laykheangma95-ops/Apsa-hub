@@ -43,9 +43,7 @@ export function classifyScan(raw: string): ScanIdentity {
 
   // 1. APSA parcel code — checked first because it also starts with "APSA"
   if (looksLikeParcelCode(raw)) {
-    return isValidParcelCode(raw)
-      ? { kind: "apsa-parcel", code: raw }
-      : { kind: "unknown", raw };
+    return isValidParcelCode(raw) ? { kind: "apsa-parcel", code: raw } : { kind: "unknown", raw };
   }
 
   // 2. APSA QR payloads (apsa:variant/<uuid> or apsa:order/<uuid>)

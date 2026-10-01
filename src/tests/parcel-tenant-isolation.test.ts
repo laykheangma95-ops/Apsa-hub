@@ -40,7 +40,10 @@ const STORED_PARCEL: MockParcelRow = {
   orders: { order_number: "APSA-2026-001048" },
 };
 
-function simulateResolve(orgId: string, code: string): {
+function simulateResolve(
+  orgId: string,
+  code: string,
+): {
   parcelId: string;
   parcelCode: string;
   orderId: string;
@@ -50,10 +53,7 @@ function simulateResolve(orgId: string, code: string): {
   if (!isValidParcelCode(code)) return null;
 
   // Simulate org-scoped DB lookup: only return if org matches
-  if (
-    STORED_PARCEL.parcel_code === code &&
-    STORED_PARCEL.organization_id === orgId
-  ) {
+  if (STORED_PARCEL.parcel_code === code && STORED_PARCEL.organization_id === orgId) {
     return {
       parcelId: STORED_PARCEL.id,
       parcelCode: STORED_PARCEL.parcel_code,

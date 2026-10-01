@@ -50,10 +50,7 @@ export const resolveParcelCodeFn = createServerFn()
   .validator((data: unknown) =>
     z
       .object({
-        code: z
-          .string()
-          .min(1, "Code is required")
-          .max(100, "Code too long"),
+        code: z.string().min(1, "Code is required").max(100, "Code too long"),
       })
       .parse(data),
   )
