@@ -666,6 +666,27 @@ export async function createParcel(
   return createParcelFn({ data: { orderId } });
 }
 
+/* ------------------------------ Scan identity router --------------------- */
+
+export type ScanResolutionType = "product" | "parcel" | "variant" | "order" | "unknown";
+
+export interface ScanResolutionResult {
+  type: ScanResolutionType;
+  payload: string;
+  metadata: Record<string, string> | null;
+}
+
+/**
+ * Server-authoritative scan identity router — the single entry point for every
+ * barcode/QR scan in APSA. The server normalizes, classifies, and resolves
+ * against the caller's org. Returns a typed result; never throws for an
+ * unrecognised scan (returns type "unknown" instead).
+ */
+export async function resolveScan(raw: string): Promise<ScanResolutionResult> {
+  const { resolveScanFn } = await import("@/api/scan");
+  return resolveScanFn({ data: { raw } }) as Promise<ScanResolutionResult>;
+}
+
 /**
  * Set / confirm / correct an order's shipping destination snapshot (migration
  * 047). The server requires orders.update and refuses once fulfillment is
