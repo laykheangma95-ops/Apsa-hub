@@ -13,7 +13,6 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccessDeniedRouteImport } from './routes/access-denied'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as DesignRouteImport } from './routes/design'
-import { Route as DesignInboxSimulatorRouteImport } from './routes/design.inbox-simulator'
 import { Route as DesignMascotRouteImport } from './routes/design-mascot'
 import { Route as DesignStatusBadgeRouteImport } from './routes/design-status-badge'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
@@ -34,6 +33,7 @@ import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppProductsRouteImport } from './routes/app.products'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppTeamRouteImport } from './routes/app.team'
+import { Route as DesignInboxSimulatorRouteImport } from './routes/design.inbox-simulator'
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIndexRouteImport } from './routes/app.customers.index'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
@@ -41,6 +41,7 @@ import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
 import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventory.$variantId'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
+import { Route as AppParcelsCodeRouteImport } from './routes/app.parcels.$code'
 import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
 import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
 
@@ -63,11 +64,6 @@ const DesignRoute = DesignRouteImport.update({
   id: '/design',
   path: '/design',
   getParentRoute: () => rootRouteImport,
-} as any)
-const DesignInboxSimulatorRoute = DesignInboxSimulatorRouteImport.update({
-  id: '/inbox-simulator',
-  path: '/inbox-simulator',
-  getParentRoute: () => DesignRoute,
 } as any)
 const DesignMascotRoute = DesignMascotRouteImport.update({
   id: '/design-mascot',
@@ -169,6 +165,11 @@ const AppTeamRoute = AppTeamRouteImport.update({
   path: '/team',
   getParentRoute: () => AppRoute,
 } as any)
+const DesignInboxSimulatorRoute = DesignInboxSimulatorRouteImport.update({
+  id: '/inbox-simulator',
+  path: '/inbox-simulator',
+  getParentRoute: () => DesignRoute,
+} as any)
 const InviteTokenRoute = InviteTokenRouteImport.update({
   id: '/invite/$token',
   path: '/invite/$token',
@@ -204,6 +205,11 @@ const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppOrdersRoute,
 } as any)
+const AppParcelsCodeRoute = AppParcelsCodeRouteImport.update({
+  id: '/parcels/$code',
+  path: '/parcels/$code',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppPaymentsIdRoute = AppPaymentsIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -220,7 +226,6 @@ export interface FileRoutesByFullPath {
   '/access-denied': typeof AccessDeniedRoute
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRouteWithChildren
-  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -240,6 +245,7 @@ export interface FileRoutesByFullPath {
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
@@ -247,6 +253,7 @@ export interface FileRoutesByFullPath {
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers/': typeof AppCustomersIndexRoute
@@ -255,7 +262,6 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/access-denied': typeof AccessDeniedRoute
   '/design': typeof DesignRouteWithChildren
-  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -275,6 +281,7 @@ export interface FileRoutesByTo {
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/invite/$token': typeof InviteTokenRoute
   '/app': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
@@ -282,6 +289,7 @@ export interface FileRoutesByTo {
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers': typeof AppCustomersIndexRoute
@@ -292,7 +300,6 @@ export interface FileRoutesById {
   '/access-denied': typeof AccessDeniedRoute
   '/app': typeof AppRouteWithChildren
   '/design': typeof DesignRouteWithChildren
-  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/design-mascot': typeof DesignMascotRoute
   '/design-status-badge': typeof DesignStatusBadgeRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -312,6 +319,7 @@ export interface FileRoutesById {
   '/app/products': typeof AppProductsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
+  '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
   '/invite/$token': typeof InviteTokenRoute
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
@@ -319,6 +327,7 @@ export interface FileRoutesById {
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers/': typeof AppCustomersIndexRoute
@@ -330,7 +339,6 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/app'
     | '/design'
-    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -350,6 +358,7 @@ export interface FileRouteTypes {
     | '/app/products'
     | '/app/settings'
     | '/app/team'
+    | '/design/inbox-simulator'
     | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
@@ -357,6 +366,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
     | '/app/customers/'
@@ -365,7 +375,6 @@ export interface FileRouteTypes {
     | '/'
     | '/access-denied'
     | '/design'
-    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -385,6 +394,7 @@ export interface FileRouteTypes {
     | '/app/products'
     | '/app/settings'
     | '/app/team'
+    | '/design/inbox-simulator'
     | '/invite/$token'
     | '/app'
     | '/app/customers/$id'
@@ -392,6 +402,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
     | '/app/customers'
@@ -401,7 +412,6 @@ export interface FileRouteTypes {
     | '/access-denied'
     | '/app'
     | '/design'
-    | '/design/inbox-simulator'
     | '/design-mascot'
     | '/design-status-badge'
     | '/forgot-password'
@@ -421,6 +431,7 @@ export interface FileRouteTypes {
     | '/app/products'
     | '/app/settings'
     | '/app/team'
+    | '/design/inbox-simulator'
     | '/invite/$token'
     | '/app/'
     | '/app/customers/$id'
@@ -428,6 +439,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
+    | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
     | '/app/customers/'
@@ -478,13 +490,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/design'
       preLoaderRoute: typeof DesignRouteImport
       parentRoute: typeof rootRouteImport
-    }
-    '/design/inbox-simulator': {
-      id: '/design/inbox-simulator'
-      path: '/inbox-simulator'
-      fullPath: '/design/inbox-simulator'
-      preLoaderRoute: typeof DesignInboxSimulatorRouteImport
-      parentRoute: typeof DesignRoute
     }
     '/design-mascot': {
       id: '/design-mascot'
@@ -626,6 +631,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamRouteImport
       parentRoute: typeof AppRoute
     }
+    '/design/inbox-simulator': {
+      id: '/design/inbox-simulator'
+      path: '/inbox-simulator'
+      fullPath: '/design/inbox-simulator'
+      preLoaderRoute: typeof DesignInboxSimulatorRouteImport
+      parentRoute: typeof DesignRoute
+    }
     '/invite/$token': {
       id: '/invite/$token'
       path: '/invite/$token'
@@ -675,6 +687,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrdersIdRouteImport
       parentRoute: typeof AppOrdersRoute
     }
+    '/app/parcels/$code': {
+      id: '/app/parcels/$code'
+      path: '/parcels/$code'
+      fullPath: '/app/parcels/$code'
+      preLoaderRoute: typeof AppParcelsCodeRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/payments/$id': {
       id: '/app/payments/$id'
       path: '/$id'
@@ -691,16 +710,6 @@ declare module '@tanstack/react-router' {
     }
   }
 }
-
-interface DesignRouteChildren {
-  DesignInboxSimulatorRoute: typeof DesignInboxSimulatorRoute
-}
-
-const DesignRouteChildren: DesignRouteChildren = {
-  DesignInboxSimulatorRoute: DesignInboxSimulatorRoute,
-}
-
-const DesignRouteWithChildren = DesignRoute._addFileChildren(DesignRouteChildren)
 
 interface AppDeliveriesRouteChildren {
   AppDeliveriesIdRoute: typeof AppDeliveriesIdRoute
@@ -788,6 +797,7 @@ interface AppRouteChildren {
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCustomersIdRoute: typeof AppCustomersIdRoute
+  AppParcelsCodeRoute: typeof AppParcelsCodeRoute
   AppCustomersIndexRoute: typeof AppCustomersIndexRoute
 }
 
@@ -805,10 +815,22 @@ const AppRouteChildren: AppRouteChildren = {
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,
   AppCustomersIdRoute: AppCustomersIdRoute,
+  AppParcelsCodeRoute: AppParcelsCodeRoute,
   AppCustomersIndexRoute: AppCustomersIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
+
+interface DesignRouteChildren {
+  DesignInboxSimulatorRoute: typeof DesignInboxSimulatorRoute
+}
+
+const DesignRouteChildren: DesignRouteChildren = {
+  DesignInboxSimulatorRoute: DesignInboxSimulatorRoute,
+}
+
+const DesignRouteWithChildren =
+  DesignRoute._addFileChildren(DesignRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
