@@ -43,6 +43,7 @@ import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventor
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
 import { Route as AppParcelsCodeRouteImport } from './routes/app.parcels.$code'
 import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
+import { Route as AppPickOrderIdRouteImport } from './routes/app.pick.$orderId'
 import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -215,6 +216,11 @@ const AppPaymentsIdRoute = AppPaymentsIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppPaymentsRoute,
 } as any)
+const AppPickOrderIdRoute = AppPickOrderIdRouteImport.update({
+  id: '/pick/$orderId',
+  path: '/pick/$orderId',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppProductsIdRoute = AppProductsIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -255,6 +261,7 @@ export interface FileRoutesByFullPath {
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/pick/$orderId': typeof AppPickOrderIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers/': typeof AppCustomersIndexRoute
 }
@@ -291,6 +298,7 @@ export interface FileRoutesByTo {
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/pick/$orderId': typeof AppPickOrderIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers': typeof AppCustomersIndexRoute
 }
@@ -329,6 +337,7 @@ export interface FileRoutesById {
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
+  '/app/pick/$orderId': typeof AppPickOrderIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
   '/app/customers/': typeof AppCustomersIndexRoute
 }
@@ -368,6 +377,7 @@ export interface FileRouteTypes {
     | '/app/orders/$id'
     | '/app/parcels/$code'
     | '/app/payments/$id'
+    | '/app/pick/$orderId'
     | '/app/products/$id'
     | '/app/customers/'
   fileRoutesByTo: FileRoutesByTo
@@ -404,6 +414,7 @@ export interface FileRouteTypes {
     | '/app/orders/$id'
     | '/app/parcels/$code'
     | '/app/payments/$id'
+    | '/app/pick/$orderId'
     | '/app/products/$id'
     | '/app/customers'
   id:
@@ -441,6 +452,7 @@ export interface FileRouteTypes {
     | '/app/orders/$id'
     | '/app/parcels/$code'
     | '/app/payments/$id'
+    | '/app/pick/$orderId'
     | '/app/products/$id'
     | '/app/customers/'
   fileRoutesById: FileRoutesById
@@ -701,6 +713,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppPaymentsIdRouteImport
       parentRoute: typeof AppPaymentsRoute
     }
+    '/app/pick/$orderId': {
+      id: '/app/pick/$orderId'
+      path: '/pick/$orderId'
+      fullPath: '/app/pick/$orderId'
+      preLoaderRoute: typeof AppPickOrderIdRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/products/$id': {
       id: '/app/products/$id'
       path: '/$id'
@@ -798,6 +817,7 @@ interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
   AppCustomersIdRoute: typeof AppCustomersIdRoute
   AppParcelsCodeRoute: typeof AppParcelsCodeRoute
+  AppPickOrderIdRoute: typeof AppPickOrderIdRoute
   AppCustomersIndexRoute: typeof AppCustomersIndexRoute
 }
 
@@ -816,6 +836,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
   AppCustomersIdRoute: AppCustomersIdRoute,
   AppParcelsCodeRoute: AppParcelsCodeRoute,
+  AppPickOrderIdRoute: AppPickOrderIdRoute,
   AppCustomersIndexRoute: AppCustomersIndexRoute,
 }
 

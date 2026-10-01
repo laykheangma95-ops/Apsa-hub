@@ -455,6 +455,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const showPrintLabel =
     canPrintParcelLabel(order.lifecycleStatus) &&
     capabilities.canSensitive("fulfillment.print_label");
+  const showPickButton =
+    order.lifecycleStatus === "confirmed" &&
+    (order.fulfillmentStatus === "unfulfilled" || order.fulfillmentStatus === "processing") &&
+    capabilities.can("orders.read");
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
 
@@ -823,17 +827,28 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : null}
         </Section>
 
-        {showPrintLabel ? (
+        {showPrintLabel || showPickButton ? (
           <Section title={t("order.fulfillment")}>
-            <Button
-              type="button"
-              variant="outline"
-              className="tap-target h-11 w-full gap-2 rounded-xl"
-              onClick={() => setParcelLabelOpen(true)}
-            >
-              <Printer className="size-4" aria-hidden />
-              {t("order.printParcelLabel")}
-            </Button>
+            {showPickButton ? (
+              <Link
+                to="/app/pick/$orderId"
+                params={{ orderId: id }}
+                className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
+              >
+                {t("order.startPicking")}
+              </Link>
+            ) : null}
+            {showPrintLabel ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="tap-target h-11 w-full gap-2 rounded-xl"
+                onClick={() => setParcelLabelOpen(true)}
+              >
+                <Printer className="size-4" aria-hidden />
+                {t("order.printParcelLabel")}
+              </Button>
+            ) : null}
           </Section>
         ) : null}
 
