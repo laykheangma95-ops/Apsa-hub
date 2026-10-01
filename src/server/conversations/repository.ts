@@ -436,6 +436,25 @@ export async function createMessage(
   return (Array.isArray(data) ? data[0] : data) as MessageRow;
 }
 
+// ── Active conversation lookup by customer ───────────────────────────────────
+
+export async function findActiveConversationIdByCustomer(
+  organizationId: string,
+  customerId: string,
+): Promise<string | null> {
+  const { data, error } = await db
+    .from("conversations")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("customer_id", customerId)
+    .order("last_message_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw databaseError(error);
+  return data ? (data as { id: string }).id : null;
+}
+
 // ── Customer display-name batch lookup (avoids N+1 in the Inbox list) ──────────
 
 export async function findCustomerDisplayNames(

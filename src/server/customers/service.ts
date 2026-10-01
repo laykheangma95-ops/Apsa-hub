@@ -104,7 +104,7 @@ export interface Customer360Result {
   /** Orders and events remain empty until their domains are productionized. */
   orders: never[];
   events: never[];
-  activeConversationId: null;
+  activeConversationId: string | null;
 }
 
 // ── Service functions ─────────────────────────────────────────────────────────
@@ -158,12 +158,19 @@ export async function getCustomer360(
     at: n.created_at,
   }));
 
+  let activeConversationId: string | null = null;
+  if (ctx.can("messages.read")) {
+    const { findActiveConversationIdByCustomer } =
+      await import("@/server/conversations/repository");
+    activeConversationId = await findActiveConversationIdByCustomer(ctx.organizationId, customerId);
+  }
+
   return {
     customer: profile,
     notes,
     orders: [],
     events: [],
-    activeConversationId: null,
+    activeConversationId,
   };
 }
 

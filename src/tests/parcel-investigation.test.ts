@@ -55,6 +55,13 @@ interface SimDelivery {
   orgId: string;
 }
 
+interface SimConversation {
+  id: string;
+  customerId: string;
+  lastMessageAt: string;
+  orgId: string;
+}
+
 interface SimCtx {
   orgId: string;
   permissions: Set<string>;
@@ -94,6 +101,7 @@ class SimStore {
   parcels: SimParcel[] = [];
   orders: SimOrder[] = [];
   deliveries: SimDelivery[] = [];
+  conversations: SimConversation[] = [];
 }
 
 function resolveParcel(
@@ -146,6 +154,24 @@ function resolveParcel(
   };
 }
 
+// ── Conversation lookup (mirrors server repository logic) ────────────────
+
+function findActiveConversationId(
+  store: SimStore,
+  orgId: string,
+  customerId: string | null,
+  permissions: Set<string>,
+): string | null {
+  if (!customerId) return null;
+  if (!permissions.has("messages.read") || !permissions.has("customers.read")) return null;
+
+  const conversations = store.conversations
+    .filter((c) => c.customerId === customerId && c.orgId === orgId)
+    .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+
+  return conversations[0]?.id ?? null;
+}
+
 // ── Navigation target derivation (mirrors page component logic) ────────────
 
 interface NavigationTarget {
@@ -154,7 +180,10 @@ interface NavigationTarget {
   enabled: boolean;
 }
 
-function deriveNavigationTargets(result: ParcelResolutionResult): NavigationTarget[] {
+function deriveNavigationTargets(
+  result: ParcelResolutionResult,
+  activeConversationId: string | null = null,
+): NavigationTarget[] {
   const targets: NavigationTarget[] = [
     {
       to: "/app/orders/$id",
@@ -179,11 +208,18 @@ function deriveNavigationTargets(result: ParcelResolutionResult): NavigationTarg
     });
   }
 
-  // Placeholder targets (always present, never enabled)
-  targets.push(
-    { to: "conversation", params: {}, enabled: false },
-    { to: "payment", params: {}, enabled: false },
-  );
+  if (activeConversationId) {
+    targets.push({
+      to: "/app/inbox/$id",
+      params: { id: activeConversationId },
+      enabled: true,
+    });
+  } else if (result.customer) {
+    targets.push({ to: "conversation", params: {}, enabled: false });
+  }
+
+  // Payment placeholder (always present, never enabled)
+  targets.push({ to: "payment", params: {}, enabled: false });
 
   return targets;
 }
@@ -524,7 +560,7 @@ describe("Parcel Investigation", () => {
   });
 
   describe("navigation targets → correct route params", () => {
-    it("derives all navigation targets for a fully populated parcel", () => {
+    it("derives all navigation targets for a fully populated parcel without conversation", () => {
       const store = makeStore();
       const orgId = uuid();
       const ctx = makeCtx(orgId);
@@ -556,6 +592,33 @@ describe("Parcel Investigation", () => {
       expect(paymentTarget!.enabled).toBe(false);
     });
 
+    it("derives conversation navigation when customer has a conversation", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const ctx = makeCtx(orgId, ["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+      const { parcelCode, customerId } = seedFullParcel(store, orgId);
+
+      const conversationId = uuid();
+      store.conversations.push({
+        id: conversationId,
+        customerId: customerId!,
+        lastMessageAt: new Date().toISOString(),
+        orgId,
+      });
+
+      const result = resolveParcel(store, ctx, parcelCode)!;
+      const activeConvId = findActiveConversationId(store, orgId, customerId, ctx.permissions);
+      const targets = deriveNavigationTargets(result, activeConvId);
+
+      const inboxTarget = targets.find((t) => t.to === "/app/inbox/$id");
+      expect(inboxTarget).toBeDefined();
+      expect(inboxTarget!.params.id).toBe(conversationId);
+      expect(inboxTarget!.enabled).toBe(true);
+
+      const placeholderConv = targets.find((t) => t.to === "conversation");
+      expect(placeholderConv).toBeUndefined();
+    });
+
     it("order target is always present", () => {
       const store = makeStore();
       const orgId = uuid();
@@ -573,7 +636,7 @@ describe("Parcel Investigation", () => {
       expect(orderTarget!.enabled).toBe(true);
     });
 
-    it("placeholder targets are always present but disabled", () => {
+    it("payment placeholder is always present but disabled", () => {
       const store = makeStore();
       const orgId = uuid();
       const ctx = makeCtx(orgId);
@@ -582,9 +645,38 @@ describe("Parcel Investigation", () => {
       const result = resolveParcel(store, ctx, parcelCode)!;
       const targets = deriveNavigationTargets(result);
 
-      const placeholders = targets.filter((t) => !t.enabled);
-      expect(placeholders.length).toBe(2);
-      expect(placeholders.map((t) => t.to).sort()).toEqual(["conversation", "payment"]);
+      const paymentTarget = targets.find((t) => t.to === "payment");
+      expect(paymentTarget).toBeDefined();
+      expect(paymentTarget!.enabled).toBe(false);
+    });
+
+    it("conversation placeholder shown when customer exists but has no conversation", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const ctx = makeCtx(orgId);
+      const { parcelCode } = seedFullParcel(store, orgId);
+
+      const result = resolveParcel(store, ctx, parcelCode)!;
+      const targets = deriveNavigationTargets(result, null);
+
+      const placeholderConv = targets.find((t) => t.to === "conversation");
+      expect(placeholderConv).toBeDefined();
+      expect(placeholderConv!.enabled).toBe(false);
+    });
+
+    it("conversation placeholder absent when no customer", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const ctx = makeCtx(orgId);
+      const { parcelCode } = seedFullParcel(store, orgId, { customerId: null });
+
+      const result = resolveParcel(store, ctx, parcelCode)!;
+      const targets = deriveNavigationTargets(result, null);
+
+      const conversationTargets = targets.filter(
+        (t) => t.to === "conversation" || t.to === "/app/inbox/$id",
+      );
+      expect(conversationTargets.length).toBe(0);
     });
   });
 
@@ -670,6 +762,151 @@ describe("Parcel Investigation", () => {
 
     it("classifies undefined result (no error) as null (still loading)", () => {
       expect(classifyInvestigationError(null, undefined)).toBeNull();
+    });
+  });
+
+  describe("customer ↔ conversation linkage", () => {
+    it("finds active conversation for a customer with conversations", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const customerId = uuid();
+      const conversationId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+
+      store.conversations.push({
+        id: conversationId,
+        customerId,
+        lastMessageAt: new Date().toISOString(),
+        orgId,
+      });
+
+      const result = findActiveConversationId(store, orgId, customerId, permissions);
+      expect(result).toBe(conversationId);
+    });
+
+    it("returns null for a customer without conversations", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const customerId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+
+      const result = findActiveConversationId(store, orgId, customerId, permissions);
+      expect(result).toBeNull();
+    });
+
+    it("returns the most recent conversation when multiple exist", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const customerId = uuid();
+      const olderConvId = uuid();
+      const newerConvId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+
+      store.conversations.push({
+        id: olderConvId,
+        customerId,
+        lastMessageAt: "2024-01-01T00:00:00.000Z",
+        orgId,
+      });
+      store.conversations.push({
+        id: newerConvId,
+        customerId,
+        lastMessageAt: "2024-06-01T00:00:00.000Z",
+        orgId,
+      });
+
+      const result = findActiveConversationId(store, orgId, customerId, permissions);
+      expect(result).toBe(newerConvId);
+    });
+
+    it("denies cross-org conversation access", () => {
+      const store = makeStore();
+      const orgA = uuid();
+      const orgB = uuid();
+      const customerId = uuid();
+      const conversationId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+
+      store.conversations.push({
+        id: conversationId,
+        customerId,
+        lastMessageAt: new Date().toISOString(),
+        orgId: orgA,
+      });
+
+      const result = findActiveConversationId(store, orgB, customerId, permissions);
+      expect(result).toBeNull();
+    });
+
+    it("returns null when customer ID is null", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+
+      const result = findActiveConversationId(store, orgId, null, permissions);
+      expect(result).toBeNull();
+    });
+
+    it("returns null when missing messages.read permission", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const customerId = uuid();
+      const conversationId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "customers.read"]);
+
+      store.conversations.push({
+        id: conversationId,
+        customerId,
+        lastMessageAt: new Date().toISOString(),
+        orgId,
+      });
+
+      const result = findActiveConversationId(store, orgId, customerId, permissions);
+      expect(result).toBeNull();
+    });
+
+    it("returns null when missing customers.read permission", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const customerId = uuid();
+      const conversationId = uuid();
+      const permissions = new Set(["fulfillment.scan_parcel", "messages.read"]);
+
+      store.conversations.push({
+        id: conversationId,
+        customerId,
+        lastMessageAt: new Date().toISOString(),
+        orgId,
+      });
+
+      const result = findActiveConversationId(store, orgId, customerId, permissions);
+      expect(result).toBeNull();
+    });
+
+    it("integrates with navigation targets: conversation link replaces placeholder", () => {
+      const store = makeStore();
+      const orgId = uuid();
+      const ctx = makeCtx(orgId, ["fulfillment.scan_parcel", "messages.read", "customers.read"]);
+      const { parcelCode, customerId } = seedFullParcel(store, orgId);
+
+      const conversationId = uuid();
+      store.conversations.push({
+        id: conversationId,
+        customerId: customerId!,
+        lastMessageAt: new Date().toISOString(),
+        orgId,
+      });
+
+      const result = resolveParcel(store, ctx, parcelCode)!;
+      const activeConvId = findActiveConversationId(store, orgId, customerId, ctx.permissions);
+      const targets = deriveNavigationTargets(result, activeConvId);
+
+      const enabledTargets = targets.filter((t) => t.enabled);
+      expect(enabledTargets.length).toBe(4);
+
+      const inboxTarget = enabledTargets.find((t) => t.to === "/app/inbox/$id");
+      expect(inboxTarget).toBeDefined();
+      expect(inboxTarget!.params.id).toBe(conversationId);
     });
   });
 });
