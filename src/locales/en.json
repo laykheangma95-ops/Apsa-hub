@@ -2307,5 +2307,21 @@
     "intent": "Ship this order",
     "intentHint": "Off = in-store pickup. Turn on to send it to a delivery address.",
     "intentNeedsDestination": "Enter a recipient name and delivery address to ship this order."
+  },
+  "barcodeScanner": {
+    "title": "Scan barcode",
+    "hint": "Point the rear camera at the barcode and hold steady.",
+    "open": "Scan with camera",
+    "starting": "Starting camera…",
+    "scanning": "Looking for a barcode…",
+    "paused": "Camera paused. Tap Try again to continue.",
+    "denied": "Camera access is blocked. Allow the camera for this site in your browser settings, or type the barcode below.",
+    "noCamera": "No camera was found on this device. Type the barcode below.",
+    "busy": "Another app is using the camera. Close it, then tap Try again.",
+    "unsupported": "This browser cannot open the camera here. Type the barcode below.",
+    "error": "The camera could not start. Tap Try again, or type the barcode below.",
+    "retry": "Try again",
+    "manualLabel": "Or type the barcode",
+    "manualSubmit": "Look up"
   }
 }

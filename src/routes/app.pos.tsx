@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
+import { Camera, LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ import { PosProductList } from "@/components/pos/PosProductList";
 import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
 import { getPosProducts, lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
+import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { formatMoney } from "@/lib/money";
 import {
@@ -112,6 +113,7 @@ function PosScreen() {
   const [cartOpen, setCartOpen] = useState(false);
   const [customerOpen, setCustomerOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const [offline, setOffline] = useState(false);
   // Barcode scanning via a keyboard-wedge scanner (§8). On by default so a
   // plugged-in scanner just works; the merchant can toggle it off.
@@ -242,7 +244,12 @@ function PosScreen() {
     }
   }
 
-  useBarcodeScanner({ enabled: canSell && scanEnabled && !checkoutOpen, onScan: handleScan });
+  // The wedge listener stands down while the camera sheet is open, so one code
+  // can never arrive through both paths.
+  useBarcodeScanner({
+    enabled: canSell && scanEnabled && !checkoutOpen && !cameraOpen,
+    onScan: handleScan,
+  });
 
   // Auto-clear the scan notice so it never lingers as stale state.
   useEffect(() => {
@@ -368,6 +375,19 @@ function PosScreen() {
                 }`}
               >
                 <ScanLine className="size-5" aria-hidden />
+              </button>
+              {/*
+               * Phone camera scanning: a phone has no wedge scanner, so this is
+               * the scan path there. The decoded code goes through the same
+               * handleScan → org-scoped server lookup as a wedge scan.
+               */}
+              <button
+                type="button"
+                aria-label={t("barcodeScanner.open")}
+                onClick={() => setCameraOpen(true)}
+                className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
+              >
+                <Camera className="size-5" aria-hidden />
               </button>
               <button
                 type="button"
@@ -509,6 +529,12 @@ function PosScreen() {
           setCustomer(next);
           setCustomerOpen(false);
         }}
+      />
+
+      <CameraScanSheet
+        open={cameraOpen}
+        onOpenChange={setCameraOpen}
+        onCode={(code) => void handleScan(code)}
       />
 
       <PosCheckoutSheet

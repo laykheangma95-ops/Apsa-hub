@@ -21,11 +21,12 @@
  */
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, PackageX, Search, TriangleAlert } from "lucide-react";
+import { Boxes, Camera, PackageX, Search, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
+import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
 import { Input } from "@/components/ui/input";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -225,6 +226,7 @@ function InventoryListScreen() {
   const [filter, setFilter] = useState<StockFilter>("all");
   const [search, setSearch] = useState("");
   const [scanNotFound, setScanNotFound] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const navigate = useNavigate();
 
   /*
@@ -243,26 +245,31 @@ function InventoryListScreen() {
    * stays exclusively the ledger/domain's job. A code that matches nothing shows
    * a non-destructive notice.
    */
-  useBarcodeScanner({
-    enabled: !detailOpen && canReadStock && canReadProducts,
-    onScan: (code) => {
-      void (async () => {
-        try {
-          const result = await lookupVariantByBarcode(code.trim());
-          if (result) {
-            setScanNotFound(false);
-            void navigate({
-              to: "/app/inventory/$variantId",
-              params: { variantId: result.variant.id },
-            });
-          } else {
-            setScanNotFound(true);
-          }
-        } catch {
+  const canScan = canReadStock && canReadProducts;
+  function resolveScan(code: string) {
+    void (async () => {
+      try {
+        const result = await lookupVariantByBarcode(code.trim());
+        if (result) {
+          setScanNotFound(false);
+          void navigate({
+            to: "/app/inventory/$variantId",
+            params: { variantId: result.variant.id },
+          });
+        } else {
           setScanNotFound(true);
         }
-      })();
-    },
+      } catch {
+        setScanNotFound(true);
+      }
+    })();
+  }
+
+  // Wedge and camera feed the same resolver; the wedge stands down while the
+  // camera sheet is open so one code never arrives twice.
+  useBarcodeScanner({
+    enabled: !detailOpen && canScan && !cameraOpen,
+    onScan: resolveScan,
   });
 
   useEffect(() => {
@@ -345,20 +352,32 @@ function InventoryListScreen() {
             </ChipRow>
 
             <div className="flex flex-col gap-1">
-              <div className="relative">
-                <Search
-                  className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-text-muted"
-                  aria-hidden
-                />
-                <Input
-                  type="search"
-                  className="h-12 pl-9"
-                  value={search}
-                  aria-label={t("inventoryList.searchPlaceholder")}
-                  aria-describedby="inventory-search-scope"
-                  placeholder={t("inventoryList.searchPlaceholder")}
-                  onChange={(event) => setSearch(event.target.value)}
-                />
+              <div className="flex items-center gap-2">
+                <div className="relative min-w-0 flex-1">
+                  <Search
+                    className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-text-muted"
+                    aria-hidden
+                  />
+                  <Input
+                    type="search"
+                    className="h-12 pl-9"
+                    value={search}
+                    aria-label={t("inventoryList.searchPlaceholder")}
+                    aria-describedby="inventory-search-scope"
+                    placeholder={t("inventoryList.searchPlaceholder")}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </div>
+                {canScan ? (
+                  <button
+                    type="button"
+                    aria-label={t("barcodeScanner.open")}
+                    onClick={() => setCameraOpen(true)}
+                    className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
+                  >
+                    <Camera className="size-5" aria-hidden />
+                  </button>
+                ) : null}
               </div>
               <span id="inventory-search-scope" className="text-caption px-1 text-text-secondary">
                 {t("inventoryList.searchScope")}
@@ -431,6 +450,9 @@ function InventoryListScreen() {
         )}
       </main>
 
+      {canScan ? (
+        <CameraScanSheet open={cameraOpen} onOpenChange={setCameraOpen} onCode={resolveScan} />
+      ) : null}
       <BottomNav />
     </ScreenBleed>
   );
