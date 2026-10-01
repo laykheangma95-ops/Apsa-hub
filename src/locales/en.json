@@ -2326,5 +2326,54 @@
     "retry": "Try again",
     "manualLabel": "Or type the barcode",
     "manualSubmit": "Look up"
+  },
+  "parcelInvestigation": {
+    "title": "Parcel Investigation",
+    "meta": "Scan result: parcel identity, order, customer, delivery and shipping at a glance.",
+    "parcel": "Parcel",
+    "parcelCode": "Parcel code",
+    "parcelStatus": "Status",
+    "created": "Created",
+    "order": "Order",
+    "orderNumber": "Order number",
+    "lifecycle": "Lifecycle",
+    "fulfillment": "Fulfillment",
+    "payment": "Payment",
+    "customer": "Customer",
+    "noCustomer": "No customer linked to this order.",
+    "delivery": "Delivery",
+    "provider": "Provider",
+    "tracking": "Tracking number",
+    "noDelivery": "No delivery arranged yet.",
+    "shippingSnapshot": "Shipping destination",
+    "hasName": "Recipient name",
+    "hasPhone": "Contact phone",
+    "hasAddress": "Delivery address",
+    "present": "On file",
+    "missing": "Missing",
+    "navigation": "Quick actions",
+    "viewOrder": "View order",
+    "viewCustomer": "View customer",
+    "viewDelivery": "View delivery",
+    "conversation": "Conversation",
+    "conversationPlaceholder": "Coming soon",
+    "paymentAction": "Payment",
+    "paymentPlaceholder": "Coming soon",
+    "notFound": {
+      "title": "Parcel not found",
+      "body": "This parcel code does not match any parcel in your organization, or the parcel has been removed."
+    },
+    "void": {
+      "title": "Voided parcel",
+      "body": "This parcel has been voided. The linked order and records are shown for reference only."
+    },
+    "error": {
+      "title": "Could not load parcel",
+      "body": "Something went wrong while looking up this parcel. Please try again."
+    },
+    "denied": {
+      "title": "Permission denied",
+      "body": "You do not have permission to investigate parcels."
+    }
   }
 }
