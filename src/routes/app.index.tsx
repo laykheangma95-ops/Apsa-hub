@@ -2,7 +2,9 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getHomeSummary } from "@/lib/api";
+import { getHomeSummary, lookupVariantByBarcode } from "@/lib/api";
+import { notifyInfo } from "@/lib/feedback";
+import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { homeQueryKey } from "@/lib/home-query";
 import { attentionDestination, attentionNoticeKey } from "@/lib/home-attention";
 import { resolveHomeSummaryView } from "@/lib/home-summary-view";
@@ -146,6 +148,7 @@ function BusinessHome() {
   const { session, organizationId } = Route.useRouteContext();
   const [range, setRange] = useState<MetricRange>("today");
   const [createOpen, setCreateOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
 
   const homeQuery = useQuery({
     queryKey: homeQueryKey(session.userId, organizationId, range),
@@ -236,17 +239,41 @@ function BusinessHome() {
     /** null means no destination exists yet — rendered as such, never as a link. */
     to: CreateActionRoute | null;
   }
+  /*
+   * Camera scanning resolves exactly as Inventory's scanner does — the same
+   * org-scoped lookupVariantByBarcode, behind the same two read grants — and
+   * opens the scanned item's stock page.
+   */
+  const canScan = capabilities.can("inventory.read") && capabilities.can("products.read");
   const createActions: readonly CreateAction[] = (
     [
       { key: "sendInvoice", to: null, available: true },
       { key: "newSale", to: "/app/pos", available: capabilities.can("orders.create") },
       { key: "newOrder", to: "/app/orders", available: capabilities.can("orders.read") },
       { key: "addProduct", to: "/app/products", available: capabilities.can("products.create") },
-      { key: "scanBarcode", to: null, available: true },
+      { key: "scanBarcode", to: null, available: canScan },
     ] as const
   )
     .filter((action) => action.available)
     .map(({ key, to }) => ({ key, to }));
+
+  function resolveScan(code: string) {
+    void (async () => {
+      try {
+        const result = await lookupVariantByBarcode(code.trim());
+        if (result) {
+          void navigate({
+            to: "/app/inventory/$variantId",
+            params: { variantId: result.variant.id },
+          });
+          return;
+        }
+      } catch {
+        // A failed lookup is reported the same way as a miss: nothing opened.
+      }
+      notifyInfo(t("inventory.scanNotFound"));
+    })();
+  }
 
   return (
     <ScreenBleed bottom="nav">
@@ -424,7 +451,19 @@ function BusinessHome() {
         <ul className="space-y-2">
           {createActions.map((action) => (
             <li key={action.key}>
-              {action.to ? (
+              {action.key === "scanBarcode" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Swap sheets, never stack them: each traps focus.
+                    setCreateOpen(false);
+                    setCameraOpen(true);
+                  }}
+                  className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
+                >
+                  {t(`nav.${action.key}`)}
+                </button>
+              ) : action.to ? (
                 <button
                   type="button"
                   onClick={() => {
@@ -439,8 +478,9 @@ function BusinessHome() {
                 </button>
               ) : (
                 /*
-                 * No barcode scanner exists yet. A disabled row that says so is
-                 * an honest answer; a tappable one that closes the sheet is not.
+                 * No destination exists yet (Send invoice). A disabled row that
+                 * says so is an honest answer; a tappable one that closes the
+                 * sheet is not.
                  */
                 <div className="flex w-full flex-col items-start rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-left">
                   <span className="text-body text-text-secondary">{t(`nav.${action.key}`)}</span>
@@ -451,6 +491,10 @@ function BusinessHome() {
           ))}
         </ul>
       </BottomSheet>
+
+      {canScan ? (
+        <CameraScanSheet open={cameraOpen} onOpenChange={setCameraOpen} onCode={resolveScan} />
+      ) : null}
     </ScreenBleed>
   );
 }
