@@ -16,7 +16,7 @@
 import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as ordersRepo from "@/server/orders/repository";
-import type { PickRequirementRow } from "./types";
+import type { PickRequirementRow, PickRequirementsResult } from "./types";
 
 /**
  * Get the pick requirements for an order: each line item with its current
@@ -28,7 +28,7 @@ import type { PickRequirementRow } from "./types";
 export async function getPickRequirements(
   ctx: AuthorizationContext,
   orderId: string,
-): Promise<PickRequirementRow[] | null> {
+): Promise<PickRequirementsResult | null> {
   ctx.require("orders.read");
 
   const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
@@ -46,12 +46,25 @@ export async function getPickRequirements(
 
   const productsRepo = await import("@/server/products/repository");
 
-  const requirements: PickRequirementRow[] = [];
+  const productIds = [...new Set(items.map((i) => i.product_id))];
+  const allVariants = await productsRepo.listVariantsByOrg(ctx.organizationId, productIds);
 
-  for (const item of items) {
-    const variant = await productsRepo.findVariantById(ctx.organizationId, item.variant_id);
+  const variantMap = new Map(allVariants.map((v) => [v.id, v]));
+  const barcodesByProduct = new Map<string, { variantId: string; barcode: string }[]>();
+  for (const v of allVariants) {
+    if (!v.barcode) continue;
+    const list = barcodesByProduct.get(v.product_id) ?? [];
+    list.push({ variantId: v.id, barcode: v.barcode });
+    barcodesByProduct.set(v.product_id, list);
+  }
 
-    requirements.push({
+  const requirements: PickRequirementRow[] = items.map((item) => {
+    const variant = variantMap.get(item.variant_id);
+    const siblings = (barcodesByProduct.get(item.product_id) ?? [])
+      .filter((s) => s.variantId !== item.variant_id)
+      .map((s) => s.barcode);
+
+    return {
       orderItemId: item.id,
       productId: item.product_id,
       variantId: item.variant_id,
@@ -60,8 +73,9 @@ export async function getPickRequirements(
       sku: item.sku_snapshot,
       barcode: variant?.barcode ?? null,
       quantityRequired: item.quantity,
-    });
-  }
+      siblingBarcodes: siblings,
+    };
+  });
 
-  return requirements;
+  return { orderNumber: order.order_number, requirements };
 }

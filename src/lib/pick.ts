@@ -26,6 +26,7 @@ export interface PickRequirement {
   sku: string | null;
   barcode: string | null;
   quantityRequired: number;
+  siblingBarcodes: readonly string[];
 }
 
 // ── Pick session state ──────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ export function computeProgress(session: PickSession): PickProgress {
  * Rules:
  *   1. If all items are already picked → already_complete.
  *   2. Find which requirement(s) match the barcode (by variant barcode).
- *   3. No match at all → wrong_product.
+ *   3. No match → check siblingBarcodes for a same-product / wrong-variant hit.
  *   4. Match found but all units for that line are picked → over_quantity.
  *   5. Match → accepted.
  */
@@ -136,12 +137,13 @@ export function validateScan(session: PickSession, barcode: string): ScanResult 
   );
 
   if (matchingReqs.length === 0) {
-    const anyProductMatch = session.requirements.some(
-      (req) => req.barcode !== null && req.barcode !== barcode,
-    );
-
-    if (anyProductMatch) {
-      return { kind: "wrong_product", scannedBarcode: barcode };
+    const siblingMatch = session.requirements.find((req) => req.siblingBarcodes.includes(barcode));
+    if (siblingMatch) {
+      return {
+        kind: "wrong_variant",
+        scannedBarcode: barcode,
+        expectedVariantName: siblingMatch.variantName,
+      };
     }
     return { kind: "wrong_product", scannedBarcode: barcode };
   }
@@ -192,8 +194,8 @@ export function applyAcceptedScan(
  * Picking is only valid for confirmed orders with unfulfilled/processing status.
  */
 export function canPickOrder(order: {
-  lifecycleStatus: string;
-  fulfillmentStatus: string;
+  lifecycleStatus: string | undefined;
+  fulfillmentStatus: string | undefined;
 }): boolean {
   return (
     order.lifecycleStatus === "confirmed" &&

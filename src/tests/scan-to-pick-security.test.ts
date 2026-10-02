@@ -20,6 +20,7 @@ function makeReq(overrides: Partial<PickRequirement> = {}): PickRequirement {
     sku: "SKU-001",
     barcode: "1111111111",
     quantityRequired: 1,
+    siblingBarcodes: [],
     ...overrides,
   };
 }
@@ -28,19 +29,27 @@ function makeReq(overrides: Partial<PickRequirement> = {}): PickRequirement {
 
 describe("canPickOrder — permission boundary", () => {
   it("draft order cannot be picked (not yet a committed sale)", () => {
-    expect(canPickOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(
+      false,
+    );
   });
 
   it("cancelled order cannot be picked (sale was called off)", () => {
-    expect(canPickOrder({ lifecycleStatus: "cancelled", fulfillmentStatus: "cancelled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "cancelled", fulfillmentStatus: "cancelled" })).toBe(
+      false,
+    );
   });
 
   it("completed order cannot be picked (already done)", () => {
-    expect(canPickOrder({ lifecycleStatus: "completed", fulfillmentStatus: "fulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "completed", fulfillmentStatus: "fulfilled" })).toBe(
+      false,
+    );
   });
 
   it("fulfilled order cannot be picked even if confirmed", () => {
-    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" })).toBe(
+      false,
+    );
   });
 });
 
@@ -65,6 +74,26 @@ describe("barcode isolation", () => {
     ]);
     const result = validateScan(session, "ORG_B_BARCODE");
     expect(result.kind).toBe("wrong_product");
+  });
+});
+
+// ── Sibling barcode isolation ──────────────────────────────────────────────
+
+describe("sibling barcode isolation", () => {
+  it("sibling barcodes from another org do not appear in requirements", () => {
+    const session = createPickSession("order-1", "ORD-001", [
+      makeReq({ barcode: "ORG_A_ORDERED", siblingBarcodes: ["ORG_A_SIBLING"] }),
+    ]);
+    const result = validateScan(session, "ORG_B_SIBLING");
+    expect(result.kind).toBe("wrong_product");
+  });
+
+  it("wrong_variant only fires for barcodes explicitly listed as siblings", () => {
+    const session = createPickSession("order-1", "ORD-001", [
+      makeReq({ barcode: "AAA", siblingBarcodes: ["BBB"] }),
+    ]);
+    expect(validateScan(session, "BBB").kind).toBe("wrong_variant");
+    expect(validateScan(session, "CCC").kind).toBe("wrong_product");
   });
 });
 

@@ -69,6 +69,7 @@ import {
   totalStockUnits,
   type OrderErrorKind,
 } from "@/lib/orders";
+import { canPickOrder } from "@/lib/pick";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
@@ -456,9 +457,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     canPrintParcelLabel(order.lifecycleStatus) &&
     capabilities.canSensitive("fulfillment.print_label");
   const showPickButton =
-    order.lifecycleStatus === "confirmed" &&
-    (order.fulfillmentStatus === "unfulfilled" || order.fulfillmentStatus === "processing") &&
-    capabilities.can("orders.read");
+    canPickOrder({
+      lifecycleStatus: order.lifecycleStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+    }) && capabilities.can("orders.read");
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
 

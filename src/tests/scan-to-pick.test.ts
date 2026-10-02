@@ -30,6 +30,7 @@ function makeRequirement(overrides: Partial<PickRequirement> = {}): PickRequirem
     sku: "TSH-RED-L",
     barcode: "1234567890",
     quantityRequired: 2,
+    siblingBarcodes: [],
     ...overrides,
   };
 }
@@ -38,7 +39,10 @@ function sessionWith(requirements: PickRequirement[]): PickSession {
   return createPickSession("order-1", "APSA-2026-000001", requirements);
 }
 
-function applyScan(session: PickSession, barcode: string): { session: PickSession; result: ScanResult } {
+function applyScan(
+  session: PickSession,
+  barcode: string,
+): { session: PickSession; result: ScanResult } {
   const result = validateScan(session, barcode);
   if (result.kind === "accepted") {
     return { session: applyAcceptedScan(session, result), result };
@@ -63,7 +67,12 @@ describe("computeProgress", () => {
   it("reports all items remaining when nothing is picked", () => {
     const session = sessionWith([
       makeRequirement({ quantityRequired: 3 }),
-      makeRequirement({ orderItemId: "item-2", variantId: "var-2", barcode: "999", quantityRequired: 2 }),
+      makeRequirement({
+        orderItemId: "item-2",
+        variantId: "var-2",
+        barcode: "999",
+        quantityRequired: 2,
+      }),
     ]);
     const progress = computeProgress(session);
     expect(progress.totalRequired).toBe(5);
@@ -93,7 +102,12 @@ describe("computeProgress", () => {
   it("reports per-line progress", () => {
     let session = sessionWith([
       makeRequirement({ orderItemId: "item-1", barcode: "AAA", quantityRequired: 2 }),
-      makeRequirement({ orderItemId: "item-2", variantId: "var-2", barcode: "BBB", quantityRequired: 1 }),
+      makeRequirement({
+        orderItemId: "item-2",
+        variantId: "var-2",
+        barcode: "BBB",
+        quantityRequired: 1,
+      }),
     ]);
     ({ session } = applyScan(session, "AAA"));
     const progress = computeProgress(session);
@@ -149,6 +163,63 @@ describe("validateScan — wrong product", () => {
   });
 });
 
+// ── validateScan — wrong variant ───────────────────────────────────────────
+
+describe("validateScan — wrong variant", () => {
+  it("returns wrong_variant when barcode matches a sibling variant", () => {
+    const session = sessionWith([
+      makeRequirement({
+        barcode: "AAA",
+        variantName: "Size L",
+        siblingBarcodes: ["BBB", "CCC"],
+      }),
+    ]);
+    const result = validateScan(session, "BBB");
+    expect(result.kind).toBe("wrong_variant");
+    if (result.kind === "wrong_variant") {
+      expect(result.scannedBarcode).toBe("BBB");
+      expect(result.expectedVariantName).toBe("Size L");
+    }
+  });
+
+  it("returns wrong_product when barcode matches no requirement or sibling", () => {
+    const session = sessionWith([
+      makeRequirement({
+        barcode: "AAA",
+        siblingBarcodes: ["BBB"],
+      }),
+    ]);
+    const result = validateScan(session, "ZZZ");
+    expect(result.kind).toBe("wrong_product");
+  });
+
+  it("prefers accepted over wrong_variant when barcode is a direct match", () => {
+    const session = sessionWith([
+      makeRequirement({
+        barcode: "AAA",
+        siblingBarcodes: ["BBB"],
+      }),
+    ]);
+    const result = validateScan(session, "AAA");
+    expect(result.kind).toBe("accepted");
+  });
+
+  it("returns wrong_variant with null expectedVariantName when variant has no name", () => {
+    const session = sessionWith([
+      makeRequirement({
+        barcode: "AAA",
+        variantName: null,
+        siblingBarcodes: ["BBB"],
+      }),
+    ]);
+    const result = validateScan(session, "BBB");
+    expect(result.kind).toBe("wrong_variant");
+    if (result.kind === "wrong_variant") {
+      expect(result.expectedVariantName).toBeNull();
+    }
+  });
+});
+
 // ── validateScan — duplicate scan / quantity ────────────────────────────────
 
 describe("validateScan — duplicate and quantity", () => {
@@ -180,7 +251,12 @@ describe("validateScan — duplicate and quantity", () => {
   it("reports over_quantity when one line is full but session is not complete", () => {
     let session = sessionWith([
       makeRequirement({ orderItemId: "item-1", barcode: "AAA", quantityRequired: 1 }),
-      makeRequirement({ orderItemId: "item-2", variantId: "var-2", barcode: "BBB", quantityRequired: 1 }),
+      makeRequirement({
+        orderItemId: "item-2",
+        variantId: "var-2",
+        barcode: "BBB",
+        quantityRequired: 1,
+      }),
     ]);
     ({ session } = applyScan(session, "AAA"));
 
@@ -198,7 +274,12 @@ describe("validateScan — already complete", () => {
   it("returns already_complete when all items are picked", () => {
     let session = sessionWith([
       makeRequirement({ orderItemId: "item-1", barcode: "AAA", quantityRequired: 1 }),
-      makeRequirement({ orderItemId: "item-2", variantId: "var-2", barcode: "BBB", quantityRequired: 1 }),
+      makeRequirement({
+        orderItemId: "item-2",
+        variantId: "var-2",
+        barcode: "BBB",
+        quantityRequired: 1,
+      }),
     ]);
     ({ session } = applyScan(session, "AAA"));
     ({ session } = applyScan(session, "BBB"));
@@ -212,31 +293,45 @@ describe("validateScan — already complete", () => {
 
 describe("canPickOrder", () => {
   it("allows picking for confirmed + unfulfilled", () => {
-    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "unfulfilled" })).toBe(true);
+    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "unfulfilled" })).toBe(
+      true,
+    );
   });
 
   it("allows picking for confirmed + processing", () => {
-    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" })).toBe(true);
+    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "processing" })).toBe(
+      true,
+    );
   });
 
   it("denies picking for draft orders", () => {
-    expect(canPickOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "draft", fulfillmentStatus: "unfulfilled" })).toBe(
+      false,
+    );
   });
 
   it("denies picking for cancelled orders", () => {
-    expect(canPickOrder({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "cancelled", fulfillmentStatus: "unfulfilled" })).toBe(
+      false,
+    );
   });
 
   it("denies picking for completed orders", () => {
-    expect(canPickOrder({ lifecycleStatus: "completed", fulfillmentStatus: "fulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "completed", fulfillmentStatus: "fulfilled" })).toBe(
+      false,
+    );
   });
 
   it("denies picking for fulfilled orders", () => {
-    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "fulfilled" })).toBe(
+      false,
+    );
   });
 
   it("denies picking for fulfillment-cancelled orders", () => {
-    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "cancelled" })).toBe(false);
+    expect(canPickOrder({ lifecycleStatus: "confirmed", fulfillmentStatus: "cancelled" })).toBe(
+      false,
+    );
   });
 });
 
@@ -245,8 +340,19 @@ describe("canPickOrder", () => {
 describe("multi-line picking workflow", () => {
   it("tracks progress across multiple lines correctly", () => {
     let session = sessionWith([
-      makeRequirement({ orderItemId: "item-1", barcode: "AAA", quantityRequired: 2, productName: "Product A" }),
-      makeRequirement({ orderItemId: "item-2", variantId: "var-2", barcode: "BBB", quantityRequired: 3, productName: "Product B" }),
+      makeRequirement({
+        orderItemId: "item-1",
+        barcode: "AAA",
+        quantityRequired: 2,
+        productName: "Product A",
+      }),
+      makeRequirement({
+        orderItemId: "item-2",
+        variantId: "var-2",
+        barcode: "BBB",
+        quantityRequired: 3,
+        productName: "Product B",
+      }),
     ]);
 
     // Pick 1 of A

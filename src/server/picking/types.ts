@@ -13,4 +13,10 @@ export interface PickRequirementRow {
   sku: string | null;
   barcode: string | null;
   quantityRequired: number;
+  siblingBarcodes: string[];
+}
+
+export interface PickRequirementsResult {
+  orderNumber: string;
+  requirements: PickRequirementRow[];
 }

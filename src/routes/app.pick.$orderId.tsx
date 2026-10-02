@@ -141,10 +141,12 @@ function PickScreen() {
     enabled: canRead,
   });
 
+  const pickData = query.data;
   const requirements: readonly PickRequirement[] = useMemo(
-    () => (query.data ?? []) as PickRequirement[],
-    [query.data],
+    () => (pickData?.requirements ?? []) as PickRequirement[],
+    [pickData],
   );
+  const orderNumber = pickData?.orderNumber ?? "";
 
   const [pickSession, setPickSession] = useState<PickSession | null>(null);
   const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
@@ -154,7 +156,7 @@ function PickScreen() {
   // Initialize pick session when requirements load
   const sessionReady = pickSession !== null;
   if (!sessionReady && requirements.length > 0) {
-    setPickSession(createPickSession(orderId, "", requirements));
+    setPickSession(createPickSession(orderId, orderNumber, requirements));
   }
 
   const progress = useMemo(
