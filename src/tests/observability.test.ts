@@ -156,7 +156,12 @@ describe("request IDs", () => {
     const b = newRequestId().slice(4);
     expect(a).not.toBe(b);
     expect(id).not.toContain("@");
-    expect(id).not.toContain(String(new Date().getUTCFullYear()));
+    // The source uses only crypto.getRandomValues — no Date or counter in code.
+    const src = read("src/server/observability/request-id.ts");
+    expect(src).toContain("crypto.getRandomValues");
+    expect(src).not.toMatch(/\bDate\b/);
+    expect(src).not.toMatch(/\bperformance\.now\b/);
+    expect(src).not.toMatch(/\+\+\w+|\w+\+\+/);
   });
 
   it("are never an authorization input", () => {
