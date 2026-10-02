@@ -122,9 +122,11 @@ describe("buildParcelLabel", () => {
         maxItemLines: 8,
       },
     );
-    // 8 printed rows: 7 one-row lines + the "+5 more" continuation row.
-    expect(vm.items).toHaveLength(7);
-    expect(vm.overflowCount).toBe(5);
+    // The millimetre budget (header, receiver, carrier above; payment, QR,
+    // Code 128 and footer reserved below) fits 5 one-row lines + the "+7 more"
+    // note — measured in Chromium by parcel-label-layout.test.ts.
+    expect(vm.items).toHaveLength(5);
+    expect(vm.overflowCount).toBe(7);
   });
 
   it("shows a COD collect amount from authoritative Money (KHR)", () => {

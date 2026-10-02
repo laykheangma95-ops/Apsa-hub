@@ -2258,6 +2258,7 @@
       "amountToCollect": "Amount to collect",
       "reprint": "Reprint",
       "addressNotConfirmed": "Shipping address not confirmed — verify before shipping",
+      "addressTruncated": "Address shortened to fit — see the order for the full address",
       "noAddress": "No address on file",
       "denied": "You do not have permission to print parcel labels.",
       "confirmCta": "Confirm shipping address",

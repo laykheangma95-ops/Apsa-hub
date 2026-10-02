@@ -29,20 +29,90 @@ import { isValidParcelCode } from "@/lib/barcode/parcel-code";
 /** Default physical target for a parcel label. */
 export const PARCEL_LABEL_SIZE_MM = { width: 100, height: 150 } as const;
 
-/** Hard cap on product lines, independent of the row budget. */
+/** Hard cap on product lines, independent of the height budget. */
 export const PARCEL_LABEL_MAX_ITEM_LINES = 8;
-
-/**
- * Printed rows available to the product list. A line longer than
- * ITEM_CHARS_PER_ROW wraps to a second row (and is clamped there), so the
- * budget is spent in rows, not lines. A long address takes space from the list.
- */
-export const PARCEL_LABEL_ITEM_ROWS = 8;
-export const PARCEL_LABEL_ITEM_ROWS_COMPACT = 5;
-const ITEM_CHARS_PER_ROW = 44;
 
 /** Above this many characters the address prints in the compact size. */
 export const PARCEL_LABEL_LONG_ADDRESS_CHARS = 140;
+
+/**
+ * Hard cap on the printed address, in characters (grapheme-safe). The DB
+ * allows 1000; anything beyond this is cut at a whole grapheme and the label
+ * says so — never silently.
+ */
+export const PARCEL_LABEL_ADDRESS_MAX_CHARS = 300;
+
+/** Most address lines printed (normal / compact size); fewer when space is short. */
+export const PARCEL_LABEL_ADDRESS_LINES = 4;
+export const PARCEL_LABEL_ADDRESS_LINES_COMPACT = 6;
+/** The address always keeps at least this many lines. */
+const ADDRESS_MIN_LINES = 2;
+
+/**
+ * ── VERTICAL BUDGET (mm) ──────────────────────────────────────────────────────
+ *
+ * The component splits the 150 mm page into a FIXED bottom block (payment + 30
+ * mm QR, full-width Code 128, footer) that always keeps its full height, and a
+ * TOP block that gets only what is left and clips inside itself. So nothing in
+ * the top block can ever reach the payment box or push the codes off the page.
+ *
+ * The figures below are the top block's own CSS (font size × line-height in
+ * pt → mm, plus paddings/rules) so buildParcelLabel can decide — before
+ * anything renders, the same way on every printer — how many address lines and
+ * item lines fit, instead of letting them be clipped:
+ *
+ *   - every text block is line-clamped in CSS, so its height can never exceed
+ *     `clamp × line-height` whatever the font;
+ *   - the number of lines a text needs is estimated with a deliberately LOW
+ *     characters-per-line figure, so the estimate errs high (less shown, never
+ *     clipped).
+ *
+ * Whatever does not fit is reported: "+N more" for items, a visible marker
+ * for a shortened address.
+ */
+const PT = 25.4 / 72;
+/** Top block height: 150 − 2×4 padding − bottom block (53.6) − 1.5 gap, less a safety margin. */
+const TOP_BLOCK_MM = 86.2;
+const GAP_MM = 1.5;
+/** Section padding-bottom (1.5) + rule (0.4). */
+const RULE_MM = 1.9;
+const lineMm = (pt: number, leading: number) => pt * leading * PT;
+const CAPTION_MM = lineMm(7, 1.25);
+const SHOP_LINE_MM = lineMm(11, 1.25);
+const SHOP_PHONE_MM = lineMm(9, 1.25);
+const LOGO_MM = 11;
+const NAME_LINE_MM = lineMm(15, 1.25);
+const PHONE_MM = lineMm(13, 1.25);
+const ADDRESS_LINE_MM = lineMm(10.5, 1.375);
+const ADDRESS_LINE_COMPACT_MM = lineMm(9, 1.375);
+const NOTE_MM = 0.5 + lineMm(7, 1.25);
+const UNCONFIRMED_MM = 0.5 + 1.6 + 2 * lineMm(7, 1.25);
+const CARRIER_LINE_MM = lineMm(9, 1.25);
+const ITEMS_HEADER_MM = lineMm(8, 1.25) + 0.5;
+const ITEM_ROW_MM = lineMm(9, 1.25);
+const ITEM_GAP_MM = 0.4;
+const MORE_MM = 0.5 + lineMm(8, 1.25);
+
+/** Low characters-per-line figures (92 mm wide) — estimates err toward MORE lines. */
+const CPL = { shop: 22, name: 18, address: 30, addressCompact: 36, carrier: 36, item: 36 };
+/** Room the translated carrier/tracking captions take on the carrier line. */
+const CARRIER_CAPTION_CHARS = 28;
+
+/** Estimated printed lines of `text` (newlines kept), capped at `max`. */
+function linesFor(text: string, cpl: number, max: number, extraChars = 0): number {
+  const needed = text
+    .split("\n")
+    .reduce(
+      (sum, para, i) =>
+        sum + Math.max(1, Math.ceil((para.trim().length + (i === 0 ? extraChars : 0)) / cpl)),
+      0,
+    );
+  return Math.min(max, Math.max(1, needed));
+}
+
+function rowsFor(text: string): number {
+  return text.length > CPL.item ? 2 : 1;
+}
 
 /** Phnom Penh time — the label's print stamp is for Cambodian staff/couriers. */
 const PRINT_TIME_ZONE = "Asia/Phnom_Penh";
@@ -116,6 +186,10 @@ export interface ParcelLabelViewModel {
   };
   /** Long addresses print smaller so they wrap without crowding the label. */
   addressCompact: boolean;
+  /** CSS line clamp for the address — what the vertical budget allows. */
+  addressLines: number;
+  /** True when the printed address may be shortened (see the full order). */
+  addressTruncated: boolean;
   orderNumber: string;
   itemCount: number;
   reprint: boolean;
@@ -154,10 +228,6 @@ function formatItemLine(item: ParcelLabelItemInput): string {
   return variant ? `${base} — ${variant}` : base;
 }
 
-function rowsFor(text: string): number {
-  return text.length > ITEM_CHARS_PER_ROW ? 2 : 1;
-}
-
 /**
  * Only an https URL or an inline raster data URI may be loaded on a label —
  * never javascript:, http: (mixed content) or SVG data (script-capable).
@@ -168,6 +238,21 @@ export function safeLogoUrl(url: string | null | undefined): string | null {
   if (/^https:\/\/[^\s]+$/i.test(trimmed)) return trimmed;
   if (/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(trimmed)) return trimmed;
   return null;
+}
+
+/**
+ * Shorten to at most `max` characters at a grapheme boundary, so a Khmer
+ * consonant cluster (base + subscripts + vowel signs) is never split.
+ */
+function truncateGraphemes(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let out = "";
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  for (const { segment } of segmenter.segment(text)) {
+    if (out.length + segment.length > max) break;
+    out += segment;
+  }
+  return out.trimEnd();
 }
 
 function formatPrintedAt(now: Date): string {
@@ -191,9 +276,13 @@ export function buildParcelLabel(
   const maxLines = options.maxItemLines ?? PARCEL_LABEL_MAX_ITEM_LINES;
   const now = options.now ?? new Date();
 
-  const address = input.customer.address;
-  const addressCompact = (address?.length ?? 0) > PARCEL_LABEL_LONG_ADDRESS_CHARS;
-  const rowBudget = addressCompact ? PARCEL_LABEL_ITEM_ROWS_COMPACT : PARCEL_LABEL_ITEM_ROWS;
+  const rawAddress = input.customer.address;
+  const addressCompact = (rawAddress?.length ?? 0) > PARCEL_LABEL_LONG_ADDRESS_CHARS;
+  const hardCut = (rawAddress?.length ?? 0) > PARCEL_LABEL_ADDRESS_MAX_CHARS;
+  const address =
+    rawAddress && hardCut
+      ? `${truncateGraphemes(rawAddress, PARCEL_LABEL_ADDRESS_MAX_CHARS)}…`
+      : rawAddress;
 
   const allLines: ParcelLabelLine[] = input.order.items.map((item) => ({
     quantity: item.quantity,
@@ -202,16 +291,79 @@ export function buildParcelLabel(
     text: formatItemLine(item),
   }));
 
+  // ── Vertical budget: fixed sections first, then address, then items. ──────
+  const shopName = input.merchant.businessName.trim();
+  const shopPhone = input.merchant.phone?.trim() || null;
+  const headerText =
+    CAPTION_MM +
+    linesFor(shopName || " ", CPL.shop, 2) * SHOP_LINE_MM +
+    (shopPhone ? SHOP_PHONE_MM : 0);
+  const header = Math.max(headerText, safeLogoUrl(input.merchant.logoUrl) ? LOGO_MM : 0) + RULE_MM;
+
+  const name = input.customer.name?.trim() ?? "";
+  const receiverFixed =
+    CAPTION_MM +
+    (name ? linesFor(name, CPL.name, 2) * NAME_LINE_MM : 0) +
+    (input.customer.phone ? PHONE_MM : 0) +
+    (input.customer.addressConfirmed ? 0 : UNCONFIRMED_MM) +
+    RULE_MM;
+
+  const d = input.delivery;
+  const carrierText = d ? `${d.providerName} ${d.serviceName ?? ""} ${d.trackingNumber ?? ""}` : "";
+  const carrier =
+    linesFor(carrierText, CPL.carrier, 2, CARRIER_CAPTION_CHARS) * CARRIER_LINE_MM + RULE_MM;
+
+  const itemsFixed = ITEMS_HEADER_MM + RULE_MM;
+  // Items keep at least one line plus the "+N more" note when any exist.
+  const itemsMinimum =
+    allLines.length > 0
+      ? rowsFor(allLines[0]!.text) * ITEM_ROW_MM + (allLines.length > 1 ? MORE_MM : 0)
+      : 0;
+
+  const addressLineMm = addressCompact ? ADDRESS_LINE_COMPACT_MM : ADDRESS_LINE_MM;
+  const addressCap = addressCompact
+    ? PARCEL_LABEL_ADDRESS_LINES_COMPACT
+    : PARCEL_LABEL_ADDRESS_LINES;
+  const addressNeed = address
+    ? linesFor(address, addressCompact ? CPL.addressCompact : CPL.address, Number.MAX_SAFE_INTEGER)
+    : 0;
+  const beforeAddress = header + receiverFixed + carrier + itemsFixed + 3 * GAP_MM;
+  // Lines the address may take: as many as it needs, up to its cap, never
+  // eating the items' minimum (but always at least ADDRESS_MIN_LINES).
+  const addressRoomForLines = (withNote: boolean) =>
+    Math.floor(
+      (TOP_BLOCK_MM - beforeAddress - itemsMinimum - 0.5 - (withNote ? NOTE_MM : 0)) /
+        addressLineMm,
+    );
+  let addressLines = address ? Math.min(addressNeed, addressCap) : 1;
+  let addressTruncated = hardCut;
+  if (address) {
+    if (addressNeed > addressCap) addressTruncated = true;
+    if (addressLines > addressRoomForLines(addressTruncated)) {
+      addressTruncated = true;
+      addressLines = Math.max(
+        Math.min(ADDRESS_MIN_LINES, addressNeed),
+        Math.min(addressLines, addressRoomForLines(true)),
+      );
+    }
+  }
+  const receiver =
+    receiverFixed +
+    0.5 +
+    addressLines * (address ? addressLineMm : ADDRESS_LINE_COMPACT_MM) +
+    (addressTruncated ? NOTE_MM : 0);
+
+  const itemsRoom = TOP_BLOCK_MM - (header + receiver + carrier + itemsFixed + 3 * GAP_MM);
   const shown: ParcelLabelLine[] = [];
-  let rowsUsed = 0;
+  let usedMm = 0;
   for (const line of allLines) {
     if (shown.length >= maxLines) break;
-    const rows = rowsFor(line.text);
-    // The continuation note needs its own row whenever lines remain hidden.
-    const reserve = shown.length + 1 < allLines.length ? 1 : 0;
-    if (rowsUsed + rows + reserve > rowBudget) break;
+    const cost = (shown.length > 0 ? ITEM_GAP_MM : 0) + rowsFor(line.text) * ITEM_ROW_MM;
+    // The "+N more" note needs its own room whenever lines remain hidden.
+    const reserve = shown.length + 1 < allLines.length ? MORE_MM : 0;
+    if (usedMm + cost + reserve > itemsRoom) break;
     shown.push(line);
-    rowsUsed += rows;
+    usedMm += cost;
   }
   const overflowCount = allLines.length - shown.length;
 
@@ -262,6 +414,8 @@ export function buildParcelLabel(
       addressConfirmed: input.customer.addressConfirmed,
     },
     addressCompact,
+    addressLines,
+    addressTruncated,
     orderNumber: input.order.orderNumber,
     itemCount: input.order.itemCount,
     reprint: input.reprint,

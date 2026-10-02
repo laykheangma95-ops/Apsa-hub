@@ -582,7 +582,34 @@ describe("label — products", () => {
       }),
     );
     expect(vm2.items.length + vm2.overflowCount).toBe(10);
-    expect(vm2.items.length).toBe(4);
+    const vmShort = buildParcelLabel(
+      input({ order: { id: ORDER_ID, orderNumber: "A-1", itemCount: 10, items } }),
+    );
+    // The address takes its lines first; the list keeps at least one line + "+N more".
+    expect(vm2.items.length).toBeGreaterThanOrEqual(1);
+    expect(vm2.items.length).toBeLessThan(vmShort.items.length);
+    expect(vm2.overflowCount).toBeGreaterThan(0);
+  });
+
+  it("a long address is clamped to its budgeted lines and marked, never grown without bound", () => {
+    const long = "ផ្ទះលេខ ១២៣ ផ្លូវ ២៤០ សង្កាត់បឹងកេងកង១ ខណ្ឌចំការមន រាជធានីភ្នំពេញ ".repeat(20);
+    const vm = buildParcelLabel(input({ customer: { ...input().customer, address: long } }));
+    expect(vm.addressTruncated).toBe(true);
+    expect(vm.addressLines).toBeGreaterThanOrEqual(2);
+    expect(vm.addressLines).toBeLessThanOrEqual(6);
+    // Hard cap (300) + ellipsis; cut on a grapheme boundary (no orphan sign).
+    expect(vm.customer.address!.length).toBeLessThanOrEqual(301);
+    expect(vm.customer.address!.endsWith("…")).toBe(true);
+    const html = render(input({ customer: { ...input().customer, address: long } }));
+    expect(html).toContain(km.labels.parcel.addressTruncated);
+    expect(html).toContain(`-webkit-line-clamp:${vm.addressLines}`);
+  });
+
+  it("a short address is printed whole with no marker", () => {
+    const vm = buildParcelLabel(input());
+    expect(vm.addressTruncated).toBe(false);
+    expect(vm.customer.address).toBe("12 St 240, BKK1, Phnom Penh");
+    expect(render(input())).not.toContain(km.labels.parcel.addressTruncated);
   });
 
   it("never prints an internal product/order UUID", () => {
