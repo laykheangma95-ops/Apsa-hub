@@ -70,6 +70,7 @@ import {
   type OrderErrorKind,
 } from "@/lib/orders";
 import { canPickOrder } from "@/lib/pick";
+import { canPackOrder } from "@/lib/pack";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
@@ -461,6 +462,11 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       lifecycleStatus: order.lifecycleStatus,
       fulfillmentStatus: order.fulfillmentStatus,
     }) && capabilities.can("orders.read");
+  const showPackButton =
+    canPackOrder({
+      lifecycleStatus: order.lifecycleStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+    }) && capabilities.can("orders.read");
   const stockUnits = totalStockUnits(items);
   const showStockConsequence = stockUnits > 0 && order.lifecycleStatus !== "draft";
 
@@ -829,7 +835,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : null}
         </Section>
 
-        {showPrintLabel || showPickButton ? (
+        {showPrintLabel || showPickButton || showPackButton ? (
           <Section title={t("order.fulfillment")}>
             {showPickButton ? (
               <Link
@@ -838,6 +844,15 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                 className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
               >
                 {t("order.startPicking")}
+              </Link>
+            ) : null}
+            {showPackButton ? (
+              <Link
+                to="/app/pack/$orderId"
+                params={{ orderId: id }}
+                className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-border-default bg-surface-primary text-text-primary"
+              >
+                {t("order.startPacking")}
               </Link>
             ) : null}
             {showPrintLabel ? (

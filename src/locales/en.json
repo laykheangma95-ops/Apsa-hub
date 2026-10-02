@@ -983,6 +983,7 @@
     "arrangeDelivery": "Arrange delivery",
     "printParcelLabel": "Print parcel label",
     "startPicking": "Start picking",
+    "startPacking": "Start packing",
     "fulfillment": "Fulfillment",
     "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
@@ -2312,6 +2313,40 @@
     "empty": {
       "title": "Nothing to pack",
       "body": "Confirmed orders that need packing will appear here."
+    }
+  },
+  "packSession": {
+    "title": "Scan to Pack",
+    "orderInfo": "Order",
+    "progress": "Packing progress",
+    "readyToSeal": "All items packed — ready to seal",
+    "submit": "Go",
+    "itemList": "Items to pack",
+    "parcel": {
+      "scanPrompt": "Scan parcel code",
+      "scanHint": "Scan the parcel label to verify you have the correct box for this order.",
+      "placeholder": "Scan or type parcel code",
+      "accepted": "Correct parcel verified",
+      "wrong": "Wrong parcel — not for this order",
+      "alreadyVerified": "Parcel already verified",
+      "verified": "Parcel verified"
+    },
+    "product": {
+      "scanPrompt": "Scan product barcode",
+      "placeholder": "Scan or type barcode",
+      "accepted": "Correct item packed",
+      "wrongProduct": "Wrong product — not in this order",
+      "wrongVariant": "Wrong variant — check the item",
+      "duplicate": "Already packed enough of this item",
+      "alreadyComplete": "All items already packed"
+    },
+    "error": {
+      "title": "Could not load pack session",
+      "body": "Something went wrong while loading the order items. Please try again."
+    },
+    "empty": {
+      "title": "Nothing to pack",
+      "body": "This order has no items that require packing."
     }
   },
   "shipping": {
