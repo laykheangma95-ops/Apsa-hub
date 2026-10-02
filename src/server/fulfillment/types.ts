@@ -5,6 +5,7 @@
  * value (§11, §16, §18).
  */
 import type { Money, Currency } from "@/types";
+import type { ParcelLabelCheckReason, ParcelLabelPaymentState } from "./label-payment";
 
 /** One row in the merchant's Ready-to-Pack work queue. */
 export interface ReadyToPackEntry {
@@ -45,6 +46,13 @@ export interface ParcelLabelItem {
 export interface ParcelLabelData {
   merchant: {
     businessName: string;
+    /** Shop phone from the business profile's location (see repo.shopPhone), or null. */
+    phone: string | null;
+    /**
+     * Shop logo URL. Always null today: APSA has no organization logo column or
+     * storage path yet. The label renders a text-only header until one exists.
+     */
+    logoUrl: string | null;
   };
   customer: {
     name: string | null;
@@ -80,14 +88,33 @@ export interface ParcelLabelData {
    */
   reprint: boolean;
   payment: {
+    /** PAID / COD / CHECK PAYMENT — see ./label-payment.ts for the exact rule. */
+    state: ParcelLabelPaymentState;
+    /** Convenience: state === "paid". */
     paid: boolean;
-    /** null when fully paid; the amount to collect otherwise. */
+    /** The amount to collect — non-null ONLY when state is "cod". */
     collect: Money | null;
+    /** COD of a remaining balance after a verified deposit. */
+    partial: boolean;
+    /** Why the label says CHECK PAYMENT; null unless state is "check". */
+    checkReason: ParcelLabelCheckReason | null;
   };
+  /**
+   * The order's current ACTIVE delivery (pending → in_transit) or a delivered
+   * one, never a failed/cancelled attempt. Null when none, or when the caller
+   * lacks delivery.read.
+   */
   delivery: {
+    /** Carrier display name — deliveries.provider_name (snapshot at creation). */
     providerName: string;
     trackingNumber: string | null;
     status: string;
+    /**
+     * Carrier service/method. No such column exists yet, so always null; kept
+     * so a future provider adapter (e.g. ZTO) can populate it without a label
+     * redesign.
+     */
+    serviceName: string | null;
   } | null;
   /**
    * The permanent opaque parcel code (APSA:PCL:v1:<token>) when the order has

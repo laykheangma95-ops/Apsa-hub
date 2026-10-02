@@ -155,16 +155,31 @@ export function LabelSheet({
 
   if (!open) return null;
 
-  // Scoped print CSS. Only #apsa-print-root and its descendants stay visible;
-  // @page fixes the physical size and removes printer margins.
+  // Scoped print CSS; @page fixes the physical size and removes printer margins.
+  //
+  // Everything that is not #apsa-print-root, inside it, or one of its ancestors
+  // is REMOVED from layout (display:none, not just hidden), and the ancestors —
+  // including this fixed overlay and any h-screen/overflow app shell — become
+  // plain static blocks. The pages then flow in normal document order, so the
+  // printer gets exactly one 100×150 mm page per label. (A fixed overlay is
+  // repeated on every printed page and never fragments, which printed labels
+  // overlapping and duplicated, with a page count set by the app behind it.)
   const printCss = `
 @media print {
   @page { size: ${pageSize.width}mm ${pageSize.height}mm; margin: 0; }
   html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
-  body * { visibility: hidden !important; }
-  #apsa-print-root, #apsa-print-root * { visibility: visible !important; }
-  #apsa-print-root { position: absolute; left: 0; top: 0; }
-  .apsa-label-page { break-after: page; page-break-after: always; }
+  body *:not(#apsa-print-root):not(#apsa-print-root *):not(:has(#apsa-print-root)) {
+    display: none !important;
+  }
+  body *:has(#apsa-print-root) {
+    display: block !important; position: static !important; inset: auto !important;
+    width: auto !important; height: auto !important; min-height: 0 !important;
+    max-height: none !important; overflow: visible !important; margin: 0 !important;
+    padding: 0 !important; border: 0 !important; transform: none !important;
+    background: #fff !important; box-shadow: none !important;
+  }
+  #apsa-print-root { display: block !important; position: static !important; margin: 0 !important; }
+  .apsa-label-page { break-after: page; page-break-after: always; break-inside: avoid; }
   .apsa-label-page:last-child { break-after: auto; page-break-after: auto; }
 }`;
 

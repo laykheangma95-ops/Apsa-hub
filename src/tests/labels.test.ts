@@ -74,6 +74,8 @@ describe("buildProductLabel", () => {
   });
 });
 
+const PARCEL_CODE = "APSA:PCL:v1:AAAAAAAAAAAAAAAAAAAAAA";
+
 function parcelInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInput {
   return {
     merchant: { businessName: "Dara Shop" },
@@ -93,8 +95,9 @@ function parcelInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInpu
       ],
     },
     reprint: false,
-    payment: { paid: false, collect: { amount: 75000, currency: "KHR" } },
+    payment: { state: "cod", collect: { amount: 75000, currency: "KHR" } },
     delivery: null,
+    parcelCode: PARCEL_CODE,
     ...overrides,
   };
 }
@@ -102,8 +105,8 @@ function parcelInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInpu
 describe("buildParcelLabel", () => {
   it("formats concise item lines with quantity and variant", () => {
     const vm = buildParcelLabel(parcelInput());
-    expect(vm.items[0]!.text).toBe("2 × Classic Tee · Black / M");
-    expect(vm.items[1]!.text).toBe("1 × Cap · White");
+    expect(vm.items[0]!.text).toBe("2 × Classic Tee — Black / M");
+    expect(vm.items[1]!.text).toBe("1 × Cap — White");
     expect(vm.overflowCount).toBe(0);
   });
 
@@ -119,8 +122,11 @@ describe("buildParcelLabel", () => {
         maxItemLines: 8,
       },
     );
-    expect(vm.items).toHaveLength(8);
-    expect(vm.overflowCount).toBe(4);
+    // The millimetre budget (header, receiver, carrier above; payment, QR,
+    // Code 128 and footer reserved below) fits 5 one-row lines + the "+7 more"
+    // note — measured in Chromium by parcel-label-layout.test.ts.
+    expect(vm.items).toHaveLength(5);
+    expect(vm.overflowCount).toBe(7);
   });
 
   it("shows a COD collect amount from authoritative Money (KHR)", () => {
@@ -131,24 +137,26 @@ describe("buildParcelLabel", () => {
 
   it("shows a COD collect amount in USD with no ×100 regression", () => {
     const vm = buildParcelLabel(
-      parcelInput({ payment: { paid: false, collect: { amount: 1234, currency: "USD" } } }),
+      parcelInput({ payment: { state: "cod", collect: { amount: 1234, currency: "USD" } } }),
     );
     expect(vm.payment.collectFormatted).toBe("$12.34");
   });
 
   it("prints PAID with nothing to collect for a paid order", () => {
-    const vm = buildParcelLabel(parcelInput({ payment: { paid: true, collect: null } }));
+    const vm = buildParcelLabel(parcelInput({ payment: { state: "paid", collect: null } }));
     expect(vm.payment.paid).toBe(true);
     expect(vm.payment.collectFormatted).toBeNull();
   });
 
-  it("builds the order QR from the order id (internal reference only)", () => {
+  it("builds the QR from the parcel identity, never the order id", () => {
     const vm = buildParcelLabel(parcelInput());
-    expect(parseApsaQrPayload(vm.qr.payload)).toEqual({ kind: "order", id: ORDER_ID });
-    expect(vm.qr.svg).toContain("<svg");
-    // The QR payload carries no money, phone or address.
-    expect(vm.qr.payload).not.toContain("75000");
-    expect(vm.qr.payload).not.toContain("012345678");
+    expect(vm.qr!.payload).toBe(PARCEL_CODE);
+    expect(parseApsaQrPayload(vm.qr!.payload)).toBeNull();
+    expect(vm.qr!.svg).toContain("<svg");
+    // The QR payload carries no money, phone, address or order id.
+    expect(vm.qr!.payload).not.toContain("75000");
+    expect(vm.qr!.payload).not.toContain("012345678");
+    expect(vm.qr!.payload).not.toContain(ORDER_ID);
   });
 
   it("carries only name/phone/address (plus the addressConfirmed flag) for the customer — no other PII fields", () => {
@@ -190,9 +198,9 @@ describe("buildParcelLabel", () => {
       }),
     );
     expect(vm.delivery).toEqual({
-      providerName: "VET Express",
+      carrierName: "VET Express",
       trackingNumber: "VET-99",
-      status: "ready",
+      serviceName: null,
     });
   });
 });

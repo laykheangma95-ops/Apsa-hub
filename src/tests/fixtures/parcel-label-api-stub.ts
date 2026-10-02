@@ -8,6 +8,9 @@
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import "./parcel-label-capabilities-stub";
 
+/** Structurally valid (APSA:PCL:v1: + 22 base64url chars), carries no PII. */
+const STUB_PARCEL_CODE = "APSA:PCL:v1:stubParcelCode_abc0123";
+
 export const PII = {
   name: "Sokha Chan",
   phone: "+855 12 345 678",
@@ -29,13 +32,16 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
       : { ...PII, addressConfirmed: true },
     order: { id: orderId, orderNumber: "APSA-2026-001048", itemCount: 1, items: [] },
     reprint: false,
-    payment: { paid: true, collect: null },
+    payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
     delivery: null,
+    // An order whose parcel identity already exists (reprint path); the label
+    // dialog only offers Print once every label carries its code.
+    parcelCode: STUB_PARCEL_CODE,
   };
 }
 
 export async function createParcel(_orderId: string): Promise<{ parcelCode: string }> {
-  return { parcelCode: "APSA:PCL:v1:stub_parcel_code_abc" };
+  return { parcelCode: STUB_PARCEL_CODE };
 }
 
 export async function updateOrderShipping(): Promise<void> {}

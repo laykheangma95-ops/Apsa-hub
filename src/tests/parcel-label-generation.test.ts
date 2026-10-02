@@ -37,7 +37,7 @@ function baseInput(overrides: Partial<ParcelLabelInput> = {}): ParcelLabelInput 
       ],
     },
     reprint: false,
-    payment: { paid: false, collect: { amount: 75000, currency: "KHR" } },
+    payment: { state: "cod", collect: { amount: 75000, currency: "KHR" } },
     delivery: null,
     ...overrides,
   };
@@ -49,7 +49,7 @@ describe("parcel creation in label flow", () => {
   it("first print: label uses parcel code when present", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
     expect(vm.parcelCode).toBe(PARCEL_CODE);
-    expect(vm.qr.payload).toBe(PARCEL_CODE);
+    expect(vm.qr!.payload).toBe(PARCEL_CODE);
   });
 
   it("second print: reuses the exact same parcel code", () => {
@@ -57,7 +57,7 @@ describe("parcel creation in label flow", () => {
     const vm1 = buildParcelLabel(input, { now: FIXED_NOW });
     const vm2 = buildParcelLabel(input, { now: FIXED_NOW });
     expect(vm1.parcelCode).toBe(vm2.parcelCode);
-    expect(vm1.qr.payload).toBe(vm2.qr.payload);
+    expect(vm1.qr!.payload).toBe(vm2.qr!.payload);
   });
 
   it("repeated prints always yield the same parcel identity", () => {
@@ -77,75 +77,71 @@ describe("parcel creation in label flow", () => {
 describe("QR payload", () => {
   it("equals the parcel identity when a parcel code is present", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.qr.payload).toBe(PARCEL_CODE);
+    expect(vm.qr!.payload).toBe(PARCEL_CODE);
   });
 
-  it("falls back to order QR reference when no parcel code exists", () => {
+  it("renders NO QR (never an order-UUID fallback) when no parcel code exists", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: null }), { now: FIXED_NOW });
-    const parsed = parseApsaQrPayload(vm.qr.payload);
-    expect(parsed).toEqual({ kind: "order", id: ORDER_ID });
+    expect(vm.qr).toBeNull();
+    expect(vm.code128).toBeNull();
+  });
+
+  it("rejects a malformed parcel code instead of encoding it", () => {
+    const vm = buildParcelLabel(baseInput({ parcelCode: `apsa:order/${ORDER_ID}` }), {
+      now: FIXED_NOW,
+    });
+    expect(vm.qr).toBeNull();
+    expect(vm.code128).toBeNull();
+    expect(vm.parcelCode).toBeNull();
   });
 
   it("QR payload contains no UUID when parcel code is present", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.qr.payload).not.toContain(ORDER_ID);
+    expect(vm.qr!.payload).not.toContain(ORDER_ID);
   });
 
   it("QR payload contains no PII", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.qr.payload).not.toContain("Sokha");
-    expect(vm.qr.payload).not.toContain("012345678");
-    expect(vm.qr.payload).not.toContain("BKK1");
-    expect(vm.qr.payload).not.toContain("75000");
-    expect(vm.qr.payload).not.toContain("APSA-2026-001048");
+    expect(vm.qr!.payload).not.toContain("Sokha");
+    expect(vm.qr!.payload).not.toContain("012345678");
+    expect(vm.qr!.payload).not.toContain("BKK1");
+    expect(vm.qr!.payload).not.toContain("75000");
+    expect(vm.qr!.payload).not.toContain("APSA-2026-001048");
   });
 
   it("QR payload contains no order identifiers when parcel code is present", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.qr.payload).not.toContain("order");
-    expect(vm.qr.payload).not.toContain(ORDER_ID);
-    expect(vm.qr.payload).not.toContain("APSA-2026");
+    expect(vm.qr!.payload).not.toContain("order");
+    expect(vm.qr!.payload).not.toContain(ORDER_ID);
+    expect(vm.qr!.payload).not.toContain("APSA-2026");
   });
 
   it("QR SVG is a valid SVG string", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.qr.svg).toContain("<svg");
-    expect(vm.qr.svg).toContain("</svg>");
+    expect(vm.qr!.svg).toContain("<svg");
+    expect(vm.qr!.svg).toContain("</svg>");
   });
 });
 
 // ── Code 128 tests ───────────────────────────────────────────────────────────
 
 describe("Code 128 barcode", () => {
-  it("is null when includeCode128 is not set", () => {
+  it("is always present alongside the QR when a parcel code exists", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
-    expect(vm.code128).toBeNull();
-  });
-
-  it("is null when includeCode128 is false", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: false }), {
-      now: FIXED_NOW,
-    });
-    expect(vm.code128).toBeNull();
-  });
-
-  it("is present when includeCode128 is true and parcel code exists", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
-      now: FIXED_NOW,
-    });
+    expect(vm.qr).not.toBeNull();
     expect(vm.code128).not.toBeNull();
   });
 
   it("encodes the same parcel identity as the QR", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), {
       now: FIXED_NOW,
     });
-    expect(vm.code128!.payload).toBe(vm.qr.payload);
+    expect(vm.code128!.payload).toBe(vm.qr!.payload);
     expect(vm.code128!.payload).toBe(PARCEL_CODE);
   });
 
   it("Code 128 SVG is a valid SVG string", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), {
       now: FIXED_NOW,
     });
     expect(vm.code128!.svg).toContain("<svg");
@@ -159,31 +155,28 @@ describe("Code 128 barcode", () => {
     }
   });
 
-  it("falls back to order QR payload when no parcel code", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: null, includeCode128: true }), {
-      now: FIXED_NOW,
-    });
-    expect(vm.code128).not.toBeNull();
-    const parsed = parseApsaQrPayload(vm.code128!.payload);
-    expect(parsed).toEqual({ kind: "order", id: ORDER_ID });
-    expect(vm.code128!.payload).toBe(vm.qr.payload);
+  it("is absent (no order-UUID fallback) when no parcel code", () => {
+    const vm = buildParcelLabel(baseInput({ parcelCode: null }), { now: FIXED_NOW });
+    expect(vm.code128).toBeNull();
   });
 });
 
 // ── Legacy order support ─────────────────────────────────────────────────────
 
 describe("legacy orders (no parcel code)", () => {
-  it("first print: parcelCode is null, QR falls back to order reference", () => {
+  it("before a parcel code is assigned: no codes are rendered at all", () => {
+    // The dialog assigns the code (idempotently) and blocks Print until it has.
     const vm = buildParcelLabel(baseInput({ parcelCode: null }), { now: FIXED_NOW });
     expect(vm.parcelCode).toBeNull();
-    const parsed = parseApsaQrPayload(vm.qr.payload);
-    expect(parsed).toEqual({ kind: "order", id: ORDER_ID });
+    expect(vm.qr).toBeNull();
+    expect(parseApsaQrPayload(JSON.stringify(vm))).toBeNull();
+    expect(JSON.stringify(vm)).not.toContain(`apsa:order/`);
   });
 
   it("after parcel creation: parcelCode is set, QR uses it", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
     expect(vm.parcelCode).toBe(PARCEL_CODE);
-    expect(vm.qr.payload).toBe(PARCEL_CODE);
+    expect(vm.qr!.payload).toBe(PARCEL_CODE);
   });
 
   it("future prints reuse the parcel code forever", () => {
@@ -191,7 +184,7 @@ describe("legacy orders (no parcel code)", () => {
     for (let i = 0; i < 50; i++) {
       const vm = buildParcelLabel(input, { now: FIXED_NOW });
       expect(vm.parcelCode).toBe(PARCEL_CODE);
-      expect(vm.qr.payload).toBe(PARCEL_CODE);
+      expect(vm.qr!.payload).toBe(PARCEL_CODE);
     }
   });
 });
@@ -237,13 +230,14 @@ describe("label content", () => {
 
   it("carries payment info (COD)", () => {
     const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), { now: FIXED_NOW });
+    expect(vm.payment.state).toBe("cod");
     expect(vm.payment.paid).toBe(false);
     expect(vm.payment.collectFormatted).toBe("៛75,000");
   });
 
   it("carries payment info (paid)", () => {
     const vm = buildParcelLabel(
-      baseInput({ parcelCode: PARCEL_CODE, payment: { paid: true, collect: null } }),
+      baseInput({ parcelCode: PARCEL_CODE, payment: { state: "paid", collect: null } }),
       { now: FIXED_NOW },
     );
     expect(vm.payment.paid).toBe(true);
@@ -260,10 +254,10 @@ describe("label content", () => {
 
 describe("rendering determinism", () => {
   it("same input produces identical output", () => {
-    const input = baseInput({ parcelCode: PARCEL_CODE, includeCode128: true });
+    const input = baseInput({ parcelCode: PARCEL_CODE });
     const vm1 = buildParcelLabel(input, { now: FIXED_NOW });
     const vm2 = buildParcelLabel(input, { now: FIXED_NOW });
-    expect(vm1.qr.svg).toBe(vm2.qr.svg);
+    expect(vm1.qr!.svg).toBe(vm2.qr!.svg);
     expect(vm1.code128!.svg).toBe(vm2.code128!.svg);
     expect(vm1.printTimestamp).toBe(vm2.printTimestamp);
     expect(vm1.parcelCode).toBe(vm2.parcelCode);
@@ -273,14 +267,14 @@ describe("rendering determinism", () => {
 
   it("QR SVG is stable across 100 runs", () => {
     const input = baseInput({ parcelCode: PARCEL_CODE });
-    const first = buildParcelLabel(input, { now: FIXED_NOW }).qr.svg;
+    const first = buildParcelLabel(input, { now: FIXED_NOW }).qr!.svg;
     for (let i = 0; i < 100; i++) {
-      expect(buildParcelLabel(input, { now: FIXED_NOW }).qr.svg).toBe(first);
+      expect(buildParcelLabel(input, { now: FIXED_NOW }).qr!.svg).toBe(first);
     }
   });
 
   it("Code128 SVG is stable across 100 runs", () => {
-    const input = baseInput({ parcelCode: PARCEL_CODE, includeCode128: true });
+    const input = baseInput({ parcelCode: PARCEL_CODE });
     const first = buildParcelLabel(input, { now: FIXED_NOW }).code128!.svg;
     for (let i = 0; i < 100; i++) {
       expect(buildParcelLabel(input, { now: FIXED_NOW }).code128!.svg).toBe(first);
@@ -309,7 +303,7 @@ describe("reprint flag", () => {
       now: FIXED_NOW,
     });
     expect(first.parcelCode).toBe(reprint.parcelCode);
-    expect(first.qr.payload).toBe(reprint.qr.payload);
+    expect(first.qr!.payload).toBe(reprint.qr!.payload);
   });
 });
 
@@ -328,16 +322,16 @@ describe("security: no PII in barcodes", () => {
   ];
 
   it("QR payload contains no PII from the label", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), {
       now: FIXED_NOW,
     });
     for (const pii of PII_STRINGS) {
-      expect(vm.qr.payload).not.toContain(pii);
+      expect(vm.qr!.payload).not.toContain(pii);
     }
   });
 
   it("Code128 payload contains no PII from the label", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), {
       now: FIXED_NOW,
     });
     for (const pii of PII_STRINGS) {
@@ -346,10 +340,10 @@ describe("security: no PII in barcodes", () => {
   });
 
   it("QR and Code128 encode exactly the same payload", () => {
-    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE, includeCode128: true }), {
+    const vm = buildParcelLabel(baseInput({ parcelCode: PARCEL_CODE }), {
       now: FIXED_NOW,
     });
-    expect(vm.qr.payload).toBe(vm.code128!.payload);
+    expect(vm.qr!.payload).toBe(vm.code128!.payload);
   });
 
   it("no UUID leakage in parcel code", () => {
@@ -383,7 +377,8 @@ describe("item overflow handling", () => {
       }),
       { maxItemLines: 8, now: FIXED_NOW },
     );
-    expect(vm.items).toHaveLength(8);
-    expect(vm.overflowCount).toBe(4);
+    // 8 printed rows: 7 one-row lines + the continuation row.
+    expect(vm.items).toHaveLength(7);
+    expect(vm.overflowCount).toBe(5);
   });
 });
