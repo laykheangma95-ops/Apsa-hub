@@ -17,6 +17,7 @@ const APP_SECTIONS = [
   "analytics",
   "customers",
   "deliveries",
+  "handoff",
   "inbox",
   "inventory",
   "orders",

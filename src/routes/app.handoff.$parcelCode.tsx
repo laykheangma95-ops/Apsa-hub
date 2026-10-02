@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import {
-  Package,
-  ShoppingCart,
-  Truck,
-  CheckCircle2,
-  AlertTriangle,
-  Loader2,
-} from "lucide-react";
+import { Package, ShoppingCart, Truck, CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AppHeader, DetailSkeleton, Screen, Section, SectionRow, SectionRows, StatusChip } from "@/design-system";
+import {
+  AppHeader,
+  DetailSkeleton,
+  Screen,
+  Section,
+  SectionRow,
+  SectionRows,
+  StatusChip,
+} from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { getHandoffPreviewFn, confirmHandoffFn } from "@/api/handoff";
 import { canConfirmHandoff, isAlreadyHandedOff, handoffErrorMessage } from "@/lib/handoff";
 import type { HandoffResult, HandoffPreview as HandoffPreviewType } from "@/lib/handoff";
@@ -37,6 +39,8 @@ function CourierHandoffScreen() {
   const { parcelCode } = Route.useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const capabilities = useCapabilities();
+  const canHandoff = capabilities.can("delivery.handoff");
   const [handoffResult, setHandoffResult] = useState<HandoffResult | null>(null);
 
   const previewQuery = useQuery({
@@ -73,12 +77,8 @@ function CourierHandoffScreen() {
         <AppHeader title={t("courierHandoff.title")} onBack={back} />
         <OperationalState
           tone="danger"
-          title={
-            isDenied ? t("courierHandoff.denied.title") : t("courierHandoff.error.title")
-          }
-          body={
-            isDenied ? t("courierHandoff.denied.body") : t("courierHandoff.error.body")
-          }
+          title={isDenied ? t("courierHandoff.denied.title") : t("courierHandoff.error.title")}
+          body={isDenied ? t("courierHandoff.denied.body") : t("courierHandoff.error.body")}
           {...(isDenied ? {} : { onRetry: () => previewQuery.refetch() })}
         />
       </Screen>
@@ -100,17 +100,13 @@ function CourierHandoffScreen() {
   }
 
   if (handoffResult?.kind === "success") {
-    return (
-      <HandoffSuccess
-        handoff={handoffResult.handoff}
-        onBack={back}
-      />
-    );
+    return <HandoffSuccess handoff={handoffResult.handoff} onBack={back} />;
   }
 
   return (
     <HandoffPreviewView
       preview={preview}
+      canHandoff={canHandoff}
       confirming={confirmMutation.isPending}
       error={
         handoffResult
@@ -127,19 +123,21 @@ function CourierHandoffScreen() {
 
 function HandoffPreviewView({
   preview,
+  canHandoff,
   confirming,
   error,
   onConfirm,
   onBack,
 }: {
   preview: HandoffPreviewType;
+  canHandoff: boolean;
   confirming: boolean;
   error: string | null;
   onConfirm: () => void;
   onBack: () => void;
 }) {
   const { t } = useTranslation();
-  const eligible = canConfirmHandoff(preview);
+  const eligible = canHandoff && canConfirmHandoff(preview);
   const alreadyDone = isAlreadyHandedOff(preview);
 
   return (
@@ -172,9 +170,7 @@ function HandoffPreviewView({
                     ? t("courierHandoff.duplicateHandoff.title")
                     : t("courierHandoff.notEligible")}
                 </p>
-                <p className="text-body-sm mt-0.5 text-text-secondary">
-                  {preview.reason}
-                </p>
+                <p className="text-body-sm mt-0.5 text-text-secondary">{preview.reason}</p>
               </div>
             </div>
           </div>
@@ -197,20 +193,13 @@ function HandoffPreviewView({
 
         <Section title={t("courierHandoff.parcel")}>
           <SectionRows>
-            <SectionRow
-              label={t("courierHandoff.parcelCode")}
-              value={preview.parcelCode}
-            />
+            <SectionRow label={t("courierHandoff.parcelCode")} value={preview.parcelCode} />
             <SectionRow
               label={t("courierHandoff.handoffStatus")}
               value={
                 <StatusChip
                   status={
-                    (eligible
-                      ? "ready"
-                      : alreadyDone
-                        ? "in_transit"
-                        : "pending") as StatusKey
+                    (eligible ? "ready" : alreadyDone ? "in_transit" : "pending") as StatusKey
                   }
                 />
               }
@@ -220,10 +209,7 @@ function HandoffPreviewView({
 
         <Section title={t("courierHandoff.order")}>
           <SectionRows>
-            <SectionRow
-              label={t("courierHandoff.orderNumber")}
-              value={preview.orderNumber}
-            />
+            <SectionRow label={t("courierHandoff.orderNumber")} value={preview.orderNumber} />
           </SectionRows>
         </Section>
 
@@ -235,9 +221,7 @@ function HandoffPreviewView({
             />
             <SectionRow
               label={t("courierHandoff.trackingNumber")}
-              value={
-                preview.externalTrackingNumber || t("courierHandoff.noTrackingNumber")
-              }
+              value={preview.externalTrackingNumber || t("courierHandoff.noTrackingNumber")}
             />
             <SectionRow
               label={t("courierHandoff.deliveryStatus")}
@@ -248,11 +232,7 @@ function HandoffPreviewView({
 
         {eligible ? (
           <div className="pt-2">
-            <Button
-              className="tap-target h-12 w-full"
-              onClick={onConfirm}
-              disabled={confirming}
-            >
+            <Button className="tap-target h-12 w-full" onClick={onConfirm} disabled={confirming}>
               {confirming ? (
                 <span className="flex items-center gap-2">
                   <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -321,9 +301,7 @@ function HandoffSuccess({
       >
         <div className="rounded-2xl border border-status-success-border bg-status-success-soft px-4 py-5 text-center">
           <CheckCircle2 className="mx-auto mb-2 size-8 text-status-success-text" aria-hidden />
-          <h3 className="text-h3 text-status-success-text">
-            {t("courierHandoff.success.title")}
-          </h3>
+          <h3 className="text-h3 text-status-success-text">{t("courierHandoff.success.title")}</h3>
           <p className="text-body-sm mt-1 text-text-secondary">
             {t("courierHandoff.success.body")}
           </p>
@@ -331,18 +309,9 @@ function HandoffSuccess({
 
         <Section title={t("courierHandoff.parcel")}>
           <SectionRows>
-            <SectionRow
-              label={t("courierHandoff.parcelCode")}
-              value={handoff.parcelCode}
-            />
-            <SectionRow
-              label={t("courierHandoff.orderNumber")}
-              value={handoff.orderNumber}
-            />
-            <SectionRow
-              label={t("courierHandoff.providerName")}
-              value={handoff.providerName}
-            />
+            <SectionRow label={t("courierHandoff.parcelCode")} value={handoff.parcelCode} />
+            <SectionRow label={t("courierHandoff.orderNumber")} value={handoff.orderNumber} />
+            <SectionRow label={t("courierHandoff.providerName")} value={handoff.providerName} />
             {handoff.externalTrackingNumber ? (
               <SectionRow
                 label={t("courierHandoff.trackingNumber")}
@@ -376,11 +345,7 @@ function HandoffSuccess({
         </Section>
 
         <div className="pt-2">
-          <Button
-            variant="outline"
-            className="tap-target h-12 w-full"
-            onClick={onBack}
-          >
+          <Button variant="outline" className="tap-target h-12 w-full" onClick={onBack}>
             {t("courierHandoff.done")}
           </Button>
         </div>

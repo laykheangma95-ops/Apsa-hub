@@ -148,7 +148,11 @@ function makeChain(rows: any[]) {
           return { data: result[0] ?? null, error: null };
         },
         then(resolve: any, reject?: any) {
-          try { resolve({ data: result, error: null }); } catch (e) { reject?.(e); }
+          try {
+            resolve({ data: result, error: null });
+          } catch (e) {
+            reject?.(e);
+          }
         },
       };
       return limitChain;
@@ -539,9 +543,9 @@ describe("client display predicates", () => {
     expect(handoffErrorMessage({ kind: "no_active_delivery" })).toContain("No active delivery");
     expect(handoffErrorMessage({ kind: "already_handed_off" })).toContain("already");
     expect(handoffErrorMessage({ kind: "order_not_confirmed" })).toContain("not in a confirmed");
-    expect(
-      handoffErrorMessage({ kind: "delivery_not_ready", currentStatus: "pending" }),
-    ).toContain("pending");
+    expect(handoffErrorMessage({ kind: "delivery_not_ready", currentStatus: "pending" })).toContain(
+      "pending",
+    );
     expect(handoffErrorMessage({ kind: "transition_failed", reason: "stale" })).toContain("stale");
   });
 });
@@ -663,10 +667,7 @@ describe("migration 051 declares delivery.handoff", () => {
 
 describe("handoff requires delivery.handoff, not delivery.update", () => {
   const repoRoot = path.resolve(import.meta.dir, "../..");
-  const source = fs.readFileSync(
-    path.join(repoRoot, "src/server/handoff/service.ts"),
-    "utf8",
-  );
+  const source = fs.readFileSync(path.join(repoRoot, "src/server/handoff/service.ts"), "utf8");
 
   it("the service requires delivery.handoff", () => {
     expect(source).toContain('ctx.require("delivery.handoff")');
