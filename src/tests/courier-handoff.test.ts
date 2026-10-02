@@ -27,6 +27,7 @@ import { CapabilityFixtureProvider, useCapabilities } from "@/hooks/use-capabili
 import { deliveryKeys } from "@/lib/deliveries-query";
 import { homeQueryKey } from "@/lib/home-query";
 import {
+  enforceHandoffCapabilityCache,
   enforceHandoffCachePrincipal,
   handoffKeys,
   syncHandoffResultCaches,
@@ -894,6 +895,8 @@ describe("handoff cache isolation", () => {
   function CapabilityDrivenPreview() {
     const allowed = useCapabilities().can("delivery.handoff");
     return createElement(HandoffPreviewAccess, {
+      userId: USER_A,
+      organizationId: ORG_A,
       allowed,
       denied: createElement("span", null, "permission-denied"),
       children: () => createElement(CachedPreviewValue),
@@ -935,6 +938,34 @@ describe("handoff cache isolation", () => {
     expect(denied).toContain("permission-denied");
     expect(denied).not.toContain("ORG-A-SECRET");
     expect(denied).not.toContain("TRACKING-SECRET");
+    expect(client.getQueryData(handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE))).toBeUndefined();
+  });
+
+  it("permission loss cancels an in-flight preview and prevents a late cache write", async () => {
+    const client = new QueryClient();
+    enforceHandoffCapabilityCache(client, USER_A, ORG_A, true);
+    let resolvePreview: (value: HandoffPreview) => void = () => {};
+    const pending = client.fetchQuery({
+      queryKey: handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE),
+      queryFn: () => new Promise<HandoffPreview>((resolve) => (resolvePreview = resolve)),
+    });
+
+    enforceHandoffCapabilityCache(client, USER_A, ORG_A, false);
+    resolvePreview({
+      parcelId: "parcel-1",
+      parcelCode: PARCEL_CODE,
+      orderId: ORDER_ID,
+      orderNumber: "LATE-SECRET",
+      deliveryId: DELIVERY_ID,
+      deliveryStatus: "ready",
+      providerName: "Flash Express",
+      externalTrackingNumber: "LATE-TRACKING",
+      eligible: true,
+      reason: null,
+    });
+    await pending.catch(() => undefined);
+
+    expect(client.getQueryData(handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE))).toBeUndefined();
   });
 });
 

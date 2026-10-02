@@ -15,7 +15,7 @@ import {
 import { OperationalState } from "@/components/common/OperationalState";
 import { HandoffPreviewAccess } from "@/components/handoff/HandoffPreviewAccess";
 import { Button } from "@/components/ui/button";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { useCapabilities, useSensitiveCapabilityRevalidation } from "@/hooks/use-capabilities";
 import { getHandoffPreviewFn, confirmHandoffFn } from "@/api/handoff";
 import {
   canConfirmHandoff,
@@ -45,12 +45,73 @@ export const Route = createFileRoute("/app/handoff/$parcelCode")({
 function CourierHandoffScreen() {
   const { parcelCode } = Route.useParams();
   const { session, organizationId } = Route.useRouteContext();
-  const userId = session.userId;
   const navigate = useNavigate();
+
+  return (
+    <CourierHandoffIdentityBoundary
+      userId={session.userId}
+      organizationId={organizationId}
+      parcelCode={parcelCode}
+      onBack={() => navigate({ to: "/app" })}
+    />
+  );
+}
+
+interface CourierHandoffIdentityProps {
+  userId: string;
+  organizationId: string;
+  parcelCode: string;
+  onBack: () => void;
+}
+
+/**
+ * React preserves hook state while a component type stays in the same tree.
+ * Key the stateful operation by every identity dimension so a parcel, account,
+ * or organization change mounts a clean mutation/result state before paint.
+ */
+export function CourierHandoffIdentityBoundary(props: CourierHandoffIdentityProps) {
+  const identity = `${props.userId}\u0000${props.organizationId}\u0000${props.parcelCode}`;
+  return <CourierHandoffOperation key={identity} {...props} />;
+}
+
+export function CourierHandoffOperation({
+  userId,
+  organizationId,
+  parcelCode,
+  onBack,
+}: CourierHandoffIdentityProps) {
+  const capabilities = useCapabilities();
+  const canHandoff = capabilities.canSensitive("delivery.handoff");
+
+  // staleTime never initiates a refresh by itself. Keep the production
+  // capability query polling for the entire time this operational screen is
+  // mounted, including while a confirmation is in flight.
+  useSensitiveCapabilityRevalidation(userId, organizationId, true);
+
+  // A capability change also remounts the stateful layer. Revocation therefore
+  // drops any success, failure, or pending mutation before a later re-grant can
+  // render, while the capability revalidator above remains mounted.
+  return (
+    <CourierHandoffState
+      key={canHandoff ? "allowed" : "denied"}
+      userId={userId}
+      organizationId={organizationId}
+      parcelCode={parcelCode}
+      onBack={onBack}
+      canHandoff={canHandoff}
+    />
+  );
+}
+
+function CourierHandoffState({
+  userId,
+  organizationId,
+  parcelCode,
+  onBack,
+  canHandoff,
+}: CourierHandoffIdentityProps & { canHandoff: boolean }) {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
-  const capabilities = useCapabilities();
-  const canHandoff = capabilities.can("delivery.handoff");
   const [handoffResult, setHandoffResult] = useState<HandoffResult | null>(null);
 
   const previewQuery = useQuery({
@@ -68,10 +129,9 @@ function CourierHandoffScreen() {
     },
   });
 
-  const back = () => navigate({ to: "/app" });
   const denied = (
     <Screen bottom="none" contentClassName="!px-0">
-      <AppHeader title={t("courierHandoff.title")} onBack={back} />
+      <AppHeader title={t("courierHandoff.title")} onBack={onBack} />
       <OperationalState
         tone="danger"
         title={t("courierHandoff.denied.title")}
@@ -84,7 +144,7 @@ function CourierHandoffScreen() {
     if (previewQuery.isLoading) {
       return (
         <Screen bottom="none" contentClassName="!px-0">
-          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <AppHeader title={t("courierHandoff.title")} onBack={onBack} />
           <DetailSkeleton />
         </Screen>
       );
@@ -99,7 +159,7 @@ function CourierHandoffScreen() {
 
       return (
         <Screen bottom="none" contentClassName="!px-0">
-          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <AppHeader title={t("courierHandoff.title")} onBack={onBack} />
           <OperationalState
             tone="danger"
             title={isDenied ? t("courierHandoff.denied.title") : t("courierHandoff.error.title")}
@@ -115,7 +175,7 @@ function CourierHandoffScreen() {
     if (!preview) {
       return (
         <Screen bottom="none" contentClassName="!px-0">
-          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <AppHeader title={t("courierHandoff.title")} onBack={onBack} />
           <OperationalState
             title={t("courierHandoff.notFound.title")}
             body={t("courierHandoff.notFound.body")}
@@ -125,7 +185,7 @@ function CourierHandoffScreen() {
     }
 
     if (handoffResult?.kind === "success") {
-      return <HandoffSuccess handoff={handoffResult.handoff} onBack={back} />;
+      return <HandoffSuccess handoff={handoffResult.handoff} onBack={onBack} />;
     }
 
     return (
@@ -141,13 +201,18 @@ function CourierHandoffScreen() {
               : null
         }
         onConfirm={() => confirmMutation.mutate()}
-        onBack={back}
+        onBack={onBack}
       />
     );
   };
 
   return (
-    <HandoffPreviewAccess allowed={canHandoff} denied={denied}>
+    <HandoffPreviewAccess
+      userId={userId}
+      organizationId={organizationId}
+      allowed={canHandoff}
+      denied={denied}
+    >
       {renderAuthorizedState}
     </HandoffPreviewAccess>
   );

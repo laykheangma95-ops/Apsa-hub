@@ -39,6 +39,48 @@ export const clearHandoffQueries = partition.clear;
 export const enforceHandoffCachePrincipal = partition.enforce;
 
 /**
+ * The last delivery.handoff answer observed for each principal and QueryClient.
+ * Kept outside React so a route remount cannot forget that a granted cache was
+ * populated before the permission was revoked.
+ */
+const LAST_HANDOFF_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
+
+/**
+ * Remove every cached Handoff preview for this principal as soon as the same
+ * capability boundary used by the screen stops holding.
+ *
+ * Cancellation comes before synchronous removal so an in-flight preview cannot
+ * write operational data back after revocation. Call during render, before the
+ * authorized subtree is evaluated. A first denied observation also evicts, so
+ * retained data from an earlier mount fails closed.
+ */
+export function enforceHandoffCapabilityCache(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  allowed: boolean,
+): void {
+  try {
+    let record = LAST_HANDOFF_GRANT.get(queryClient);
+    if (!record) {
+      record = new Map();
+      LAST_HANDOFF_GRANT.set(queryClient, record);
+    }
+
+    const principal = `${userId}\u0000${organizationId}`;
+    const previous = record.get(principal);
+    record.set(principal, allowed);
+    if (allowed || previous === false) return;
+
+    const queryKey = handoffKeys.principal(userId, organizationId);
+    void queryClient.cancelQueries({ queryKey }).catch(() => undefined);
+    queryClient.removeQueries({ queryKey });
+  } catch {
+    // Never block rendering. HandoffPreviewAccess still refuses the subtree.
+  }
+}
+
+/**
  * Apply the cache effects of one server-authoritative handoff result.
  * Failures change no domain state and therefore invalidate nothing.
  */
