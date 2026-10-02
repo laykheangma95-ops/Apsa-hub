@@ -7,6 +7,8 @@
  *   - Server-only modules (@/server/packing/*) are dynamically imported in
  *     handler bodies so they never enter the client bundle.
  *   - Permissions are enforced in the service: requires orders.read.
+ *   - Scan validation is server-authoritative — the client displays results
+ *     but never decides whether a scan is valid.
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
@@ -42,4 +44,38 @@ export const getPackRequirementsFn = createServerFn()
     const authCtx = await resolveAuthContext();
     const { getPackRequirements } = await import("@/server/packing/service");
     return getPackRequirements(authCtx, data.orderId);
+  });
+
+// ── validatePackParcelScanFn ─────────────────────────────────────────────────
+
+export const validatePackParcelScanFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        scannedCode: z.string().min(1, "Scanned code is required"),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { validatePackParcelScan } = await import("@/server/packing/service");
+    return validatePackParcelScan(authCtx, data.orderId, data.scannedCode);
+  });
+
+// ── validatePackProductScanFn ────────────────────────────────────────────────
+
+export const validatePackProductScanFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        barcode: z.string().min(1, "Barcode is required"),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { validatePackProductScan } = await import("@/server/packing/service");
+    return validatePackProductScan(authCtx, data.orderId, data.barcode);
   });

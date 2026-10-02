@@ -13,14 +13,13 @@ import {
   createPackSession,
   computePackProgress,
   getPackPhase,
-  validateParcelScan,
-  applyParcelScan,
-  validateProductScan,
-  applyAcceptedPackScan,
+  applyServerParcelAccepted,
+  applyServerProductAccepted,
+  isLocalDuplicateScan,
   type PackSession,
   type PackRequirement,
-  type ParcelScanResult,
-  type ProductScanResult,
+  type ServerParcelScanResult,
+  type ServerProductScanResult,
 } from "@/lib/pack";
 import { looksLikeParcelCode } from "@/lib/barcode/parcel-code";
 
@@ -37,15 +36,22 @@ export const Route = createFileRoute("/app/pack/$orderId")({
   component: PackScreen,
 });
 
+type FeedbackResult =
+  | ServerParcelScanResult
+  | ServerProductScanResult
+  | { kind: "parcel_already_verified" }
+  | { kind: "duplicate_scan"; variantId: string; productName: string }
+  | { kind: "already_complete" };
+
 type FeedbackEntry = {
   id: number;
-  result: ParcelScanResult | ProductScanResult;
+  result: FeedbackResult;
   timestamp: number;
 };
 
 function ParcelFeedback({ entry }: { entry: FeedbackEntry }) {
   const { t } = useTranslation();
-  const r = entry.result as ParcelScanResult;
+  const r = entry.result;
 
   if (r.kind === "parcel_accepted") {
     return (
@@ -82,12 +88,23 @@ function ParcelFeedback({ entry }: { entry: FeedbackEntry }) {
     );
   }
 
+  if (r.kind === "invalid_order") {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-status-danger bg-status-danger-soft px-4 py-3">
+        <XCircle className="size-6 shrink-0 text-status-danger-text" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <p className="text-label text-status-danger-text">{t("packSession.error.title")}</p>
+        </div>
+      </div>
+    );
+  }
+
   return null;
 }
 
 function ProductFeedback({ entry }: { entry: FeedbackEntry }) {
   const { t } = useTranslation();
-  const r = entry.result as ProductScanResult;
+  const r = entry.result;
 
   if (r.kind === "accepted") {
     return (
@@ -160,7 +177,12 @@ function ProductFeedback({ entry }: { entry: FeedbackEntry }) {
 
 function ScanFeedback({ entry }: { entry: FeedbackEntry }) {
   const r = entry.result;
-  if ("parcelCode" in r || "scannedCode" in r || r.kind === "parcel_already_verified") {
+  if (
+    r.kind === "parcel_accepted" ||
+    r.kind === "wrong_parcel" ||
+    r.kind === "parcel_already_verified" ||
+    r.kind === "invalid_order"
+  ) {
     return <ParcelFeedback entry={entry} />;
   }
   return <ProductFeedback entry={entry} />;
@@ -214,6 +236,7 @@ function PackScreen() {
 
   const [packSession, setPackSession] = useState<PackSession | null>(null);
   const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
+  const [scanning, setScanning] = useState(false);
   const feedbackIdRef = useRef(0);
   const scanInputRef = useRef<HTMLInputElement>(null);
 
@@ -229,38 +252,73 @@ function PackScreen() {
 
   const phase = packSession ? getPackPhase(packSession) : null;
 
-  const handleScan = useCallback(
-    (scannedValue: string) => {
-      if (!packSession) return;
+  const addFeedback = useCallback((result: FeedbackResult) => {
+    const id = ++feedbackIdRef.current;
+    setFeedback((prev) => [{ id, result, timestamp: Date.now() }, ...prev].slice(0, 10));
+  }, []);
 
-      const id = ++feedbackIdRef.current;
+  const handleScan = useCallback(
+    async (scannedValue: string) => {
+      if (!packSession || scanning) return;
 
       if (!packSession.parcelVerified) {
-        const result = validateParcelScan(packSession, scannedValue);
-        setFeedback((prev) => [{ id, result, timestamp: Date.now() }, ...prev].slice(0, 10));
-        if (result.kind === "parcel_accepted") {
-          setPackSession((prev) => (prev ? applyParcelScan(prev, result) : prev));
+        setScanning(true);
+        try {
+          const { validatePackParcelScanFn } = await import("@/api/packing");
+          const result = await validatePackParcelScanFn({
+            data: { orderId, scannedCode: scannedValue },
+          });
+          addFeedback(result);
+          if (result.kind === "parcel_accepted") {
+            setPackSession((prev) => (prev ? applyServerParcelAccepted(prev) : prev));
+          }
+        } finally {
+          setScanning(false);
         }
         return;
       }
 
       if (looksLikeParcelCode(scannedValue)) {
-        const result = validateParcelScan(packSession, scannedValue);
-        setFeedback((prev) => [{ id, result, timestamp: Date.now() }, ...prev].slice(0, 10));
+        addFeedback({ kind: "parcel_already_verified" });
         return;
       }
 
-      const result = validateProductScan(packSession, scannedValue);
-      setFeedback((prev) => [{ id, result, timestamp: Date.now() }, ...prev].slice(0, 10));
-      if (result.kind === "accepted") {
-        setPackSession((prev) => (prev ? applyAcceptedPackScan(prev, result) : prev));
+      const currentProgress = packSession ? computePackProgress(packSession) : null;
+      if (currentProgress?.isComplete) {
+        addFeedback({ kind: "already_complete" });
+        return;
+      }
+
+      setScanning(true);
+      try {
+        const { validatePackProductScanFn } = await import("@/api/packing");
+        const result = await validatePackProductScanFn({
+          data: { orderId, barcode: scannedValue },
+        });
+
+        if (result.kind === "accepted") {
+          if (isLocalDuplicateScan(packSession, result.orderItemId)) {
+            addFeedback({
+              kind: "duplicate_scan",
+              variantId: result.variantId,
+              productName: result.productName,
+            });
+          } else {
+            addFeedback(result);
+            setPackSession((prev) => (prev ? applyServerProductAccepted(prev, result) : prev));
+          }
+        } else {
+          addFeedback(result);
+        }
+      } finally {
+        setScanning(false);
       }
     },
-    [packSession],
+    [packSession, scanning, orderId, addFeedback],
   );
 
   useBarcodeScanner({
-    enabled: canRead && packSession !== null && phase !== "complete",
+    enabled: canRead && packSession !== null && phase !== "complete" && !scanning,
     onScan: handleScan,
   });
 
@@ -271,7 +329,7 @@ function PackScreen() {
       if (!input) return;
       const value = input.value.trim();
       if (value.length > 0) {
-        handleScan(value);
+        void handleScan(value);
         input.value = "";
       }
     },
@@ -341,9 +399,10 @@ function PackScreen() {
                   />
                   <button
                     type="submit"
-                    className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white active:opacity-90"
+                    disabled={scanning}
+                    className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white active:opacity-90 disabled:opacity-50"
                   >
-                    {t("packSession.submit")}
+                    {scanning ? <Spinner className="size-5" /> : t("packSession.submit")}
                   </button>
                 </form>
               </section>
@@ -388,9 +447,10 @@ function PackScreen() {
                     />
                     <button
                       type="submit"
-                      className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white active:opacity-90"
+                      disabled={scanning}
+                      className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white active:opacity-90 disabled:opacity-50"
                     >
-                      {t("packSession.submit")}
+                      {scanning ? <Spinner className="size-5" /> : t("packSession.submit")}
                     </button>
                   </form>
                 </section>

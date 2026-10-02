@@ -1,17 +1,16 @@
 /**
- * Scan-to-Pack domain — pure packing logic.
+ * Scan-to-Pack domain — client-side types and display logic.
  *
- * A pack session verifies that picked items are placed into the correct parcel.
- * The warehouse worker scans the parcel code first, then scans each product.
- * The domain validates each scan against the order's requirements.
+ * VALIDATION IS SERVER-AUTHORITATIVE. All scan validation (parcel identity,
+ * product barcode, variant ownership) is performed by the server service in
+ * src/server/packing/service.ts. This module contains only:
+ *   - Type definitions shared between client and server response shapes
+ *   - Progress computation for the UI progress bar
+ *   - Phase derivation for UI state machine rendering
+ *   - canPackOrder display predicate for the order detail button
  *
  * INVENTORY IS NOT MUTATED. Packing is a verification step — it confirms
- * physical items match the order, nothing more. Stock was consumed at order
- * confirmation; picking gathered the goods; packing checks they go into the
- * right box.
- *
- * Future compatibility: courier handoff, returns, multi-parcel orders,
- * warehouse zones and batch packing can extend this without restructuring.
+ * physical items match the order, nothing more.
  */
 
 // ── Pack requirement (what the order needs) ─────────────────────────────────
@@ -28,7 +27,7 @@ export interface PackRequirement {
   siblingBarcodes: readonly string[];
 }
 
-// ── Pack session state ──────────────────────────────────────────────────────
+// ── Pack session state (client-side tracking for UI progress) ──────────────
 
 export interface PackedItem {
   orderItemId: string;
@@ -47,22 +46,18 @@ export interface PackSession {
   packed: readonly PackedItem[];
 }
 
-// ── Parcel scan result ──────────────────────────────────────────────────────
+// ── Server scan result types (match server/packing/types.ts) ──────────────
 
-export type ParcelScanResult =
+export type ServerParcelScanResult =
   | { kind: "parcel_accepted"; parcelCode: string }
   | { kind: "wrong_parcel"; scannedCode: string }
-  | { kind: "parcel_already_verified" };
+  | { kind: "invalid_order" };
 
-// ── Product scan result ─────────────────────────────────────────────────────
-
-export type ProductScanResult =
+export type ServerProductScanResult =
   | { kind: "accepted"; orderItemId: string; variantId: string; productName: string }
   | { kind: "wrong_product"; scannedBarcode: string }
   | { kind: "wrong_variant"; scannedBarcode: string; expectedVariantName: string | null }
-  | { kind: "duplicate_scan"; variantId: string; productName: string }
-  | { kind: "already_complete" }
-  | { kind: "parcel_not_verified" };
+  | { kind: "invalid_order" };
 
 // ── Progress ────────────────────────────────────────────────────────────────
 
@@ -143,94 +138,20 @@ export function getPackPhase(session: PackSession): PackPhase {
 }
 
 /**
- * Validate a scanned parcel code against the pack session's expected parcel.
+ * Apply a server-validated parcel acceptance to the local session.
+ * Only call after the server returned parcel_accepted.
  */
-export function validateParcelScan(session: PackSession, scannedCode: string): ParcelScanResult {
-  if (session.parcelVerified) {
-    return { kind: "parcel_already_verified" };
-  }
-
-  if (scannedCode === session.expectedParcelCode) {
-    return { kind: "parcel_accepted", parcelCode: scannedCode };
-  }
-
-  return { kind: "wrong_parcel", scannedCode };
-}
-
-/**
- * Apply an accepted parcel scan, returning a new session with parcel verified.
- */
-export function applyParcelScan(
-  session: PackSession,
-  _result: Extract<ParcelScanResult, { kind: "parcel_accepted" }>,
-): PackSession {
+export function applyServerParcelAccepted(session: PackSession): PackSession {
   return { ...session, parcelVerified: true };
 }
 
 /**
- * Validate a scanned product barcode against the pack session's requirements.
- *
- * Rules:
- *   1. Parcel must be verified first.
- *   2. If all items are already packed → already_complete.
- *   3. Find which requirement(s) match the barcode (by variant barcode).
- *   4. No match → check siblingBarcodes for a same-product / wrong-variant hit.
- *   5. Match found but all units for that line are packed → duplicate_scan.
- *   6. Match → accepted.
+ * Apply a server-validated product acceptance to the local session.
+ * Only call after the server returned accepted.
  */
-export function validateProductScan(session: PackSession, barcode: string): ProductScanResult {
-  if (!session.parcelVerified) {
-    return { kind: "parcel_not_verified" };
-  }
-
-  const progress = computePackProgress(session);
-  if (progress.isComplete) {
-    return { kind: "already_complete" };
-  }
-
-  const matchingReqs = session.requirements.filter(
-    (req) => req.barcode !== null && req.barcode === barcode,
-  );
-
-  if (matchingReqs.length === 0) {
-    const siblingMatch = session.requirements.find((req) => req.siblingBarcodes.includes(barcode));
-    if (siblingMatch) {
-      return {
-        kind: "wrong_variant",
-        scannedBarcode: barcode,
-        expectedVariantName: siblingMatch.variantName,
-      };
-    }
-    return { kind: "wrong_product", scannedBarcode: barcode };
-  }
-
-  for (const req of matchingReqs) {
-    const packed = packedCountForItem(session.packed, req.orderItemId);
-    if (packed < req.quantityRequired) {
-      return {
-        kind: "accepted",
-        orderItemId: req.orderItemId,
-        variantId: req.variantId,
-        productName: req.productName,
-      };
-    }
-  }
-
-  const firstMatch = matchingReqs[0]!;
-  return {
-    kind: "duplicate_scan",
-    variantId: firstMatch.variantId,
-    productName: firstMatch.productName,
-  };
-}
-
-/**
- * Apply an accepted product scan to the session, returning a new session with
- * the item recorded. Only call after validateProductScan returned "accepted".
- */
-export function applyAcceptedPackScan(
+export function applyServerProductAccepted(
   session: PackSession,
-  result: Extract<ProductScanResult, { kind: "accepted" }>,
+  result: { orderItemId: string; variantId: string },
 ): PackSession {
   return {
     ...session,
@@ -246,8 +167,19 @@ export function applyAcceptedPackScan(
 }
 
 /**
+ * Check whether a scan is a duplicate for display purposes.
+ * This checks the LOCAL packed count against requirements.
+ */
+export function isLocalDuplicateScan(session: PackSession, orderItemId: string): boolean {
+  const req = session.requirements.find((r) => r.orderItemId === orderItemId);
+  if (!req) return false;
+  return packedCountForItem(session.packed, orderItemId) >= req.quantityRequired;
+}
+
+/**
  * Check whether an order is in a state where packing is allowed.
- * Packing requires a confirmed order with processing fulfillment (pick done).
+ * Display predicate for showing/hiding the "Start packing" button.
+ * The server enforces the same check authoritatively.
  */
 export function canPackOrder(order: {
   lifecycleStatus: string | undefined;

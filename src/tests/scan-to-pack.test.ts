@@ -1,9 +1,10 @@
 /**
- * Scan-to-Pack domain — pure logic tests.
+ * Scan-to-Pack domain — pure display logic tests.
  *
- * Covers: correct parcel, wrong parcel, correct product, wrong product,
- * wrong variant, duplicate scan, incomplete pack, completed pack, and
- * session lifecycle phases.
+ * Validation has moved to the server (src/server/packing/service.ts).
+ * These tests cover client-side display logic: session creation, progress
+ * computation, phase derivation, server result application, local duplicate
+ * detection, canPackOrder eligibility, and session immutability.
  *
  * Run: bun test src/tests/scan-to-pack.test.ts
  */
@@ -12,14 +13,12 @@ import {
   createPackSession,
   computePackProgress,
   getPackPhase,
-  validateParcelScan,
-  applyParcelScan,
-  validateProductScan,
-  applyAcceptedPackScan,
+  applyServerParcelAccepted,
+  applyServerProductAccepted,
+  isLocalDuplicateScan,
   canPackOrder,
   type PackRequirement,
   type PackSession,
-  type ProductScanResult,
 } from "../lib/pack";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -49,22 +48,16 @@ function sessionWith(
 }
 
 function verifyParcel(session: PackSession): PackSession {
-  const result = validateParcelScan(session, session.expectedParcelCode);
-  if (result.kind === "parcel_accepted") {
-    return applyParcelScan(session, result);
-  }
-  throw new Error(`Expected parcel_accepted, got ${result.kind}`);
+  return applyServerParcelAccepted(session);
 }
 
-function applyProductScan(
+function applyProductAccepted(
   session: PackSession,
-  barcode: string,
-): { session: PackSession; result: ProductScanResult } {
-  const result = validateProductScan(session, barcode);
-  if (result.kind === "accepted") {
-    return { session: applyAcceptedPackScan(session, result), result };
-  }
-  return { session, result };
+  orderItemId: string,
+  variantId: string,
+  productName: string,
+): PackSession {
+  return applyServerProductAccepted(session, { orderItemId, variantId });
 }
 
 // ── createPackSession ───────────────────────────────────────────────────────
@@ -82,31 +75,18 @@ describe("createPackSession", () => {
 
 // ── Parcel verification ─────────────────────────────────────────────────────
 
-describe("validateParcelScan", () => {
-  it("accepts the correct parcel code", () => {
-    const session = sessionWith([makeRequirement()]);
-    const result = validateParcelScan(session, PARCEL_CODE);
-    expect(result.kind).toBe("parcel_accepted");
-  });
-
-  it("rejects a wrong parcel code", () => {
-    const session = sessionWith([makeRequirement()]);
-    const result = validateParcelScan(session, "APSA:PCL:v1:WRONG_CODE_HERE_____");
-    expect(result.kind).toBe("wrong_parcel");
-  });
-
-  it("returns parcel_already_verified after verification", () => {
-    const session = verifyParcel(sessionWith([makeRequirement()]));
-    const result = validateParcelScan(session, PARCEL_CODE);
-    expect(result.kind).toBe("parcel_already_verified");
-  });
-});
-
-describe("applyParcelScan", () => {
+describe("applyServerParcelAccepted", () => {
   it("transitions to scanning_products phase", () => {
     const session = verifyParcel(sessionWith([makeRequirement()]));
     expect(session.parcelVerified).toBe(true);
     expect(getPackPhase(session)).toBe("scanning_products");
+  });
+
+  it("does not mutate the original session", () => {
+    const original = sessionWith([makeRequirement()]);
+    const before = JSON.stringify(original);
+    verifyParcel(original);
+    expect(JSON.stringify(original)).toBe(before);
   });
 });
 
@@ -134,8 +114,7 @@ describe("computePackProgress", () => {
 
   it("tracks partial progress", () => {
     let session = verifyParcel(sessionWith([makeRequirement({ quantityRequired: 3 })]));
-    const scan1 = applyProductScan(session, "1234567890");
-    session = scan1.session;
+    session = applyProductAccepted(session, "item-1", "var-1", "Red T-Shirt");
     const progress = computePackProgress(session);
     expect(progress.totalPacked).toBe(1);
     expect(progress.remaining).toBe(2);
@@ -144,8 +123,8 @@ describe("computePackProgress", () => {
 
   it("reports complete when all items are packed", () => {
     let session = verifyParcel(sessionWith([makeRequirement({ quantityRequired: 2 })]));
-    session = applyProductScan(session, "1234567890").session;
-    session = applyProductScan(session, "1234567890").session;
+    session = applyProductAccepted(session, "item-1", "var-1", "Red T-Shirt");
+    session = applyProductAccepted(session, "item-1", "var-1", "Red T-Shirt");
     const progress = computePackProgress(session);
     expect(progress.totalPacked).toBe(2);
     expect(progress.remaining).toBe(0);
@@ -154,61 +133,23 @@ describe("computePackProgress", () => {
   });
 });
 
-// ── Product scan validation ─────────────────────────────────────────────────
+// ── isLocalDuplicateScan ────────────────────────────────────────────────────
 
-describe("validateProductScan", () => {
-  it("rejects scan when parcel is not verified", () => {
-    const session = sessionWith([makeRequirement()]);
-    const result = validateProductScan(session, "1234567890");
-    expect(result.kind).toBe("parcel_not_verified");
+describe("isLocalDuplicateScan", () => {
+  it("returns false when line is not full", () => {
+    const session = verifyParcel(sessionWith([makeRequirement({ quantityRequired: 2 })]));
+    expect(isLocalDuplicateScan(session, "item-1")).toBe(false);
   });
 
-  it("accepts a correct product barcode", () => {
-    const session = verifyParcel(sessionWith([makeRequirement()]));
-    const result = validateProductScan(session, "1234567890");
-    expect(result.kind).toBe("accepted");
-    if (result.kind === "accepted") {
-      expect(result.orderItemId).toBe("item-1");
-      expect(result.productName).toBe("Red T-Shirt");
-    }
-  });
-
-  it("rejects a wrong product barcode", () => {
-    const session = verifyParcel(sessionWith([makeRequirement()]));
-    const result = validateProductScan(session, "UNKNOWN");
-    expect(result.kind).toBe("wrong_product");
-  });
-
-  it("detects wrong variant via sibling barcodes", () => {
-    const session = verifyParcel(
-      sessionWith([makeRequirement({ barcode: "AAA", siblingBarcodes: ["BBB"] })]),
-    );
-    const result = validateProductScan(session, "BBB");
-    expect(result.kind).toBe("wrong_variant");
-  });
-
-  it("reports duplicate_scan when one line is full but others remain", () => {
-    let session = verifyParcel(
-      sessionWith([
-        makeRequirement({ orderItemId: "item-1", barcode: "AAA", quantityRequired: 1 }),
-        makeRequirement({
-          orderItemId: "item-2",
-          variantId: "var-2",
-          barcode: "BBB",
-          quantityRequired: 1,
-        }),
-      ]),
-    );
-    session = applyProductScan(session, "AAA").session;
-    const result = validateProductScan(session, "AAA");
-    expect(result.kind).toBe("duplicate_scan");
-  });
-
-  it("reports already_complete when all items are packed", () => {
+  it("returns true when line is full", () => {
     let session = verifyParcel(sessionWith([makeRequirement({ quantityRequired: 1 })]));
-    session = applyProductScan(session, "1234567890").session;
-    const result = validateProductScan(session, "SOME_OTHER");
-    expect(result.kind).toBe("already_complete");
+    session = applyProductAccepted(session, "item-1", "var-1", "Red T-Shirt");
+    expect(isLocalDuplicateScan(session, "item-1")).toBe(true);
+  });
+
+  it("returns false for unknown order item", () => {
+    const session = verifyParcel(sessionWith([makeRequirement()]));
+    expect(isLocalDuplicateScan(session, "nonexistent")).toBe(false);
   });
 });
 
@@ -233,13 +174,13 @@ describe("multi-line packing", () => {
       ]),
     );
 
-    session = applyProductScan(session, "AAA").session;
+    session = applyProductAccepted(session, "item-1", "var-1", "Shirt");
     let progress = computePackProgress(session);
     expect(progress.totalPacked).toBe(1);
     expect(progress.remaining).toBe(2);
 
-    session = applyProductScan(session, "BBB").session;
-    session = applyProductScan(session, "BBB").session;
+    session = applyProductAccepted(session, "item-2", "var-2", "Pants");
+    session = applyProductAccepted(session, "item-2", "var-2", "Pants");
     progress = computePackProgress(session);
     expect(progress.totalPacked).toBe(3);
     expect(progress.isComplete).toBe(true);
@@ -284,17 +225,17 @@ describe("canPackOrder", () => {
 // ── Immutability ────────────────────────────────────────────────────────────
 
 describe("session immutability", () => {
-  it("validateProductScan does not mutate the session", () => {
+  it("applyServerProductAccepted does not mutate the session", () => {
     const session = verifyParcel(sessionWith([makeRequirement()]));
     const before = JSON.stringify(session);
-    validateProductScan(session, "1234567890");
+    applyServerProductAccepted(session, { orderItemId: "item-1", variantId: "var-1" });
     expect(JSON.stringify(session)).toBe(before);
   });
 
-  it("validateParcelScan does not mutate the session", () => {
+  it("applyServerParcelAccepted does not mutate the session", () => {
     const session = sessionWith([makeRequirement()]);
     const before = JSON.stringify(session);
-    validateParcelScan(session, PARCEL_CODE);
+    applyServerParcelAccepted(session);
     expect(JSON.stringify(session)).toBe(before);
   });
 });
