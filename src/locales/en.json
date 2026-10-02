@@ -959,7 +959,7 @@
     "placedBy": "Handled by",
     "placedOn": "Placed",
     "payment": "Payment",
-    "fulfillment": "Fulfilment",
+    "fulfillment": "Fulfillment",
     "items": "Items",
     "subtotal": "Subtotal",
     "discount": "Discount",
@@ -984,7 +984,6 @@
     "printParcelLabel": "Print parcel label",
     "startPicking": "Start picking",
     "startPacking": "Start packing",
-    "fulfillment": "Fulfillment",
     "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
     "markReady": "Mark as ready",
@@ -2266,7 +2265,25 @@
       "needsConfirmBody": "{{count}} order(s) need a confirmed shipping address before their labels can print.",
       "needsConfirmOne": "This order needs a confirmed shipping address before its label can print.",
       "editCta": "Edit shipping address",
-      "includeCode128": "Include Code 128 barcode"
+      "carrier": "Carrier",
+      "tracking": "Tracking",
+      "carrierNotAssigned": "Not assigned yet",
+      "codToCollect": "COD — collect from customer",
+      "balanceDue": "Remaining balance after deposit",
+      "paidNoCollect": "Do not collect money",
+      "checkPayment": "Check payment",
+      "checkPaymentBody": "Do not collect money until the shop confirms payment.",
+      "checkReason": {
+        "settlement_unavailable": "Payment status could not be confirmed",
+        "refunded": "A refund was issued on this order",
+        "payment_review": "A payment is waiting for review",
+        "payment_failed": "A payment did not match",
+        "payment_reversed": "A payment was reversed"
+      },
+      "order": "Order",
+      "codesPending": "Parcel code not assigned yet",
+      "needsParcelCode": "These labels need a parcel code before printing. Ask an owner or manager to print them.",
+      "parcelCodeError": "Could not assign a parcel code. Please try again."
     }
   },
   "pick": {

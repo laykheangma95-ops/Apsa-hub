@@ -1,10 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { ParcelLabel } from "./ParcelLabel";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/design-system";
 import { ShippingDestinationSheet } from "@/components/orders/ShippingDestinationSheet";
 import {
@@ -23,10 +22,15 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  *
  * ── PARCEL IDENTITY INTEGRATION ──────────────────────────────────────────────
  *
- * On print, every order without a parcel code gets one created via
- * createParcelFn (idempotent). Orders that already have a parcel code reuse it
- * unchanged — reprinting never generates a new identity. The QR and optional
- * Code 128 barcode both encode the same parcel identity.
+ * When the labels load, every order without a parcel code gets one created via
+ * createParcelFn (idempotent), and the labels refetch. Orders that already have
+ * a parcel code reuse it unchanged — reprinting never generates a new identity.
+ * The QR and the Code 128 barcode both encode that same parcel identity.
+ *
+ * Printing is blocked until EVERY label in the batch carries its parcel code, so
+ * a label can never go to the printer without its codes, or with a legacy
+ * order-UUID QR. A member who cannot create parcels (and whose orders have no
+ * code yet) is told to ask someone who can.
  *
  * ── ORDER-AUTHORITATIVE DESTINATION (§9, §13, migration 047) ──────────────────
  *
@@ -65,7 +69,6 @@ export function ParcelLabelDialog({
   useSensitiveCapabilityRevalidation(userId, organizationId, open);
 
   const [confirmOrderId, setConfirmOrderId] = useState<string | null>(null);
-  const [includeCode128, setIncludeCode128] = useState(false);
 
   useEffect(() => {
     if (!canPrint || !open) setConfirmOrderId(null);
@@ -78,10 +81,9 @@ export function ParcelLabelDialog({
   });
 
   /**
-   * Ensure every order in the batch has a parcel identity before printing.
-   * Idempotent: createParcel returns the existing parcel if one exists.
-   * After creating missing parcels, refetch label data so the parcel codes
-   * appear on the labels.
+   * Ensure every order in the batch has a parcel identity. Idempotent:
+   * createParcel returns the existing parcel if one exists. After creating
+   * missing parcels, refetch label data so the codes appear on the labels.
    */
   const ensureParcelsMutation = useMutation({
     mutationFn: async (labelData: ParcelLabelInput[]) => {
@@ -89,12 +91,28 @@ export function ParcelLabelDialog({
       if (needsParcel.length === 0) return;
       await Promise.all(needsParcel.map((d) => createParcel(d.order.id)));
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
+    onSuccess: () =>
+      queryClient.invalidateQueries({
         queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
-      });
-    },
+      }),
   });
+
+  // One automatic attempt per opened batch — a failure is shown, never retried
+  // in a loop.
+  const batchKey = orderIds.join(",");
+  const attemptedBatch = useRef<string | null>(null);
+  const loaded = canPrint && query.isSuccess ? query.data : null;
+  const missingCodes = loaded ? loaded.some((d) => !d.parcelCode) : false;
+  useEffect(() => {
+    if (!open) {
+      attemptedBatch.current = null;
+      return;
+    }
+    if (!loaded || !missingCodes || !canCreateParcel) return;
+    if (attemptedBatch.current === batchKey) return;
+    attemptedBatch.current = batchKey;
+    ensureParcelsMutation.mutate(loaded);
+  }, [open, loaded, missingCodes, canCreateParcel, batchKey, ensureParcelsMutation]);
 
   if (!open) return null;
 
@@ -115,26 +133,12 @@ export function ParcelLabelDialog({
   }
 
   /**
-   * Pre-print hook: ensure parcel identities exist, then reauthorize.
-   * If any order is missing a parcel code, create it first, refetch, and only
-   * then proceed to the authorization check and print.
+   * Pre-print hook: never print a label without its parcel code (the Print
+   * button is hidden in that case too), then reauthorize server-side.
    */
   async function handleBeforePrint(): Promise<boolean> {
     const currentData: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
-    const needsParcel = currentData.some((d) => !d.parcelCode);
-
-    if (needsParcel && canCreateParcel) {
-      try {
-        await ensureParcelsMutation.mutateAsync(currentData);
-        // Wait for the refetch to complete so labels show parcel codes.
-        await queryClient.refetchQueries({
-          queryKey: fulfillmentKeys.parcelLabels(userId, organizationId, orderIds),
-        });
-      } catch {
-        return false;
-      }
-    }
-
+    if (currentData.length === 0 || currentData.some((d) => !d.parcelCode)) return false;
     return reauthorizePrint();
   }
 
@@ -146,6 +150,12 @@ export function ParcelLabelDialog({
   const unconfirmed = data.filter((d) => !d.customer.addressConfirmed);
   const confirmed = data.filter((d) => d.customer.addressConfirmed);
   const allConfirmed = data.length > 0 && unconfirmed.length === 0;
+  const allCoded = data.length > 0 && data.every((d) => !!d.parcelCode);
+  // Creation failed, or succeeded yet the refetched labels still lack a code.
+  const codeError =
+    ensureParcelsMutation.isError ||
+    (ensureParcelsMutation.isSuccess && !query.isFetching && missingCodes);
+  const assigningCodes = missingCodes && canCreateParcel && !codeError;
 
   const title =
     orderIds.length > 1
@@ -168,7 +178,7 @@ export function ParcelLabelDialog({
         onClose={onClose}
         title={title}
         pageSize={PARCEL_LABEL_SIZE_MM}
-        printable={canPrint && allConfirmed}
+        printable={canPrint && allConfirmed && allCoded}
         active={confirmTarget === null}
         onBeforePrint={handleBeforePrint}
         controls={
@@ -214,16 +224,26 @@ export function ParcelLabelDialog({
                     ))}
                 </ul>
               ) : null}
-              <label className="flex items-center gap-2 pt-1">
-                <Checkbox
-                  checked={includeCode128}
-                  onCheckedChange={(c) => setIncludeCode128(c === true)}
-                  aria-label={t("labels.parcel.includeCode128")}
-                />
-                <span className="text-body-sm text-text-secondary">
-                  {t("labels.parcel.includeCode128")}
-                </span>
-              </label>
+              {missingCodes && !canCreateParcel ? (
+                <p role="status" className="text-caption text-text-muted">
+                  {t("labels.parcel.needsParcelCode")}
+                </p>
+              ) : null}
+              {codeError ? (
+                <div role="alert" className="flex items-center justify-between gap-2">
+                  <p className="text-caption text-text-muted">
+                    {t("labels.parcel.parcelCodeError")}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="tap-target h-9 shrink-0 rounded-xl"
+                    onClick={() => ensureParcelsMutation.mutate(data)}
+                  >
+                    {t("common.retry")}
+                  </Button>
+                </div>
+              ) : null}
             </div>
           ) : undefined
         }
@@ -232,7 +252,7 @@ export function ParcelLabelDialog({
           <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
             {t("labels.parcel.denied")}
           </div>
-        ) : query.isPending || ensureParcelsMutation.isPending ? (
+        ) : query.isPending || ensureParcelsMutation.isPending || assigningCodes ? (
           <div className="flex h-full items-center justify-center">
             <Spinner />
           </div>
@@ -241,9 +261,7 @@ export function ParcelLabelDialog({
             {t("labels.parcel.error")}
           </div>
         ) : (
-          confirmed.map((d) => (
-            <ParcelLabel key={d.order.id} vm={buildParcelLabel({ ...d, includeCode128 })} />
-          ))
+          confirmed.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />)
         )}
       </LabelSheet>
 

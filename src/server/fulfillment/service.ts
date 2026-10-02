@@ -33,6 +33,7 @@ import {
   type ParcelLabelBlockReason,
 } from "@/server/orders/state-machine";
 import * as repo from "./repository";
+import { deriveLabelPayment } from "./label-payment";
 import type { ReadyToPackEntry, ParcelLabelData, ParcelLabelItem } from "./types";
 
 /** Default and maximum queue page size. */
@@ -129,6 +130,15 @@ export async function listReadyToPack(
   });
 }
 
+/** Delivery statuses whose carrier/tracking may appear on a label. */
+const LABEL_DELIVERY_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "preparing",
+  "ready",
+  "in_transit",
+  "delivered",
+]);
+
 /** Human-facing refusal for each non-printable order state (§19). */
 function printBlockError(reason: ParcelLabelBlockReason): Error {
   switch (reason) {
@@ -161,7 +171,14 @@ function printBlockError(reason: ParcelLabelBlockReason): Error {
  *
  * ── COD (§18) ─────────────────────────────────────────────────────────────────
  * The amount to collect is the authoritative OUTSTANDING balance from the
- * Payment ledger, not the full total and not derived from payment_status.
+ * Payment ledger, not the full total and not derived from payment_status. An
+ * ambiguous settlement (unverified claim, mismatch, refund, reversal) prints as
+ * CHECK PAYMENT with no amount — see deriveLabelPayment.
+ *
+ * ── SHOP / CARRIER ────────────────────────────────────────────────────────────
+ * Shop name and phone come from the caller's own organization (and its
+ * location); carrier/tracking from this order's own delivery row. Every read is
+ * filtered by ctx.organizationId, never a client-supplied id.
  *
  * ── ADDRESS (§13, migration 047) ──────────────────────────────────────────────
  * The destination is the ORDER's own shipping snapshot (orders.shipping_*),
@@ -195,17 +212,20 @@ export async function getParcelLabelData(
     throw printBlockError(printability.reason);
   }
 
-  const [items, businessName, delivery, totals, parcelCode] = await Promise.all([
-    ordersRepo.listOrderItems(ctx.organizationId, orderId),
-    repo.organizationName(ctx.organizationId),
-    ctx.can("delivery.read")
-      ? repo.latestDeliveryForOrder(ctx.organizationId, orderId)
-      : Promise.resolve(null),
-    repo.orderPaymentTotals(ctx.organizationId, orderId),
-    import("@/server/parcels/service")
-      .then((m) => m.getParcelCodeForOrder(ctx.organizationId, orderId))
-      .catch(() => null),
-  ]);
+  const [items, businessName, phone, latestDelivery, totals, paymentRows, parcelCode] =
+    await Promise.all([
+      ordersRepo.listOrderItems(ctx.organizationId, orderId),
+      repo.organizationName(ctx.organizationId),
+      repo.shopPhone(ctx.organizationId, order.location_id ?? null),
+      ctx.can("delivery.read")
+        ? repo.latestDeliveryForOrder(ctx.organizationId, orderId)
+        : Promise.resolve(null),
+      repo.orderPaymentTotals(ctx.organizationId, orderId),
+      repo.orderPaymentStates(ctx.organizationId, orderId),
+      import("@/server/parcels/service")
+        .then((m) => m.getParcelCodeForOrder(ctx.organizationId, orderId))
+        .catch(() => null),
+    ]);
 
   // The destination is the ORDER's snapshot, never the mutable customer default.
   // A non-empty shipping_address is the authoritative, confirmed destination.
@@ -227,11 +247,21 @@ export async function getParcelLabelData(
   }));
   const itemCount = labelItems.reduce((sum, i) => sum + i.quantity, 0);
 
-  const outstanding = outstandingMinor(totals ?? undefined, order.total_minor);
-  const paid = outstanding === 0;
+  // PAID / COD / CHECK from the Payment ledger only (§18) — fail-safe rule in
+  // ./label-payment.ts. A missing settlement row is CHECK, never a guessed COD.
+  const payment = deriveLabelPayment({
+    currency: order.currency as Currency,
+    totals,
+    payments: paymentRows,
+  });
+
+  // A failed or cancelled attempt's carrier/tracking would send a courier the
+  // wrong way; only an active or delivered delivery is printed.
+  const delivery =
+    latestDelivery && LABEL_DELIVERY_STATUSES.has(latestDelivery.status) ? latestDelivery : null;
 
   return {
-    merchant: { businessName: businessName ?? "" },
+    merchant: { businessName: businessName ?? "", phone, logoUrl: null },
     customer: {
       name: shipName,
       phone: shipPhone,
@@ -248,15 +278,13 @@ export async function getParcelLabelData(
       items: labelItems,
     },
     reprint: printability.reprint,
-    payment: {
-      paid,
-      collect: paid ? null : money(outstanding, order.currency),
-    },
+    payment: { ...payment, paid: payment.state === "paid" },
     delivery: delivery
       ? {
           providerName: delivery.provider_name,
           trackingNumber: delivery.external_tracking_number,
           status: delivery.status,
+          serviceName: null,
         }
       : null,
     parcelCode,

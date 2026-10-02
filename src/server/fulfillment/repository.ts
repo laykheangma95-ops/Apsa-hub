@@ -124,6 +124,59 @@ export interface LatestDeliveryRow {
   status: string;
 }
 
+/**
+ * The shop phone printed on a parcel label, org-scoped.
+ *
+ * Organizations carry no phone column today; the only phone the business
+ * profile has is per location (migration 005). So: the order's own selling
+ * location when it has one; otherwise the organization's location ONLY when it
+ * has exactly one active location (single-branch shop). With several branches
+ * and no order location there is no authoritative answer, so null — the label
+ * never guesses between branches.
+ */
+export async function shopPhone(
+  organizationId: string,
+  orderLocationId: string | null,
+): Promise<string | null> {
+  let query = db.from("locations").select("phone").eq("organization_id", organizationId);
+  query = orderLocationId
+    ? query.eq("id", orderLocationId).limit(1)
+    : query.eq("status", "active").limit(2);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`shopPhone: ${errMessage(error)}`);
+  const rows = (data ?? []) as Array<{ phone: string | null }>;
+  if (rows.length !== 1) return null;
+  const phone = rows[0]!.phone?.trim();
+  return phone ? phone : null;
+}
+
+/**
+ * The payment rows for one order, org-scoped — status, method and
+ * verification only (no amounts, references or evidence). Used to keep an
+ * ambiguous settlement from printing as PAID or as a COD amount; see
+ * ./label-payment.ts.
+ */
+export interface OrderPaymentStateRow {
+  method: string;
+  status: string;
+  verification_state: string;
+}
+
+export async function orderPaymentStates(
+  organizationId: string,
+  orderId: string,
+): Promise<OrderPaymentStateRow[]> {
+  const { data, error } = await db
+    .from("payments")
+    .select("method, status, verification_state")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId);
+
+  if (error) throw new Error(`orderPaymentStates: ${errMessage(error)}`);
+  return (data ?? []) as OrderPaymentStateRow[];
+}
+
 /** The most recent delivery attempt for an order, org-scoped, or null. */
 export async function latestDeliveryForOrder(
   organizationId: string,

@@ -131,6 +131,8 @@ interface Tables {
   organizations?: unknown;
   deliveries?: unknown;
   order_payment_totals?: unknown;
+  payments?: unknown;
+  locations?: unknown;
 }
 
 /**
@@ -207,8 +209,10 @@ function totalsRow(overrides: Record<string, unknown> = {}) {
 async function withDb<T>(tables: Tables, fn: () => Promise<T>): Promise<T> {
   const orders = await import("../server/orders/repository");
   const fulfil = await import("../server/fulfillment/repository");
-  const restoreOrders = orders.setOrderRepositoryDbForTests(makeDb(tables));
-  const restoreFulfil = fulfil.setFulfillmentRepositoryDbForTests(makeDb(tables));
+  // No payment rows and no location unless a test says otherwise.
+  const withDefaults: Tables = { payments: [], locations: [], ...tables };
+  const restoreOrders = orders.setOrderRepositoryDbForTests(makeDb(withDefaults));
+  const restoreFulfil = fulfil.setFulfillmentRepositoryDbForTests(makeDb(withDefaults));
   try {
     return await fn();
   } finally {
@@ -456,7 +460,7 @@ describe("getParcelLabelData — assembly", () => {
     expect(data.payment.collect).toBeNull();
   });
 
-  it("derives outstanding from settlement after a refund, not stale payment_status", async () => {
+  it("a refunded order prints CHECK PAYMENT — never a COD amount for refunded money", async () => {
     const { getParcelLabelData } = await import("../server/fulfillment/service");
     const data = await withDb(
       {
@@ -476,8 +480,12 @@ describe("getParcelLabelData — assembly", () => {
       },
       () => getParcelLabelData(makeCtx(PRINT_PERMS), ORDER_ID),
     );
+    // Previously this printed "collect 30,000": the courier would have collected
+    // money the shop had just refunded. A refund makes the label CHECK PAYMENT.
     expect(data.payment.paid).toBe(false);
-    expect(data.payment.collect).toEqual({ amount: 30000, currency: "KHR" });
+    expect(data.payment.state).toBe("check");
+    expect(data.payment.checkReason).toBe("refunded");
+    expect(data.payment.collect).toBeNull();
   });
 
   it("refuses draft / cancelled / completed orders (§19)", async () => {
