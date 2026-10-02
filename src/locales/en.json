@@ -1800,6 +1800,58 @@
     "noLocation": "No location",
     "confirm": "Record receipt"
   },
+  "receiving": {
+    "action": "Receive stock",
+    "title": "Receive stock",
+    "subtitle": "Scan products as they arrive",
+    "supplier": {
+      "title": "Supplier",
+      "label": "Supplier (optional)",
+      "placeholder": "Who is this stock from?",
+      "hint": "Saved with each item you receive. Leave empty if you don't need it.",
+      "tooLong": "Keep the supplier name to {{count}} characters or fewer."
+    },
+    "scan": {
+      "title": "Scan product",
+      "label": "Barcode",
+      "placeholder": "Scan or type the barcode",
+      "hint": "Use a barcode scanner, the camera, or type the code and press Find.",
+      "find": "Find product",
+      "finding": "Finding…",
+      "notFound": "No active product with that barcode in this business.",
+      "notAProduct": "That code is a parcel or an order, not a product."
+    },
+    "product": {
+      "title": "Product",
+      "barcode": "Barcode",
+      "onHand": "On hand now:"
+    },
+    "confirm": {
+      "title": "Quantity received",
+      "quantity": "Quantity",
+      "quantityHint": "Whole units, from 1 to 100,000.",
+      "submit": "Receive {{count}}",
+      "submitEmpty": "Enter a quantity",
+      "scanAnother": "Scan a different product"
+    },
+    "done": {
+      "title": "{{count}} received",
+      "replayedTitle": "Already received",
+      "replayedBody": "This receipt was already recorded, so no stock was added again.",
+      "onHand": "On hand now:",
+      "supplier": "Supplier: {{supplier}}",
+      "next": "Receive next product",
+      "viewStock": "View stock for this item"
+    },
+    "error": {
+      "denied": "You don't have permission to receive stock.",
+      "invalid": "Check the quantity and supplier, then try again.",
+      "generic": "The receipt could not be confirmed. Try again — it will not be counted twice.",
+      "variantNotFound": "This product is no longer available to receive.",
+      "locationNotFound": "That location is not available. Choose another.",
+      "receiptConflict": "This receipt changed while it was being saved. Check it and confirm again."
+    }
+  },
   "stockAdjustment": {
     "action": "Adjust stock",
     "title": "Manual adjustment",

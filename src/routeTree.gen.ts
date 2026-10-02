@@ -41,6 +41,7 @@ import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id
 import { Route as AppHandoffParcelCodeRouteImport } from './routes/app.handoff.$parcelCode'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
 import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventory.$variantId'
+import { Route as AppInventoryReceiveRouteImport } from './routes/app.inventory.receive'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
 import { Route as AppPackOrderIdRouteImport } from './routes/app.pack.$orderId'
 import { Route as AppParcelsCodeRouteImport } from './routes/app.parcels.$code'
@@ -208,6 +209,11 @@ const AppInventoryVariantIdRoute = AppInventoryVariantIdRouteImport.update({
   path: '/$variantId',
   getParentRoute: () => AppInventoryRoute,
 } as any)
+const AppInventoryReceiveRoute = AppInventoryReceiveRouteImport.update({
+  id: '/receive',
+  path: '/receive',
+  getParentRoute: () => AppInventoryRoute,
+} as any)
 const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -271,6 +277,7 @@ export interface FileRoutesByFullPath {
   '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
+  '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
@@ -310,6 +317,7 @@ export interface FileRoutesByTo {
   '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
+  '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
@@ -351,6 +359,7 @@ export interface FileRoutesById {
   '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
+  '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
@@ -393,6 +402,7 @@ export interface FileRouteTypes {
     | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
+    | '/app/inventory/receive'
     | '/app/orders/$id'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
@@ -432,6 +442,7 @@ export interface FileRouteTypes {
     | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
+    | '/app/inventory/receive'
     | '/app/orders/$id'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
@@ -472,6 +483,7 @@ export interface FileRouteTypes {
     | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
+    | '/app/inventory/receive'
     | '/app/orders/$id'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
@@ -723,6 +735,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInventoryVariantIdRouteImport
       parentRoute: typeof AppInventoryRoute
     }
+    '/app/inventory/receive': {
+      id: '/app/inventory/receive'
+      path: '/receive'
+      fullPath: '/app/inventory/receive'
+      preLoaderRoute: typeof AppInventoryReceiveRouteImport
+      parentRoute: typeof AppInventoryRoute
+    }
     '/app/orders/$id': {
       id: '/app/orders/$id'
       path: '/$id'
@@ -794,10 +813,12 @@ const AppInboxRouteWithChildren = AppInboxRoute._addFileChildren(
 
 interface AppInventoryRouteChildren {
   AppInventoryVariantIdRoute: typeof AppInventoryVariantIdRoute
+  AppInventoryReceiveRoute: typeof AppInventoryReceiveRoute
 }
 
 const AppInventoryRouteChildren: AppInventoryRouteChildren = {
   AppInventoryVariantIdRoute: AppInventoryVariantIdRoute,
+  AppInventoryReceiveRoute: AppInventoryReceiveRoute,
 }
 
 const AppInventoryRouteWithChildren = AppInventoryRoute._addFileChildren(

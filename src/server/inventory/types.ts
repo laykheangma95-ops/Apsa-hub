@@ -26,6 +26,8 @@ export interface InventoryMovementRow {
   reference_type: string | null;
   reference_id: string | null;
   reason: string | null;
+  /** Optional free-text supplier label on receiving movements (migration 052). */
+  supplier_name?: string | null;
   created_by: string | null;
   created_at: string;
 }
@@ -50,6 +52,8 @@ export interface CreateMovementInput {
   reference_type?: string | null | undefined;
   reference_id?: string | null | undefined;
   reason?: string | null | undefined;
+  /** Receiving only (initial/restock) — migration 052 rejects it elsewhere. */
+  supplier_name?: string | null | undefined;
   created_by?: string | null | undefined;
 }
 

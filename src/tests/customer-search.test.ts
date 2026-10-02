@@ -752,8 +752,8 @@ describe("No migration was required, and the schema says why", () => {
     // 048 (explicit service_role table grants — an environment fix, not this
     // phase's) is likewise unrelated, and so is 049 (the Analytics performance
     // phase's status-count RPC), 050 (parcel identity — fulfillment parcels
-    // phase), and 051 (courier handoff permission — courier handoff phase);
-    // anything from 052 up would be new.
-    expect(migrations.filter((f) => /^05[2-9]|^0[6-9]\d/.test(f))).toEqual([]);
+    // phase), 051 (courier handoff permission — courier handoff phase), and 052
+    // (receiving inventory — receiving phase); anything from 053 up would be new.
+    expect(migrations.filter((f) => /^05[3-9]|^0[6-9]\d/.test(f))).toEqual([]);
   });
 });
