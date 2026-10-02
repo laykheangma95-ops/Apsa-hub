@@ -53,6 +53,7 @@ import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveri
 import { ordersKeys } from "@/lib/orders-query";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
+import { handoffHistoryReasonMessage } from "@/lib/handoff";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { cn } from "@/lib/utils";
 import type { DeliveryAction } from "@/lib/api";
@@ -296,7 +297,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     .map((entry) => ({
       id: entry.id,
       title: t(`status.${entry.toStatus}`),
-      ...(entry.reason ? { detail: entry.reason } : {}),
+      ...(entry.reason ? { detail: handoffHistoryReasonMessage(entry.reason, t) } : {}),
       meta: fullTimestamp(entry.createdAt),
       tone: HISTORY_TONE[entry.toStatus],
     }));

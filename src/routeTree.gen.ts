@@ -38,6 +38,7 @@ import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppCustomersIndexRouteImport } from './routes/app.customers.index'
 import { Route as AppCustomersIdRouteImport } from './routes/app.customers.$id'
 import { Route as AppDeliveriesIdRouteImport } from './routes/app.deliveries.$id'
+import { Route as AppHandoffParcelCodeRouteImport } from './routes/app.handoff.$parcelCode'
 import { Route as AppInboxIdRouteImport } from './routes/app.inbox.$id'
 import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventory.$variantId'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
@@ -192,6 +193,11 @@ const AppDeliveriesIdRoute = AppDeliveriesIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppDeliveriesRoute,
 } as any)
+const AppHandoffParcelCodeRoute = AppHandoffParcelCodeRouteImport.update({
+  id: '/handoff/$parcelCode',
+  path: '/handoff/$parcelCode',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppInboxIdRoute = AppInboxIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -262,6 +268,7 @@ export interface FileRoutesByFullPath {
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
+  '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
@@ -300,6 +307,7 @@ export interface FileRoutesByTo {
   '/app': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
+  '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
@@ -340,6 +348,7 @@ export interface FileRoutesById {
   '/app/': typeof AppIndexRoute
   '/app/customers/$id': typeof AppCustomersIdRoute
   '/app/deliveries/$id': typeof AppDeliveriesIdRoute
+  '/app/handoff/$parcelCode': typeof AppHandoffParcelCodeRoute
   '/app/inbox/$id': typeof AppInboxIdRoute
   '/app/inventory/$variantId': typeof AppInventoryVariantIdRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
@@ -381,6 +390,7 @@ export interface FileRouteTypes {
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
+    | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
@@ -419,6 +429,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
+    | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
@@ -458,6 +469,7 @@ export interface FileRouteTypes {
     | '/app/'
     | '/app/customers/$id'
     | '/app/deliveries/$id'
+    | '/app/handoff/$parcelCode'
     | '/app/inbox/$id'
     | '/app/inventory/$variantId'
     | '/app/orders/$id'
@@ -690,6 +702,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDeliveriesIdRouteImport
       parentRoute: typeof AppDeliveriesRoute
     }
+    '/app/handoff/$parcelCode': {
+      id: '/app/handoff/$parcelCode'
+      path: '/handoff/$parcelCode'
+      fullPath: '/app/handoff/$parcelCode'
+      preLoaderRoute: typeof AppHandoffParcelCodeRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/inbox/$id': {
       id: '/app/inbox/$id'
       path: '/$id'
@@ -846,6 +865,7 @@ interface AppRouteChildren {
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCustomersIdRoute: typeof AppCustomersIdRoute
+  AppHandoffParcelCodeRoute: typeof AppHandoffParcelCodeRoute
   AppParcelsCodeRoute: typeof AppParcelsCodeRoute
   AppPickOrderIdRoute: typeof AppPickOrderIdRoute
   AppCustomersIndexRoute: typeof AppCustomersIndexRoute
@@ -865,6 +885,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,
   AppCustomersIdRoute: AppCustomersIdRoute,
+  AppHandoffParcelCodeRoute: AppHandoffParcelCodeRoute,
   AppParcelsCodeRoute: AppParcelsCodeRoute,
   AppPickOrderIdRoute: AppPickOrderIdRoute,
   AppCustomersIndexRoute: AppCustomersIndexRoute,

@@ -2438,5 +2438,67 @@
       "title": "Permission denied",
       "body": "You do not have permission to investigate parcels."
     }
+  },
+  "courierHandoff": {
+    "title": "Courier Handoff",
+    "subtitle": "Confirm parcel handoff to courier",
+    "parcel": "Parcel",
+    "parcelCode": "Parcel code",
+    "order": "Order",
+    "orderNumber": "Order number",
+    "courier": "Courier",
+    "providerName": "Provider",
+    "trackingNumber": "Tracking number",
+    "noTrackingNumber": "No tracking number",
+    "deliveryStatus": "Delivery status",
+    "handoffTime": "Handoff time",
+    "handoffStatus": "Handoff status",
+    "eligible": "Ready for handoff",
+    "notEligible": "Not eligible",
+    "alreadyHandedOff": "Already handed off",
+    "confirm": "Confirm Handoff",
+    "confirming": "Confirming...",
+    "success": {
+      "title": "Handoff confirmed",
+      "body": "The parcel has been handed off to the courier. Delivery tracking will begin when the courier provides updates."
+    },
+    "notFound": {
+      "title": "Parcel not found",
+      "body": "This parcel code does not match any parcel in your organization."
+    },
+    "error": {
+      "title": "Handoff failed",
+      "body": "Something went wrong while confirming the handoff. Please try again."
+    },
+    "denied": {
+      "title": "Permission denied",
+      "body": "You do not have permission to perform courier handoffs."
+    },
+    "voided": {
+      "title": "Parcel voided",
+      "body": "This parcel has been voided and cannot be handed off."
+    },
+    "noDelivery": {
+      "title": "No delivery",
+      "body": "No active delivery exists for this order. Create a delivery first."
+    },
+    "deliveryNotReady": {
+      "title": "Delivery not ready",
+      "body": "The delivery must be in 'ready' status before handoff."
+    },
+    "orderNotConfirmed": {
+      "title": "Order not confirmed",
+      "body": "The order must be in a confirmed state for handoff."
+    },
+    "duplicateHandoff": {
+      "title": "Already handed off",
+      "body": "This parcel has already been handed off to the courier."
+    },
+    "history": {
+      "confirmed": "Courier handoff confirmed"
+    },
+    "viewOrder": "View order",
+    "viewDelivery": "View delivery",
+    "done": "Done"
   }
 }

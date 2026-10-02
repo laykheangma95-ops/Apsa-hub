@@ -33,6 +33,7 @@ import { enforceOrderCachePrincipal } from "@/lib/orders-query";
 import { enforceTeamCachePrincipal } from "@/lib/team-query";
 import { enforceSettingsCachePrincipal } from "@/lib/settings-view";
 import { enforceFulfillmentCachePrincipal } from "@/lib/fulfillment-query";
+import { enforceHandoffCachePrincipal } from "@/lib/handoff-query";
 import type { CapabilityResult } from "@/lib/capabilities";
 
 export const Route = createFileRoute("/app")({
@@ -120,6 +121,7 @@ function AppLayout() {
   enforceCustomerCachePrincipal(queryClient, session.userId, organizationId);
   enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId);
   enforceFulfillmentCachePrincipal(queryClient, session.userId, organizationId);
+  enforceHandoffCachePrincipal(queryClient, session.userId, organizationId);
   enforceTeamCachePrincipal(queryClient, session.userId, organizationId);
   /*
    * Account and business profile (Settings, and the Team header's business

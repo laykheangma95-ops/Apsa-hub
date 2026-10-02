@@ -123,6 +123,12 @@ export const UI_PERMISSION_KEYS = [
   "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
+  // delivery.handoff gates the courier-handoff confirmation affordance
+  // (confirmHandoff requires it — src/server/handoff/service.ts, migration 051).
+  // A distinct grant from delivery.update: handoff is operational (Cashier/Sales
+  // physically hand a parcel to a courier), while delivery.update is Owner/Manager
+  // authority over the full delivery lifecycle.
+  "delivery.handoff",
   // Fulfillment — src/server/fulfillment/service.ts. fulfillment.print_label
   // gates the parcel-label affordance (Ready-to-Pack print). It is a NARROW
   // operational grant scoped to the shipping fields a label needs (name, phone,
