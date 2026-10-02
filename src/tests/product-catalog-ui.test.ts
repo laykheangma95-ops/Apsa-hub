@@ -1928,8 +1928,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
     // 050 (parcel identity) belongs to the fulfillment parcels phase;
     // 051 (courier handoff permission) belongs to the courier handoff phase;
-    // 052 (receiving inventory) belongs to the receiving inventory phase.
-    expect(migrations.at(-1)).toBe("052_inventory_receiving.sql");
+    // 052 (receiving inventory) belongs to the receiving inventory phase;
+    // 053 (stock counts) belongs to the stock count phase.
+    expect(migrations.at(-1)).toBe("053_stock_counts.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

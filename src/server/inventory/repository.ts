@@ -454,3 +454,106 @@ export async function findLocationForOrg(
   }
   return data ?? null;
 }
+
+// ── Stock count (migration 053) ───────────────────────────────────────────────
+
+/**
+ * Ledger balance for exactly one (variant, location) scope. location null is
+ * the "no location" scope, matched with IS NULL — never with `= null`, which
+ * matches nothing. The inventory_stock view nets each scope to one row.
+ */
+export async function getScopedStockQuantity(
+  organizationId: string,
+  variantId: string,
+  locationId: string | null,
+): Promise<number> {
+  let query = db
+    .from("inventory_stock")
+    .select("quantity_on_hand")
+    .eq("organization_id", organizationId)
+    .eq("variant_id", variantId);
+  query = locationId === null ? query.is("location_id", null) : query.eq("location_id", locationId);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`getScopedStockQuantity: ${(error as { message: string }).message}`);
+  return ((data ?? []) as Array<{ quantity_on_hand: number }>).reduce(
+    (sum, row) => sum + row.quantity_on_hand,
+    0,
+  );
+}
+
+/** Raw record_stock_count_v1 result: a status plus, when recorded/replayed, the stock_counts row. */
+export interface RecordStockCountRpcResult {
+  status:
+    | "recorded"
+    | "replayed"
+    | "count_conflict"
+    | "variant_not_found"
+    | "location_not_found"
+    | "stale";
+  id?: string;
+  count_key?: string;
+  product_id?: string;
+  variant_id?: string;
+  location_id?: string | null;
+  system_quantity?: number;
+  counted_quantity?: number;
+  difference?: number;
+  movement_id?: string | null;
+  created_at?: string;
+}
+
+/**
+ * Record one count in ONE transaction: key replay/conflict, ownership, stale
+ * check, count row, ledger adjustment and mandatory audit (migration 053).
+ */
+export async function recordStockCount(
+  organizationId: string,
+  actor: string,
+  input: {
+    count_key: string;
+    variant_id: string;
+    location_id: string | null;
+    counted_quantity: number;
+    expected_system_quantity: number;
+  },
+): Promise<RecordStockCountRpcResult> {
+  const { data, error } = await db.rpc("record_stock_count_v1", {
+    p_organization_id: organizationId,
+    p_actor: actor,
+    p_count_key: input.count_key,
+    p_variant_id: input.variant_id,
+    p_location_id: input.location_id,
+    p_counted_quantity: input.counted_quantity,
+    p_expected_system_quantity: input.expected_system_quantity,
+  });
+
+  if (error) throw new Error(`recordStockCount: ${(error as { message: string }).message}`);
+  return data as RecordStockCountRpcResult;
+}
+
+export interface StockCountSearchRow {
+  variant_id: string;
+  product_id: string;
+  product_name_km: string;
+  product_name_en: string | null;
+  variant_name: string;
+  sku: string | null;
+  barcode: string | null;
+}
+
+/** Active variants of this organization matching a literal search (migration 053). */
+export async function searchStockCountVariants(
+  organizationId: string,
+  query: string,
+  limit: number,
+): Promise<StockCountSearchRow[]> {
+  const { data, error } = await db.rpc("search_stock_count_variants_v1", {
+    p_organization_id: organizationId,
+    p_query: query,
+    p_limit: limit,
+  });
+
+  if (error) throw new Error(`searchStockCountVariants: ${(error as { message: string }).message}`);
+  return (data ?? []) as StockCountSearchRow[];
+}

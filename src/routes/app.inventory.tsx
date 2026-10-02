@@ -21,7 +21,15 @@
  */
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, Camera, PackagePlus, PackageX, Search, TriangleAlert } from "lucide-react";
+import {
+  Boxes,
+  Camera,
+  ClipboardCheck,
+  PackagePlus,
+  PackageX,
+  Search,
+  TriangleAlert,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { lookupVariantByBarcode } from "@/lib/api";
@@ -249,6 +257,8 @@ function InventoryListScreen() {
   const canScan = canReadStock && canReadProducts;
   // Offered only; receiveInventory re-checks inventory.receive_stock server-side.
   const canReceive = canScan && capabilities.can("inventory.receive_stock");
+  // Offered only; every stock count call re-checks inventory.adjust server-side.
+  const canCount = canScan && capabilities.can("inventory.adjust");
   function resolveScan(code: string) {
     void (async () => {
       try {
@@ -346,6 +356,14 @@ function InventoryListScreen() {
                 <Link to="/app/inventory/receive">
                   <PackagePlus className="size-4" aria-hidden />
                   {t("receiving.action")}
+                </Link>
+              </Button>
+            ) : null}
+            {canCount ? (
+              <Button asChild variant="outline" className="tap-target h-12 w-full gap-2">
+                <Link to="/app/inventory/count">
+                  <ClipboardCheck className="size-4" aria-hidden />
+                  {t("stockCount.action")}
                 </Link>
               </Button>
             ) : null}

@@ -1852,6 +1852,88 @@
       "receiptConflict": "This receipt changed while it was being saved. Check it and confirm again."
     }
   },
+  "stockCount": {
+    "action": "Count stock",
+    "title": "Stock count",
+    "subtitle": "Count what is on the shelf and correct the record",
+    "location": {
+      "title": "Where are you counting?",
+      "label": "Location",
+      "none": "No location",
+      "hint": "Stock is compared for this location only."
+    },
+    "scan": {
+      "title": "Scan product",
+      "label": "Barcode",
+      "placeholder": "Scan or type the barcode",
+      "hint": "Use a barcode scanner, the camera, or type the code and press Find.",
+      "find": "Find product",
+      "finding": "Finding…",
+      "notFound": "No active product with that barcode in this business.",
+      "notAProduct": "That code is a parcel or an order, not a product."
+    },
+    "search": {
+      "title": "Or search by name or SKU",
+      "label": "Product name or SKU",
+      "placeholder": "Type at least 2 characters",
+      "hint": "Use this when a barcode cannot be scanned.",
+      "find": "Search",
+      "searching": "Searching…",
+      "empty": "No matching products.",
+      "results": "Results"
+    },
+    "product": {
+      "title": "Product",
+      "barcode": "Barcode",
+      "location": "Location: {{location}}"
+    },
+    "count": {
+      "title": "Counted quantity",
+      "quantity": "Counted on the shelf",
+      "hint": "Whole units, from 0 to 1,000,000.",
+      "review": "Review difference",
+      "reviewEmpty": "Enter the counted quantity",
+      "reviewing": "Checking…",
+      "scanAnother": "Count a different product"
+    },
+    "preview": {
+      "title": "Difference",
+      "system": "System quantity",
+      "counted": "Counted quantity",
+      "difference": "Difference",
+      "result": "On hand after",
+      "confirm": "Confirm adjustment of {{difference}}",
+      "confirmNoChange": "Record count (no change)",
+      "edit": "Change counted quantity",
+      "note": "The difference is written to the stock history as a stock-count adjustment."
+    },
+    "direction": {
+      "none": "Matches the record",
+      "increase": "More than recorded",
+      "decrease": "Less than recorded"
+    },
+    "done": {
+      "title": "Stock adjusted by {{difference}}",
+      "noChangeTitle": "Count matches the record",
+      "replayedTitle": "Already recorded",
+      "replayedBody": "This count was already recorded, so stock was not adjusted again.",
+      "onHand": "On hand at this location now:",
+      "next": "Count next product",
+      "viewStock": "View stock for this item"
+    },
+    "history": {
+      "label": "Stock count"
+    },
+    "error": {
+      "denied": "You don't have permission to count and adjust stock.",
+      "invalid": "Check the counted quantity, then try again.",
+      "generic": "The count could not be recorded. Try again — it will not be adjusted twice.",
+      "variantNotFound": "This product is no longer available to count.",
+      "locationNotFound": "That location is not available. Choose another.",
+      "countConflict": "This count changed while it was being saved. Check it and confirm again.",
+      "stale": "Stock changed since you checked. Review the new difference and confirm again."
+    }
+  },
   "stockAdjustment": {
     "action": "Adjust stock",
     "title": "Manual adjustment",
