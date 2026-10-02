@@ -982,6 +982,7 @@
     "recordPayment": "Record payment",
     "arrangeDelivery": "Arrange delivery",
     "printParcelLabel": "Print parcel label",
+    "startPicking": "Start picking",
     "fulfillment": "Fulfillment",
     "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
@@ -2265,6 +2266,31 @@
       "needsConfirmOne": "This order needs a confirmed shipping address before its label can print.",
       "editCta": "Edit shipping address",
       "includeCode128": "Include Code 128 barcode"
+    }
+  },
+  "pick": {
+    "title": "Scan to Pick",
+    "backToOrder": "Back to order",
+    "progress": "Picking progress",
+    "allPicked": "All items picked",
+    "scanPrompt": "Scan product barcode",
+    "scanPlaceholder": "Scan or type barcode",
+    "submit": "Go",
+    "itemList": "Items to pick",
+    "error": {
+      "title": "Could not load pick list",
+      "body": "Something went wrong while loading the order items. Please try again."
+    },
+    "empty": {
+      "title": "Nothing to pick",
+      "body": "This order has no items that require picking."
+    },
+    "scan": {
+      "accepted": "Correct item scanned",
+      "wrongProduct": "Wrong product — not in this order",
+      "wrongVariant": "Wrong variant — check the item",
+      "overQuantity": "Already picked enough of this item",
+      "alreadyComplete": "All items already picked"
     }
   },
   "pack": {
