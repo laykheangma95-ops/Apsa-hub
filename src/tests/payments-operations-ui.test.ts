@@ -919,8 +919,9 @@ describe("production boundary", () => {
       // 048 (explicit service_role table grants) is an unrelated environment fix;
       // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
       // 050 (parcel identity) belongs to the fulfillment parcels phase;
-      // 051 (courier handoff permission) belongs to the courier handoff phase.
-      return Number.isFinite(prefix) && prefix > 51;
+      // 051 (courier handoff permission) belongs to the courier handoff phase;
+      // 052 (receiving inventory) belongs to the receiving inventory phase.
+      return Number.isFinite(prefix) && prefix > 52;
     });
     expect(beyond047).toEqual([]);
   });

@@ -119,6 +119,32 @@ export async function findMovementByReference(
   return data ? (data as InventoryMovementRow) : null;
 }
 
+/** reference_type of a receiving movement; reference_id is the receipt key. */
+export const RECEIPT_REFERENCE_TYPE = "inventory_receipt";
+
+/**
+ * The ledger movement recorded under one receipt key, in this organization —
+ * whichever variant it was for. Migration 052's uniq_inventory_movements_receipt_key
+ * guarantees there is at most one.
+ */
+export async function findReceiptMovement(
+  organizationId: string,
+  receiptKey: string,
+): Promise<InventoryMovementRow | null> {
+  const { data, error } = await db
+    .from("inventory_movements")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("reference_type", RECEIPT_REFERENCE_TYPE)
+    .eq("reference_id", receiptKey)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`findReceiptMovement: ${(error as { message: string }).message}`);
+  }
+  return data ? (data as InventoryMovementRow) : null;
+}
+
 // ── Derived stock (live view — never a mutable cache) ─────────────────────────
 
 /**
@@ -395,10 +421,11 @@ export async function listLocationsForOrg(organizationId: string): Promise<Inven
 export async function findVariantForOrg(
   organizationId: string,
   variantId: string,
-): Promise<{ id: string; product_id: string; organization_id: string } | null> {
+): Promise<{ id: string; product_id: string; organization_id: string; status: string } | null> {
   const { data, error } = await db
     .from("product_variants")
-    .select("id, product_id, organization_id")
+    // status lets receiving refuse an archived variant without a second lookup.
+    .select("id, product_id, organization_id, status")
     .eq("id", variantId)
     .eq("organization_id", organizationId)
     .single();

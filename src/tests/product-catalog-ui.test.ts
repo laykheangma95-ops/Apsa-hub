@@ -1927,8 +1927,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 048 (explicit service_role table grants) is an unrelated environment fix;
     // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
     // 050 (parcel identity) belongs to the fulfillment parcels phase;
-    // 051 (courier handoff permission) belongs to the courier handoff phase.
-    expect(migrations.at(-1)).toBe("051_courier_handoff_permission.sql");
+    // 051 (courier handoff permission) belongs to the courier handoff phase;
+    // 052 (receiving inventory) belongs to the receiving inventory phase.
+    expect(migrations.at(-1)).toBe("052_inventory_receiving.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

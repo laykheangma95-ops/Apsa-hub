@@ -21,13 +21,14 @@
  */
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, Camera, PackageX, Search, TriangleAlert } from "lucide-react";
+import { Boxes, Camera, PackagePlus, PackageX, Search, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
@@ -246,6 +247,8 @@ function InventoryListScreen() {
    * a non-destructive notice.
    */
   const canScan = canReadStock && canReadProducts;
+  // Offered only; receiveInventory re-checks inventory.receive_stock server-side.
+  const canReceive = canScan && capabilities.can("inventory.receive_stock");
   function resolveScan(code: string) {
     void (async () => {
       try {
@@ -338,6 +341,14 @@ function InventoryListScreen() {
           />
         ) : (
           <div className="flex flex-col gap-3">
+            {canReceive ? (
+              <Button asChild className="tap-target h-12 w-full gap-2">
+                <Link to="/app/inventory/receive">
+                  <PackagePlus className="size-4" aria-hidden />
+                  {t("receiving.action")}
+                </Link>
+              </Button>
+            ) : null}
             <ChipRow label={t("inventoryList.filterLabel")} role="tablist">
               {STOCK_FILTERS.map((option) => (
                 <Chip
