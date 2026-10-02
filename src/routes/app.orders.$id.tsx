@@ -69,7 +69,6 @@ import {
   totalStockUnits,
   type OrderErrorKind,
 } from "@/lib/orders";
-import { canPickOrder } from "@/lib/pick";
 import { canPackOrder } from "@/lib/pack";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
@@ -457,11 +456,6 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const showPrintLabel =
     canPrintParcelLabel(order.lifecycleStatus) &&
     capabilities.canSensitive("fulfillment.print_label");
-  const showPickButton =
-    canPickOrder({
-      lifecycleStatus: order.lifecycleStatus,
-      fulfillmentStatus: order.fulfillmentStatus,
-    }) && capabilities.can("orders.read");
   const showPackButton =
     canPackOrder({
       lifecycleStatus: order.lifecycleStatus,
@@ -835,37 +829,31 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : null}
         </Section>
 
-        {showPrintLabel || showPickButton || showPackButton ? (
+        {showPrintLabel || showPackButton ? (
           <Section title={t("order.fulfillment")}>
-            {showPickButton ? (
-              <Link
-                to="/app/pick/$orderId"
-                params={{ orderId: id }}
-                className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
-              >
-                {t("order.startPicking")}
-              </Link>
-            ) : null}
-            {showPackButton ? (
-              <Link
-                to="/app/pack/$orderId"
-                params={{ orderId: id }}
-                className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-border-default bg-surface-primary text-text-primary"
-              >
-                {t("order.startPacking")}
-              </Link>
-            ) : null}
-            {showPrintLabel ? (
-              <Button
-                type="button"
-                variant="outline"
-                className="tap-target h-11 w-full gap-2 rounded-xl"
-                onClick={() => setParcelLabelOpen(true)}
-              >
-                <Printer className="size-4" aria-hidden />
-                {t("order.printParcelLabel")}
-              </Button>
-            ) : null}
+            {/* V1 flow: print the parcel label first, then Pack Order into it. */}
+            <div className="flex flex-col gap-2">
+              {showPrintLabel ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="tap-target h-11 w-full gap-2 rounded-xl"
+                  onClick={() => setParcelLabelOpen(true)}
+                >
+                  <Printer className="size-4" aria-hidden />
+                  {t("order.printParcelLabel")}
+                </Button>
+              ) : null}
+              {showPackButton ? (
+                <Link
+                  to="/app/pack/$orderId"
+                  params={{ orderId: id }}
+                  className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
+                >
+                  {t("order.startPacking")}
+                </Link>
+              ) : null}
+            </div>
           </Section>
         ) : null}
 

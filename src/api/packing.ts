@@ -1,12 +1,13 @@
 /**
  * Packing domain server functions — TanStack Start API boundary.
  *
- * Security posture identical to src/api/picking.ts:
+ * Security posture identical to src/api/orders.ts:
  *   - Session from HttpOnly cookies; organization resolved from the caller's
  *     active membership. No organizationId parameter exists on any handler.
  *   - Server-only modules (@/server/packing/*) are dynamically imported in
  *     handler bodies so they never enter the client bundle.
- *   - Permissions are enforced in the service: requires orders.read.
+ *   - Permissions are enforced in the service: requires orders.read (Mark Packed
+ *     additionally requires delivery.handoff).
  *   - Scan validation is server-authoritative — the client displays results
  *     but never decides whether a scan is valid.
  */
@@ -78,4 +79,29 @@ export const validatePackProductScanFn = createServerFn()
     const authCtx = await resolveAuthContext();
     const { validatePackProductScan } = await import("@/server/packing/service");
     return validatePackProductScan(authCtx, data.orderId, data.barcode);
+  });
+
+// ── markOrderPackedFn ────────────────────────────────────────────────────────
+
+export const markOrderPackedFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        packedLines: z
+          .array(
+            z.object({
+              orderItemId: z.string().uuid("Invalid order item ID"),
+              quantity: z.number().int().nonnegative(),
+            }),
+          )
+          .min(1)
+          .max(500),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { markOrderPacked } = await import("@/server/packing/service");
+    return markOrderPacked(authCtx, data.orderId, data.packedLines);
   });
