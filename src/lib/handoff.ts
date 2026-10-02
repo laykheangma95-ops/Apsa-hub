@@ -75,23 +75,50 @@ export function isAlreadyHandedOff(preview: HandoffPreview): boolean {
   return preview.deliveryStatus === "in_transit" || preview.deliveryStatus === "delivered";
 }
 
-export function handoffErrorMessage(result: HandoffResult): string | null {
-  switch (result.kind) {
-    case "success":
-      return null;
-    case "parcel_not_found":
-      return "Parcel not found in this organization";
-    case "parcel_voided":
-      return "This parcel has been voided";
-    case "no_active_delivery":
-      return "No active delivery exists for this order";
-    case "delivery_not_ready":
-      return `Delivery is '${result.currentStatus}' — must be 'ready' for handoff`;
-    case "order_not_confirmed":
-      return "Order is not in a confirmed state";
-    case "already_handed_off":
-      return "This parcel has already been handed off to the courier";
-    case "transition_failed":
-      return `Handoff failed: ${result.reason}`;
-  }
+/**
+ * Stable reason codes the server returns in HandoffPreview.reason.
+ * Each maps to an i18n key under courierHandoff.
+ */
+const REASON_CODE_I18N: Record<string, string> = {
+  parcel_voided: "courierHandoff.voided.body",
+  no_active_delivery: "courierHandoff.noDelivery.body",
+  order_not_eligible: "courierHandoff.orderNotConfirmed.body",
+  already_handed_off: "courierHandoff.duplicateHandoff.body",
+  delivery_not_ready: "courierHandoff.deliveryNotReady.body",
+};
+
+/**
+ * Resolve a server-returned preview reason code to a localized message.
+ * Returns the code itself as a fallback if no i18n key is mapped.
+ */
+export function handoffReasonMessage(
+  reasonCode: string | null,
+  t: (key: string) => string,
+): string | null {
+  if (!reasonCode) return null;
+  const i18nKey = REASON_CODE_I18N[reasonCode];
+  return i18nKey ? t(i18nKey) : reasonCode;
+}
+
+/**
+ * Map a HandoffResult to a localized error message for the confirmation flow.
+ * Returns null for success.
+ */
+const RESULT_KIND_I18N: Record<string, string> = {
+  parcel_not_found: "courierHandoff.notFound.body",
+  parcel_voided: "courierHandoff.voided.body",
+  no_active_delivery: "courierHandoff.noDelivery.body",
+  delivery_not_ready: "courierHandoff.deliveryNotReady.body",
+  order_not_confirmed: "courierHandoff.orderNotConfirmed.body",
+  already_handed_off: "courierHandoff.duplicateHandoff.body",
+  transition_failed: "courierHandoff.error.body",
+};
+
+export function handoffErrorMessage(
+  result: HandoffResult,
+  t: (key: string) => string,
+): string | null {
+  if (result.kind === "success") return null;
+  const i18nKey = RESULT_KIND_I18N[result.kind];
+  return i18nKey ? t(i18nKey) : t("courierHandoff.error.body");
 }

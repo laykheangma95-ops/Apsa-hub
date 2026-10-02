@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Package, ShoppingCart, Truck, CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -16,8 +16,15 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { getHandoffPreviewFn, confirmHandoffFn } from "@/api/handoff";
-import { canConfirmHandoff, isAlreadyHandedOff, handoffErrorMessage } from "@/lib/handoff";
+import {
+  canConfirmHandoff,
+  isAlreadyHandedOff,
+  handoffErrorMessage,
+  handoffReasonMessage,
+} from "@/lib/handoff";
 import type { HandoffResult, HandoffPreview as HandoffPreviewType } from "@/lib/handoff";
+import { handoffKeys } from "@/lib/handoff-query";
+import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
 import { fullTimestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { StatusKey } from "@/types";
@@ -37,24 +44,55 @@ export const Route = createFileRoute("/app/handoff/$parcelCode")({
 
 function CourierHandoffScreen() {
   const { parcelCode } = Route.useParams();
+  const { session, organizationId } = Route.useRouteContext();
+  const userId = session.userId;
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { t } = useTranslation();
   const capabilities = useCapabilities();
   const canHandoff = capabilities.can("delivery.handoff");
   const [handoffResult, setHandoffResult] = useState<HandoffResult | null>(null);
 
   const previewQuery = useQuery({
-    queryKey: ["handoff-preview", parcelCode],
+    queryKey: handoffKeys.preview(userId, organizationId, parcelCode),
     queryFn: () => getHandoffPreviewFn({ data: { parcelCode } }),
+    enabled: canHandoff,
     retry: false,
   });
 
   const confirmMutation = useMutation({
     mutationFn: () => confirmHandoffFn({ data: { parcelCode } }),
-    onSuccess: (result) => setHandoffResult(result),
+    onSuccess: (result) => {
+      setHandoffResult(result);
+      if (result.kind === "success") {
+        const h = result.handoff;
+        for (const key of deliveryTransitionInvalidationKeys(userId, organizationId, h.orderId)) {
+          void queryClient.invalidateQueries({ queryKey: key });
+        }
+        void queryClient.invalidateQueries({
+          queryKey: deliveryKeys.detail(userId, organizationId, h.deliveryId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: handoffKeys.preview(userId, organizationId, parcelCode),
+        });
+      }
+    },
   });
 
   const back = () => navigate({ to: "/app" });
+
+  if (!canHandoff) {
+    return (
+      <Screen bottom="none" contentClassName="!px-0">
+        <AppHeader title={t("courierHandoff.title")} onBack={back} />
+        <OperationalState
+          tone="danger"
+          title={t("courierHandoff.denied.title")}
+          body={t("courierHandoff.denied.body")}
+        />
+      </Screen>
+    );
+  }
 
   if (previewQuery.isLoading) {
     return (
@@ -110,7 +148,7 @@ function CourierHandoffScreen() {
       confirming={confirmMutation.isPending}
       error={
         handoffResult
-          ? handoffErrorMessage(handoffResult)
+          ? handoffErrorMessage(handoffResult, t)
           : confirmMutation.isError
             ? t("courierHandoff.error.body")
             : null
@@ -170,7 +208,9 @@ function HandoffPreviewView({
                     ? t("courierHandoff.duplicateHandoff.title")
                     : t("courierHandoff.notEligible")}
                 </p>
-                <p className="text-body-sm mt-0.5 text-text-secondary">{preview.reason}</p>
+                <p className="text-body-sm mt-0.5 text-text-secondary">
+                  {handoffReasonMessage(preview.reason, t)}
+                </p>
               </div>
             </div>
           </div>

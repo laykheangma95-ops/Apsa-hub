@@ -718,6 +718,7 @@ describe("F. the partitions are wired into the real routes", () => {
       "enforceConversationCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceCustomerCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceDeliveryCachePrincipal(queryClient, session.userId, organizationId)",
+      "enforceHandoffCachePrincipal(queryClient, session.userId, organizationId)",
       "enforceTeamCachePrincipal(queryClient, session.userId, organizationId)",
       // The Apsi console lives in the nav, so it is mounted on every signed-in
       // screen and its answers outlive any single route.

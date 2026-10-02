@@ -23,6 +23,7 @@ import {
   canConfirmHandoff,
   isAlreadyHandedOff,
   handoffErrorMessage,
+  handoffReasonMessage,
   type HandoffPreview,
   type HandoffResult,
 } from "../lib/handoff";
@@ -309,7 +310,7 @@ describe("duplicate handoff", () => {
     const preview = await getHandoffPreview(mockCtx(ORG_A), PARCEL_CODE);
 
     expect(preview!.eligible).toBe(false);
-    expect(preview!.reason).toContain("already been handed off");
+    expect(preview!.reason).toBe("already_handed_off");
   });
 });
 
@@ -521,6 +522,7 @@ describe("client display predicates", () => {
   });
 
   it("handoffErrorMessage returns null for success", () => {
+    const mockT = (key: string) => key;
     const result: HandoffResult = {
       kind: "success",
       handoff: {
@@ -534,19 +536,32 @@ describe("client display predicates", () => {
         handedOffAt: "2026-01-01T00:00:00Z",
       },
     };
-    expect(handoffErrorMessage(result)).toBeNull();
+    expect(handoffErrorMessage(result, mockT)).toBeNull();
   });
 
-  it("handoffErrorMessage returns messages for each failure kind", () => {
-    expect(handoffErrorMessage({ kind: "parcel_not_found" })).toContain("not found");
-    expect(handoffErrorMessage({ kind: "parcel_voided" })).toContain("voided");
-    expect(handoffErrorMessage({ kind: "no_active_delivery" })).toContain("No active delivery");
-    expect(handoffErrorMessage({ kind: "already_handed_off" })).toContain("already");
-    expect(handoffErrorMessage({ kind: "order_not_confirmed" })).toContain("not in a confirmed");
-    expect(handoffErrorMessage({ kind: "delivery_not_ready", currentStatus: "pending" })).toContain(
-      "pending",
+  it("handoffErrorMessage returns i18n keys for each failure kind", () => {
+    const mockT = (key: string) => key;
+    expect(handoffErrorMessage({ kind: "parcel_not_found" }, mockT)).toBe(
+      "courierHandoff.notFound.body",
     );
-    expect(handoffErrorMessage({ kind: "transition_failed", reason: "stale" })).toContain("stale");
+    expect(handoffErrorMessage({ kind: "parcel_voided" }, mockT)).toBe(
+      "courierHandoff.voided.body",
+    );
+    expect(handoffErrorMessage({ kind: "no_active_delivery" }, mockT)).toBe(
+      "courierHandoff.noDelivery.body",
+    );
+    expect(handoffErrorMessage({ kind: "already_handed_off" }, mockT)).toBe(
+      "courierHandoff.duplicateHandoff.body",
+    );
+    expect(handoffErrorMessage({ kind: "order_not_confirmed" }, mockT)).toBe(
+      "courierHandoff.orderNotConfirmed.body",
+    );
+    expect(
+      handoffErrorMessage({ kind: "delivery_not_ready", currentStatus: "pending" }, mockT),
+    ).toBe("courierHandoff.deliveryNotReady.body");
+    expect(handoffErrorMessage({ kind: "transition_failed", reason: "stale" }, mockT)).toBe(
+      "courierHandoff.error.body",
+    );
   });
 });
 
@@ -675,5 +690,243 @@ describe("handoff requires delivery.handoff, not delivery.update", () => {
 
   it("the service does not require delivery.update", () => {
     expect(source).not.toContain('ctx.require("delivery.update")');
+  });
+});
+
+// ── 13. Server returns reason codes, not English messages ──────────────────
+
+describe("server returns stable reason codes", () => {
+  it("voided parcel preview returns 'parcel_voided' code", async () => {
+    mockOrders = [makeConfirmedOrder()];
+    mockParcels = [{ ...makeParcel(), status: "void" }];
+
+    const { getHandoffPreview } = await import("../server/handoff/service");
+    const preview = await getHandoffPreview(mockCtx(ORG_A), PARCEL_CODE);
+
+    expect(preview!.reason).toBe("parcel_voided");
+  });
+
+  it("no delivery returns 'no_active_delivery' code", async () => {
+    mockOrders = [makeConfirmedOrder()];
+    mockParcels = [makeParcel()];
+    mockDeliveries = [];
+
+    const { getHandoffPreview } = await import("../server/handoff/service");
+    const preview = await getHandoffPreview(mockCtx(ORG_A), PARCEL_CODE);
+
+    expect(preview!.reason).toBe("no_active_delivery");
+  });
+
+  it("non-confirmed order returns 'order_not_eligible' code", async () => {
+    mockOrders = [{ ...makeConfirmedOrder(), lifecycle_status: "draft" }];
+    mockParcels = [makeParcel()];
+    mockDeliveries = [makeReadyDelivery()];
+
+    const { getHandoffPreview } = await import("../server/handoff/service");
+    const preview = await getHandoffPreview(mockCtx(ORG_A), PARCEL_CODE);
+
+    expect(preview!.reason).toBe("order_not_eligible");
+  });
+
+  it("delivery not in ready returns 'delivery_not_ready' code", async () => {
+    mockOrders = [makeConfirmedOrder()];
+    mockParcels = [makeParcel()];
+    mockDeliveries = [{ ...makeReadyDelivery(), status: "pending" }];
+
+    const { getHandoffPreview } = await import("../server/handoff/service");
+    const preview = await getHandoffPreview(mockCtx(ORG_A), PARCEL_CODE);
+
+    expect(preview!.reason).toBe("delivery_not_ready");
+  });
+
+  it("service never returns raw English operational messages", async () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(path.join(repoRoot, "src/server/handoff/service.ts"), "utf8");
+    const reasonAssignments = source.match(/reason[:\s]*[=]\s*["`]([^"`]+)["`]/g) || [];
+    const englishPatterns = [
+      "Parcel has been voided",
+      "No active delivery",
+      "not eligible for handoff",
+      "already been handed off",
+      "must be 'ready'",
+    ];
+    for (const assignment of reasonAssignments) {
+      for (const pattern of englishPatterns) {
+        expect(assignment).not.toContain(pattern);
+      }
+    }
+  });
+});
+
+// ── 14. Client reason/error functions use i18n keys ────────────────────────
+
+describe("localized reason and error messages", () => {
+  it("handoffReasonMessage maps each code to an i18n key", () => {
+    const mockT = (key: string) => key;
+    expect(handoffReasonMessage("parcel_voided", mockT)).toBe("courierHandoff.voided.body");
+    expect(handoffReasonMessage("no_active_delivery", mockT)).toBe(
+      "courierHandoff.noDelivery.body",
+    );
+    expect(handoffReasonMessage("order_not_eligible", mockT)).toBe(
+      "courierHandoff.orderNotConfirmed.body",
+    );
+    expect(handoffReasonMessage("already_handed_off", mockT)).toBe(
+      "courierHandoff.duplicateHandoff.body",
+    );
+    expect(handoffReasonMessage("delivery_not_ready", mockT)).toBe(
+      "courierHandoff.deliveryNotReady.body",
+    );
+  });
+
+  it("handoffReasonMessage returns null for null", () => {
+    const mockT = (key: string) => key;
+    expect(handoffReasonMessage(null, mockT)).toBeNull();
+  });
+
+  it("handoffReasonMessage falls back to raw code for unknown codes", () => {
+    const mockT = (key: string) => key;
+    expect(handoffReasonMessage("unknown_code", mockT)).toBe("unknown_code");
+  });
+
+  it("every reason code maps to an existing i18n key in both locales", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
+    const en = JSON.parse(read("src/locales/en.json")) as Record<string, unknown>;
+    const km = JSON.parse(read("src/locales/km.json")) as Record<string, unknown>;
+
+    const lookup = (bundle: Record<string, unknown>, key: string): unknown =>
+      key
+        .split(".")
+        .reduce<unknown>(
+          (node, part) =>
+            node && typeof node === "object" ? (node as Record<string, unknown>)[part] : undefined,
+          bundle,
+        );
+
+    const reasonI18nKeys = [
+      "courierHandoff.voided.body",
+      "courierHandoff.noDelivery.body",
+      "courierHandoff.orderNotConfirmed.body",
+      "courierHandoff.duplicateHandoff.body",
+      "courierHandoff.deliveryNotReady.body",
+    ];
+
+    for (const key of reasonI18nKeys) {
+      expect(`en:${key}=${typeof lookup(en, key)}`).toBe(`en:${key}=string`);
+      expect(`km:${key}=${typeof lookup(km, key)}`).toBe(`km:${key}=string`);
+    }
+  });
+
+  it("client handoff lib contains no hardcoded English error messages", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(path.join(repoRoot, "src/lib/handoff.ts"), "utf8");
+    const englishMessages = [
+      "Parcel not found in this organization",
+      "This parcel has been voided",
+      "No active delivery exists",
+      "must be 'ready' for handoff",
+      "not in a confirmed state",
+      "already been handed off to the courier",
+      "Handoff failed:",
+    ];
+    for (const msg of englishMessages) {
+      expect(source).not.toContain(msg);
+    }
+  });
+});
+
+// ── 15. Cache isolation — query keys partitioned by principal ───────────────
+
+describe("handoff cache isolation", () => {
+  it("handoff query keys include userId and organizationId", async () => {
+    const { handoffKeys } = await import("../lib/handoff-query");
+    const key = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
+    expect(key).toEqual(["handoff", "user-A", "org-A", "preview", "PARCEL-001"]);
+  });
+
+  it("different users produce different query keys", async () => {
+    const { handoffKeys } = await import("../lib/handoff-query");
+    const keyA = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
+    const keyB = handoffKeys.preview("user-B", "org-A", "PARCEL-001");
+    expect(keyA).not.toEqual(keyB);
+  });
+
+  it("different orgs produce different query keys", async () => {
+    const { handoffKeys } = await import("../lib/handoff-query");
+    const keyA = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
+    const keyB = handoffKeys.preview("user-A", "org-B", "PARCEL-001");
+    expect(keyA).not.toEqual(keyB);
+  });
+
+  it("partition enforce clears cache on principal change", async () => {
+    const { createQueryPartition } = await import("../lib/query-principal");
+    const partition = createQueryPartition("test-handoff");
+
+    let removeCallCount = 0;
+    const mockQueryClient = {
+      removeQueries: () => {
+        removeCallCount++;
+      },
+    } as any;
+
+    partition.enforce(mockQueryClient, "user-A", "org-A");
+    expect(removeCallCount).toBe(1);
+
+    partition.enforce(mockQueryClient, "user-A", "org-A");
+    expect(removeCallCount).toBe(1);
+
+    partition.enforce(mockQueryClient, "user-B", "org-A");
+    expect(removeCallCount).toBe(2);
+  });
+
+  it("handoff route file uses Route.useRouteContext for principal", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(
+      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("Route.useRouteContext()");
+    expect(source).toContain("session.userId");
+    expect(source).toContain("handoffKeys.preview(userId, organizationId");
+  });
+
+  it("handoff route disables query when lacking permission", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(
+      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("enabled: canHandoff");
+  });
+
+  it("app layout enforces handoff cache principal", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(path.join(repoRoot, "src/routes/app.tsx"), "utf8");
+    expect(source).toContain("enforceHandoffCachePrincipal");
+  });
+});
+
+// ── 16. Cache invalidation after successful handoff ─────────────────────────
+
+describe("handoff cache invalidation", () => {
+  it("handoff route invalidates queries on success", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const source = fs.readFileSync(
+      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("deliveryTransitionInvalidationKeys");
+    expect(source).toContain("invalidateQueries");
+    expect(source).toContain("deliveryKeys.detail");
+    expect(source).toContain("handoffKeys.preview");
+  });
+
+  it("deliveryTransitionInvalidationKeys covers orders and deliveries", async () => {
+    const { deliveryTransitionInvalidationKeys } = await import("../lib/deliveries-query");
+    const keys = deliveryTransitionInvalidationKeys("user-1", "org-1", "order-1");
+    expect(keys.length).toBeGreaterThanOrEqual(4);
+    const flat = keys.map((k) => JSON.stringify(k)).join(",");
+    expect(flat).toContain("orders");
+    expect(flat).toContain("deliveries");
   });
 });

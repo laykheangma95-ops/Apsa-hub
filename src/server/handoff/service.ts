@@ -48,7 +48,7 @@ export async function getHandoffPreview(
       providerName: "",
       externalTrackingNumber: null,
       eligible: false,
-      reason: "Parcel has been voided",
+      reason: "parcel_voided",
     };
   }
 
@@ -71,7 +71,7 @@ export async function getHandoffPreview(
       providerName: "",
       externalTrackingNumber: null,
       eligible: false,
-      reason: "No active delivery for this order",
+      reason: "no_active_delivery",
     };
   }
 
@@ -86,7 +86,7 @@ export async function getHandoffPreview(
       providerName: delivery.provider_name,
       externalTrackingNumber: delivery.external_tracking_number,
       eligible: false,
-      reason: `Order is ${order.lifecycle_status} — not eligible for handoff`,
+      reason: "order_not_eligible",
     };
   }
 
@@ -94,9 +94,9 @@ export async function getHandoffPreview(
   let reason: string | null = null;
   if (!eligible) {
     if (delivery.status === "in_transit") {
-      reason = "Parcel has already been handed off";
+      reason = "already_handed_off";
     } else {
-      reason = `Delivery is '${delivery.status}' — must be 'ready' for handoff`;
+      reason = "delivery_not_ready";
     }
   }
 
