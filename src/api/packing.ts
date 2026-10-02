@@ -117,3 +117,15 @@ export const getOrderPackStateFn = createServerFn()
     const { getOrderPackState } = await import("@/server/packing/service");
     return getOrderPackState(authCtx, data.orderId);
   });
+
+// ── retryPackedDeliveryReadyFn ───────────────────────────────────────────────
+
+export const retryPackedDeliveryReadyFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { retryPackedDeliveryReady } = await import("@/server/packing/service");
+    return retryPackedDeliveryReady(authCtx, data.orderId);
+  });

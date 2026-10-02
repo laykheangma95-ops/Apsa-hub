@@ -72,6 +72,7 @@ import {
   type OrderStatusAxis,
 } from "./state-machine";
 import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
+import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import { ORDER_SOURCES } from "./types";
 import type {
   OrderRow,
@@ -222,6 +223,16 @@ async function bestEffortAudit(
 
 function badRequest(message: string): Error {
   return publicError(message, 400);
+}
+
+/**
+ * Generic transitions accept a free-text reason; a reserved operational marker
+ * (e.g. Pack Order's packed reason) may only be written by its owning service.
+ */
+function rejectReservedReason(reason: string | null | undefined): void {
+  if (isReservedOperationalReason(reason)) {
+    throw badRequest("This reason is reserved for an internal workflow");
+  }
 }
 
 function notFound(message: string): Error {
@@ -726,6 +737,7 @@ export async function transitionLifecycleStatus(
   // Permission is checked before the order is loaded, so an unauthorized caller
   // cannot use timing or error shape to learn whether an order id is real.
   ctx.require(permission);
+  rejectReservedReason(reason);
 
   const order = await loadTransitionTarget(ctx, orderId);
   const from = order.lifecycle_status;
@@ -786,6 +798,7 @@ export async function transitionFulfillmentStatus(
   reason?: string | null,
 ): Promise<OrderDetail> {
   ctx.require(FULFILLMENT_TRANSITION_PERMISSIONS[to]);
+  rejectReservedReason(reason);
 
   const order = await loadTransitionTarget(ctx, orderId);
   const from = order.fulfillment_status;

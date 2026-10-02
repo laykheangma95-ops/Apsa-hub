@@ -47,6 +47,7 @@ import type {
   PackedLineInput,
   PackRequirementRow,
   PackRequirementsResult,
+  RetryDeliveryReadyResult,
   ServerParcelScanResult,
   ServerProductScanResult,
 } from "./types";
@@ -160,8 +161,7 @@ export async function getPackRequirements(
 
 /**
  * Whether the order has been marked packed: its active delivery is ready (or
- * further), or a packed reason exists on the order's fulfillment history or on
- * any of its deliveries' history. All reads org-scoped.
+ * further), or the trusted packed marker exists (hasTrustedPackedMarker).
  */
 async function isOrderPacked(
   organizationId: string,
@@ -169,10 +169,24 @@ async function isOrderPacked(
   activeDeliveryStatus: string | null,
 ): Promise<boolean> {
   if (isPackedDeliveryStatus(activeDeliveryStatus)) return true;
+  return hasTrustedPackedMarker(organizationId, orderId);
+}
 
+/**
+ * Whether Pack Order itself recorded the order as packed: the packed reason on
+ * the order's fulfillment history or on any of its deliveries' history.
+ *
+ * The marker is trusted because it is reserved — generic order and delivery
+ * transition APIs reject it (isReservedOperationalReason), so only this
+ * service writes it. Delivery status alone never counts here: a delivery moved
+ * to 'ready' through the generic delivery API is not proof of packing, so
+ * readying a delivery on the packed order's behalf depends on this check only.
+ * All reads org-scoped.
+ */
+async function hasTrustedPackedMarker(organizationId: string, orderId: string): Promise<boolean> {
   const orderHistory = await ordersRepo.listStatusHistory(organizationId, orderId);
   const orderReasons = orderHistory.filter((h) => h.axis === "fulfillment").map((h) => h.reason);
-  if (isOrderPackedFromHistory({ activeDeliveryStatus, historyReasons: orderReasons })) {
+  if (isOrderPackedFromHistory({ activeDeliveryStatus: null, historyReasons: orderReasons })) {
     return true;
   }
 
@@ -415,8 +429,50 @@ export async function readyPackedOrderDelivery(
   const delivery = await deliveriesRepo.findActiveDeliveryForOrder(organizationId, orderId);
   if (!delivery) return "no_delivery";
   if (isPackedDeliveryStatus(delivery.status)) return "already_ready";
-  if (!(await isOrderPacked(organizationId, orderId, delivery.status))) return "not_packed";
+  if (!(await hasTrustedPackedMarker(organizationId, orderId))) return "not_packed";
   return (await moveDeliveryToReady(organizationId, userId, delivery)).kind;
+}
+
+/**
+ * Retry delivery readiness for an order that is already packed.
+ *
+ * Recovers a packed order whose delivery was left 'pending'/'preparing' — e.g.
+ * the best-effort readying after Arrange Delivery failed. It never repacks:
+ * no scan counts are taken and the order fulfillment history is not touched.
+ * Only the delivery steps still missing are written (pending → preparing →
+ * ready), so a retry after a partial failure does not duplicate history, and a
+ * delivery already ready reports already_ready without writing anything.
+ * Courier Handoff is unchanged — it still takes the delivery from 'ready'.
+ *
+ * Same grants as Mark Packed (orders.read + delivery.handoff); the packed fact
+ * must come from the trusted marker, never from the delivery status.
+ */
+export async function retryPackedDeliveryReady(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<RetryDeliveryReadyResult> {
+  ctx.require("orders.read");
+  ctx.require("delivery.handoff");
+
+  const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
+  if (
+    !order ||
+    order.lifecycle_status !== "confirmed" ||
+    order.fulfillment_status === "cancelled"
+  ) {
+    return { kind: "invalid_order" };
+  }
+
+  const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
+  if (!delivery) return { kind: "no_delivery" };
+  if (isPackedDeliveryStatus(delivery.status)) {
+    return { kind: "already_ready", deliveryId: delivery.id };
+  }
+  if (!(await hasTrustedPackedMarker(ctx.organizationId, orderId))) return { kind: "not_packed" };
+
+  const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
+  if (moved.kind === "failed") return { kind: "transition_failed", reason: moved.reason };
+  return { kind: moved.kind, deliveryId: delivery.id };
 }
 
 type DeliveryReadyOutcome =

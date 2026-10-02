@@ -1104,7 +1104,11 @@
     },
     "packed": "Packed",
     "courierHandoff": "Courier handoff",
-    "handoffAfterPacking": "Available once the order is packed."
+    "handoffAfterPacking": "Available once the order is packed.",
+    "retryDeliveryReady": "Retry delivery ready",
+    "retryDeliveryReadyHint": "Packed, but the delivery is not ready for handoff yet.",
+    "retryDeliveryReadyDone": "Delivery is ready for courier handoff.",
+    "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again."
   },
   "orderList": {
     "title": "Orders",

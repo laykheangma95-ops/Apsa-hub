@@ -2,6 +2,7 @@ import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
+import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import {
   isTerminalDeliveryStatus,
   isValidDeliveryTransition,
@@ -230,6 +231,11 @@ async function transition(
   reason?: string | null,
 ): Promise<DeliveryDetail> {
   ctx.require("delivery.update");
+  // Reserved operational markers (Pack Order's packed reason, the courier
+  // handoff code) are written only by their owning services, never here.
+  if (isReservedOperationalReason(reason)) {
+    throw publicError("This reason is reserved for an internal workflow", 400);
+  }
   const delivery = await repo.findDeliveryById(ctx.organizationId, deliveryId);
   if (!delivery) throw notFound("Delivery not found");
   if (isTerminalDeliveryStatus(delivery.status)) {

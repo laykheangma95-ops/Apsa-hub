@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, PackageCheck, Printer, Truck } from "lucide-react";
+import { ChevronRight, PackageCheck, Printer, RotateCw, Truck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -305,6 +305,31 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       return getOrderPackStateFn({ data: { orderId: id } });
     },
     enabled: query.isSuccess && identityOk && capabilities.can("orders.read"),
+  });
+
+  /*
+   * Recovery for a packed order whose delivery was left pending/preparing
+   * (readying it after Arrange Delivery is best-effort). Never repacks; the
+   * server re-checks the trusted packed marker and the delivery.handoff grant.
+   */
+  const retryDeliveryReadyMutation = useMutation({
+    mutationFn: async () => {
+      const { retryPackedDeliveryReadyFn } = await import("@/api/packing");
+      return retryPackedDeliveryReadyFn({ data: { orderId: id } });
+    },
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
+      void queryClient.invalidateQueries({ queryKey });
+      setNotice(
+        t(
+          result.kind === "ready" || result.kind === "already_ready"
+            ? "order.retryDeliveryReadyDone"
+            : "order.retryDeliveryReadyFailed",
+        ),
+      );
+    },
+    onError: () => setNotice(t("order.retryDeliveryReadyFailed")),
   });
 
   /*
@@ -911,6 +936,26 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                           ? t("order.createReplacementDelivery")
                           : t("order.arrangeDelivery")}
                       </Button>
+                    );
+                  case "retry_delivery_ready":
+                    return (
+                      <div key={action.key} className="flex flex-col gap-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="tap-target h-11 w-full gap-2 rounded-xl"
+                          disabled={retryDeliveryReadyMutation.isPending}
+                          aria-busy={retryDeliveryReadyMutation.isPending}
+                          aria-describedby="order-retry-ready-hint"
+                          onClick={() => retryDeliveryReadyMutation.mutate()}
+                        >
+                          <RotateCw className="size-4" aria-hidden />
+                          {t("order.retryDeliveryReady")}
+                        </Button>
+                        <p id="order-retry-ready-hint" className="text-caption text-text-muted">
+                          {t("order.retryDeliveryReadyHint")}
+                        </p>
+                      </div>
                     );
                   case "handoff":
                     return action.disabled || !packState?.parcelCode ? (

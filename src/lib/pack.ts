@@ -137,7 +137,7 @@ export interface OrderPackState {
 // ── Order detail fulfillment actions ────────────────────────────────────────
 
 export type FulfillmentActionKey =
-  "print_label" | "pack" | "packed" | "arrange_delivery" | "handoff";
+  "print_label" | "pack" | "packed" | "arrange_delivery" | "retry_delivery_ready" | "handoff";
 
 export interface FulfillmentAction {
   key: FulfillmentActionKey;
@@ -150,7 +150,9 @@ export interface FulfillmentAction {
  *   1. Print parcel label
  *   2. Pack order  (or a "Packed" status once packed)
  *   3. Arrange delivery  (only while there is no active delivery — optional)
- *   4. Courier handoff  (only once a delivery exists; enabled when it is ready)
+ *   4. Retry delivery ready  (packed order whose delivery is still pending /
+ *      preparing — readying it failed; recovers without repacking)
+ *   5. Courier handoff  (only once a delivery exists; enabled when it is ready)
  *
  * Display only: every action is enforced again by the server.
  */
@@ -168,6 +170,13 @@ export function fulfillmentActions(input: {
   if (input.canPack) actions.push({ key: input.packed ? "packed" : "pack", disabled: false });
   if (input.canArrangeDelivery && input.activeDeliveryStatus === null) {
     actions.push({ key: "arrange_delivery", disabled: false });
+  }
+  if (
+    input.canHandoff &&
+    input.packed &&
+    (input.activeDeliveryStatus === "pending" || input.activeDeliveryStatus === "preparing")
+  ) {
+    actions.push({ key: "retry_delivery_ready", disabled: false });
   }
   if (
     input.canHandoff &&

@@ -60,3 +60,13 @@ export type MarkPackedResult =
   | { kind: "no_parcel" }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };
+
+// ── Retry delivery readiness (packed order) ─────────────────────────────────
+
+export type RetryDeliveryReadyResult =
+  | { kind: "ready"; deliveryId: string }
+  | { kind: "already_ready"; deliveryId: string }
+  | { kind: "not_packed" }
+  | { kind: "no_delivery" }
+  | { kind: "invalid_order" }
+  | { kind: "transition_failed"; reason: string };

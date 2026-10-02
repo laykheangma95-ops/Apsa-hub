@@ -11,7 +11,7 @@ import {
   Tag,
   XCircle,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AppHeader,
@@ -171,12 +171,51 @@ function ProgressBar({ packed, total }: { packed: number; total: number }) {
 }
 
 function PackScreen() {
-  const { t } = useTranslation();
   const { orderId } = Route.useParams();
+  const { session, organizationId } = Route.useRouteContext();
+  return (
+    <PackOrderIdentityBoundary
+      userId={session.userId}
+      organizationId={organizationId}
+      orderId={orderId}
+    />
+  );
+}
+
+interface PackOrderIdentityProps {
+  userId: string;
+  organizationId: string;
+  orderId: string;
+}
+
+/**
+ * React keeps hook state while a component type stays in the same tree, so a
+ * route param or principal change would otherwise carry the scan queue,
+ * progress, feedback and Mark Packed mutation over to another order, user or
+ * organization. Keying the stateful screen by every identity dimension mounts a
+ * clean session; the old instance's late async results are dropped (see
+ * `activeRef` in PackOrderSession).
+ */
+export function PackOrderIdentityBoundary(props: PackOrderIdentityProps) {
+  const identity = `${props.userId}\u0000${props.organizationId}\u0000${props.orderId}`;
+  return <PackOrderSession key={identity} {...props} />;
+}
+
+export function PackOrderSession({ userId, organizationId, orderId }: PackOrderIdentityProps) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const capabilities = useCapabilities();
-  const { session, organizationId } = Route.useRouteContext();
+  // Identity is fixed for this instance (PackOrderIdentityBoundary remounts on
+  // any change). Once it unmounts, every in-flight scan or Mark Packed result
+  // belongs to an old identity and must not touch state, caches or navigation.
+  const activeRef = useRef(true);
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+    };
+  }, []);
 
   const canRead = capabilities.can("orders.read");
   // Mark Packed requires the same operational grant as courier handoff (V1;
@@ -184,7 +223,7 @@ function PackScreen() {
   const canMark = capabilities.can("delivery.handoff");
 
   const query = useQuery({
-    queryKey: packingKeys.requirements(session.userId, organizationId, orderId),
+    queryKey: packingKeys.requirements(userId, organizationId, orderId),
     queryFn: async () => {
       const { getPackRequirementsFn } = await import("@/api/packing");
       return getPackRequirementsFn({ data: { orderId } });
@@ -255,6 +294,7 @@ function PackScreen() {
         }
         const { validatePackParcelScanFn } = await import("@/api/packing");
         const result = await validatePackParcelScanFn({ data: { orderId, scannedCode: code } });
+        if (!activeRef.current) return;
         addFeedback(result);
         if (result.kind === "parcel_accepted" && sessionRef.current) {
           commit(applyServerParcelAccepted(sessionRef.current));
@@ -269,6 +309,7 @@ function PackScreen() {
 
       const { validatePackProductScanFn } = await import("@/api/packing");
       const result = await validatePackProductScanFn({ data: { orderId, barcode: code } });
+      if (!activeRef.current) return;
       const latest = sessionRef.current;
       if (result.kind !== "accepted" || !latest) {
         addFeedback(result);
@@ -293,8 +334,12 @@ function PackScreen() {
       setPendingScans((n) => n + 1);
       scanQueueRef.current = scanQueueRef.current
         .then(() => processScan(raw))
-        .catch(() => addFeedback({ kind: "invalid_order" }))
-        .finally(() => setPendingScans((n) => n - 1));
+        .catch(() => {
+          if (activeRef.current) addFeedback({ kind: "invalid_order" });
+        })
+        .finally(() => {
+          if (activeRef.current) setPendingScans((n) => n - 1);
+        });
     },
     [processScan, addFeedback],
   );
@@ -339,14 +384,17 @@ function PackScreen() {
       return markOrderPackedFn({ data: { orderId, packedLines: buildPackedLines(current) } });
     },
     onSuccess: async (result) => {
+      // A late result for an order/user/organization no longer on screen.
+      if (!activeRef.current) return;
       if (result.kind === "packed" || result.kind === "already_packed") {
         const keys = [
-          ...deliveryTransitionInvalidationKeys(session.userId, organizationId, orderId),
-          ordersKeys.principal(session.userId, organizationId),
-          fulfillmentKeys.readyToPack(session.userId, organizationId),
-          packingKeys.principal(session.userId, organizationId),
+          ...deliveryTransitionInvalidationKeys(userId, organizationId, orderId),
+          ordersKeys.principal(userId, organizationId),
+          fulfillmentKeys.readyToPack(userId, organizationId),
+          packingKeys.principal(userId, organizationId),
         ];
         await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+        if (!activeRef.current) return;
         notifySuccess(
           t(
             result.kind === "packed"
@@ -360,7 +408,9 @@ function PackScreen() {
       }
       notifyError(t(markPackedErrorKey(result)));
     },
-    onError: () => notifyError(t("packSession.markPacked.failed")),
+    onError: () => {
+      if (activeRef.current) notifyError(t("packSession.markPacked.failed"));
+    },
   });
 
   const ready = packSession !== null && canMarkPacked(packSession);
