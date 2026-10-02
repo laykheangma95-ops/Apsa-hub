@@ -18,6 +18,7 @@
  * Never import this file from browser-bundled code.
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { COURIER_HANDOFF_CONFIRMED_REASON_CODE } from "@/lib/handoff";
 import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
 import * as ordersRepo from "@/server/orders/repository";
@@ -154,7 +155,7 @@ export async function confirmHandoff(
     "ready",
     "in_transit",
     ctx.userId,
-    "Courier handoff confirmed",
+    COURIER_HANDOFF_CONFIRMED_REASON_CODE,
   );
 
   if (result.status !== "success") {

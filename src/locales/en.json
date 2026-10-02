@@ -2494,6 +2494,9 @@
       "title": "Already handed off",
       "body": "This parcel has already been handed off to the courier."
     },
+    "history": {
+      "confirmed": "Courier handoff confirmed"
+    },
     "viewOrder": "View order",
     "viewDelivery": "View delivery",
     "done": "Done"

@@ -13,6 +13,7 @@ import {
   StatusChip,
 } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
+import { HandoffPreviewAccess } from "@/components/handoff/HandoffPreviewAccess";
 import { Button } from "@/components/ui/button";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { getHandoffPreviewFn, confirmHandoffFn } from "@/api/handoff";
@@ -23,8 +24,7 @@ import {
   handoffReasonMessage,
 } from "@/lib/handoff";
 import type { HandoffResult, HandoffPreview as HandoffPreviewType } from "@/lib/handoff";
-import { handoffKeys } from "@/lib/handoff-query";
-import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
+import { handoffKeys, syncHandoffResultCaches } from "@/lib/handoff-query";
 import { fullTimestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { StatusKey } from "@/types";
@@ -64,98 +64,92 @@ function CourierHandoffScreen() {
     mutationFn: () => confirmHandoffFn({ data: { parcelCode } }),
     onSuccess: (result) => {
       setHandoffResult(result);
-      if (result.kind === "success") {
-        const h = result.handoff;
-        for (const key of deliveryTransitionInvalidationKeys(userId, organizationId, h.orderId)) {
-          void queryClient.invalidateQueries({ queryKey: key });
-        }
-        void queryClient.invalidateQueries({
-          queryKey: deliveryKeys.detail(userId, organizationId, h.deliveryId),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: handoffKeys.preview(userId, organizationId, parcelCode),
-        });
-      }
+      void syncHandoffResultCaches(queryClient, userId, organizationId, parcelCode, result);
     },
   });
 
   const back = () => navigate({ to: "/app" });
+  const denied = (
+    <Screen bottom="none" contentClassName="!px-0">
+      <AppHeader title={t("courierHandoff.title")} onBack={back} />
+      <OperationalState
+        tone="danger"
+        title={t("courierHandoff.denied.title")}
+        body={t("courierHandoff.denied.body")}
+      />
+    </Screen>
+  );
 
-  if (!canHandoff) {
+  const renderAuthorizedState = () => {
+    if (previewQuery.isLoading) {
+      return (
+        <Screen bottom="none" contentClassName="!px-0">
+          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <DetailSkeleton />
+        </Screen>
+      );
+    }
+
+    if (previewQuery.isError) {
+      const errorMessage = (previewQuery.error as Error | undefined)?.message ?? "";
+      const isDenied =
+        errorMessage.includes("Not authenticated") ||
+        errorMessage.includes("Forbidden") ||
+        errorMessage.includes("No active organization");
+
+      return (
+        <Screen bottom="none" contentClassName="!px-0">
+          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <OperationalState
+            tone="danger"
+            title={isDenied ? t("courierHandoff.denied.title") : t("courierHandoff.error.title")}
+            body={isDenied ? t("courierHandoff.denied.body") : t("courierHandoff.error.body")}
+            {...(isDenied ? {} : { onRetry: () => previewQuery.refetch() })}
+          />
+        </Screen>
+      );
+    }
+
+    const preview = previewQuery.data;
+
+    if (!preview) {
+      return (
+        <Screen bottom="none" contentClassName="!px-0">
+          <AppHeader title={t("courierHandoff.title")} onBack={back} />
+          <OperationalState
+            title={t("courierHandoff.notFound.title")}
+            body={t("courierHandoff.notFound.body")}
+          />
+        </Screen>
+      );
+    }
+
+    if (handoffResult?.kind === "success") {
+      return <HandoffSuccess handoff={handoffResult.handoff} onBack={back} />;
+    }
+
     return (
-      <Screen bottom="none" contentClassName="!px-0">
-        <AppHeader title={t("courierHandoff.title")} onBack={back} />
-        <OperationalState
-          tone="danger"
-          title={t("courierHandoff.denied.title")}
-          body={t("courierHandoff.denied.body")}
-        />
-      </Screen>
+      <HandoffPreviewView
+        preview={preview}
+        canHandoff={canHandoff}
+        confirming={confirmMutation.isPending}
+        error={
+          handoffResult
+            ? handoffErrorMessage(handoffResult, t)
+            : confirmMutation.isError
+              ? t("courierHandoff.error.body")
+              : null
+        }
+        onConfirm={() => confirmMutation.mutate()}
+        onBack={back}
+      />
     );
-  }
-
-  if (previewQuery.isLoading) {
-    return (
-      <Screen bottom="none" contentClassName="!px-0">
-        <AppHeader title={t("courierHandoff.title")} onBack={back} />
-        <DetailSkeleton />
-      </Screen>
-    );
-  }
-
-  if (previewQuery.isError) {
-    const errorMessage = (previewQuery.error as Error | undefined)?.message ?? "";
-    const isDenied =
-      errorMessage.includes("Not authenticated") ||
-      errorMessage.includes("Forbidden") ||
-      errorMessage.includes("No active organization");
-
-    return (
-      <Screen bottom="none" contentClassName="!px-0">
-        <AppHeader title={t("courierHandoff.title")} onBack={back} />
-        <OperationalState
-          tone="danger"
-          title={isDenied ? t("courierHandoff.denied.title") : t("courierHandoff.error.title")}
-          body={isDenied ? t("courierHandoff.denied.body") : t("courierHandoff.error.body")}
-          {...(isDenied ? {} : { onRetry: () => previewQuery.refetch() })}
-        />
-      </Screen>
-    );
-  }
-
-  const preview = previewQuery.data;
-
-  if (!preview) {
-    return (
-      <Screen bottom="none" contentClassName="!px-0">
-        <AppHeader title={t("courierHandoff.title")} onBack={back} />
-        <OperationalState
-          title={t("courierHandoff.notFound.title")}
-          body={t("courierHandoff.notFound.body")}
-        />
-      </Screen>
-    );
-  }
-
-  if (handoffResult?.kind === "success") {
-    return <HandoffSuccess handoff={handoffResult.handoff} onBack={back} />;
-  }
+  };
 
   return (
-    <HandoffPreviewView
-      preview={preview}
-      canHandoff={canHandoff}
-      confirming={confirmMutation.isPending}
-      error={
-        handoffResult
-          ? handoffErrorMessage(handoffResult, t)
-          : confirmMutation.isError
-            ? t("courierHandoff.error.body")
-            : null
-      }
-      onConfirm={() => confirmMutation.mutate()}
-      onBack={back}
-    />
+    <HandoffPreviewAccess allowed={canHandoff} denied={denied}>
+      {renderAuthorizedState}
+    </HandoffPreviewAccess>
   );
 }
 

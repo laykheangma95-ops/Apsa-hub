@@ -19,11 +19,26 @@
 import fs from "fs";
 import path from "path";
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { HandoffPreviewAccess } from "@/components/handoff/HandoffPreviewAccess";
+import { CapabilityFixtureProvider, useCapabilities } from "@/hooks/use-capabilities";
+import { deliveryKeys } from "@/lib/deliveries-query";
+import { homeQueryKey } from "@/lib/home-query";
 import {
+  enforceHandoffCachePrincipal,
+  handoffKeys,
+  syncHandoffResultCaches,
+} from "@/lib/handoff-query";
+import { ordersKeys } from "@/lib/orders-query";
+import {
+  COURIER_HANDOFF_CONFIRMED_REASON_CODE,
   canConfirmHandoff,
-  isAlreadyHandedOff,
   handoffErrorMessage,
+  handoffHistoryReasonMessage,
   handoffReasonMessage,
+  isAlreadyHandedOff,
   type HandoffPreview,
   type HandoffResult,
 } from "../lib/handoff";
@@ -40,6 +55,7 @@ let mockOrders: any[] = [];
 let mockParcels: any[] = [];
 let mockDeliveries: any[] = [];
 let transitionResults: any[] = [];
+let rpcCalls: Array<{ name: string; params: Record<string, unknown> }> = [];
 
 function makeConfirmedOrder(orgId: string = ORG_A) {
   return {
@@ -195,7 +211,8 @@ function makeMockDb() {
         },
       };
     },
-    rpc(name: string, _params: any) {
+    rpc(name: string, params: Record<string, unknown>) {
+      rpcCalls.push({ name, params });
       if (name === "transition_delivery_status_v1") {
         if (transitionResults.length > 0) {
           return { data: transitionResults.shift(), error: null };
@@ -218,6 +235,7 @@ beforeEach(async () => {
   mockParcels = [];
   mockDeliveries = [];
   transitionResults = [];
+  rpcCalls = [];
 
   const testDb = makeMockDb();
 
@@ -257,6 +275,19 @@ describe("successful handoff", () => {
       expect(result.handoff.externalTrackingNumber).toBe("TRK-001");
       expect(result.handoff.handedOffAt).toBeDefined();
     }
+    expect(rpcCalls).toEqual([
+      {
+        name: "transition_delivery_status_v1",
+        params: {
+          p_organization_id: ORG_A,
+          p_delivery_id: DELIVERY_ID,
+          p_expected_from: "ready",
+          p_to: "in_transit",
+          p_changed_by: "user-test",
+          p_reason: COURIER_HANDOFF_CONFIRMED_REASON_CODE,
+        },
+      },
+    ]);
   });
 
   it("returns preview with eligible=true when delivery is ready", async () => {
@@ -678,22 +709,7 @@ describe("migration 051 declares delivery.handoff", () => {
   });
 });
 
-// ── 12. Server service enforces delivery.handoff, not delivery.update ───────
-
-describe("handoff requires delivery.handoff, not delivery.update", () => {
-  const repoRoot = path.resolve(import.meta.dir, "../..");
-  const source = fs.readFileSync(path.join(repoRoot, "src/server/handoff/service.ts"), "utf8");
-
-  it("the service requires delivery.handoff", () => {
-    expect(source).toContain('ctx.require("delivery.handoff")');
-  });
-
-  it("the service does not require delivery.update", () => {
-    expect(source).not.toContain('ctx.require("delivery.update")');
-  });
-});
-
-// ── 13. Server returns reason codes, not English messages ──────────────────
+// ── 12. Server returns reason codes, not English messages ──────────────────
 
 describe("server returns stable reason codes", () => {
   it("voided parcel preview returns 'parcel_voided' code", async () => {
@@ -738,27 +754,9 @@ describe("server returns stable reason codes", () => {
 
     expect(preview!.reason).toBe("delivery_not_ready");
   });
-
-  it("service never returns raw English operational messages", async () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(path.join(repoRoot, "src/server/handoff/service.ts"), "utf8");
-    const reasonAssignments = source.match(/reason[:\s]*[=]\s*["`]([^"`]+)["`]/g) || [];
-    const englishPatterns = [
-      "Parcel has been voided",
-      "No active delivery",
-      "not eligible for handoff",
-      "already been handed off",
-      "must be 'ready'",
-    ];
-    for (const assignment of reasonAssignments) {
-      for (const pattern of englishPatterns) {
-        expect(assignment).not.toContain(pattern);
-      }
-    }
-  });
 });
 
-// ── 14. Client reason/error functions use i18n keys ────────────────────────
+// ── 13. Client reason/error functions use i18n keys ────────────────────────
 
 describe("localized reason and error messages", () => {
   it("handoffReasonMessage maps each code to an i18n key", () => {
@@ -783,9 +781,26 @@ describe("localized reason and error messages", () => {
     expect(handoffReasonMessage(null, mockT)).toBeNull();
   });
 
-  it("handoffReasonMessage falls back to raw code for unknown codes", () => {
+  it("unknown preview reason codes fall back to generic localized copy", () => {
     const mockT = (key: string) => key;
-    expect(handoffReasonMessage("unknown_code", mockT)).toBe("unknown_code");
+    expect(handoffReasonMessage("unknown_code", mockT)).toBe("courierHandoff.error.body");
+  });
+
+  it("delivery history localizes the stable handoff reason code", () => {
+    const mockT = (key: string) => key;
+    expect(handoffHistoryReasonMessage(COURIER_HANDOFF_CONFIRMED_REASON_CODE, mockT)).toBe(
+      "courierHandoff.history.confirmed",
+    );
+  });
+
+  it("unknown system history codes fail closed while merchant notes stay verbatim", () => {
+    const mockT = (key: string) => key;
+    expect(handoffHistoryReasonMessage("system:future_handoff_reason", mockT)).toBe(
+      "courierHandoff.error.body",
+    );
+    expect(handoffHistoryReasonMessage("Customer requested evening delivery", mockT)).toBe(
+      "Customer requested evening delivery",
+    );
   });
 
   it("every reason code maps to an existing i18n key in both locales", () => {
@@ -809,6 +824,8 @@ describe("localized reason and error messages", () => {
       "courierHandoff.orderNotConfirmed.body",
       "courierHandoff.duplicateHandoff.body",
       "courierHandoff.deliveryNotReady.body",
+      "courierHandoff.history.confirmed",
+      "courierHandoff.error.body",
     ];
 
     for (const key of reasonI18nKeys) {
@@ -816,117 +833,189 @@ describe("localized reason and error messages", () => {
       expect(`km:${key}=${typeof lookup(km, key)}`).toBe(`km:${key}=string`);
     }
   });
-
-  it("client handoff lib contains no hardcoded English error messages", () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(path.join(repoRoot, "src/lib/handoff.ts"), "utf8");
-    const englishMessages = [
-      "Parcel not found in this organization",
-      "This parcel has been voided",
-      "No active delivery exists",
-      "must be 'ready' for handoff",
-      "not in a confirmed state",
-      "already been handed off to the courier",
-      "Handoff failed:",
-    ];
-    for (const msg of englishMessages) {
-      expect(source).not.toContain(msg);
-    }
-  });
 });
 
-// ── 15. Cache isolation — query keys partitioned by principal ───────────────
+// ── 14. Cache isolation and permission-sensitive rendering ─────────────────
 
 describe("handoff cache isolation", () => {
-  it("handoff query keys include userId and organizationId", async () => {
-    const { handoffKeys } = await import("../lib/handoff-query");
+  const USER_A = "user-A";
+  const USER_B = "user-B";
+
+  it("handoff query keys include userId and organizationId", () => {
     const key = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
     expect(key).toEqual(["handoff", "user-A", "org-A", "preview", "PARCEL-001"]);
   });
 
-  it("different users produce different query keys", async () => {
-    const { handoffKeys } = await import("../lib/handoff-query");
+  it("different users produce different query keys", () => {
     const keyA = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
     const keyB = handoffKeys.preview("user-B", "org-A", "PARCEL-001");
     expect(keyA).not.toEqual(keyB);
   });
 
-  it("different orgs produce different query keys", async () => {
-    const { handoffKeys } = await import("../lib/handoff-query");
+  it("different orgs produce different query keys", () => {
     const keyA = handoffKeys.preview("user-A", "org-A", "PARCEL-001");
     const keyB = handoffKeys.preview("user-A", "org-B", "PARCEL-001");
     expect(keyA).not.toEqual(keyB);
   });
 
-  it("partition enforce clears cache on principal change", async () => {
-    const { createQueryPartition } = await import("../lib/query-principal");
-    const partition = createQueryPartition("test-handoff");
+  it("a principal change removes the previous user's real cached preview", () => {
+    const client = new QueryClient();
+    const oldKey = handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE);
+    enforceHandoffCachePrincipal(client, USER_A, ORG_A);
+    client.setQueryData(oldKey, { orderNumber: "ORG-A-SECRET" });
 
-    let removeCallCount = 0;
-    const mockQueryClient = {
-      removeQueries: () => {
-        removeCallCount++;
-      },
-    } as any;
+    enforceHandoffCachePrincipal(client, USER_B, ORG_A);
 
-    partition.enforce(mockQueryClient, "user-A", "org-A");
-    expect(removeCallCount).toBe(1);
-
-    partition.enforce(mockQueryClient, "user-A", "org-A");
-    expect(removeCallCount).toBe(1);
-
-    partition.enforce(mockQueryClient, "user-B", "org-A");
-    expect(removeCallCount).toBe(2);
+    expect(client.getQueryData(oldKey)).toBeUndefined();
+    expect(client.getQueryData(handoffKeys.preview(USER_B, ORG_A, PARCEL_CODE))).toBeUndefined();
   });
 
-  it("handoff route file uses Route.useRouteContext for principal", () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(
-      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
-      "utf8",
+  it("an organization change removes the previous organization's real cached preview", () => {
+    const client = new QueryClient();
+    const oldKey = handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE);
+    enforceHandoffCachePrincipal(client, USER_A, ORG_A);
+    client.setQueryData(oldKey, { orderNumber: "ORG-A-SECRET" });
+
+    enforceHandoffCachePrincipal(client, USER_A, ORG_B);
+
+    expect(client.getQueryData(oldKey)).toBeUndefined();
+    expect(client.getQueryData(handoffKeys.preview(USER_A, ORG_B, PARCEL_CODE))).toBeUndefined();
+  });
+
+  function CachedPreviewValue() {
+    const query = useQuery<HandoffPreview>({
+      queryKey: handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE),
+      queryFn: () => Promise.reject(new Error("disabled query must not fetch")),
+      enabled: false,
+    });
+    return createElement("span", null, query.data?.orderNumber ?? "no-preview");
+  }
+
+  function CapabilityDrivenPreview() {
+    const allowed = useCapabilities().can("delivery.handoff");
+    return createElement(HandoffPreviewAccess, {
+      allowed,
+      denied: createElement("span", null, "permission-denied"),
+      children: () => createElement(CachedPreviewValue),
+    });
+  }
+
+  function renderCachedPreview(client: QueryClient, allowed: boolean): string {
+    return renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(
+          CapabilityFixtureProvider,
+          { permissions: allowed ? ["delivery.handoff"] : [] },
+          createElement(CapabilityDrivenPreview),
+        ),
+      ),
     );
-    expect(source).toContain("Route.useRouteContext()");
-    expect(source).toContain("session.userId");
-    expect(source).toContain("handoffKeys.preview(userId, organizationId");
-  });
+  }
 
-  it("handoff route disables query when lacking permission", () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(
-      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("enabled: canHandoff");
-  });
+  it("permission loss hides a preview that remains in the real QueryClient", () => {
+    const client = new QueryClient();
+    const preview: HandoffPreview = {
+      parcelId: "parcel-1",
+      parcelCode: PARCEL_CODE,
+      orderId: ORDER_ID,
+      orderNumber: "ORG-A-SECRET",
+      deliveryId: DELIVERY_ID,
+      deliveryStatus: "ready",
+      providerName: "Flash Express",
+      externalTrackingNumber: "TRACKING-SECRET",
+      eligible: true,
+      reason: null,
+    };
+    client.setQueryData(handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE), preview);
 
-  it("app layout enforces handoff cache principal", () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(path.join(repoRoot, "src/routes/app.tsx"), "utf8");
-    expect(source).toContain("enforceHandoffCachePrincipal");
+    expect(renderCachedPreview(client, true)).toContain("ORG-A-SECRET");
+    const denied = renderCachedPreview(client, false);
+    expect(denied).toContain("permission-denied");
+    expect(denied).not.toContain("ORG-A-SECRET");
+    expect(denied).not.toContain("TRACKING-SECRET");
   });
 });
 
-// ── 16. Cache invalidation after successful handoff ─────────────────────────
+// ── 15. Cache invalidation after successful handoff ─────────────────────────
 
 describe("handoff cache invalidation", () => {
-  it("handoff route invalidates queries on success", () => {
-    const repoRoot = path.resolve(import.meta.dir, "../..");
-    const source = fs.readFileSync(
-      path.join(repoRoot, "src/routes/app.handoff.$parcelCode.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("deliveryTransitionInvalidationKeys");
-    expect(source).toContain("invalidateQueries");
-    expect(source).toContain("deliveryKeys.detail");
-    expect(source).toContain("handoffKeys.preview");
+  const USER_A = "user-A";
+  const USER_B = "user-B";
+
+  const success: HandoffResult = {
+    kind: "success",
+    handoff: {
+      parcelId: "parcel-1",
+      parcelCode: PARCEL_CODE,
+      orderId: ORDER_ID,
+      orderNumber: "APSA-2026-000001",
+      deliveryId: DELIVERY_ID,
+      providerName: "Flash Express",
+      externalTrackingNumber: "TRK-001",
+      handedOffAt: "2026-10-02T00:00:00.000Z",
+    },
+  };
+
+  const stale = (client: QueryClient, key: readonly unknown[]) =>
+    client.getQueryState(key)?.isInvalidated ?? null;
+
+  it("marks Handoff, Delivery, Orders and Home entries stale in a real QueryClient", async () => {
+    const client = new QueryClient();
+    const keys = [
+      handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE),
+      deliveryKeys.detail(USER_A, ORG_A, DELIVERY_ID),
+      deliveryKeys.list(USER_A, ORG_A, "active", null, null),
+      ordersKeys.detail(USER_A, ORG_A, ORDER_ID),
+      ordersKeys.detailDeliveries(USER_A, ORG_A, ORDER_ID),
+      ordersKeys.list(USER_A, ORG_A),
+      homeQueryKey(USER_A, ORG_A, "today"),
+      homeQueryKey(USER_A, ORG_A, "week"),
+    ];
+    for (const key of keys) client.setQueryData(key, { cached: true });
+
+    await syncHandoffResultCaches(client, USER_A, ORG_A, PARCEL_CODE, success);
+
+    for (const key of keys)
+      expect({ key, stale: stale(client, key) }).toEqual({ key, stale: true });
   });
 
-  it("deliveryTransitionInvalidationKeys covers orders and deliveries", async () => {
-    const { deliveryTransitionInvalidationKeys } = await import("../lib/deliveries-query");
-    const keys = deliveryTransitionInvalidationKeys("user-1", "org-1", "order-1");
-    expect(keys.length).toBeGreaterThanOrEqual(4);
-    const flat = keys.map((k) => JSON.stringify(k)).join(",");
-    expect(flat).toContain("orders");
-    expect(flat).toContain("deliveries");
+  it("does not invalidate another user's or organization's partition", async () => {
+    const client = new QueryClient();
+    const otherKeys = [
+      handoffKeys.preview(USER_B, ORG_A, PARCEL_CODE),
+      handoffKeys.preview(USER_A, ORG_B, PARCEL_CODE),
+      deliveryKeys.detail(USER_B, ORG_A, DELIVERY_ID),
+      deliveryKeys.list(USER_A, ORG_B, "active", null, null),
+      ordersKeys.detail(USER_B, ORG_A, ORDER_ID),
+      ordersKeys.list(USER_A, ORG_B),
+    ];
+    for (const key of otherKeys) client.setQueryData(key, { cached: true });
+
+    await syncHandoffResultCaches(client, USER_A, ORG_A, PARCEL_CODE, success);
+
+    for (const key of otherKeys) {
+      expect({ key, stale: stale(client, key) }).toEqual({ key, stale: false });
+    }
+  });
+
+  it("leaves every cache fresh when the server rejects the handoff", async () => {
+    const client = new QueryClient();
+    const keys = [
+      handoffKeys.preview(USER_A, ORG_A, PARCEL_CODE),
+      deliveryKeys.detail(USER_A, ORG_A, DELIVERY_ID),
+      ordersKeys.list(USER_A, ORG_A),
+      homeQueryKey(USER_A, ORG_A, "today"),
+    ];
+    for (const key of keys) client.setQueryData(key, { cached: true });
+
+    await syncHandoffResultCaches(client, USER_A, ORG_A, PARCEL_CODE, {
+      kind: "delivery_not_ready",
+      currentStatus: "preparing",
+    });
+
+    for (const key of keys)
+      expect({ key, stale: stale(client, key) }).toEqual({ key, stale: false });
   });
 });

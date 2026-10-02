@@ -17,6 +17,9 @@
  * Safe to bundle for the browser: no Supabase, no server imports, no secrets.
  */
 import { createQueryPartition } from "@/lib/query-principal";
+import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
+import type { HandoffResult } from "@/lib/handoff";
+import type { QueryClient } from "@tanstack/react-query";
 
 export const HANDOFF_QUERY_ROOT = "handoff";
 
@@ -34,3 +37,26 @@ export const handoffKeys = {
 export const HANDOFF_QUERY_PREFIX = partition.prefix;
 export const clearHandoffQueries = partition.clear;
 export const enforceHandoffCachePrincipal = partition.enforce;
+
+/**
+ * Apply the cache effects of one server-authoritative handoff result.
+ * Failures change no domain state and therefore invalidate nothing.
+ */
+export async function syncHandoffResultCaches(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  parcelCode: string,
+  result: HandoffResult,
+): Promise<void> {
+  if (result.kind !== "success") return;
+
+  const { handoff } = result;
+  const keys = [
+    ...deliveryTransitionInvalidationKeys(userId, organizationId, handoff.orderId),
+    deliveryKeys.detail(userId, organizationId, handoff.deliveryId),
+    handoffKeys.preview(userId, organizationId, parcelCode),
+  ];
+
+  await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+}

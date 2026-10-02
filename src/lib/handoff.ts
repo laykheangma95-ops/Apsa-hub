@@ -61,6 +61,9 @@ export type HandoffResult =
   | { kind: "already_handed_off" }
   | { kind: "transition_failed"; reason: string };
 
+/** Reserved delivery-history reason written by the server for this workflow. */
+export const COURIER_HANDOFF_CONFIRMED_REASON_CODE = "system:courier_handoff_confirmed";
+
 // ── Display phase ──────────────────────────────────────────────────────────
 
 export type HandoffPhase = "loading" | "preview" | "confirming" | "confirmed" | "error";
@@ -97,7 +100,26 @@ export function handoffReasonMessage(
 ): string | null {
   if (!reasonCode) return null;
   const i18nKey = REASON_CODE_I18N[reasonCode];
-  return i18nKey ? t(i18nKey) : reasonCode;
+  return t(i18nKey ?? "courierHandoff.error.body");
+}
+
+/**
+ * Localize system-generated delivery-history reasons without changing
+ * merchant-entered failure/cancellation notes. Unknown reserved system codes
+ * fail closed to generic translated copy rather than leaking raw text.
+ */
+export function handoffHistoryReasonMessage(reason: string, t: (key: string) => string): string;
+export function handoffHistoryReasonMessage(reason: null, t: (key: string) => string): null;
+export function handoffHistoryReasonMessage(
+  reason: string | null,
+  t: (key: string) => string,
+): string | null {
+  if (!reason) return null;
+  if (reason === COURIER_HANDOFF_CONFIRMED_REASON_CODE) {
+    return t("courierHandoff.history.confirmed");
+  }
+  if (reason.startsWith("system:")) return t("courierHandoff.error.body");
+  return reason;
 }
 
 /**
