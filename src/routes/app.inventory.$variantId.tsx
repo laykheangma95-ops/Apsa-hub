@@ -199,7 +199,13 @@ function InventoryDetailScreen() {
           // Business language, never the enum value: "Stock received", not
           // "restock"; "Sold", not "sale".
           title: `${t(movementTypeLabelKey(movement.movementType))} · ${formatMovementDelta(movement.quantityDelta)}`,
-          ...(movement.reason ? { detail: movement.reason } : {}),
+          // A stock-count adjustment's stored reason is a fixed system label;
+          // show it in the merchant's language instead.
+          ...(movement.referenceType === "stock_count"
+            ? { detail: t("stockCount.history.label") }
+            : movement.reason
+              ? { detail: movement.reason }
+              : {}),
           meta: place ? `${when} · ${place}` : when,
           tone: movementTone(movement),
         };

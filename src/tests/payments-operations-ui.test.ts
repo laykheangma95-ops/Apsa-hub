@@ -920,8 +920,9 @@ describe("production boundary", () => {
       // 049 (Analytics status-count RPC) belongs to the Analytics performance phase;
       // 050 (parcel identity) belongs to the fulfillment parcels phase;
       // 051 (courier handoff permission) belongs to the courier handoff phase;
-      // 052 (receiving inventory) belongs to the receiving inventory phase.
-      return Number.isFinite(prefix) && prefix > 52;
+      // 052 (receiving inventory) belongs to the receiving inventory phase;
+      // 053 (stock counts) belongs to the stock count phase.
+      return Number.isFinite(prefix) && prefix > 53;
     });
     expect(beyond047).toEqual([]);
   });
