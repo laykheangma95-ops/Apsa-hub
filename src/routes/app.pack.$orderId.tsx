@@ -43,7 +43,6 @@ import {
   canMarkPacked,
   confirmLineManually,
   filterPackLines,
-  isPackedDeliveryStatus,
   resolveAcceptedLine,
   type MarkPackedResult,
   type PackSession,
@@ -180,8 +179,8 @@ function PackScreen() {
   const { session, organizationId } = Route.useRouteContext();
 
   const canRead = capabilities.can("orders.read");
-  // Mark Packed moves the order's delivery to 'ready'; the server requires the
-  // same operational grant as courier handoff. This only hides the control.
+  // Mark Packed requires the same operational grant as courier handoff (V1;
+  // a dedicated packing grant is an APSA V2 TODO). This only hides the control.
   const canMark = capabilities.can("delivery.handoff");
 
   const query = useQuery({
@@ -200,8 +199,8 @@ function PackScreen() {
   );
   const orderNumber = packData?.orderNumber ?? "";
   const parcelCode = packData?.parcelCode ?? "";
-  const deliveryStatus = packData?.deliveryStatus ?? null;
-  const alreadyPacked = isPackedDeliveryStatus(deliveryStatus);
+  // Packing never requires a delivery; the server says whether it is packed.
+  const alreadyPacked = packData?.packed ?? false;
 
   const [packSession, setPackSession] = useState<PackSession | null>(null);
   // Scans are processed strictly in order, each against the latest session, so
@@ -578,17 +577,15 @@ function PackScreen() {
             <p className="text-body-sm text-text-secondary">
               {!canMark
                 ? t("packSession.markPacked.noPermission")
-                : deliveryStatus === null
-                  ? t("packSession.markPacked.noDelivery")
-                  : ready
-                    ? t("packSession.markPacked.ready")
-                    : t("packSession.markPacked.remaining", { count: remaining })}
+                : ready
+                  ? t("packSession.markPacked.ready")
+                  : t("packSession.markPacked.remaining", { count: remaining })}
             </p>
           }
         >
           <Button
             className="press-tactile tap-target elevation-action h-12 w-full gap-2 rounded-2xl"
-            disabled={!ready || !canMark || deliveryStatus === null || markPacked.isPending}
+            disabled={!ready || !canMark || markPacked.isPending}
             aria-busy={markPacked.isPending}
             onClick={() => markPacked.mutate()}
           >
@@ -607,8 +604,6 @@ function PackScreen() {
 
 function markPackedErrorKey(result: MarkPackedResult): string {
   switch (result.kind) {
-    case "no_active_delivery":
-      return "packSession.markPacked.noDelivery";
     case "incomplete":
       return "packSession.markPacked.incomplete";
     default:

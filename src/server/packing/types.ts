@@ -20,12 +20,17 @@ export interface PackRequirementsResult {
   orderNumber: string;
   parcelCode: string;
   eligible: boolean;
-  /**
-   * Status of the order's active delivery, or null when none is arranged.
-   * 'ready' / 'in_transit' mean the order has already been marked packed.
-   */
+  /** Status of the order's active delivery, or null when none is arranged. */
   deliveryStatus: string | null;
+  /** The order has already been marked packed (with or without a delivery). */
+  packed: boolean;
   requirements: PackRequirementRow[];
+}
+
+export interface OrderPackStateResult {
+  packed: boolean;
+  /** Only returned to members holding delivery.handoff; otherwise null. */
+  parcelCode: string | null;
 }
 
 // ── Server-side scan validation results ────────────────────────────────────
@@ -49,11 +54,9 @@ export interface PackedLineInput {
 }
 
 export type MarkPackedResult =
-  | { kind: "packed"; deliveryId: string }
-  | { kind: "already_packed"; deliveryId: string }
+  | { kind: "packed"; deliveryId: string | null }
+  | { kind: "already_packed"; deliveryId: string | null }
   | { kind: "incomplete" }
   | { kind: "no_parcel" }
-  | { kind: "no_active_delivery" }
-  | { kind: "delivery_not_packable"; currentStatus: string }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };

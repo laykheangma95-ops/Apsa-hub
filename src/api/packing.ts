@@ -105,3 +105,15 @@ export const markOrderPackedFn = createServerFn({ method: "POST" })
     const { markOrderPacked } = await import("@/server/packing/service");
     return markOrderPacked(authCtx, data.orderId, data.packedLines);
   });
+
+// ── getOrderPackStateFn ──────────────────────────────────────────────────────
+
+export const getOrderPackStateFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getOrderPackState } = await import("@/server/packing/service");
+    return getOrderPackState(authCtx, data.orderId);
+  });

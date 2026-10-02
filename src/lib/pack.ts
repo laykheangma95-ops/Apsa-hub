@@ -16,12 +16,28 @@
  *   - Line resolution, manual confirmation and duplicate detection
  *   - Manual search over the order's lines
  *   - canPackOrder display predicate for the order detail button
+ *   - fulfillmentActions: the ordered Order detail fulfillment actions
+ *
+ * PACKED IS INDEPENDENT OF DELIVERY. Mark Packed never creates, assigns or
+ * starts a delivery. The packed fact is recorded with PACK_ORDER_PACKED_REASON_CODE
+ * on an append-only history row: the order fulfillment history when there is no
+ * delivery yet, the delivery history when one is already arranged (which also
+ * moves it to "ready" — the state Courier Handoff requires). Arranging a
+ * delivery for an already-packed order moves the new delivery to "ready" the
+ * same way, so Courier Handoff (ready → in_transit) is unchanged.
+ *
+ * TODO(APSA V2): a dedicated packing permission (e.g. fulfillment.mark_packed).
+ * V1 keeps the existing model — Mark Packed requires delivery.handoff, the
+ * operational grant the person at the packing bench already holds.
  *
  * INVENTORY IS NOT MUTATED. Packing verifies that the physical items match the
  * order; stock was consumed at order confirmation.
  */
 
-/** Delivery-history reason recorded when Mark Packed moves a delivery to ready. */
+/**
+ * History reason recorded when an order is marked packed — on the order
+ * fulfillment history and/or the delivery history (see the module comment).
+ */
 export const PACK_ORDER_PACKED_REASON_CODE = "pack_order_packed";
 
 // ── Pack requirement (what the order needs) ─────────────────────────────────
@@ -76,18 +92,92 @@ export type ServerProductScanResult =
   | { kind: "invalid_order" };
 
 export type MarkPackedResult =
-  | { kind: "packed"; deliveryId: string }
-  | { kind: "already_packed"; deliveryId: string }
+  | { kind: "packed"; deliveryId: string | null }
+  | { kind: "already_packed"; deliveryId: string | null }
   | { kind: "incomplete" }
   | { kind: "no_parcel" }
-  | { kind: "no_active_delivery" }
-  | { kind: "delivery_not_packable"; currentStatus: string }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };
 
 /** Delivery statuses at which the parcel has been packed (or gone further). */
 export function isPackedDeliveryStatus(status: string | null | undefined): boolean {
   return status === "ready" || status === "in_transit";
+}
+
+/**
+ * Whether an order counts as packed: its active delivery is ready (or further),
+ * or any order-fulfillment or delivery history row carries the packed reason.
+ * The server computes this from org-scoped history; this is the shared rule.
+ */
+export function isOrderPackedFromHistory(input: {
+  activeDeliveryStatus: string | null;
+  historyReasons: readonly (string | null)[];
+}): boolean {
+  return (
+    isPackedDeliveryStatus(input.activeDeliveryStatus) ||
+    input.historyReasons.includes(PACK_ORDER_PACKED_REASON_CODE)
+  );
+}
+
+/** Localized text for a history reason this module wrote; null for any other reason. */
+export function packHistoryReasonMessage(
+  reason: string | null,
+  t: (key: string) => string,
+): string | null {
+  return reason === PACK_ORDER_PACKED_REASON_CODE ? t("packSession.history.packed") : null;
+}
+
+/** Server response for the Order detail fulfillment section. */
+export interface OrderPackState {
+  packed: boolean;
+  /** Only returned to members who may hand off (delivery.handoff); else null. */
+  parcelCode: string | null;
+}
+
+// ── Order detail fulfillment actions ────────────────────────────────────────
+
+export type FulfillmentActionKey =
+  "print_label" | "pack" | "packed" | "arrange_delivery" | "handoff";
+
+export interface FulfillmentAction {
+  key: FulfillmentActionKey;
+  /** Shown but not yet possible (e.g. handoff before the parcel is packed). */
+  disabled: boolean;
+}
+
+/**
+ * The Order detail fulfillment actions, in V1 workflow order:
+ *   1. Print parcel label
+ *   2. Pack order  (or a "Packed" status once packed)
+ *   3. Arrange delivery  (only while there is no active delivery — optional)
+ *   4. Courier handoff  (only once a delivery exists; enabled when it is ready)
+ *
+ * Display only: every action is enforced again by the server.
+ */
+export function fulfillmentActions(input: {
+  canPrintLabel: boolean;
+  canPack: boolean;
+  packed: boolean;
+  canArrangeDelivery: boolean;
+  activeDeliveryStatus: string | null;
+  canHandoff: boolean;
+  parcelCode: string | null;
+}): FulfillmentAction[] {
+  const actions: FulfillmentAction[] = [];
+  if (input.canPrintLabel) actions.push({ key: "print_label", disabled: false });
+  if (input.canPack) actions.push({ key: input.packed ? "packed" : "pack", disabled: false });
+  if (input.canArrangeDelivery && input.activeDeliveryStatus === null) {
+    actions.push({ key: "arrange_delivery", disabled: false });
+  }
+  if (
+    input.canHandoff &&
+    input.parcelCode !== null &&
+    input.activeDeliveryStatus !== null &&
+    input.activeDeliveryStatus !== "in_transit"
+  ) {
+    actions.push({ key: "handoff", disabled: input.activeDeliveryStatus !== "ready" });
+  }
+  return actions;
 }
 
 // ── Progress ────────────────────────────────────────────────────────────────

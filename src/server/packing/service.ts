@@ -10,10 +10,20 @@
  *   - Reads and scan validation require `orders.read` (same grant as Order detail).
  *   - Mark Packed additionally requires `delivery.handoff` — the operational
  *     fulfillment grant the person at the packing bench already holds for
- *     courier handoff — because it moves the order's delivery to 'ready'.
+ *     courier handoff. V1 keeps the existing permission model; a dedicated
+ *     packing grant is a TODO for APSA V2 (needs a permission migration).
  *   - Every DB lookup is org-scoped via the AuthorizationContext.
  *   - Parcel ownership verified: parcel must belong to the order in the org.
  *   - Variant barcodes / QR ids validated against the order's actual line items.
+ *
+ * Packing does NOT require a delivery. Mark Packed records the packed fact on
+ * append-only history with PACK_ORDER_PACKED_REASON_CODE and never creates,
+ * assigns, starts or hands off a delivery:
+ *   - no delivery yet  → order fulfillment history (unfulfilled → processing)
+ *   - delivery arranged → delivery history, moving it to 'ready'
+ * Arranging a delivery later for a packed order moves the new delivery to
+ * 'ready' (readyPackedOrderDelivery), so Courier Handoff (ready → in_transit)
+ * is unchanged.
  *
  * Inventory is NOT touched: stock was consumed at order confirmation.
  *
@@ -26,9 +36,14 @@ import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
 import { classifyScan } from "@/lib/barcode/scan-router";
 import { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "@/lib/barcode/normalize";
-import { PACK_ORDER_PACKED_REASON_CODE } from "@/lib/pack";
+import {
+  PACK_ORDER_PACKED_REASON_CODE,
+  isOrderPackedFromHistory,
+  isPackedDeliveryStatus,
+} from "@/lib/pack";
 import type {
   MarkPackedResult,
+  OrderPackStateResult,
   PackedLineInput,
   PackRequirementRow,
   PackRequirementsResult,
@@ -138,8 +153,71 @@ export async function getPackRequirements(
     parcelCode: parcel.parcel_code,
     eligible: true,
     deliveryStatus: delivery?.status ?? null,
+    packed: await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null),
     requirements,
   };
+}
+
+/**
+ * Whether the order has been marked packed: its active delivery is ready (or
+ * further), or a packed reason exists on the order's fulfillment history or on
+ * any of its deliveries' history. All reads org-scoped.
+ */
+async function isOrderPacked(
+  organizationId: string,
+  orderId: string,
+  activeDeliveryStatus: string | null,
+): Promise<boolean> {
+  if (isPackedDeliveryStatus(activeDeliveryStatus)) return true;
+
+  const orderHistory = await ordersRepo.listStatusHistory(organizationId, orderId);
+  const orderReasons = orderHistory.filter((h) => h.axis === "fulfillment").map((h) => h.reason);
+  if (isOrderPackedFromHistory({ activeDeliveryStatus, historyReasons: orderReasons })) {
+    return true;
+  }
+
+  const deliveries = await deliveriesRepo.listDeliveries(organizationId, { order_id: orderId });
+  for (const delivery of deliveries) {
+    const history = await deliveriesRepo.listDeliveryHistory(organizationId, delivery.id);
+    if (
+      isOrderPackedFromHistory({
+        activeDeliveryStatus: null,
+        historyReasons: history.map((h) => h.reason),
+      })
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Packed state for the Order detail fulfillment section. Requires orders.read.
+ * The parcel code (needed to open Courier Handoff) is only returned to members
+ * who may hand off. Returns null for a missing or other-org order.
+ */
+export async function getOrderPackState(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<OrderPackStateResult | null> {
+  ctx.require("orders.read");
+
+  const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
+  if (!order) return null;
+
+  const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
+  const packed =
+    order.lifecycle_status === "confirmed" &&
+    order.fulfillment_status !== "cancelled" &&
+    (await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null));
+
+  let parcelCode: string | null = null;
+  if (ctx.can("delivery.handoff")) {
+    const parcel = await parcelsRepo.findActiveParcelByOrder(ctx.organizationId, orderId);
+    if (parcel && parcel.status !== "void") parcelCode = parcel.parcel_code;
+  }
+
+  return { packed, parcelCode };
 }
 
 /**
@@ -270,12 +348,15 @@ export async function validatePackProductScan(
  *
  * Re-validates everything at execution time (the screen is advisory): the order
  * is pack-eligible, its parcel exists, and the submitted per-line counts cover
- * every unit of every line exactly. Then the order's active delivery moves to
- * 'ready' through the existing delivery transition RPC (pending → preparing →
- * ready as needed), which records history with the actor and a reason code.
- * Courier Handoff then takes it from 'ready' to 'in_transit', unchanged.
+ * every unit of every line exactly. Then the packed fact is recorded — and only
+ * that. No delivery is created, no courier assigned, nothing handed off:
+ *   - With an arranged delivery (pending/preparing) it moves to 'ready' through
+ *     the existing delivery transition RPC, recording the actor and reason code.
+ *   - With no delivery, the order fulfillment history records the reason code
+ *     (unfulfilled → processing, which the state machine defines as "packing
+ *     has started"). Arranging a delivery later readies it for handoff.
  *
- * Idempotent: a delivery already 'ready' (or further) reports already_packed.
+ * Idempotent: an order already packed reports already_packed.
  */
 export async function markOrderPacked(
   ctx: AuthorizationContext,
@@ -297,45 +378,123 @@ export async function markOrderPacked(
   if (!isPackingComplete(items, packedLines)) return { kind: "incomplete" };
 
   const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
-  if (!delivery) return { kind: "no_active_delivery" };
+  const alreadyPacked = await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null);
 
-  if (delivery.status === "ready" || delivery.status === "in_transit") {
-    return { kind: "already_packed", deliveryId: delivery.id };
+  if (delivery) {
+    const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
+    if (moved.kind === "failed") return { kind: "transition_failed", reason: moved.reason };
+    return {
+      kind: alreadyPacked || moved.kind === "already_ready" ? "already_packed" : "packed",
+      deliveryId: delivery.id,
+    };
   }
 
-  if (delivery.status !== "pending" && delivery.status !== "preparing") {
-    return { kind: "delivery_not_packable", currentStatus: delivery.status };
-  }
+  if (alreadyPacked) return { kind: "already_packed", deliveryId: null };
 
-  const steps: readonly (readonly ["pending" | "preparing", "preparing" | "ready"])[] =
-    delivery.status === "pending"
-      ? [
-          ["pending", "preparing"],
-          ["preparing", "ready"],
-        ]
-      : [["preparing", "ready"]];
+  const recorded = await recordPackedOnOrder(
+    ctx.organizationId,
+    ctx.userId,
+    orderId,
+    order.fulfillment_status,
+  );
+  if (recorded !== "success") return { kind: "transition_failed", reason: recorded };
+  return { kind: "packed", deliveryId: null };
+}
+
+/**
+ * Arrange Delivery after packing: when the order is already packed, move its
+ * newly arranged delivery to 'ready' so Courier Handoff can take it. Called by
+ * the delivery service after a delivery is created; a no-op for an order that
+ * is not packed yet (Mark Packed will ready the delivery instead).
+ */
+export async function readyPackedOrderDelivery(
+  organizationId: string,
+  userId: string,
+  orderId: string,
+): Promise<"not_packed" | "no_delivery" | "ready" | "already_ready" | "failed"> {
+  const delivery = await deliveriesRepo.findActiveDeliveryForOrder(organizationId, orderId);
+  if (!delivery) return "no_delivery";
+  if (isPackedDeliveryStatus(delivery.status)) return "already_ready";
+  if (!(await isOrderPacked(organizationId, orderId, delivery.status))) return "not_packed";
+  return (await moveDeliveryToReady(organizationId, userId, delivery)).kind;
+}
+
+type DeliveryReadyOutcome =
+  { kind: "ready" } | { kind: "already_ready" } | { kind: "failed"; reason: string };
+
+/** pending → preparing → ready (as needed), each step tagged with the packed reason. */
+async function moveDeliveryToReady(
+  organizationId: string,
+  userId: string,
+  delivery: { id: string; status: string },
+): Promise<DeliveryReadyOutcome> {
+  if (isPackedDeliveryStatus(delivery.status)) return { kind: "already_ready" };
+
+  let steps: readonly (readonly ["pending" | "preparing", "preparing" | "ready"])[];
+  if (delivery.status === "pending") {
+    steps = [
+      ["pending", "preparing"],
+      ["preparing", "ready"],
+    ];
+  } else if (delivery.status === "preparing") {
+    steps = [["preparing", "ready"]];
+  } else {
+    return { kind: "failed", reason: "invalid_transition" };
+  }
 
   for (const [from, to] of steps) {
     const result = await deliveriesRepo.transitionDelivery(
-      ctx.organizationId,
+      organizationId,
       delivery.id,
       from,
       to,
-      ctx.userId,
+      userId,
       PACK_ORDER_PACKED_REASON_CODE,
     );
     if (result.status !== "success") {
-      if (
-        result.status === "stale" &&
-        (result.current === "ready" || result.current === "in_transit")
-      ) {
-        return { kind: "already_packed", deliveryId: delivery.id };
+      if (result.status === "stale" && isPackedDeliveryStatus(result.current)) {
+        return { kind: "already_ready" };
       }
-      return { kind: "transition_failed", reason: result.status };
+      return { kind: "failed", reason: result.status };
     }
   }
+  return { kind: "ready" };
+}
 
-  return { kind: "packed", deliveryId: delivery.id };
+/**
+ * Record the packed fact on the order fulfillment history (no delivery exists).
+ *
+ * unfulfilled → processing carries the reason. An order already 'processing'
+ * with no active delivery (only reachable through a manual fulfillment
+ * transition) cannot write a processing → processing row, so the marker is the
+ * pair processing → unfulfilled → processing, both rows tagged with the reason.
+ */
+async function recordPackedOnOrder(
+  organizationId: string,
+  userId: string,
+  orderId: string,
+  fulfillmentStatus: string,
+): Promise<string> {
+  const steps: readonly (readonly [string, string])[] =
+    fulfillmentStatus === "unfulfilled"
+      ? [["unfulfilled", "processing"]]
+      : [
+          ["processing", "unfulfilled"],
+          ["unfulfilled", "processing"],
+        ];
+  for (const [from, to] of steps) {
+    const result = await ordersRepo.transitionStatus(
+      organizationId,
+      orderId,
+      "fulfillment",
+      from,
+      to,
+      userId,
+      PACK_ORDER_PACKED_REASON_CODE,
+    );
+    if (result.status !== "success") return result.status;
+  }
+  return "success";
 }
 
 /**

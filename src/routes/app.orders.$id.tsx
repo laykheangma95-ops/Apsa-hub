@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Printer } from "lucide-react";
+import { ChevronRight, PackageCheck, Printer, Truck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -69,7 +69,8 @@ import {
   totalStockUnits,
   type OrderErrorKind,
 } from "@/lib/orders";
-import { canPackOrder } from "@/lib/pack";
+import { canPackOrder, fulfillmentActions, packHistoryReasonMessage } from "@/lib/pack";
+import { packingKeys } from "@/lib/packing-query";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
@@ -291,6 +292,22 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   });
 
   /*
+   * Packed is independent of delivery (V1 fulfillment), so it comes from the
+   * server's packing service rather than from the delivery status. The parcel
+   * code for Courier Handoff is only returned to members holding
+   * delivery.handoff.
+   */
+  const packStateQueryKey = packingKeys.orderState(userId, routeOrganizationId, id);
+  const packStateQuery = useQuery({
+    queryKey: packStateQueryKey,
+    queryFn: async () => {
+      const { getOrderPackStateFn } = await import("@/api/packing");
+      return getOrderPackStateFn({ data: { orderId: id } });
+    },
+    enabled: query.isSuccess && identityOk && capabilities.can("orders.read"),
+  });
+
+  /*
    * This order's own payments, filtered in SQL by the server (listPaymentsFn
    * accepts orderId) — never the whole organization's list narrowed here.
    * PAYMENTS_PER_ORDER is a page size, not a claim about how many exist:
@@ -476,6 +493,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     });
   const isReplacementDelivery = canCreateDelivery && latestDelivery !== null;
 
+  /*
+   * V1 fulfillment actions, in workflow order: Print parcel label → Pack order
+   * (or "Packed") → Arrange delivery (optional, only while none is active) →
+   * Courier handoff (only once a delivery exists; enabled when it is ready).
+   * Packing never waits for a delivery. Display only — the server re-checks.
+   */
+  const packState = packStateQuery.data ?? null;
+  const actions = fulfillmentActions({
+    canPrintLabel: showPrintLabel,
+    // Wait for the server's packed state so "Pack order" never flashes for a
+    // packed order; on a failed read the pack screen reports it instead.
+    canPack: showPackButton && !packStateQuery.isPending,
+    packed: packState?.packed ?? false,
+    canArrangeDelivery: canCreateDelivery && deliveriesQuery.isSuccess,
+    activeDeliveryStatus: activeDelivery?.status ?? null,
+    canHandoff: identityOk && capabilities.can("delivery.handoff"),
+    parcelCode: packState?.parcelCode ?? null,
+  });
+
   const payments = paymentsQuery.data?.items ?? [];
   /*
    * Fail closed on the CAPABILITY, not just on the query.
@@ -519,7 +555,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         axis: t(`order.axis.${entry.axis}`),
         status: t(`status.${entry.toStatus}`),
       }),
-      ...(entry.reason ? { detail: entry.reason } : {}),
+      ...(entry.reason
+        ? { detail: packHistoryReasonMessage(entry.reason, t) ?? entry.reason }
+        : {}),
       meta: fullTimestamp(entry.changedAt),
       tone:
         entry.toStatus === "cancelled"
@@ -816,43 +854,94 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           ) : (
             <p className="text-body-sm text-text-secondary">{t("order.noDeliveryBody")}</p>
           )}
-          {canCreateDelivery ? (
-            <Button
-              variant="ghost"
-              className="tap-target text-label mt-3 h-11 w-full text-action-primary"
-              onClick={() => setCreateDeliveryOpen(true)}
-            >
-              {isReplacementDelivery
-                ? t("order.createReplacementDelivery")
-                : t("order.arrangeDelivery")}
-            </Button>
-          ) : null}
         </Section>
 
-        {showPrintLabel || showPackButton ? (
+        {actions.length > 0 ? (
           <Section title={t("order.fulfillment")}>
-            {/* V1 flow: print the parcel label first, then Pack Order into it. */}
+            {/* V1 flow — see fulfillmentActions (src/lib/pack.ts) for the order. */}
             <div className="flex flex-col gap-2">
-              {showPrintLabel ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="tap-target h-11 w-full gap-2 rounded-xl"
-                  onClick={() => setParcelLabelOpen(true)}
-                >
-                  <Printer className="size-4" aria-hidden />
-                  {t("order.printParcelLabel")}
-                </Button>
-              ) : null}
-              {showPackButton ? (
-                <Link
-                  to="/app/pack/$orderId"
-                  params={{ orderId: id }}
-                  className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
-                >
-                  {t("order.startPacking")}
-                </Link>
-              ) : null}
+              {actions.map((action) => {
+                switch (action.key) {
+                  case "print_label":
+                    return (
+                      <Button
+                        key={action.key}
+                        type="button"
+                        variant="outline"
+                        className="tap-target h-11 w-full gap-2 rounded-xl"
+                        onClick={() => setParcelLabelOpen(true)}
+                      >
+                        <Printer className="size-4" aria-hidden />
+                        {t("order.printParcelLabel")}
+                      </Button>
+                    );
+                  case "pack":
+                    return (
+                      <Link
+                        key={action.key}
+                        to="/app/pack/$orderId"
+                        params={{ orderId: id }}
+                        className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
+                      >
+                        {t("order.startPacking")}
+                      </Link>
+                    );
+                  case "packed":
+                    // Status carried by icon + label, never colour alone.
+                    return (
+                      <p
+                        key={action.key}
+                        role="status"
+                        className="text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-status-success-soft text-status-success-text"
+                      >
+                        <PackageCheck className="size-4" aria-hidden />
+                        {t("order.packed")}
+                      </p>
+                    );
+                  case "arrange_delivery":
+                    return (
+                      <Button
+                        key={action.key}
+                        type="button"
+                        variant="outline"
+                        className="tap-target h-11 w-full gap-2 rounded-xl"
+                        onClick={() => setCreateDeliveryOpen(true)}
+                      >
+                        {isReplacementDelivery
+                          ? t("order.createReplacementDelivery")
+                          : t("order.arrangeDelivery")}
+                      </Button>
+                    );
+                  case "handoff":
+                    return action.disabled || !packState?.parcelCode ? (
+                      <div key={action.key} className="flex flex-col gap-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="tap-target h-11 w-full gap-2 rounded-xl"
+                          disabled
+                          aria-describedby="order-handoff-hint"
+                        >
+                          <Truck className="size-4" aria-hidden />
+                          {t("order.courierHandoff")}
+                        </Button>
+                        <p id="order-handoff-hint" className="text-caption text-text-muted">
+                          {t("order.handoffAfterPacking")}
+                        </p>
+                      </div>
+                    ) : (
+                      <Link
+                        key={action.key}
+                        to="/app/handoff/$parcelCode"
+                        params={{ parcelCode: packState.parcelCode }}
+                        className="press tap-target text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-brand-primary bg-brand-primary text-white"
+                      >
+                        <Truck className="size-4" aria-hidden />
+                        {t("order.courierHandoff")}
+                      </Link>
+                    );
+                }
+              })}
             </div>
           </Section>
         ) : null}
@@ -905,6 +994,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         orderTotal={order.total}
         onCreated={(detail) => {
           void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
+          void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
           /*
            * Arranging delivery moves this order's fulfilment axis, so the
            * order itself and the surfaces that summarise it are stale too —
@@ -939,7 +1029,11 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       />
       <ParcelLabelDialog
         open={parcelLabelOpen}
-        onClose={() => setParcelLabelOpen(false)}
+        onClose={() => {
+          setParcelLabelOpen(false);
+          // Printing creates the parcel identity Courier Handoff opens by.
+          void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
+        }}
         orderIds={parcelLabelOpen ? [id] : []}
         userId={userId}
         organizationId={routeOrganizationId}

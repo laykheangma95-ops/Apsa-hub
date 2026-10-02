@@ -182,7 +182,22 @@ export async function createDelivery(
     cod_amount_minor: codAmountMinor,
   });
   if (result.status !== "success" || !result.delivery_id) throw createFailure(result.status);
-  return requireDetail(ctx.organizationId, result.delivery_id);
+  const detail = await requireDetail(ctx.organizationId, result.delivery_id);
+
+  /*
+   * V1 fulfillment: an order may be packed before its delivery is arranged.
+   * The new delivery for an already-packed order goes straight to 'ready' so
+   * Courier Handoff can take it. Best-effort — the delivery exists either way,
+   * and a failure leaves it 'pending' (Mark Packed again readies it).
+   */
+  try {
+    const { readyPackedOrderDelivery } = await import("@/server/packing/service");
+    const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
+    if (readied === "ready") return requireDetail(ctx.organizationId, result.delivery_id);
+  } catch {
+    // Intentionally ignored; see above.
+  }
+  return detail;
 }
 
 function transitionFailure(status: string, current?: string): Error {

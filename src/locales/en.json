@@ -1101,7 +1101,10 @@
       "codNote": "Cash on delivery — the courier still holds this money. It is not counted as paid.",
       "submit": "Record payment",
       "working": "Recording…"
-    }
+    },
+    "packed": "Packed",
+    "courierHandoff": "Courier handoff",
+    "handoffAfterPacking": "Available once the order is packed."
   },
   "orderList": {
     "title": "Orders",
@@ -2480,10 +2483,9 @@
       "remaining": "{{count}} more to pack",
       "ready": "Every item is in the parcel",
       "noPermission": "You don't have permission to mark orders packed.",
-      "success": "Order packed — ready for courier handoff",
+      "success": "Order packed",
       "alreadyPacked": "This order is already packed",
-      "packedBody": "Hand the sealed parcel to the courier.",
-      "noDelivery": "Arrange a delivery for this order before marking it packed.",
+      "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
       "incomplete": "Some items are not packed yet.",
       "failed": "Could not mark the order packed. Please try again."
     },
@@ -2494,6 +2496,9 @@
     "empty": {
       "title": "Nothing to pack",
       "body": "This order has no items that require packing."
+    },
+    "history": {
+      "packed": "Packed"
     }
   },
   "shipping": {
