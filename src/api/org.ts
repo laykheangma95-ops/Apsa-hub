@@ -38,7 +38,7 @@ export type {
 } from "@/lib/org-schema";
 export type { OrganizationProfile } from "@/server/org/get-organization-profile";
 
-export const createOrganizationFn = createServerFn()
+export const createOrganizationFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => CreateOrganizationInputSchema.parse(data))
   .handler(async ({ data }): Promise<CreateOrganizationResult> => {
     // 1. Validate the session from cookies — never trust client-provided identity.
@@ -99,7 +99,7 @@ export const getOrganizationProfileFn = createServerFn().handler(
 // before the handler body even runs — see UpdateOrganizationProfileInputSchema
 // in src/lib/org-schema.ts for exactly which fields those are and why.
 
-export const updateOrganizationProfileFn = createServerFn()
+export const updateOrganizationProfileFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => UpdateOrganizationProfileInputSchema.parse(data))
   .handler(async ({ data }): Promise<OrganizationProfile> => {
     const authCtx = await resolveAuthContext();

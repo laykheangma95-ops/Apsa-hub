@@ -55,7 +55,7 @@ export const getCustomer360Fn = createServerFn()
 
 // ── addCustomerNoteFn ──────────────────────────────────────────────────────────
 
-export const addCustomerNoteFn = createServerFn()
+export const addCustomerNoteFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -131,7 +131,7 @@ export const searchCustomersFn = createServerFn()
 
 // ── createCustomerFn ───────────────────────────────────────────────────────────
 
-export const createCustomerFn = createServerFn()
+export const createCustomerFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -164,7 +164,7 @@ export const createCustomerFn = createServerFn()
 // list and Customer 360. Writing primary_phone/primary_email additionally
 // requires customers.view_sensitive (src/server/customers/service.ts).
 
-export const updateCustomerFn = createServerFn()
+export const updateCustomerFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -198,7 +198,7 @@ export const updateCustomerFn = createServerFn()
 
 // ── addIdentityFn ──────────────────────────────────────────────────────────────
 
-export const addIdentityFn = createServerFn()
+export const addIdentityFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

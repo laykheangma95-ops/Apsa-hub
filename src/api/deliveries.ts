@@ -39,7 +39,7 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
-export const createDeliveryFn = createServerFn()
+export const createDeliveryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -67,7 +67,7 @@ export const createDeliveryFn = createServerFn()
     });
   });
 
-export const startPreparingDeliveryFn = createServerFn()
+export const startPreparingDeliveryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => deliveryIdSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -75,7 +75,7 @@ export const startPreparingDeliveryFn = createServerFn()
     return startPreparingDelivery(authCtx, data.deliveryId, data.reason ?? null);
   });
 
-export const markDeliveryReadyFn = createServerFn()
+export const markDeliveryReadyFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => deliveryIdSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -83,7 +83,7 @@ export const markDeliveryReadyFn = createServerFn()
     return markDeliveryReady(authCtx, data.deliveryId, data.reason ?? null);
   });
 
-export const markDeliveryInTransitFn = createServerFn()
+export const markDeliveryInTransitFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => deliveryIdSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -91,7 +91,7 @@ export const markDeliveryInTransitFn = createServerFn()
     return markDeliveryInTransit(authCtx, data.deliveryId, data.reason ?? null);
   });
 
-export const markDeliveryDeliveredFn = createServerFn()
+export const markDeliveryDeliveredFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => deliveryIdSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -104,7 +104,7 @@ const reasonRequiredSchema = z.object({
   reason: z.string().trim().min(1, "A reason is required").max(1000),
 });
 
-export const markDeliveryFailedFn = createServerFn()
+export const markDeliveryFailedFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => reasonRequiredSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -112,7 +112,7 @@ export const markDeliveryFailedFn = createServerFn()
     return markDeliveryFailed(authCtx, data.deliveryId, data.reason);
   });
 
-export const cancelDeliveryFn = createServerFn()
+export const cancelDeliveryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => reasonRequiredSchema.parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();

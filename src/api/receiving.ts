@@ -55,7 +55,7 @@ export const resolveReceivingScanFn = createServerFn()
 
 // ── receiveInventoryFn ───────────────────────────────────────────────────────
 
-export const receiveInventoryFn = createServerFn()
+export const receiveInventoryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

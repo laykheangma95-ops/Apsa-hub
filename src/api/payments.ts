@@ -70,7 +70,7 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
 
 // ── recordPaymentFn ───────────────────────────────────────────────────────────
 
-export const recordPaymentFn = createServerFn()
+export const recordPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -98,7 +98,7 @@ export const recordPaymentFn = createServerFn()
 
 // ── attachPaymentEvidenceFn ───────────────────────────────────────────────────
 
-export const attachPaymentEvidenceFn = createServerFn()
+export const attachPaymentEvidenceFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -127,7 +127,7 @@ export const attachPaymentEvidenceFn = createServerFn()
 // One narrow function, one authoritative state machine — the target is part
 // of the contract (a zod enum), so a caller cannot request an unknown state.
 
-export const verifyPaymentFn = createServerFn()
+export const verifyPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -145,7 +145,7 @@ export const verifyPaymentFn = createServerFn()
 
 // ── reversePaymentFn ──────────────────────────────────────────────────────────
 
-export const reversePaymentFn = createServerFn()
+export const reversePaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -162,7 +162,7 @@ export const reversePaymentFn = createServerFn()
 
 // ── refundPaymentFn ───────────────────────────────────────────────────────────
 
-export const refundPaymentFn = createServerFn()
+export const refundPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -187,7 +187,7 @@ export const refundPaymentFn = createServerFn()
 
 // ── correctPaymentFn ──────────────────────────────────────────────────────────
 
-export const correctPaymentFn = createServerFn()
+export const correctPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

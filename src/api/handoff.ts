@@ -50,7 +50,7 @@ export const getHandoffPreviewFn = createServerFn()
 
 // ── confirmHandoffFn ─────────────────────────────────────────────────────────
 
-export const confirmHandoffFn = createServerFn()
+export const confirmHandoffFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

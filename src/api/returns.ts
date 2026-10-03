@@ -109,7 +109,7 @@ export const findReturnableOrderByParcelFn = createServerFn()
 
 // ── requestCustomerReturnFn ──────────────────────────────────────────────────
 
-export const requestCustomerReturnFn = createServerFn()
+export const requestCustomerReturnFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -138,7 +138,7 @@ export const requestCustomerReturnFn = createServerFn()
 
 // ── receiveCustomerReturnFn ──────────────────────────────────────────────────
 
-export const receiveCustomerReturnFn = createServerFn()
+export const receiveCustomerReturnFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => z.object({ returnId: returnIdSchema }).strict().parse(data))
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
@@ -148,7 +148,7 @@ export const receiveCustomerReturnFn = createServerFn()
 
 // ── inspectCustomerReturnFn ──────────────────────────────────────────────────
 
-export const inspectCustomerReturnFn = createServerFn()
+export const inspectCustomerReturnFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ returnId: returnIdSchema, lines: inspectionLinesSchema }).strict().parse(data),
   )
@@ -160,7 +160,7 @@ export const inspectCustomerReturnFn = createServerFn()
 
 // ── completeCustomerReturnFn ─────────────────────────────────────────────────
 
-export const completeCustomerReturnFn = createServerFn()
+export const completeCustomerReturnFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ returnId: returnIdSchema, expected: inspectionLinesSchema }).strict().parse(data),
   )

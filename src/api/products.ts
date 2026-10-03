@@ -133,7 +133,7 @@ const variantInputSchema = z.object({
   weight_grams: z.number().int().min(0).nullish(),
 });
 
-export const createProductFn = createServerFn()
+export const createProductFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -174,7 +174,7 @@ export const createProductFn = createServerFn()
 
 // ── updateProductFn ───────────────────────────────────────────────────────────
 
-export const updateProductFn = createServerFn()
+export const updateProductFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -197,7 +197,7 @@ export const updateProductFn = createServerFn()
 
 // ── archiveProductFn ──────────────────────────────────────────────────────────
 
-export const archiveProductFn = createServerFn()
+export const archiveProductFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ productId: z.string().uuid("Invalid product ID") }).parse(data),
   )
@@ -209,7 +209,7 @@ export const archiveProductFn = createServerFn()
 
 // ── createVariantFn ───────────────────────────────────────────────────────────
 
-export const createVariantFn = createServerFn()
+export const createVariantFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({ productId: z.string().uuid("Invalid product ID") })
@@ -234,7 +234,7 @@ export const createVariantFn = createServerFn()
 
 // ── updateVariantFn ───────────────────────────────────────────────────────────
 
-export const updateVariantFn = createServerFn()
+export const updateVariantFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -285,7 +285,7 @@ export const updateVariantFn = createServerFn()
 // Mints a fresh, org-unique APSA barcode for a variant and persists it. Refuses
 // to overwrite an existing barcode; uniqueness is checked server-side.
 
-export const generateVariantBarcodeFn = createServerFn()
+export const generateVariantBarcodeFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ variantId: z.string().uuid("Invalid variant ID") }).parse(data),
   )
@@ -309,7 +309,7 @@ export const listCategoriesFn = createServerFn()
 
 // ── createCategoryFn ──────────────────────────────────────────────────────────
 
-export const createCategoryFn = createServerFn()
+export const createCategoryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -333,7 +333,7 @@ export const createCategoryFn = createServerFn()
 
 // ── updateCategoryFn ──────────────────────────────────────────────────────────
 
-export const updateCategoryFn = createServerFn()
+export const updateCategoryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

@@ -55,7 +55,7 @@ export const listTeamFn = createServerFn().handler(async () => {
 
 const InvitableRole = z.enum(["manager", "cashier", "sales", "customer_service"]);
 
-export const inviteStaffFn = createServerFn()
+export const inviteStaffFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -73,7 +73,7 @@ export const inviteStaffFn = createServerFn()
 
 // ── resendInviteFn ───────────────────────────────────────────────────────────
 
-export const resendInviteFn = createServerFn()
+export const resendInviteFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ invitationId: z.string().uuid("Invalid invitation ID") }).parse(data),
   )
@@ -85,7 +85,7 @@ export const resendInviteFn = createServerFn()
 
 // ── cancelInviteFn ───────────────────────────────────────────────────────────
 
-export const cancelInviteFn = createServerFn()
+export const cancelInviteFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ invitationId: z.string().uuid("Invalid invitation ID") }).parse(data),
   )
@@ -97,7 +97,7 @@ export const cancelInviteFn = createServerFn()
 
 // ── changeRoleFn ─────────────────────────────────────────────────────────────
 
-export const changeRoleFn = createServerFn()
+export const changeRoleFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -114,7 +114,7 @@ export const changeRoleFn = createServerFn()
 
 // ── deactivateMemberFn / reactivateMemberFn ─────────────────────────────────
 
-export const deactivateMemberFn = createServerFn()
+export const deactivateMemberFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ membershipId: z.string().uuid("Invalid membership ID") }).parse(data),
   )
@@ -124,7 +124,7 @@ export const deactivateMemberFn = createServerFn()
     return deactivateMember(authCtx, data.membershipId);
   });
 
-export const reactivateMemberFn = createServerFn()
+export const reactivateMemberFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ membershipId: z.string().uuid("Invalid membership ID") }).parse(data),
   )
@@ -152,7 +152,7 @@ export const getInvitationPreviewFn = createServerFn()
 
 // ── acceptInvitationFn ───────────────────────────────────────────────────────
 
-export const acceptInvitationFn = createServerFn()
+export const acceptInvitationFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => z.object({ token: z.string().min(1) }).parse(data))
   .handler(async ({ data }) => {
     const session = await getSessionFn();

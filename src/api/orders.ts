@@ -90,7 +90,7 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
 
 // ── createOrderFn ─────────────────────────────────────────────────────────────
 
-export const createOrderFn = createServerFn()
+export const createOrderFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -144,7 +144,7 @@ export const createOrderFn = createServerFn()
 // orders.update and the RPC refuses once fulfillment is terminal, so a shipped
 // parcel's destination is never casually rewritten.
 
-export const updateOrderShippingFn = createServerFn()
+export const updateOrderShippingFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -165,7 +165,7 @@ export const updateOrderShippingFn = createServerFn()
 // axis is part of the contract, so a caller cannot aim a fulfillment value at
 // the payment column and rely on validation to catch it.
 
-export const transitionOrderLifecycleFn = createServerFn()
+export const transitionOrderLifecycleFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -186,7 +186,7 @@ export const transitionOrderLifecycleFn = createServerFn()
  * APSA Parcel"). Same authority as confirmation, enforced in the service; the
  * lifecycle check and the parcel write are one locked database decision.
  */
-export const recoverOrderParcelFn = createServerFn()
+export const recoverOrderParcelFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
   )
@@ -197,7 +197,7 @@ export const recoverOrderParcelFn = createServerFn()
   });
 
 /** @deprecated Always rejects; callers must use Payment recording/verification. */
-export const transitionOrderPaymentFn = createServerFn()
+export const transitionOrderPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
@@ -213,7 +213,7 @@ export const transitionOrderPaymentFn = createServerFn()
     return transitionPaymentStatus(authCtx, data.orderId, data.to, data.reason ?? null);
   });
 
-export const transitionOrderFulfillmentFn = createServerFn()
+export const transitionOrderFulfillmentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
