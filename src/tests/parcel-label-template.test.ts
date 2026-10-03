@@ -540,8 +540,15 @@ describe("label — products", () => {
     const vm = buildParcelLabel(input());
     expect(vm.items.map((l) => l.text)).toEqual(["2 × Iced Coffee — Large", "1 × Croissant"]);
     const html = render(input());
-    expect(html).toContain("Iced Coffee — Large");
-    expect(html).toContain("2 ×");
+    // Packing list: every line shows quantity, product name and variant.
+    expect(html).toContain(T.packingList.replace("{{count}}", "3"));
+    expect((html.match(/data-testid="parcel-label-item"/g) ?? []).length).toBe(2);
+    expect(html).toMatch(/data-testid="parcel-label-item-qty"[^>]*>2 ×</);
+    expect(html).toMatch(/data-testid="parcel-label-item-name"[^>]*>Iced Coffee</);
+    expect(html).toMatch(/data-testid="parcel-label-item-variant"[^>]*> — Large</);
+    expect(html).toMatch(/data-testid="parcel-label-item-name"[^>]*>Croissant</);
+    // A line without a variant renders no variant element.
+    expect((html.match(/data-testid="parcel-label-item-variant"/g) ?? []).length).toBe(1);
   });
 
   it("long Khmer/English names wrap (break-words, 2-row clamp) and use more row budget", () => {
@@ -689,11 +696,16 @@ describe("label — carrier", () => {
 });
 
 describe("label — payment", () => {
-  it("COD shows the exact collectible amount, prominently (USD)", () => {
+  it("COD shows 'Collect: <amount>' as the most prominent block (USD)", () => {
     const html = render(input());
-    expect(html).toContain(T.codToCollect);
-    expect(html).toContain("$35.00");
-    expect(html).toContain("text-[22pt]");
+    const cod = /data-testid="parcel-label-cod"[\s\S]*?<\/div>/.exec(html)![0];
+    expect(cod).toContain(T.collect);
+    expect(cod).toContain("$35.00");
+    // Prominent: the heaviest border on the label and the largest type.
+    expect(cod).toContain("border-[1.2mm]");
+    expect(cod).toContain("text-[22pt]");
+    expect(html.indexOf(T.collect)).toBeLessThan(html.indexOf("$35.00"));
+    expect(html).not.toContain(T.paymentVerified);
   });
 
   it("COD in KHR shows riel exactly", () => {
@@ -713,12 +725,21 @@ describe("label — payment", () => {
     expect(html).toContain(T.balanceDue);
   });
 
-  it("PAID shows a small PAID mark and NO amount at all", () => {
+  it("Paid by bank shows '✓ Payment verified' and NO amount at all", () => {
     const html = render(input({ payment: { state: "paid", collect: null } }));
-    expect(html).toContain(T.paid);
+    expect(html).toContain(`✓ ${T.paymentVerified}`);
     expect(html).toContain(T.paidNoCollect);
     expect(html).not.toContain("$");
-    expect(html).not.toContain(T.codToCollect);
+    expect(html).not.toContain(T.collect);
+    expect(html).not.toContain('data-testid="parcel-label-cod"');
+  });
+
+  it("Paid never prints the paid amount, even when the order total is known", () => {
+    const html = render(
+      input({ payment: { state: "paid", collect: { amount: 3500, currency: "USD" } } }),
+    );
+    expect(html).toContain(T.paymentVerified);
+    expect(html).not.toContain("35.00");
   });
 
   it("PAID ignores any stray amount the input carries", () => {
@@ -757,20 +778,46 @@ describe("label — payment", () => {
 });
 
 describe("shipping label — APSA Parcel ID as text + carrier tracking Code 128", () => {
-  // CORRECTION-003: the shipping label is the carrier's document. Its only
-  // barcode is the TRACKING number; the APSA Parcel ID is secondary text. The
-  // scannable APSA QR / Code 128 live on the internal parcel label only.
-  it("shows the APSA Parcel ID as text and carries NO scannable APSA code", () => {
+  // The carrier's document: the TRACKING Code 128 is the primary, full-width
+  // barcode. A SMALL APSA Parcel QR + Parcel ID are the merchant's internal
+  // identifier (the full-size APSA codes are on the internal parcel label).
+  it("shows a small APSA Parcel QR and the Parcel ID beside the primary tracking barcode", () => {
     const vm = buildParcelLabel(input(), { now: FIXED_NOW });
     expect(vm.parcelCode).toBe(PARCEL_CODE);
-    expect(vm).not.toHaveProperty("qr");
-    expect(vm).not.toHaveProperty("code128");
+    expect(vm.apsaQr!.payload).toBe(PARCEL_CODE);
+    expect(vm.apsaQr!.payload).not.toBe(vm.trackingCode128!.payload);
     const html = render(input());
     expect(html).toContain('data-testid="parcel-label-apsa-id"');
+    expect(html).toContain('data-testid="parcel-label-apsa-qr"');
     expect(html).toContain(PARCEL_CODE);
     expect(html).toContain(T.apsaParcelId);
-    // Exactly one barcode: the tracking Code 128. No QR at all.
-    expect((html.match(/<svg/g) ?? []).length).toBe(1);
+    // Two codes: the small APSA QR and the tracking Code 128.
+    expect((html.match(/<svg/g) ?? []).length).toBe(2);
+  });
+
+  it("the APSA QR is small and the tracking barcode stays primary (full width)", () => {
+    const html = render(input());
+    expect(html).toContain('data-testid="parcel-label-apsa-qr" class="size-[20mm]');
+    expect(html).toContain("h-[12mm] w-full");
+    // Reading order: tracking barcode is the last, widest code on the page.
+    expect(html.indexOf('data-testid="parcel-label-apsa-qr"')).toBeLessThan(
+      html.indexOf('data-testid="parcel-label-code128"'),
+    );
+  });
+
+  it("the APSA QR encodes only the parcel code — no PII, money or order data", () => {
+    const vm = buildParcelLabel(input());
+    for (const s of [
+      "Sokha",
+      "012 345 678",
+      "BKK1",
+      "35.00",
+      "Iced Coffee",
+      "APSA-2026-001048",
+      ORDER_ID,
+    ]) {
+      expect(vm.apsaQr!.payload).not.toContain(s);
+    }
   });
 
   it("the one barcode encodes the carrier tracking number — never the APSA code", () => {
@@ -804,7 +851,9 @@ describe("shipping label — APSA Parcel ID as text + carrier tracking Code 128"
     );
     expect(html).toContain(T.noTracking);
     expect(html).toContain("h-[12mm] w-full");
-    expect(html).not.toContain("<svg");
+    // Only the small APSA QR remains; no tracking barcode is invented.
+    expect((html.match(/<svg/g) ?? []).length).toBe(1);
+    expect(html).toContain('data-testid="parcel-label-apsa-qr"');
     expect(html).not.toContain(ORDER_ID);
   });
 
@@ -853,7 +902,7 @@ describe("deterministic fixtures — paid parcel and COD parcel", () => {
 
   it("paid parcel fixture", () => {
     const html = render(input({ payment: { state: "paid", collect: null } }));
-    expect(html).toContain(T.paid);
+    expect(html).toContain(T.paymentVerified);
     expect(html).not.toContain("$35.00");
   });
 });

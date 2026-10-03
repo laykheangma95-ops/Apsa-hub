@@ -194,8 +194,10 @@ interface Measured {
   top: Box;
   bottom: Box;
   payment: Box;
-  /** The 30 mm APSA Parcel ID text box (secondary identifier). */
+  /** The 30 mm APSA Parcel box: small QR + Parcel ID (secondary identifier). */
   apsaId: Box;
+  /** The small APSA Parcel QR inside it. */
+  apsaQr: Box | null;
   code128: Box | null;
   /** The tracking barcode SVG, or its same-size "no tracking" placeholder. */
   code128Slot: Box | null;
@@ -231,6 +233,7 @@ const MEASURE = `(() => {
       id: page.querySelector('[data-fixture]')?.getAttribute('data-fixture'),
       page: box(page), label: box(q('parcel-label')), top: box(top), bottom: box(q('parcel-label-bottom')),
       payment: box(q('parcel-label-payment')), apsaId: box(q('parcel-label-apsa-id')),
+      apsaQr: box(q('parcel-label-apsa-qr')?.querySelector('svg')),
       code128: box(q('parcel-label-code128')),
       code128Slot: box(q('parcel-label-code128')?.querySelector('svg') ?? q('parcel-label-code128')?.firstElementChild),
       code128Svg: box(q('parcel-label-code128')?.querySelector('svg')),
@@ -526,6 +529,15 @@ describe.skipIf(!READY && !ON_CI)("parcel label — rendered geometry in Chromiu
         // A tracking number always prints as a real barcode.
         if (fixture.input.delivery?.trackingNumber) {
           expect(m.code128Svg).not.toBeNull();
+        }
+        // The APSA Parcel QR is SMALL and secondary: it sits wholly inside its
+        // 30 mm box, stays scannable (≥ 18 mm), and is far narrower than the
+        // primary full-width tracking barcode.
+        if (fixture.input.parcelCode) {
+          expect(m.apsaQr).not.toBeNull();
+          expect(inside(m.apsaQr!, m.apsaId)).toBe(true);
+          expect(m.apsaQr!.width).toBeGreaterThanOrEqual(18 - EPS);
+          expect(m.apsaQr!.width).toBeLessThan(m.code128Slot!.width / 3);
         }
       });
 

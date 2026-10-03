@@ -474,17 +474,33 @@ describe("Arrange Delivery creates a shipment that attaches to the existing parc
     expect(after.delivery?.trackingNumber).toBe("VET-42");
   });
 
-  it("the shipping label's barcode is the tracking number; the APSA Parcel ID is text only", async () => {
+  it("shipping label: tracking Code 128 is primary; a small APSA QR carries the SAME parcel", async () => {
     await confirm();
     await arrange();
     const data = await shippingLabel();
     const vm = buildParcelLabel(data);
+    const parcelCode = String(activeParcels()[0]!["parcel_code"]);
     expect(vm.trackingCode128!.payload).toBe("VET-42");
-    expect(vm.parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+    expect(vm.parcelCode).toBe(parcelCode);
+    // The small APSA QR is the very identity Pack Order and Handoff use.
+    expect(vm.apsaQr!.payload).toBe(parcelCode);
     const html = renderToStaticMarkup(createElement(ParcelLabel, { vm }));
-    expect(html).toContain(vm.parcelCode!);
+    expect(html).toContain(parcelCode);
     expect(html).toContain("VET Express");
-    expect((html.match(/<svg/g) ?? []).length).toBe(1);
+    expect(html).toContain('data-testid="parcel-label-apsa-qr"');
+    expect((html.match(/<svg/g) ?? []).length).toBe(2);
+  });
+
+  it("after cancellation the new shipping label keeps the same small APSA QR", async () => {
+    await confirm();
+    const a = await arrange("VET Express", "VET-42");
+    const first = buildParcelLabel(await shippingLabel());
+    const { cancelDelivery } = await import("../server/deliveries/service");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await arrange("J&T Express", "JT-7");
+    const second = buildParcelLabel(await shippingLabel());
+    expect(second.trackingCode128!.payload).toBe("JT-7");
+    expect(second.apsaQr!.svg).toBe(first.apsaQr!.svg);
   });
 });
 

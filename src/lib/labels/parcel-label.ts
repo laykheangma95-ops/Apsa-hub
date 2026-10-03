@@ -12,10 +12,10 @@
  *     It NEVER recomputes an amount and never prints one unless the state is
  *     COD (§18);
  *   - is the SHIPPING label (CORRECTION-003): it exists for a carrier shipment.
- *     Its only barcode is the carrier TRACKING number (Code 128) — what the
- *     courier scans. The APSA Parcel ID appears as secondary TEXT only; the
- *     scannable APSA QR / Code 128 live on the internal parcel label
- *     (./internal-parcel-label.ts), which the courier never scans. The label
+ *     Its PRIMARY barcode is the carrier TRACKING number (full-width Code 128)
+ *     — what the courier scans. A SMALL APSA Parcel QR plus the Parcel ID are
+ *     the merchant's secondary, internal identifier (the full-size APSA codes
+ *     live on the internal parcel label, ./internal-parcel-label.ts). The label
  *     never prints an order UUID.
  *
  * It carries no user-facing prose (wording is the component's i18n job). It
@@ -24,6 +24,7 @@
  */
 import type { Money } from "@/types";
 import { formatMoney } from "@/lib/money";
+import { renderQrSvg } from "@/lib/barcode/qr";
 import { renderCode128Svg, isCode128Encodable } from "@/lib/barcode/code128";
 import { isValidParcelCode } from "@/lib/barcode/parcel-code";
 
@@ -216,6 +217,11 @@ export interface ParcelLabelViewModel {
    * without a tracking number (or one Code 128 cannot encode).
    */
   trackingCode128: { payload: string; svg: string } | null;
+  /**
+   * SMALL QR of the APSA Parcel ID — the merchant's internal identifier,
+   * secondary to the tracking barcode. Null without a valid parcel code.
+   */
+  apsaQr: { payload: string; svg: string } | null;
   /** The APSA Parcel ID, printed as secondary text only (never scannable here). */
   parcelCode: string | null;
   /** ISO timestamp of when this label was generated. */
@@ -434,6 +440,12 @@ export function buildParcelLabel(
         }
       : null,
     trackingCode128,
+    apsaQr: parcelCode
+      ? {
+          payload: parcelCode,
+          svg: renderQrSvg(parcelCode, { moduleSize: 4, quietModules: 4, ecLevel: "M" }),
+        }
+      : null,
     parcelCode,
     printTimestamp: now.toISOString(),
     printedAt: formatPrintedAt(now),

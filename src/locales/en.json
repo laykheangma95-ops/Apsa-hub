@@ -2430,7 +2430,10 @@
       "parcelCodeError": "Could not assign a parcel code. Please try again.",
       "apsaParcelId": "APSA Parcel ID",
       "noTracking": "No tracking number",
-      "needsDelivery": "The shipping label is available after delivery is arranged."
+      "needsDelivery": "The shipping label is available after delivery is arranged.",
+      "packingList": "Packing list · {{count}} items",
+      "collect": "Collect:",
+      "paymentVerified": "Payment verified"
     },
     "internal": {
       "title": "APSA parcel",

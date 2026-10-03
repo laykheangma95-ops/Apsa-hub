@@ -12,8 +12,9 @@ import type { ParcelLabelViewModel } from "@/lib/labels/parcel-label";
  *
  * Reading order, top to bottom, for a packer or courier at a glance:
  *   1. shop (logo + name + phone)   2–3. receiver + address
- *   4. carrier / tracking           5. items
- *   6. payment (COD / PAID / CHECK) 7. APSA Parcel ID (text) + tracking Code 128
+ *   4. carrier / tracking           5. packing list (qty × product — variant)
+ *   6. payment (Collect: COD / ✓ Payment verified / CHECK)
+ *   7. small APSA Parcel QR + Parcel ID, then the primary tracking Code 128
  *   8. order number + print time
  *
  * Text wraps (break-words) instead of truncating, so long Khmer or English names
@@ -145,20 +146,30 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
           )}
         </section>
 
-        {/* 5. Items */}
+        {/* 5. Packing list — quantity, product, variant per line */}
         <section
           data-testid="parcel-label-items"
           className="flex min-h-0 flex-1 flex-col overflow-hidden border-b-[0.4mm] border-black pb-[1.5mm]"
         >
           <p className="shrink-0 text-[8pt] font-semibold leading-tight">
-            {t("labels.parcel.items", { count: vm.itemCount })}
+            {t("labels.parcel.packingList", { count: vm.itemCount })}
           </p>
           <ul className="mt-[0.5mm] min-h-0 space-y-[0.4mm] overflow-hidden">
             {vm.items.map((line, i) => (
-              <li key={i} className="line-clamp-2 break-words text-[9pt] leading-tight">
-                <span className="font-bold tabular-nums">{line.quantity} ×</span>{" "}
-                {line.productName.trim()}
-                {line.variantName?.trim() ? ` — ${line.variantName.trim()}` : ""}
+              <li
+                key={i}
+                data-testid="parcel-label-item"
+                className="line-clamp-2 break-words text-[9pt] leading-tight"
+              >
+                <span data-testid="parcel-label-item-qty" className="font-bold tabular-nums">
+                  {line.quantity} ×
+                </span>{" "}
+                <span data-testid="parcel-label-item-name">{line.productName.trim()}</span>
+                {line.variantName?.trim() ? (
+                  <span data-testid="parcel-label-item-variant">
+                    {` — ${line.variantName.trim()}`}
+                  </span>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -178,10 +189,15 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
         <section className="flex shrink-0 items-center gap-[3mm]">
           <div className="min-w-0 flex-1" data-testid="parcel-label-payment">
             {vm.payment.state === "cod" ? (
-              <div className="border-[0.8mm] border-black px-[2mm] py-[1.5mm]">
-                <p className="text-[10pt] font-bold leading-tight">
-                  {t("labels.parcel.codToCollect")}
-                </p>
+              /*
+               * COD is the one figure a courier must act on, so it is the
+               * loudest thing on the label: "Collect: <amount>" in a heavy box.
+               */
+              <div
+                data-testid="parcel-label-cod"
+                className="border-[1.2mm] border-black px-[2mm] py-[1.5mm]"
+              >
+                <p className="text-[12pt] font-bold leading-tight">{t("labels.parcel.collect")}</p>
                 <p
                   data-testid="parcel-label-cod-amount"
                   className="break-all text-[22pt] font-bold leading-none tabular-nums"
@@ -195,9 +211,10 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
                 ) : null}
               </div>
             ) : vm.payment.state === "paid" ? (
-              <div>
+              // Paid (e.g. by bank): verified, and deliberately NO amount.
+              <div data-testid="parcel-label-paid">
                 <p className="inline-block border-[0.5mm] border-black px-[2mm] py-[0.5mm] text-[11pt] font-bold">
-                  ✓ {t("labels.parcel.paid")}
+                  ✓ {t("labels.parcel.paymentVerified")}
                 </p>
                 <p className="mt-[0.5mm] text-[8pt] leading-tight">
                   {t("labels.parcel.paidNoCollect")}
@@ -221,18 +238,23 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
           </div>
 
           {/*
-           * 7a. APSA Parcel ID — secondary, TEXT only (CORRECTION-003). The
-           * scannable APSA QR / Code 128 are on the internal parcel label; the
-           * courier scans only the tracking barcode below.
+           * 7a. The merchant's internal identifier: a SMALL APSA Parcel QR plus
+           * the Parcel ID. Secondary by design — the carrier tracking barcode
+           * below is the primary, full-width shipping barcode.
            */}
           <div
-            className="flex size-[30mm] shrink-0 flex-col justify-center border-[0.3mm] border-black p-[1.5mm]"
+            className="flex size-[30mm] shrink-0 flex-col items-center justify-center gap-[0.5mm] overflow-hidden border-[0.3mm] border-black p-[1mm]"
             data-testid="parcel-label-apsa-id"
+            aria-label={t("labels.parcel.apsaParcelId")}
           >
-            <p className="text-[7pt] font-semibold leading-tight">
-              {t("labels.parcel.apsaParcelId")}
-            </p>
-            <p className="mt-[0.5mm] break-all font-mono text-[7pt] leading-tight">
+            {vm.apsaQr ? (
+              <div
+                data-testid="parcel-label-apsa-qr"
+                className="size-[20mm] shrink-0 [&>svg]:h-full [&>svg]:w-full"
+                dangerouslySetInnerHTML={{ __html: vm.apsaQr.svg }}
+              />
+            ) : null}
+            <p className="w-full break-all text-center font-mono text-[6pt] leading-tight">
               {vm.parcelCode ?? "—"}
             </p>
           </div>
