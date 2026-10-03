@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import type { ParcelLabelViewModel } from "@/lib/labels/parcel-label";
 
 /**
- * One 100×150 mm parcel/shipping label (§13). Pure black-on-white: no greys,
+ * One 100×150 mm SHIPPING label (§13) — printed only once a carrier shipment
+ * exists (CORRECTION-003). Pure black-on-white: no greys,
  * tints or screen-only colours, so it prints the same on a thermal printer, a
  * mono laser or a colour inkjet (see ProductLabel for the design-token
  * exception). Contains exactly the fulfillment PII the view model carries (name,
@@ -12,7 +13,7 @@ import type { ParcelLabelViewModel } from "@/lib/labels/parcel-label";
  * Reading order, top to bottom, for a packer or courier at a glance:
  *   1. shop (logo + name + phone)   2–3. receiver + address
  *   4. carrier / tracking           5. items
- *   6. payment (COD / PAID / CHECK) 7. QR + Code 128 of the parcel identity
+ *   6. payment (COD / PAID / CHECK) 7. APSA Parcel ID (text) + tracking Code 128
  *   8. order number + print time
  *
  * Text wraps (break-words) instead of truncating, so long Khmer or English names
@@ -219,29 +220,44 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
             )}
           </div>
 
-          <div className="size-[30mm] shrink-0" data-testid="parcel-label-qr">
-            {vm.qr ? (
-              <div
-                className="h-full w-full [&>svg]:h-full [&>svg]:w-full"
-                dangerouslySetInnerHTML={{ __html: vm.qr.svg }}
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center border-[0.3mm] border-dashed border-black p-[1.5mm] text-center text-[7pt]">
-                {t("labels.parcel.codesPending")}
-              </div>
-            )}
+          {/*
+           * 7a. APSA Parcel ID — secondary, TEXT only (CORRECTION-003). The
+           * scannable APSA QR / Code 128 are on the internal parcel label; the
+           * courier scans only the tracking barcode below.
+           */}
+          <div
+            className="flex size-[30mm] shrink-0 flex-col justify-center border-[0.3mm] border-black p-[1.5mm]"
+            data-testid="parcel-label-apsa-id"
+          >
+            <p className="text-[7pt] font-semibold leading-tight">
+              {t("labels.parcel.apsaParcelId")}
+            </p>
+            <p className="mt-[0.5mm] break-all font-mono text-[7pt] leading-tight">
+              {vm.parcelCode ?? "—"}
+            </p>
           </div>
         </section>
 
-        {/* 7b. Code 128 — full label width so each module stays scannable. */}
-        {vm.code128 ? (
-          <section className="shrink-0" data-testid="parcel-label-code128">
-            <div className="h-[12mm] w-full" dangerouslySetInnerHTML={{ __html: vm.code128.svg }} />
-            <p className="mt-[0.5mm] break-all text-center font-mono text-[8pt] leading-tight">
-              {vm.parcelCode}
-            </p>
-          </section>
-        ) : null}
+        {/*
+         * 7b. Carrier tracking Code 128 — full label width so each module stays
+         * scannable. Same height with or without a tracking number, so the
+         * vertical budget above never changes.
+         */}
+        <section className="shrink-0" data-testid="parcel-label-code128">
+          {vm.trackingCode128 ? (
+            <div
+              className="h-[12mm] w-full"
+              dangerouslySetInnerHTML={{ __html: vm.trackingCode128.svg }}
+            />
+          ) : (
+            <div className="flex h-[12mm] w-full items-center justify-center border-[0.3mm] border-dashed border-black text-[8pt]">
+              {t("labels.parcel.noTracking")}
+            </div>
+          )}
+          <p className="mt-[0.5mm] break-all text-center font-mono text-[8pt] leading-tight">
+            {vm.delivery?.trackingNumber ?? "—"}
+          </p>
+        </section>
 
         {/* 8. Small references */}
         <footer

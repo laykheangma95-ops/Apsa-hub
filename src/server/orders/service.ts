@@ -777,7 +777,31 @@ export async function transitionLifecycleStatus(
     ...(reason ? { reason } : {}),
   });
 
+  if (to === "confirmed") await generateApsaParcel(ctx, orderId);
+
   return requireDetail(ctx.organizationId, orderId);
+}
+
+/**
+ * Confirmation is the moment the order enters fulfillment, so it is when the
+ * order's APSA Parcel (internal warehouse identity: Parcel ID, QR, Code 128) is
+ * generated — before packing, and independent of any carrier shipment
+ * (CORRECTION-003). Authorized by the confirm permission already required.
+ *
+ * Best-effort: the confirmation has committed and must not be reported as
+ * failed. Every fulfillment read that needs the parcel (internal label, Pack
+ * Order) ensures it idempotently, so a failure here self-heals on first use.
+ */
+async function generateApsaParcel(ctx: AuthorizationContext, orderId: string): Promise<void> {
+  try {
+    const { ensureParcelForOrder } = await import("@/server/parcels/service");
+    await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
+  } catch (err) {
+    reportServerError(err, {
+      event: "orders.parcel_generation_failed",
+      organizationId: ctx.organizationId,
+    });
+  }
 }
 
 /**

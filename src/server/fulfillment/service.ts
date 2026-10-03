@@ -34,7 +34,12 @@ import {
 } from "@/server/orders/state-machine";
 import * as repo from "./repository";
 import { deriveLabelPayment } from "./label-payment";
-import type { ReadyToPackEntry, ParcelLabelData, ParcelLabelItem } from "./types";
+import type {
+  InternalParcelLabelData,
+  ReadyToPackEntry,
+  ParcelLabelData,
+  ParcelLabelItem,
+} from "./types";
 
 /** Default and maximum queue page size. */
 export const READY_TO_PACK_DEFAULT_LIMIT = 50;
@@ -287,6 +292,58 @@ export async function getParcelLabelData(
           serviceName: null,
         }
       : null,
+    parcelCode,
+  };
+}
+
+/**
+ * Assemble the INTERNAL APSA Parcel label for one order (CORRECTION-003).
+ *
+ * Always available while the order is in fulfillment: before packing, before
+ * and after any carrier shipment, and after a shipment is cancelled — the APSA
+ * Parcel belongs to the order, not to the courier. It is generated at
+ * confirmation; for an order confirmed earlier (or whose generation failed) it
+ * is ensured here, idempotently, so the label always carries its identity.
+ * A completed order prints its existing parcel read-only (returns); draft and
+ * cancelled orders have none.
+ *
+ * Contains no customer PII and no carrier data, so it needs only orders.read +
+ * fulfillment.print_label. Every read is scoped to ctx.organizationId.
+ */
+export async function getInternalParcelLabelData(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<InternalParcelLabelData> {
+  ctx.require("orders.read");
+  ctx.require("fulfillment.print_label");
+
+  const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
+  if (!order) throw publicError("Order not found", 404);
+
+  const parcels = await import("@/server/parcels/service");
+  let parcelCode: string | null;
+  if (order.lifecycle_status === "confirmed") {
+    parcelCode = (await parcels.ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId))
+      .parcelCode;
+  } else if (order.lifecycle_status === "completed") {
+    parcelCode = await parcels.getParcelCodeForOrder(ctx.organizationId, orderId);
+  } else {
+    throw publicError("An APSA parcel label is only available for a confirmed order", 409);
+  }
+  if (!parcelCode) throw publicError("This order has no APSA parcel", 409);
+
+  const [items, businessName] = await Promise.all([
+    ordersRepo.listOrderItems(ctx.organizationId, orderId),
+    repo.organizationName(ctx.organizationId),
+  ]);
+
+  return {
+    merchant: { businessName: businessName ?? "" },
+    order: {
+      id: order.id,
+      orderNumber: order.order_number,
+      itemCount: items.reduce((sum, line) => sum + line.quantity, 0),
+    },
     parcelCode,
   };
 }

@@ -66,3 +66,15 @@ export const getParcelLabelDataFn = createServerFn()
     const { getParcelLabelData } = await import("@/server/fulfillment/service");
     return getParcelLabelData(authCtx, data.orderId);
   });
+
+// ── getInternalParcelLabelDataFn ───────────────────────────────────────────────
+
+export const getInternalParcelLabelDataFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getInternalParcelLabelData } = await import("@/server/fulfillment/service");
+    return getInternalParcelLabelData(authCtx, data.orderId);
+  });

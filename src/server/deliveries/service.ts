@@ -44,6 +44,17 @@ export interface DeliveryDetail extends DeliverySummary {
   history: DeliveryHistoryEntry[];
 }
 
+/**
+ * A newly arranged carrier shipment and the APSA Parcel it is attached to
+ * (CORRECTION-003). The parcel is the order's: it existed before the shipment
+ * (generated at confirmation) and outlives it — a cancelled shipment's
+ * replacement attaches to the very same parcel.
+ */
+export interface CreatedDelivery extends DeliveryDetail {
+  parcelId: string;
+  parcelCode: string;
+}
+
 export interface CreateDeliveryServiceInput {
   orderId: string;
   locationId?: string | null;
@@ -135,7 +146,7 @@ function createFailure(status: string): Error {
 export async function createDelivery(
   ctx: AuthorizationContext,
   input: CreateDeliveryServiceInput,
-): Promise<DeliveryDetail> {
+): Promise<CreatedDelivery> {
   ctx.require("delivery.create");
 
   const order = await repo.findOrderForOrg(ctx.organizationId, input.orderId);
@@ -173,6 +184,17 @@ export async function createDelivery(
     throw conflict("Order already has an active delivery");
   }
 
+  /*
+   * A shipment ATTACHES to the order's existing APSA Parcel; it never creates
+   * or replaces it (CORRECTION-003). The parcel is generated at confirmation —
+   * this only backfills an order confirmed before that (idempotent, one active
+   * parcel per order). Resolved BEFORE the shipment is written, so a shipment
+   * never exists without its parcel. Authorized by delivery.create above; the
+   * order was verified confirmed in this organization.
+   */
+  const { ensureParcelForOrder } = await import("@/server/parcels/service");
+  const parcel = await ensureParcelForOrder(ctx.organizationId, ctx.userId, input.orderId);
+
   const result = await repo.createDelivery(ctx.organizationId, ctx.userId, {
     order_id: input.orderId,
     location_id: locationId,
@@ -194,11 +216,14 @@ export async function createDelivery(
   try {
     const { readyPackedOrderDelivery } = await import("@/server/packing/service");
     const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
-    if (readied === "ready") return requireDetail(ctx.organizationId, result.delivery_id);
+    if (readied === "ready") {
+      const ready = await requireDetail(ctx.organizationId, result.delivery_id);
+      return { ...ready, parcelId: parcel.id, parcelCode: parcel.parcelCode };
+    }
   } catch {
     // Intentionally ignored; see above.
   }
-  return detail;
+  return { ...detail, parcelId: parcel.id, parcelCode: parcel.parcelCode };
 }
 
 function transitionFailure(status: string, current?: string): Error {

@@ -33,9 +33,9 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
     order: { id: orderId, orderNumber: "APSA-2026-001048", itemCount: 1, items: [] },
     reprint: false,
     payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
-    delivery: null,
-    // An order whose parcel identity already exists (reprint path); the label
-    // dialog only offers Print once every label carries its code.
+    // A shipping label exists only for a carrier shipment (CORRECTION-003).
+    delivery: { providerName: "VET Express", trackingNumber: "VET-1", status: "ready" },
+    // The order's APSA Parcel ID — secondary text on the shipping label.
     parcelCode: STUB_PARCEL_CODE,
   };
 }

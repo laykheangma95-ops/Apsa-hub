@@ -1,5 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { ParcelLabel } from "./ParcelLabel";
@@ -11,26 +11,25 @@ import {
   useCapabilities,
   useSensitiveCapabilityRevalidation,
 } from "@/hooks/use-capabilities";
-import { createParcel, getParcelLabelData } from "@/lib/api";
+import { getParcelLabelData } from "@/lib/api";
 import { buildParcelLabel, PARCEL_LABEL_SIZE_MM } from "@/lib/labels/parcel-label";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
 
 /**
- * Parcel label preview + print (§13, §17). Accepts one or many order ids; each
+ * SHIPPING label preview + print (§13, §17). Accepts one or many order ids; each
  * order prints as its own 100×150 mm page (§17 bulk print).
  *
- * ── PARCEL IDENTITY INTEGRATION ──────────────────────────────────────────────
+ * ── SHIPPING LABEL VS APSA PARCEL LABEL (CORRECTION-003) ─────────────────────
  *
- * When the labels load, every order without a parcel code gets one created via
- * createParcelFn (idempotent), and the labels refetch. Orders that already have
- * a parcel code reuse it unchanged — reprinting never generates a new identity.
- * The QR and the Code 128 barcode both encode that same parcel identity.
+ * This is the carrier-facing label: carrier, tracking (Code 128), sender,
+ * receiver, COD. It exists only for a carrier shipment — an order without one
+ * is not printable and is told so. It never creates or changes the APSA
+ * Parcel: the parcel ID appears as secondary text only. The scannable internal
+ * identity is printed by InternalParcelLabelDialog, always available.
  *
- * Printing is blocked until EVERY label in the batch carries its parcel code, so
- * a label can never go to the printer without its codes, or with a legacy
- * order-UUID QR. A member who cannot create parcels (and whose orders have no
- * code yet) is told to ask someone who can.
+ * A cancelled shipment is not printable (its carrier/tracking are void); the
+ * replacement shipment prints a NEW shipping label with the SAME parcel ID.
  *
  * ── ORDER-AUTHORITATIVE DESTINATION (§9, §13, migration 047) ──────────────────
  *
@@ -64,7 +63,6 @@ export function ParcelLabelDialog({
   const queryClient = useQueryClient();
   const canPrint = capabilities.canSensitive("fulfillment.print_label");
   const canConfirm = capabilities.can("orders.update");
-  const canCreateParcel = capabilities.can("fulfillment.create_parcel");
 
   useSensitiveCapabilityRevalidation(userId, organizationId, open);
 
@@ -79,40 +77,6 @@ export function ParcelLabelDialog({
     queryFn: () => Promise.all(orderIds.map((id) => getParcelLabelData(id))),
     enabled: open && orderIds.length > 0 && canPrint,
   });
-
-  /**
-   * Ensure every order in the batch has a parcel identity. Idempotent:
-   * createParcel returns the existing parcel if one exists. After creating
-   * missing parcels, refetch label data so the codes appear on the labels.
-   */
-  const ensureParcelsMutation = useMutation({
-    mutationFn: async (labelData: ParcelLabelInput[]) => {
-      const needsParcel = labelData.filter((d) => !d.parcelCode);
-      if (needsParcel.length === 0) return;
-      await Promise.all(needsParcel.map((d) => createParcel(d.order.id)));
-    },
-    onSuccess: () =>
-      queryClient.invalidateQueries({
-        queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
-      }),
-  });
-
-  // One automatic attempt per opened batch — a failure is shown, never retried
-  // in a loop.
-  const batchKey = orderIds.join(",");
-  const attemptedBatch = useRef<string | null>(null);
-  const loaded = canPrint && query.isSuccess ? query.data : null;
-  const missingCodes = loaded ? loaded.some((d) => !d.parcelCode) : false;
-  useEffect(() => {
-    if (!open) {
-      attemptedBatch.current = null;
-      return;
-    }
-    if (!loaded || !missingCodes || !canCreateParcel) return;
-    if (attemptedBatch.current === batchKey) return;
-    attemptedBatch.current = batchKey;
-    ensureParcelsMutation.mutate(loaded);
-  }, [open, loaded, missingCodes, canCreateParcel, batchKey, ensureParcelsMutation]);
 
   if (!open) return null;
 
@@ -133,12 +97,12 @@ export function ParcelLabelDialog({
   }
 
   /**
-   * Pre-print hook: never print a label without its parcel code (the Print
-   * button is hidden in that case too), then reauthorize server-side.
+   * Pre-print hook: never print a shipping label without its carrier shipment
+   * (the Print button is hidden in that case too), then reauthorize server-side.
    */
   async function handleBeforePrint(): Promise<boolean> {
     const currentData: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
-    if (currentData.length === 0 || currentData.some((d) => !d.parcelCode)) return false;
+    if (currentData.length === 0 || currentData.some((d) => d.delivery === null)) return false;
     return reauthorizePrint();
   }
 
@@ -150,12 +114,9 @@ export function ParcelLabelDialog({
   const unconfirmed = data.filter((d) => !d.customer.addressConfirmed);
   const confirmed = data.filter((d) => d.customer.addressConfirmed);
   const allConfirmed = data.length > 0 && unconfirmed.length === 0;
-  const allCoded = data.length > 0 && data.every((d) => !!d.parcelCode);
-  // Creation failed, or succeeded yet the refetched labels still lack a code.
-  const codeError =
-    ensureParcelsMutation.isError ||
-    (ensureParcelsMutation.isSuccess && !query.isFetching && missingCodes);
-  const assigningCodes = missingCodes && canCreateParcel && !codeError;
+  // A shipping label exists only for a carrier shipment (CORRECTION-003).
+  const unshipped = data.filter((d) => d.delivery === null);
+  const allShipped = data.length > 0 && unshipped.length === 0;
 
   const title =
     orderIds.length > 1
@@ -178,7 +139,7 @@ export function ParcelLabelDialog({
         onClose={onClose}
         title={title}
         pageSize={PARCEL_LABEL_SIZE_MM}
-        printable={canPrint && allConfirmed && allCoded}
+        printable={canPrint && allConfirmed && allShipped}
         active={confirmTarget === null}
         onBeforePrint={handleBeforePrint}
         controls={
@@ -224,25 +185,10 @@ export function ParcelLabelDialog({
                     ))}
                 </ul>
               ) : null}
-              {missingCodes && !canCreateParcel ? (
+              {unshipped.length > 0 ? (
                 <p role="status" className="text-caption text-text-muted">
-                  {t("labels.parcel.needsParcelCode")}
+                  {t("labels.parcel.needsDelivery")}
                 </p>
-              ) : null}
-              {codeError ? (
-                <div role="alert" className="flex items-center justify-between gap-2">
-                  <p className="text-caption text-text-muted">
-                    {t("labels.parcel.parcelCodeError")}
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="tap-target h-9 shrink-0 rounded-xl"
-                    onClick={() => ensureParcelsMutation.mutate(data)}
-                  >
-                    {t("common.retry")}
-                  </Button>
-                </div>
               ) : null}
             </div>
           ) : undefined
@@ -252,7 +198,7 @@ export function ParcelLabelDialog({
           <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">
             {t("labels.parcel.denied")}
           </div>
-        ) : query.isPending || ensureParcelsMutation.isPending || assigningCodes ? (
+        ) : query.isPending ? (
           <div className="flex h-full items-center justify-center">
             <Spinner />
           </div>

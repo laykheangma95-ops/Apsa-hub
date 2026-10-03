@@ -100,8 +100,9 @@ async function loadOrderVariantIndex(
  * Get the pack requirements for an order: each line item with its current
  * variant barcode for scan validation, plus the parcel the order is packed into.
  *
- * The order must be confirmed and in an eligible fulfillment state, and its
- * parcel label must exist (Print Parcel Label comes before packing).
+ * The order must be confirmed and in an eligible fulfillment state. Its APSA
+ * Parcel is ensured (it normally exists from confirmation); no label print or
+ * delivery is required first.
  * Returns null if the order does not exist or belongs to another org.
  */
 export async function getPackRequirements(
@@ -120,14 +121,11 @@ export async function getPackRequirements(
     );
   }
 
-  const parcel = await parcelsRepo.findActiveParcelByOrder(ctx.organizationId, orderId);
-  if (!parcel) {
-    throw publicError("Order has no parcel identity — print the parcel label before packing", 400);
-  }
-
-  if (parcel.status === "void") {
-    throw publicError("Parcel has been voided — cannot pack", 400);
-  }
+  // The APSA Parcel is generated at confirmation (CORRECTION-003); an order
+  // confirmed before that, or whose generation failed, gets it here — Pack
+  // Order never waits for a label print or a delivery. Idempotent.
+  const { ensureParcelForOrder } = await import("@/server/parcels/service");
+  const parcel = await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
 
   const { items, variantMap, barcodesByProduct } = await loadOrderVariantIndex(
     ctx.organizationId,
@@ -157,7 +155,7 @@ export async function getPackRequirements(
 
   return {
     orderNumber: order.order_number,
-    parcelCode: parcel.parcel_code,
+    parcelCode: parcel.parcelCode,
     eligible: true,
     deliveryStatus: delivery?.status ?? null,
     packed: await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null),

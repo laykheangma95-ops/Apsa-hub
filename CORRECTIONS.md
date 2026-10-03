@@ -41,6 +41,23 @@ Corrections are listed newest first.
 
 ---
 
+### CORRECTION-003
+
+**Date:** 2026-10-03
+**Affects:** supabase/migrations/050_parcels.sql (header — historical, not edited), src/server/parcels/service.ts, src/server/orders/service.ts (`transitionLifecycleStatus`), src/server/packing/service.ts (`getPackRequirements`), src/server/deliveries/service.ts (`createDelivery`), src/server/fulfillment/service.ts, src/lib/labels/*, src/components/labels/*, src/routes/app.orders.$id.tsx, src/routes/app.pack.tsx
+**Section:** Fulfillment — APSA Parcel (internal identity) vs Carrier Shipment
+**Original:** The parcel identity was created lazily when a parcel label was first printed (or, in the unmerged PR #109, when delivery was arranged), and a single label mixed the APSA QR/Code 128 with carrier, tracking and receiver data.
+**Correction:** Project owner decision — APSA has two separate objects:
+- **APSA Parcel** — the ORDER's internal warehouse identity (Parcel ID + QR + Code 128 of the same opaque `APSA:PCL:v1:` code). Generated when the order is confirmed (enters fulfillment); stable through Pack Order, Mark Packed, warehouse/shelf lookup, inventory operations, Courier Handoff, returns and audit. Used only by APSA; the courier never scans it.
+- **Carrier Shipment** (`deliveries`) — created only by Arrange Delivery; carries carrier, tracking number, service and shipping metadata. It ATTACHES to the existing APSA Parcel and never creates, replaces or voids it.
+- **Two labels.** The internal APSA Parcel label (QR, Code 128, Parcel ID; no carrier, no customer data) is always available for an order in fulfillment. The shipping label (carrier, tracking Code 128, sender, receiver, COD) is available only once a shipment exists; it may show the APSA Parcel ID as secondary text, never as a scannable APSA code.
+- **Cancellation.** Cancelling a shipment leaves the APSA Parcel, its label and packing history untouched; the replacement shipment attaches to the same parcel and gets a new shipping label. No repacking.
+- **Courier Handoff** identifies the parcel by its APSA Parcel ID, then confirms the carrier shipment attached to it.
+- Attachment is resolved through the order (one active parcel per order, `uniq_parcels_org_order_active`); an explicit `deliveries.parcel_id` column is deferred until split shipments need it.
+**Reason:** The parcel is a physical warehouse object owned by the order; a courier booking is replaceable. Tying the identity to label printing or to delivery arrangement blocked packing before delivery and would have forced re-identification (and repacking) whenever a shipment was cancelled.
+
+---
+
 ### CORRECTION-002
 
 **Date:** 2026-09-28

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
-import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
+import { InternalParcelLabelDialog } from "@/components/labels/InternalParcelLabelDialog";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { listReadyToPack, type ReadyToPackRow } from "@/lib/api";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
@@ -240,7 +240,9 @@ function PackScreen() {
         ) : null}
       </main>
 
-      <ParcelLabelDialog
+      {/* Ready to Pack prints the INTERNAL APSA Parcel label (CORRECTION-003):
+          packing comes before, and never waits for, a carrier shipment. */}
+      <InternalParcelLabelDialog
         open={printIds !== null}
         onClose={() => setPrintIds(null)}
         orderIds={printIds ?? []}

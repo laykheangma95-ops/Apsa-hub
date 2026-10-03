@@ -123,3 +123,16 @@ export interface ParcelLabelData {
    */
   parcelCode: string | null;
 }
+
+/**
+ * The INTERNAL APSA Parcel label (CORRECTION-003): the order's warehouse
+ * identity — Parcel ID, QR and Code 128 — used by APSA staff for packing,
+ * shelf lookup, handoff and returns. It carries NO carrier, tracking or
+ * customer data; the shipping label is a separate document.
+ */
+export interface InternalParcelLabelData {
+  merchant: { businessName: string };
+  order: { id: string; orderNumber: string; itemCount: number };
+  /** The permanent APSA:PCL:v1 code. Always present: the read ensures it. */
+  parcelCode: string;
+}

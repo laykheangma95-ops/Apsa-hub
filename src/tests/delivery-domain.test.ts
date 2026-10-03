@@ -87,12 +87,34 @@ async function withDb<T>(options: FakeOptions, run: (calls: RpcCall[]) => Promis
     },
   };
   const restore = setDeliveryRepositoryDbForTests(testDb);
+  // The order's APSA Parcel, generated at confirmation (CORRECTION-003): a
+  // shipment attaches to it and never creates one.
+  const { setParcelRepositoryDbForTests } = await import("../server/parcels/repository");
+  const parcelQuery = {
+    select: () => parcelQuery,
+    eq: () => parcelQuery,
+    neq: () => parcelQuery,
+    limit: async () => ({ data: [APSA_PARCEL], error: null }),
+  };
+  const restoreParcels = setParcelRepositoryDbForTests({ from: () => parcelQuery });
   try {
     return await run(calls);
   } finally {
+    restoreParcels();
     restore();
   }
 }
+
+const APSA_PARCEL = {
+  id: "aaaaaaaa-6666-0000-0000-000000000001",
+  organization_id: ORG_A,
+  order_id: ORDER_A,
+  parcel_code: "APSA:PCL:v1:AbCdEfGhIjKlMnOpQrStUv",
+  status: "created",
+  created_by: USER_A,
+  created_at: "2026-09-05T00:00:00.000Z",
+  updated_at: "2026-09-05T00:00:00.000Z",
+};
 
 const order = (overrides: Record<string, unknown> = {}): QueryResult => ({
   data: {

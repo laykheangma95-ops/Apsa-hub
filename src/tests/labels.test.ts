@@ -10,6 +10,7 @@
 import { describe, it, expect } from "bun:test";
 import { buildProductLabel } from "../lib/labels/product-label";
 import { buildParcelLabel, type ParcelLabelInput } from "../lib/labels/parcel-label";
+import { buildInternalParcelLabel } from "../lib/labels/internal-parcel-label";
 import { parseApsaQrPayload } from "../lib/barcode/payload";
 
 const VARIANT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -148,8 +149,20 @@ describe("buildParcelLabel", () => {
     expect(vm.payment.collectFormatted).toBeNull();
   });
 
-  it("builds the QR from the parcel identity, never the order id", () => {
+  it("the shipping label prints the APSA Parcel ID as text only — no APSA QR (CORRECTION-003)", () => {
     const vm = buildParcelLabel(parcelInput());
+    expect(vm.parcelCode).toBe(PARCEL_CODE);
+    expect(vm).not.toHaveProperty("qr");
+    expect(vm).not.toHaveProperty("code128");
+  });
+
+  it("the internal APSA Parcel label builds its QR from the parcel identity, never the order id", () => {
+    const i = parcelInput();
+    const vm = buildInternalParcelLabel({
+      merchant: { businessName: i.merchant.businessName },
+      order: { id: i.order.id, orderNumber: i.order.orderNumber, itemCount: i.order.itemCount },
+      parcelCode: i.parcelCode ?? null,
+    });
     expect(vm.qr!.payload).toBe(PARCEL_CODE);
     expect(parseApsaQrPayload(vm.qr!.payload)).toBeNull();
     expect(vm.qr!.svg).toContain("<svg");

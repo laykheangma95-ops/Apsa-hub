@@ -1109,7 +1109,9 @@
     "retryDeliveryReadyHint": "Packed, but the delivery is not ready for handoff yet.",
     "retryDeliveryReadyDone": "Delivery is ready for courier handoff.",
     "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again.",
-    "retryDeliveryReadyNotPacked": "The order is no longer packed. Pack it again before courier handoff."
+    "retryDeliveryReadyNotPacked": "The order is no longer packed. Pack it again before courier handoff.",
+    "printShippingLabel": "Print shipping label",
+    "shippingLabelNeedsDelivery": "Available after delivery is arranged."
   },
   "orderList": {
     "title": "Orders",
@@ -2386,8 +2388,8 @@
       "includeQr": "Include APSA QR"
     },
     "parcel": {
-      "title": "Parcel label",
-      "bulkTitle": "Parcel labels ({{count}})",
+      "title": "Shipping label",
+      "bulkTitle": "Shipping labels ({{count}})",
       "error": "Could not load label data. Please try again.",
       "from": "From",
       "to": "To",
@@ -2425,7 +2427,20 @@
       "order": "Order",
       "codesPending": "Parcel code not assigned yet",
       "needsParcelCode": "These labels need a parcel code before printing. Ask an owner or manager to print them.",
-      "parcelCodeError": "Could not assign a parcel code. Please try again."
+      "parcelCodeError": "Could not assign a parcel code. Please try again.",
+      "apsaParcelId": "APSA Parcel ID",
+      "noTracking": "No tracking number",
+      "needsDelivery": "The shipping label is available after delivery is arranged."
+    },
+    "internal": {
+      "title": "APSA parcel",
+      "dialogTitle": "APSA parcel label",
+      "bulkTitle": "APSA parcel labels ({{count}})",
+      "notShipping": "Warehouse use only — not a shipping label",
+      "parcelId": "APSA Parcel ID",
+      "noCode": "No APSA parcel code",
+      "error": "Could not load the APSA parcel label. Please try again.",
+      "denied": "You do not have permission to print parcel labels."
     }
   },
   "pack": {

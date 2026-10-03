@@ -29,6 +29,7 @@ import {
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
+import type { InternalParcelLabelInput } from "@/lib/labels/internal-parcel-label";
 import type { BusinessSummary, CustomerSummary, TopSellersPage } from "@/lib/analytics-view";
 import { assertPrototypeFixturesAllowed, isDemoModeError } from "@/lib/api/prototype-gate";
 import { conversations, conversationMessages } from "@/lib/mock/conversations";
@@ -652,6 +653,18 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
   const { getParcelLabelDataFn } = await import("@/api/fulfillment");
   const data = await getParcelLabelDataFn({ data: { orderId } });
   return data as unknown as ParcelLabelInput;
+}
+
+/**
+ * The INTERNAL APSA Parcel label for one order: Parcel ID, QR and Code 128 for
+ * warehouse use. No customer or carrier data. The server ensures the parcel
+ * exists for a confirmed order and requires orders.read + fulfillment.print_label.
+ */
+export async function getInternalParcelLabelData(
+  orderId: string,
+): Promise<InternalParcelLabelInput> {
+  const { getInternalParcelLabelDataFn } = await import("@/api/fulfillment");
+  return getInternalParcelLabelDataFn({ data: { orderId } });
 }
 
 /**

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
+import { InternalParcelLabelDialog } from "@/components/labels/InternalParcelLabelDialog";
 import {
   AppHeader,
   ChannelBadge,
@@ -233,6 +234,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
   const [parcelLabelOpen, setParcelLabelOpen] = useState(false);
+  const [shippingLabelOpen, setShippingLabelOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   /*
@@ -471,7 +473,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   // (src/server/orders/state-machine.ts).
   const canConfirm = canConfirmOrder(order.lifecycleStatus) && capabilities.can("orders.confirm");
   const canCancel = canCancelOrder(order.lifecycleStatus) && capabilities.can("orders.cancel");
+  // Two labels (CORRECTION-003). The INTERNAL APSA Parcel label carries no
+  // PII and is always offered for an order in fulfillment; the SHIPPING label
+  // carries the receiver's PII, so it rides the sensitive (fail-closed) grant.
   const showPrintLabel =
+    canPrintParcelLabel(order.lifecycleStatus) && capabilities.can("fulfillment.print_label");
+  const showShippingLabel =
     canPrintParcelLabel(order.lifecycleStatus) &&
     capabilities.canSensitive("fulfillment.print_label");
   const showPackButton =
@@ -493,11 +500,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       fulfillmentStatus: order.fulfillmentStatus,
     });
   const isReplacementDelivery = canCreateDelivery && latestDelivery !== null;
+  // The shipping label exists only for a carrier shipment: the latest one is
+  // active or delivered (the label service's own rule). A cancelled shipment's
+  // label is void until a replacement is arranged.
+  const shipmentArranged =
+    latestDelivery !== null &&
+    (isActiveDeliveryStatus(latestDelivery.status) || latestDelivery.status === "delivered");
 
   /*
-   * V1 fulfillment actions, in workflow order: Print parcel label → Pack order
-   * (or "Packed") → Arrange delivery (optional, only while none is active) →
-   * Courier handoff (only once a delivery exists; enabled when it is ready).
+   * V1 fulfillment actions, in workflow order: Print APSA parcel label → Pack
+   * order (or "Packed") → Arrange delivery (optional, only while none is active)
+   * → Print shipping label (once a shipment exists) → Courier handoff (only once
+   * a delivery exists; enabled when it is ready).
    * Packing never waits for a delivery. Display only — the server re-checks.
    */
   const packState = packStateQuery.data ?? null;
@@ -511,6 +525,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     activeDeliveryStatus: activeDelivery?.status ?? null,
     canHandoff: identityOk && capabilities.can("delivery.handoff"),
     parcelCode: packState?.parcelCode ?? null,
+    canPrintShippingLabel: showShippingLabel && deliveriesQuery.isSuccess,
+    shipmentArranged,
   });
 
   const payments = paymentsQuery.data?.items ?? [];
@@ -876,6 +892,33 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                         {t("order.printParcelLabel")}
                       </Button>
                     );
+                  case "print_shipping_label":
+                    // Only once a carrier shipment exists — and says why.
+                    return (
+                      <div key={action.key} className="space-y-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="tap-target h-11 w-full gap-2 rounded-xl"
+                          disabled={action.disabled}
+                          aria-describedby={
+                            action.disabled ? "shipping-label-needs-delivery" : undefined
+                          }
+                          onClick={() => setShippingLabelOpen(true)}
+                        >
+                          <Truck className="size-4" aria-hidden />
+                          {t("order.printShippingLabel")}
+                        </Button>
+                        {action.disabled ? (
+                          <p
+                            id="shipping-label-needs-delivery"
+                            className="text-caption text-center text-text-muted"
+                          >
+                            {t("order.shippingLabelNeedsDelivery")}
+                          </p>
+                        ) : null}
+                      </div>
+                    );
                   case "pack":
                     return (
                       <Link
@@ -1039,14 +1082,22 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         error={recordPaymentError}
         onConfirm={(submit) => recordPaymentMutation.mutate(submit)}
       />
-      <ParcelLabelDialog
+      <InternalParcelLabelDialog
         open={parcelLabelOpen}
         onClose={() => {
           setParcelLabelOpen(false);
-          // Printing creates the parcel identity Courier Handoff opens by.
+          // An order confirmed before parcels were generated at confirmation
+          // gets its APSA Parcel on this read; Courier Handoff opens by it.
           void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
         }}
         orderIds={parcelLabelOpen ? [id] : []}
+        userId={userId}
+        organizationId={routeOrganizationId}
+      />
+      <ParcelLabelDialog
+        open={shippingLabelOpen}
+        onClose={() => setShippingLabelOpen(false)}
+        orderIds={shippingLabelOpen ? [id] : []}
         userId={userId}
         organizationId={routeOrganizationId}
       />

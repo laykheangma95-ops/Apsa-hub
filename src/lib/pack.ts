@@ -155,7 +155,13 @@ export interface OrderPackState {
 // ── Order detail fulfillment actions ────────────────────────────────────────
 
 export type FulfillmentActionKey =
-  "print_label" | "pack" | "packed" | "arrange_delivery" | "retry_delivery_ready" | "handoff";
+  | "print_label"
+  | "pack"
+  | "packed"
+  | "arrange_delivery"
+  | "print_shipping_label"
+  | "retry_delivery_ready"
+  | "handoff";
 
 export interface FulfillmentAction {
   key: FulfillmentActionKey;
@@ -165,9 +171,10 @@ export interface FulfillmentAction {
 
 /**
  * The Order detail fulfillment actions, in V1 workflow order:
- *   1. Print parcel label
+ *   1. Print APSA parcel label  (internal identity — always, CORRECTION-003)
  *   2. Pack order  (or a "Packed" status once packed)
  *   3. Arrange delivery  (only while there is no active delivery — optional)
+ *   3b. Print shipping label  (enabled only once a carrier shipment exists)
  *   4. Retry delivery ready  (packed order whose delivery is still pending /
  *      preparing — readying it failed; recovers without repacking)
  *   5. Courier handoff  (only once a delivery exists; enabled when it is ready)
@@ -182,12 +189,19 @@ export function fulfillmentActions(input: {
   activeDeliveryStatus: string | null;
   canHandoff: boolean;
   parcelCode: string | null;
+  /** Shows the shipping-label action; it is enabled only with `shipmentArranged`. */
+  canPrintShippingLabel?: boolean;
+  /** A carrier shipment exists (active or delivered) — the shipping label's gate. */
+  shipmentArranged?: boolean;
 }): FulfillmentAction[] {
   const actions: FulfillmentAction[] = [];
   if (input.canPrintLabel) actions.push({ key: "print_label", disabled: false });
   if (input.canPack) actions.push({ key: input.packed ? "packed" : "pack", disabled: false });
   if (input.canArrangeDelivery && input.activeDeliveryStatus === null) {
     actions.push({ key: "arrange_delivery", disabled: false });
+  }
+  if (input.canPrintShippingLabel) {
+    actions.push({ key: "print_shipping_label", disabled: !input.shipmentArranged });
   }
   if (
     input.canHandoff &&

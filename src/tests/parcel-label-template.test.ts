@@ -28,7 +28,6 @@ import {
   type ParcelLabelInput,
 } from "../lib/labels/parcel-label";
 import { ParcelLabel } from "../components/labels/ParcelLabel";
-import { isValidParcelCode } from "../lib/barcode/parcel-code";
 
 const ORG_A = "11111111-1111-4111-8111-111111111111";
 const ORDER_ID = "12345678-90ab-4cde-8f01-234567890abc";
@@ -757,19 +756,31 @@ describe("label — payment", () => {
   });
 });
 
-describe("label — QR + Code 128", () => {
-  it("renders BOTH codes, encoding the same canonical parcel identity", () => {
+describe("shipping label — APSA Parcel ID as text + carrier tracking Code 128", () => {
+  // CORRECTION-003: the shipping label is the carrier's document. Its only
+  // barcode is the TRACKING number; the APSA Parcel ID is secondary text. The
+  // scannable APSA QR / Code 128 live on the internal parcel label only.
+  it("shows the APSA Parcel ID as text and carries NO scannable APSA code", () => {
     const vm = buildParcelLabel(input(), { now: FIXED_NOW });
-    expect(vm.qr!.payload).toBe(PARCEL_CODE);
-    expect(vm.code128!.payload).toBe(PARCEL_CODE);
-    expect(isValidParcelCode(vm.qr!.payload)).toBe(true);
+    expect(vm.parcelCode).toBe(PARCEL_CODE);
+    expect(vm).not.toHaveProperty("qr");
+    expect(vm).not.toHaveProperty("code128");
     const html = render(input());
-    expect(html).toContain('data-testid="parcel-label-qr"');
-    expect(html).toContain('data-testid="parcel-label-code128"');
+    expect(html).toContain('data-testid="parcel-label-apsa-id"');
     expect(html).toContain(PARCEL_CODE);
+    expect(html).toContain(T.apsaParcelId);
+    // Exactly one barcode: the tracking Code 128. No QR at all.
+    expect((html.match(/<svg/g) ?? []).length).toBe(1);
   });
 
-  it("no PII, money, product or order data is encoded in either code", () => {
+  it("the one barcode encodes the carrier tracking number — never the APSA code", () => {
+    const vm = buildParcelLabel(input());
+    expect(vm.trackingCode128!.payload).toBe("VET-123");
+    expect(vm.trackingCode128!.payload).not.toContain(PARCEL_CODE);
+    expect(render(input())).toContain('data-testid="parcel-label-code128"');
+  });
+
+  it("no PII, money, product or order data is encoded in the tracking barcode", () => {
     const vm = buildParcelLabel(input());
     for (const s of [
       "Sokha",
@@ -783,46 +794,42 @@ describe("label — QR + Code 128", () => {
       ORDER_ID,
       CUSTOMER_ID,
     ]) {
-      expect(vm.qr!.payload).not.toContain(s);
-      expect(vm.code128!.payload).not.toContain(s);
+      expect(vm.trackingCode128!.payload).not.toContain(s);
     }
   });
 
-  it("a reprint reuses the exact same code and identical code graphics", () => {
+  it("without a tracking number: a same-height placeholder, no barcode, no order-UUID fallback", () => {
+    const html = render(
+      input({ delivery: { providerName: "VET Express", trackingNumber: null, status: "ready" } }),
+    );
+    expect(html).toContain(T.noTracking);
+    expect(html).toContain("h-[12mm] w-full");
+    expect(html).not.toContain("<svg");
+    expect(html).not.toContain(ORDER_ID);
+  });
+
+  it("without an APSA Parcel ID the text slot shows a dash — never an order UUID", () => {
+    const html = render(input({ parcelCode: null }));
+    expect(html).toContain('data-testid="parcel-label-apsa-id"');
+    expect(html).not.toContain(ORDER_ID);
+  });
+
+  it("a reprint keeps the same parcel ID and identical tracking barcode", () => {
     const first = buildParcelLabel(input(), { now: FIXED_NOW });
     const reprint = buildParcelLabel(input({ reprint: true }), {
       now: new Date("2026-12-01T00:00:00Z"),
     });
     expect(reprint.parcelCode).toBe(first.parcelCode);
-    expect(reprint.qr!.svg).toBe(first.qr!.svg);
-    expect(reprint.code128!.svg).toBe(first.code128!.svg);
+    expect(reprint.trackingCode128!.svg).toBe(first.trackingCode128!.svg);
   });
 
-  it("without a parcel code: a placeholder, no codes, no order-UUID fallback", () => {
-    const html = render(input({ parcelCode: null }));
-    expect(html).toContain(T.codesPending);
-    expect(html).not.toContain("<svg");
-    expect(html).not.toContain(ORDER_ID);
-  });
-
-  it("print geometry: QR ≥ 0.5 mm/module with a 4-module quiet zone at 30 mm", () => {
+  it("print geometry: tracking Code 128 spans the label width with X ≥ 0.17 mm and 10-module quiet zones", () => {
     const vm = buildParcelLabel(input());
-    const dim = Number(/viewBox="0 0 (\d+) /.exec(vm.qr!.svg)![1]);
-    const modules = dim / 4; // moduleSize 4
-    expect(30 / modules).toBeGreaterThanOrEqual(0.5);
-    // First dark module starts after the 4-module quiet zone.
-    const firstRect = /<rect x="(\d+)" y="(\d+)" width="\d+" height="4"/.exec(vm.qr!.svg)!;
-    expect(Number(firstRect[1])).toBeGreaterThanOrEqual(16);
-    expect(Number(firstRect[2])).toBeGreaterThanOrEqual(16);
-  });
-
-  it("print geometry: Code 128 spans the label width with X ≥ 0.17 mm and 10-module quiet zones", () => {
-    const vm = buildParcelLabel(input());
-    const width = Number(/viewBox="0 0 (\d+) /.exec(vm.code128!.svg)![1]);
+    const width = Number(/viewBox="0 0 (\d+) /.exec(vm.trackingCode128!.svg)![1]);
     const modules = width / 2; // moduleWidth 2
     const printableMm = PARCEL_LABEL_SIZE_MM.width - 8; // 4 mm padding each side
     expect(printableMm / modules).toBeGreaterThanOrEqual(0.17);
-    const firstBar = /<rect x="(\d+)"/.exec(vm.code128!.svg)!;
+    const firstBar = /<rect x="(\d+)"/.exec(vm.trackingCode128!.svg)!;
     expect(Number(firstBar[1])).toBe(20); // 10 quiet modules × 2
     expect(render(input())).toContain("h-[12mm] w-full");
   });
