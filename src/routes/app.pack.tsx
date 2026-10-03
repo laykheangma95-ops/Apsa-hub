@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Printer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -130,10 +130,13 @@ function PackScreen() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [printIds, setPrintIds] = useState<string[] | null>(null);
 
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const packOrderOpen = pathname !== "/app/pack" && pathname.startsWith("/app/pack/");
+
   const query = useQuery({
     queryKey: fulfillmentKeys.readyToPack(session.userId, organizationId),
     queryFn: () => listReadyToPack(),
-    enabled: canRead,
+    enabled: !packOrderOpen && canRead,
   });
   const rows = useMemo(() => query.data ?? [], [query.data]);
 
@@ -178,6 +181,14 @@ function PackScreen() {
       return next;
     });
   }
+
+  /*
+   * /app/pack/$orderId (Pack Order) is a child of this route, so without an
+   * Outlet the per-order Pack screen never rendered — Order Detail's "Pack
+   * Order" changed the URL but left the merchant on this queue. Pack Order is a
+   * full screen, so the queue steps aside entirely while it is open.
+   */
+  if (packOrderOpen) return <Outlet />;
 
   return (
     <ScreenBleed bottom="nav" surface="raised">
