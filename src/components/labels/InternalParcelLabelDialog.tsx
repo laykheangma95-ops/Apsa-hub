@@ -1,14 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { InternalParcelLabel } from "./InternalParcelLabel";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/design-system";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { reauthorizeCapability, useCapabilities } from "@/hooks/use-capabilities";
 import { getInternalParcelLabelData } from "@/lib/api";
 import {
   buildInternalParcelLabel,
   INTERNAL_PARCEL_LABEL_SIZE_MM,
 } from "@/lib/labels/internal-parcel-label";
+import { runInternalPrePrint } from "@/lib/labels/internal-print-guard";
+import {
+  createPrintGuard,
+  printIdentity,
+  type PrintGuard,
+} from "@/lib/labels/shipping-print-guard";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
 
 /**
@@ -21,9 +29,18 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  * every (re)print; this dialog never creates or chooses one. Nothing prints
  * unless every label in the batch carries its code.
  *
- * No customer PII is involved, so no sensitive reauthorization is needed; the
- * server still requires orders.read + fulfillment.print_label.
+ * ── NOTHING PRINTS FROM CACHE ────────────────────────────────────────────────
+ *
+ * Same security model as the shipping label. Before printing, the label query
+ * is cancelled and a brand-new authoritative read is made — the server
+ * re-checks orders.read + fulfillment.print_label and the order lifecycle on
+ * it — the print capability is re-authorized, and the attempt must still
+ * belong to the same open dialog, user, organization and orders. A revoked
+ * permission, a cancelled order, a failed refresh or an identity change does
+ * not print (src/lib/labels/internal-print-guard.ts).
  */
+type PrintNotice = "changed" | "refreshFailed";
+
 export interface InternalParcelLabelDialogProps {
   open: boolean;
   onClose: () => void;
@@ -40,15 +57,59 @@ export function InternalParcelLabelDialog({
   organizationId,
 }: InternalParcelLabelDialogProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const canPrint = useCapabilities().can("fulfillment.print_label");
+  const [printNotice, setPrintNotice] = useState<PrintNotice | null>(null);
 
+  useEffect(() => {
+    if (!open) setPrintNotice(null);
+  }, [open]);
+
+  // A print attempt is bound to who started it and for which orders: closing
+  // or unmounting the dialog, or a user / organization / order change, retires
+  // the attempt in flight before it can print.
+  const guardRef = useRef<PrintGuard | null>(null);
+  if (guardRef.current === null) guardRef.current = createPrintGuard();
+  const printGuard = guardRef.current;
+  printGuard.setContext(printIdentity(userId, organizationId, orderIds), open);
+  useEffect(() => () => printGuard.retire(), [printGuard]);
+
+  const labelsKey = fulfillmentKeys.internalLabels(userId, organizationId, orderIds);
+  const fetchLabels = () => Promise.all(orderIds.map((id) => getInternalParcelLabelData(id)));
   const query = useQuery({
-    queryKey: fulfillmentKeys.internalLabels(userId, organizationId, orderIds),
-    queryFn: () => Promise.all(orderIds.map((id) => getInternalParcelLabelData(id))),
+    queryKey: labelsKey,
+    queryFn: fetchLabels,
     enabled: open && orderIds.length > 0 && canPrint,
   });
 
   if (!open) return null;
+
+  /** Pre-print hook: only a fresh, verified, authorized, still-live attempt prints. */
+  async function handleBeforePrint(): Promise<boolean> {
+    const live = printGuard.begin();
+    setPrintNotice(null);
+    const result = await runInternalPrePrint({
+      displayed: canPrint ? (query.data ?? []) : [],
+      queryClient,
+      queryKey: labelsKey,
+      read: fetchLabels,
+      live,
+      reauthorize: () =>
+        reauthorizeCapability(queryClient, userId, organizationId, "fulfillment.print_label"),
+    });
+    if (result === "ok") return true;
+    if (result === "retired") return false;
+    if (result === "denied" || result === "refreshFailed") {
+      // Fail closed: the label that could not be re-confirmed leaves the cache,
+      // so the preview reloads from the server (a refusal shows as an error).
+      void queryClient.cancelQueries({ queryKey: labelsKey, exact: true }).catch(() => undefined);
+      queryClient.removeQueries({ queryKey: labelsKey, exact: true });
+      setPrintNotice("refreshFailed");
+      return false;
+    }
+    if (result === "changed") setPrintNotice("changed");
+    return false;
+  }
 
   const data = canPrint ? (query.data ?? []) : [];
   const allCoded = data.length > 0 && data.every((d) => !!d.parcelCode);
@@ -64,6 +125,27 @@ export function InternalParcelLabelDialog({
       title={title}
       pageSize={INTERNAL_PARCEL_LABEL_SIZE_MM}
       printable={canPrint && query.isSuccess && allCoded}
+      onBeforePrint={handleBeforePrint}
+      controls={
+        canPrint && printNotice ? (
+          <div role="alert" className="flex items-center justify-between gap-2">
+            <p className="text-caption text-text-muted">
+              {t(`labels.internal.printNotice.${printNotice}`)}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="tap-target h-9 shrink-0 rounded-xl"
+              onClick={() => {
+                setPrintNotice(null);
+                void query.refetch();
+              }}
+            >
+              {t("common.retry")}
+            </Button>
+          </div>
+        ) : undefined
+      }
     >
       {!canPrint ? (
         <div className="flex h-full items-center justify-center p-[6mm] text-center text-[10pt] text-black">

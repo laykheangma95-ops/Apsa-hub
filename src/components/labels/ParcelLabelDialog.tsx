@@ -17,6 +17,7 @@ import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
 import {
   createPrintGuard,
+  fetchAuthoritative,
   printIdentity,
   shippingLabelIssues,
   verifyFreshLabels,
@@ -145,7 +146,8 @@ export function ParcelLabelDialog({
    * Pre-print hook — nothing prints from cache:
    *   1. the labels on screen must be complete (the Print button is hidden
    *      otherwise too);
-   *   2. FRESH authoritative label data is fetched now and must match what is
+   *   2. the label query is cancelled and FRESH authoritative label data is
+   *      fetched by a brand-new request (never a reused in-flight one) and must match what is
    *      shown — same parcel, same shipment (a replacement has a new id), same
    *      tracking, same payment state and COD amount. A difference replaces the
    *      preview and asks the merchant to review instead of printing;
@@ -162,11 +164,9 @@ export function ParcelLabelDialog({
     setPrintNotice(null);
     let fresh: ParcelLabelInput[];
     try {
-      fresh = await queryClient.fetchQuery({
-        queryKey: labelsKey,
-        queryFn: fetchLabels,
-        staleTime: 0,
-      });
+      // Cancels the exact label query, then issues a brand-new request — an
+      // earlier in-flight (background) response is never reused.
+      fresh = await fetchAuthoritative(queryClient, labelsKey, fetchLabels);
     } catch {
       // The refusal may be a revoked grant: re-authorize so a denial evicts
       // the label PII and shows the denied state (fail closed). Only a still
@@ -176,6 +176,9 @@ export function ParcelLabelDialog({
       return false;
     }
     if (!live()) return false;
+    // Still the same open dialog, user, organization and orders: the fresh
+    // data becomes the preview, so a difference is what the merchant reviews.
+    queryClient.setQueryData(labelsKey, fresh);
     const verdict = verifyFreshLabels(displayed, fresh);
     if (verdict.kind !== "ok") {
       setPrintNotice(verdict.kind);

@@ -14,7 +14,31 @@
  *   3. it is STILL WANTED by the same person — the dialog is open, for the same
  *      user, organization and orders it was started for (createPrintGuard).
  */
+import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import { buildParcelLabel, type ParcelLabelInput } from "./parcel-label";
+
+/**
+ * The pre-print read: a BRAND-NEW request to the server, never an earlier one.
+ *
+ * `queryClient.fetchQuery` de-duplicates: with a background refetch already in
+ * flight for the key it returns THAT request's promise, so a response the
+ * server produced before a payment / shipment change could be "verified" and
+ * printed. Here the exact label query is cancelled first (its late response is
+ * discarded and can never be written back to the cache), and `read` is then
+ * invoked directly, outside the query's de-duplication.
+ *
+ * Rejects when the cancel or the read fails — the caller fails closed. The
+ * caller decides, after re-running its identity guard, whether the result may
+ * be shown (setQueryData) or printed.
+ */
+export async function fetchAuthoritative<T>(
+  queryClient: Pick<QueryClient, "cancelQueries">,
+  queryKey: QueryKey,
+  read: () => Promise<T>,
+): Promise<T> {
+  await queryClient.cancelQueries({ queryKey, exact: true });
+  return read();
+}
 
 export type ShippingLabelIssue =
   "no_parcel" | "no_parcel_code" | "no_shipment" | "no_tracking" | "tracking_unrenderable";

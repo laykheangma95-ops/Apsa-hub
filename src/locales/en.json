@@ -2457,7 +2457,11 @@
       "parcelId": "APSA Parcel ID",
       "noCode": "No APSA parcel code",
       "error": "Could not load the APSA parcel label. Please try again.",
-      "denied": "You do not have permission to print parcel labels."
+      "denied": "You do not have permission to print parcel labels.",
+      "printNotice": {
+        "changed": "The APSA parcel label changed since it was opened. Review it, then print again.",
+        "refreshFailed": "Could not confirm this APSA parcel label with the server. Try again."
+      }
     }
   },
   "pack": {
