@@ -26,8 +26,11 @@
  * is unchanged.
  *
  * Packed is current state: reopening the order's fulfillment (processing →
- * unfulfilled) clears it, so a delivery arranged afterwards stays pending until
- * Mark Packed runs again. A cancelled/failed delivery attempt does not clear it.
+ * unfulfilled) clears it and cancels a 'ready' delivery, so a delivery arranged
+ * afterwards stays pending until Mark Packed runs again. A cancelled/failed
+ * delivery attempt does not clear it. No path — including the generic delivery
+ * "Mark ready" — can ready a delivery while the order is not currently packed
+ * (enforced in the database, migration 054).
  *
  * Inventory is NOT touched: stock was consumed at order confirmation.
  *
@@ -40,11 +43,7 @@ import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
 import { classifyScan } from "@/lib/barcode/scan-router";
 import { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "@/lib/barcode/normalize";
-import {
-  PACK_ORDER_PACKED_REASON_CODE,
-  isOrderCurrentlyPacked,
-  isPackedDeliveryStatus,
-} from "@/lib/pack";
+import { PACK_ORDER_PACKED_REASON_CODE, isPackedDeliveryStatus } from "@/lib/pack";
 import type {
   MarkPackedResult,
   OrderPackStateResult,
@@ -179,35 +178,21 @@ async function isOrderPacked(
 /**
  * Whether Pack Order's packed state is CURRENT for the order: the reserved
  * packed reason (order fulfillment or any delivery's history) is newer than the
- * last time the order's fulfillment was reopened to 'unfulfilled'
- * (isOrderCurrentlyPacked has the rule). Packed once, then reopened, is not
- * packed: a delivery arranged afterwards waits for Pack Order again.
+ * last time the order's fulfillment was reopened to 'unfulfilled'. Packed once,
+ * then reopened, is not packed: a delivery arranged afterwards waits for Pack
+ * Order again.
+ *
+ * The rule exists once, in the database (order_currently_packed_v1, migration
+ * 054). The same function guards every '→ ready' write under row locks —
+ * Arrange Delivery auto-ready, Retry delivery ready and the generic delivery
+ * transition — so this read and those writes can never disagree.
  *
  * The marker is trusted because it is reserved — generic order and delivery
  * transition APIs reject it (isReservedOperationalReason), so only this
- * service writes it. Delivery status alone never counts here: a delivery moved
- * to 'ready' through the generic delivery API is not proof of packing, so
- * readying a delivery on the packed order's behalf depends on this check only.
- * All reads org-scoped.
+ * service writes it. Org-scoped by the RPC.
  */
-async function isCurrentlyPackedByPackOrder(
-  organizationId: string,
-  orderId: string,
-): Promise<boolean> {
-  const orderHistory = await ordersRepo.listStatusHistory(organizationId, orderId);
-  const deliveries = await deliveriesRepo.listDeliveries(organizationId, { order_id: orderId });
-  const deliveryHistories = await Promise.all(
-    deliveries.map((d) => deliveriesRepo.listDeliveryHistory(organizationId, d.id)),
-  );
-
-  return isOrderCurrentlyPacked({
-    orderFulfillmentHistory: orderHistory
-      .filter((h) => h.axis === "fulfillment")
-      .map((h) => ({ toStatus: h.to_status, reason: h.reason, at: h.changed_at })),
-    deliveryHistory: deliveryHistories
-      .flat()
-      .map((h) => ({ toStatus: h.to_status, reason: h.reason, at: h.created_at })),
-  });
+function isCurrentlyPackedByPackOrder(organizationId: string, orderId: string): Promise<boolean> {
+  return deliveriesRepo.isOrderCurrentlyPacked(organizationId, orderId);
 }
 
 /**

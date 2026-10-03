@@ -1743,15 +1743,21 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql")) +
       executableSql(readSource("supabase/migrations/047_order_shipping_snapshot.sql")) +
       executableSql(readSource("supabase/migrations/054_pack_order_readiness_guards.sql"));
-    // ready_packed_delivery_v1 (also migration 054) is called by the deliveries
-    // repository, not this one.
+    // The other migration-054 functions — ready_packed_delivery_v1,
+    // order_currently_packed_v1 and the re-declared transition_delivery_status_v1
+    // — are called by the deliveries repository, not this one.
+    const deliveriesRepositoryFunctions = new Set([
+      "ready_packed_delivery_v1",
+      "order_currently_packed_v1",
+      "transition_delivery_status_v1",
+    ]);
     const granted = [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
-      .map((m) => m[1])
+      .map((m) => m[1]!)
       .filter(
         (name) =>
           name !== "create_order_v1" &&
           name !== "create_order_v2" &&
-          name !== "ready_packed_delivery_v1",
+          !deliveriesRepositoryFunctions.has(name),
       )
       .sort();
     const called = [...readSource("src/server/orders/repository.ts").matchAll(/db\.rpc\("(\w+)"/g)]

@@ -695,6 +695,9 @@ function transitionFailureToError(result: { status: string; current?: string }):
       return conflict(
         `Order status changed concurrently (now ${result.current ?? "unknown"}) — re-read and retry`,
       );
+    case "retry":
+      // The order's delivery kept changing during a reopen; nothing was written.
+      return conflict("Order delivery changed concurrently — re-read and retry");
     case "no_change":
       return conflict("Order is already in that status");
     case "terminal":
@@ -791,6 +794,26 @@ export async function transitionPaymentStatus(
   throw conflict("Order payment transitions are deprecated; use the Payment domain");
 }
 
+/** How many times a reopen is re-run after the RPC reports a concurrent delivery change. */
+const REOPEN_ATTEMPTS = 3;
+
+/**
+ * reopen_order_fulfillment_v1 returns 'retry' — writing nothing — when the
+ * order's active delivery was created or changed between its delivery lookup
+ * and its order lock. Each attempt is a fresh transaction that sees the new
+ * delivery; if the order keeps changing, the caller gets a retryable conflict.
+ */
+async function reopenFulfillmentWithRetry(
+  ctx: AuthorizationContext,
+  orderId: string,
+  reason: string | null,
+) {
+  for (let attempt = 1; ; attempt++) {
+    const result = await repo.reopenFulfillment(ctx.organizationId, orderId, ctx.userId, reason);
+    if (result.status !== "retry" || attempt >= REOPEN_ATTEMPTS) return result;
+  }
+}
+
 /** Move the order's fulfillment status. */
 export async function transitionFulfillmentStatus(
   ctx: AuthorizationContext,
@@ -816,7 +839,7 @@ export async function transitionFulfillmentStatus(
    */
   const result =
     from === "processing" && to === "unfulfilled"
-      ? await repo.reopenFulfillment(ctx.organizationId, orderId, ctx.userId, reason ?? null)
+      ? await reopenFulfillmentWithRetry(ctx, orderId, reason ?? null)
       : await repo.transitionStatus(
           ctx.organizationId,
           orderId,

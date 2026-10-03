@@ -219,6 +219,9 @@ function transitionFailure(status: string, current?: string): Error {
       return conflict("Order is terminal and its delivery can no longer be modified");
     case "order_fulfillment_terminal":
       return conflict("Order fulfillment conflicts with this delivery transition");
+    case "not_packed":
+      // Only a currently packed order's delivery may be ready (migration 054).
+      return conflict("Pack the order with Pack Order before its delivery can be ready");
     default:
       return new Error(`Delivery transition failed: ${status}`);
   }

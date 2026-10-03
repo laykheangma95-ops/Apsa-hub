@@ -104,6 +104,23 @@ export async function readyPackedDelivery(
   return data as ReadyPackedDeliveryRpcResult;
 }
 
+/**
+ * Whether the order is currently packed by Pack Order — the ONE packed rule
+ * (order_currently_packed_v1, migration 054), the same function every '→ ready'
+ * write checks under its locks. Read-only.
+ */
+export async function isOrderCurrentlyPacked(
+  organizationId: string,
+  orderId: string,
+): Promise<boolean> {
+  const { data, error } = await db.rpc("order_currently_packed_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+  });
+  if (error) throw new Error(`isOrderCurrentlyPacked: ${message(error)}`);
+  return data === true;
+}
+
 export async function findDeliveryById(
   organizationId: string,
   deliveryId: string,
