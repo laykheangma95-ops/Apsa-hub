@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LabelSheet } from "./LabelSheet";
 import { ParcelLabel } from "./ParcelLabel";
@@ -15,6 +15,13 @@ import { getParcelLabelData } from "@/lib/api";
 import { buildParcelLabel, PARCEL_LABEL_SIZE_MM } from "@/lib/labels/parcel-label";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
+import {
+  createPrintGuard,
+  printIdentity,
+  shippingLabelIssues,
+  verifyFreshLabels,
+  type PrintGuard,
+} from "@/lib/labels/shipping-print-guard";
 
 /**
  * SHIPPING label preview + print (§13, §17). Accepts one or many order ids; each
@@ -43,6 +50,26 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  * query key is principal-partitioned and the fetch is gated on
  * `canSensitive("fulfillment.print_label")`.
  */
+type PrintNotice = "changed" | "invalid" | "refreshFailed";
+
+/** A recoverable problem: what is wrong, and a way to try again. */
+function RecoverableError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div role="alert" className="flex items-center justify-between gap-2">
+      <p className="text-caption text-text-muted">{message}</p>
+      <Button
+        type="button"
+        variant="outline"
+        className="tap-target h-9 shrink-0 rounded-xl"
+        onClick={onRetry}
+      >
+        {t("common.retry")}
+      </Button>
+    </div>
+  );
+}
+
 export interface ParcelLabelDialogProps {
   open: boolean;
   onClose: () => void;
@@ -67,15 +94,33 @@ export function ParcelLabelDialog({
   useSensitiveCapabilityRevalidation(userId, organizationId, open);
 
   const [confirmOrderId, setConfirmOrderId] = useState<string | null>(null);
+  const [printNotice, setPrintNotice] = useState<PrintNotice | null>(null);
 
   useEffect(() => {
     if (!canPrint || !open) setConfirmOrderId(null);
+    if (!open) setPrintNotice(null);
   }, [canPrint, open]);
 
+  /*
+   * A print attempt is bound to who started it and for which orders: closing
+   * the dialog, unmounting it (navigation), a user or organization switch, or
+   * a different batch retires the attempt in flight before it can print.
+   */
+  const guardRef = useRef<PrintGuard | null>(null);
+  if (guardRef.current === null) guardRef.current = createPrintGuard();
+  const printGuard = guardRef.current;
+  printGuard.setContext(printIdentity(userId, organizationId, orderIds), open);
+  useEffect(() => () => printGuard.retire(), [printGuard]);
+
+  const labelsKey = fulfillmentKeys.parcelLabels(userId, organizationId, orderIds);
+  const fetchLabels = () => Promise.all(orderIds.map((id) => getParcelLabelData(id)));
   const query = useQuery({
-    queryKey: fulfillmentKeys.parcelLabels(userId, organizationId, orderIds),
-    queryFn: () => Promise.all(orderIds.map((id) => getParcelLabelData(id))),
+    queryKey: labelsKey,
+    queryFn: fetchLabels,
     enabled: open && orderIds.length > 0 && canPrint,
+    // Never reopen onto, or keep, an earlier opening's shipment/payment data.
+    gcTime: 0,
+    refetchOnMount: "always",
   });
 
   if (!open) return null;
@@ -97,13 +142,43 @@ export function ParcelLabelDialog({
   }
 
   /**
-   * Pre-print hook: never print a shipping label without its carrier shipment
-   * (the Print button is hidden in that case too), then reauthorize server-side.
+   * Pre-print hook — nothing prints from cache:
+   *   1. the labels on screen must be complete (the Print button is hidden
+   *      otherwise too);
+   *   2. FRESH authoritative label data is fetched now and must match what is
+   *      shown — same parcel, same shipment (a replacement has a new id), same
+   *      tracking, same payment state and COD amount. A difference replaces the
+   *      preview and asks the merchant to review instead of printing;
+   *   3. the attempt must still belong to the same open dialog, user,
+   *      organization and orders after every await;
+   *   4. the print capability is re-authorized server-side.
    */
   async function handleBeforePrint(): Promise<boolean> {
-    const currentData: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
-    if (currentData.length === 0 || currentData.some((d) => d.delivery === null)) return false;
-    return reauthorizePrint();
+    const displayed: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
+    if (displayed.length === 0 || displayed.some((d) => shippingLabelIssues(d).length > 0)) {
+      return false;
+    }
+    const live = printGuard.begin();
+    setPrintNotice(null);
+    let fresh: ParcelLabelInput[];
+    try {
+      fresh = await queryClient.fetchQuery({
+        queryKey: labelsKey,
+        queryFn: fetchLabels,
+        staleTime: 0,
+      });
+    } catch {
+      if (live()) setPrintNotice("refreshFailed");
+      return false;
+    }
+    if (!live()) return false;
+    const verdict = verifyFreshLabels(displayed, fresh);
+    if (verdict.kind !== "ok") {
+      setPrintNotice(verdict.kind);
+      return false;
+    }
+    const allowed = await reauthorizePrint();
+    return allowed && live();
   }
 
   const data: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
@@ -114,9 +189,12 @@ export function ParcelLabelDialog({
   const unconfirmed = data.filter((d) => !d.customer.addressConfirmed);
   const confirmed = data.filter((d) => d.customer.addressConfirmed);
   const allConfirmed = data.length > 0 && unconfirmed.length === 0;
-  // A shipping label exists only for a carrier shipment (CORRECTION-003).
-  const unshipped = data.filter((d) => d.delivery === null);
-  const allShipped = data.length > 0 && unshipped.length === 0;
+  // Complete labels only: parcel + its QR, shipment, tracking, renderable
+  // tracking barcode (CORRECTION-003). An incomplete one is shown as an error,
+  // never printed with a placeholder.
+  const issuesByOrder = new Map(data.map((d) => [d.order.id, shippingLabelIssues(d)]));
+  const allComplete =
+    data.length > 0 && data.every((d) => (issuesByOrder.get(d.order.id) ?? []).length === 0);
 
   const title =
     orderIds.length > 1
@@ -139,12 +217,32 @@ export function ParcelLabelDialog({
         onClose={onClose}
         title={title}
         pageSize={PARCEL_LABEL_SIZE_MM}
-        printable={canPrint && allConfirmed && allShipped}
+        printable={canPrint && allConfirmed && allComplete}
         active={confirmTarget === null}
         onBeforePrint={handleBeforePrint}
         controls={
-          canPrint && query.isSuccess ? (
+          canPrint && query.isError ? (
+            <RecoverableError
+              message={t("labels.parcel.error")}
+              onRetry={() => void query.refetch()}
+            />
+          ) : canPrint && query.isSuccess ? (
             <div className="space-y-2">
+              {printNotice ? (
+                <RecoverableError
+                  message={t(`labels.parcel.printNotice.${printNotice}`)}
+                  onRetry={() => {
+                    setPrintNotice(null);
+                    void query.refetch();
+                  }}
+                />
+              ) : null}
+              {!allComplete ? (
+                <RecoverableError
+                  message={t("labels.parcel.cannotPrint")}
+                  onRetry={() => void query.refetch()}
+                />
+              ) : null}
               {unconfirmed.length > 0 ? (
                 <div>
                   <p className="text-label text-text-primary">
@@ -185,11 +283,6 @@ export function ParcelLabelDialog({
                     ))}
                 </ul>
               ) : null}
-              {unshipped.length > 0 ? (
-                <p role="status" className="text-caption text-text-muted">
-                  {t("labels.parcel.needsDelivery")}
-                </p>
-              ) : null}
             </div>
           ) : undefined
         }
@@ -207,7 +300,28 @@ export function ParcelLabelDialog({
             {t("labels.parcel.error")}
           </div>
         ) : (
-          confirmed.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />)
+          confirmed.map((d) => {
+            const issues = issuesByOrder.get(d.order.id) ?? [];
+            return issues.length > 0 ? (
+              <div
+                key={d.order.id}
+                role="alert"
+                data-testid="shipping-label-invalid"
+                className="flex h-full flex-col items-center justify-center gap-[2mm] p-[6mm] text-center text-[10pt] text-black"
+              >
+                <p className="font-bold">
+                  {t("labels.parcel.cannotPrint")} · {d.order.orderNumber}
+                </p>
+                <ul className="space-y-[1mm]">
+                  {issues.map((issue) => (
+                    <li key={issue}>{t(`labels.parcel.issue.${issue}`)}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />
+            );
+          })
         )}
       </LabelSheet>
 

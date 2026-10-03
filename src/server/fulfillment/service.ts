@@ -227,9 +227,11 @@ export async function getParcelLabelData(
         : Promise.resolve(null),
       repo.orderPaymentTotals(ctx.organizationId, orderId),
       repo.orderPaymentStates(ctx.organizationId, orderId),
-      import("@/server/parcels/service")
-        .then((m) => m.getParcelCodeForOrder(ctx.organizationId, orderId))
-        .catch(() => null),
+      // A failed parcel lookup fails the label read; it is never swallowed
+      // into "no parcel" (the shipping label refuses to print without one).
+      import("@/server/parcels/service").then((m) =>
+        m.getParcelCodeForOrder(ctx.organizationId, orderId),
+      ),
     ]);
 
   // The destination is the ORDER's snapshot, never the mutable customer default.
@@ -286,6 +288,7 @@ export async function getParcelLabelData(
     payment: { ...payment, paid: payment.state === "paid" },
     delivery: delivery
       ? {
+          id: delivery.id,
           providerName: delivery.provider_name,
           trackingNumber: delivery.external_tracking_number,
           status: delivery.status,
@@ -301,11 +304,10 @@ export async function getParcelLabelData(
  *
  * Always available while the order is in fulfillment: before packing, before
  * and after any carrier shipment, and after a shipment is cancelled — the APSA
- * Parcel belongs to the order, not to the courier. It is generated at
- * confirmation; for an order confirmed earlier (or whose generation failed) it
- * is ensured here, idempotently, so the label always carries its identity.
- * A completed order prints its existing parcel read-only (returns); draft and
- * cancelled orders have none.
+ * Parcel belongs to the order, not to the courier. It is created atomically
+ * with confirmation (migration 057; historical orders by 058) and only READ
+ * here — this never creates a parcel. A completed order prints its existing
+ * parcel (returns); draft and cancelled orders have none.
  *
  * Contains no customer PII and no carrier data, so it needs only orders.read +
  * fulfillment.print_label. Every read is scoped to ctx.organizationId.
@@ -320,16 +322,11 @@ export async function getInternalParcelLabelData(
   const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
   if (!order) throw publicError("Order not found", 404);
 
-  const parcels = await import("@/server/parcels/service");
-  let parcelCode: string | null;
-  if (order.lifecycle_status === "confirmed") {
-    parcelCode = (await parcels.ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId))
-      .parcelCode;
-  } else if (order.lifecycle_status === "completed") {
-    parcelCode = await parcels.getParcelCodeForOrder(ctx.organizationId, orderId);
-  } else {
+  if (order.lifecycle_status !== "confirmed" && order.lifecycle_status !== "completed") {
     throw publicError("An APSA parcel label is only available for a confirmed order", 409);
   }
+  const { getParcelCodeForOrder } = await import("@/server/parcels/service");
+  const parcelCode = await getParcelCodeForOrder(ctx.organizationId, orderId);
   if (!parcelCode) throw publicError("This order has no APSA parcel", 409);
 
   const [items, businessName] = await Promise.all([

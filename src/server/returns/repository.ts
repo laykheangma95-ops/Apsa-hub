@@ -249,6 +249,21 @@ export async function findOrderByNumber(
   return (data ?? null) as ReturnOrderRow | null;
 }
 
+/** The order an APSA Parcel belongs to — org-scoped like every read here. */
+export async function findOrderById(
+  organizationId: string,
+  orderId: string,
+): Promise<ReturnOrderRow | null> {
+  const { data, error } = await db
+    .from("orders")
+    .select("id, order_number, lifecycle_status")
+    .eq("organization_id", organizationId)
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error) throw new Error(`findOrderById: ${errMessage(error)}`);
+  return (data ?? null) as ReturnOrderRow | null;
+}
+
 export async function listOrderItems(
   organizationId: string,
   orderId: string,

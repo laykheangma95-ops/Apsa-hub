@@ -923,8 +923,9 @@ describe("production boundary", () => {
       // 052 (receiving inventory) belongs to the receiving inventory phase;
       // 053 (stock counts) belongs to the stock count phase;
       // 054 (Pack Order readiness guards) belongs to the V1 fulfillment phase;
-      // 055–056 (damage movement type + customer returns) belong to the returns phase.
-      return Number.isFinite(prefix) && prefix > 56;
+      // 055–056 (damage movement type + customer returns) belong to the returns phase;
+      // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase.
+      return Number.isFinite(prefix) && prefix > 58;
     });
     expect(beyond047).toEqual([]);
   });

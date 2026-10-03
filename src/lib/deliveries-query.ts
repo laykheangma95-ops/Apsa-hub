@@ -39,6 +39,7 @@
 import { createQueryPartition } from "@/lib/query-principal";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
+import { fulfillmentKeys } from "@/lib/fulfillment-query";
 
 export const DELIVERIES_QUERY_ROOT = "deliveries";
 
@@ -122,5 +123,8 @@ export function deliveryTransitionInvalidationKeys(
     deliveryKeys.lists(userId, organizationId),
     // Home's delivery-attention count is derived from delivery status.
     HOME_QUERY_PREFIX,
+    // Shipping labels carry the shipment (carrier, tracking, status): a
+    // cancelled or replaced shipment must never print from cache.
+    fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
   ];
 }

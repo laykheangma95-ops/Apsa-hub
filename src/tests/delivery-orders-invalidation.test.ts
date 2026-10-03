@@ -26,6 +26,7 @@ import * as path from "path";
 import { QueryClient } from "@tanstack/react-query";
 
 import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
+import { fulfillmentKeys } from "@/lib/fulfillment-query";
 import { HOME_QUERY_PREFIX, homeQueryKey } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
 
@@ -72,9 +73,18 @@ describe("A. the contract names every screen a transition makes stale", () => {
     expect(keys).toContainEqual([...HOME_QUERY_PREFIX]);
   });
 
+  it("includes this principal's shipping labels — a replaced shipment never prints from cache", () => {
+    expect(keysFor(USER_A, ORG_A)).toContainEqual([
+      ...fulfillmentKeys.parcelLabelsPrefix(USER_A, ORG_A),
+    ]);
+    expect(keysFor(USER_A, ORG_A)).not.toContainEqual([
+      ...fulfillmentKeys.parcelLabelsPrefix(USER_B, ORG_B),
+    ]);
+  });
+
   it("names nothing else — no blanket root, no bare legacy shapes", () => {
     const keys = keysFor(USER_A, ORG_A);
-    expect(keys).toHaveLength(4);
+    expect(keys).toHaveLength(5);
     // The pre-partition shapes no screen reads any more, and the roots that
     // would reach other principals' entries in the same tab.
     for (const forbidden of [

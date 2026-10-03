@@ -142,9 +142,9 @@ export const UI_PERMISSION_KEYS = [
   // getParcelLabelData feeds it straight into ctx.require.
   "fulfillment.print_label",
   // fulfillment.create_parcel is deliberately NOT a UI key: the APSA Parcel is
-  // server-owned (CORRECTION-003) — created at order confirmation and ensured
-  // by the internal label / Pack Order reads — so no browser surface creates
-  // one. The grant (migration 050) is still enforced server-side.
+  // server-owned (CORRECTION-003) — created atomically with order
+  // confirmation (migration 057) — so no browser surface creates one. The
+  // grant (migration 050) is still enforced server-side.
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",

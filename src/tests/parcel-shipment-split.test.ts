@@ -25,6 +25,13 @@ import { buildInternalParcelLabel } from "../lib/labels/internal-parcel-label";
 import { InternalParcelLabel } from "../components/labels/InternalParcelLabel";
 import { ParcelLabel } from "../components/labels/ParcelLabel";
 import { fulfillmentActions } from "../lib/pack";
+import {
+  createPrintGuard,
+  printIdentity,
+  shippingLabelIssues,
+  verifyFreshLabels,
+} from "../lib/labels/shipping-print-guard";
+import { returnLookupFor } from "../lib/returns";
 
 const ORG_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const ORG_B = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -46,6 +53,8 @@ interface World {
   tables: Record<string, Row[]>;
   rpcCalls: string[];
   packed: boolean;
+  /** Make the parcel write inside confirmation fail (rollback path). */
+  failParcelOnConfirm?: boolean;
 }
 
 function seed(lifecycle: "draft" | "confirmed" = "draft"): World {
@@ -227,6 +236,43 @@ function makeDb(world: World) {
         if (o[col] !== args["p_expected_from"]) {
           return { data: { status: "stale", current: o[col] }, error: null };
         }
+        /*
+         * Mirrors migration 057: lifecycle → confirmed creates (or reuses) the
+         * order's active parcel in the SAME transaction; a parcel failure
+         * raises and nothing — not even the status change — is committed. The
+         * real SQL behaviour is proven in atomic-parcel-confirm.runtime.ts.
+         */
+        if (args["p_axis"] === "lifecycle" && args["p_to"] === "confirmed") {
+          if (world.failParcelOnConfirm) {
+            return { data: null, error: { message: "parcel write failed (test)" } };
+          }
+          o[col] = args["p_to"];
+          let parcel = world.tables["parcels"]!.find(
+            (p) => p["order_id"] === o["id"] && p["status"] !== "void",
+          );
+          if (!parcel) {
+            parcel = {
+              id: crypto.randomUUID(),
+              organization_id: o["organization_id"],
+              order_id: o["id"],
+              parcel_code: `APSA:PCL:v1:${crypto.randomUUID().replaceAll("-", "").slice(0, 22)}`,
+              status: "created",
+              created_by: args["p_changed_by"],
+              created_at: tick(),
+              updated_at: tick(),
+            };
+            world.tables["parcels"]!.push(parcel);
+          }
+          return {
+            data: {
+              status: "success",
+              stock_movements: 0,
+              parcel_id: parcel["id"],
+              parcel_code: parcel["parcel_code"],
+            },
+            error: null,
+          };
+        }
         o[col] = args["p_to"];
         return { data: { status: "success", stock_movements: 0 }, error: null };
       }
@@ -287,6 +333,7 @@ async function install(w: World) {
     import("../server/orders/repository"),
     import("../server/fulfillment/repository"),
     import("../server/products/repository"),
+    import("../server/returns/repository"),
   ]);
   restores.push(
     repos[0].setDeliveryRepositoryDbForTests(db),
@@ -294,6 +341,7 @@ async function install(w: World) {
     repos[2].setOrderRepositoryDbForTests(db),
     repos[3].setFulfillmentRepositoryDbForTests(db),
     repos[4].setProductRepositoryDbForTests(db),
+    repos[5].setReturnsRepositoryDbForTests(db),
   );
 }
 
@@ -372,13 +420,37 @@ describe("APSA Parcel is generated when the order enters fulfillment", () => {
     expect(parcels()).toHaveLength(0);
   });
 
-  it("an order confirmed before this change gets its parcel on first use (backfill, idempotent)", async () => {
+  it("parcel generation failure fails the confirmation — the order stays draft, no parcel", async () => {
+    world.failParcelOnConfirm = true;
+    await expect(confirm()).rejects.toThrow();
+    expect(world.tables["orders"]![0]!["lifecycle_status"]).toBe("draft");
+    expect(parcels()).toHaveLength(0);
+  });
+
+  it("no duplicate parcels: an existing active parcel is reused by confirmation", async () => {
+    world.tables["parcels"]!.push({
+      id: "pre-existing",
+      organization_id: ORG_A,
+      order_id: ORDER_A,
+      parcel_code: "APSA:PCL:v1:PreexistingParcel_00001",
+      status: "created",
+      created_at: tick(),
+      updated_at: tick(),
+    });
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+    expect(activeParcels()[0]!["id"]).toBe("pre-existing");
+  });
+
+  it("a confirmed order WITHOUT a parcel (not yet backfilled) is refused — never repaired at runtime", async () => {
     restores.splice(0).forEach((r) => r());
     await install(seed("confirmed"));
-    const first = await internalLabel();
-    const again = await internalLabel();
-    expect(first.parcelCode).toBe(again.parcelCode);
-    expect(activeParcels()).toHaveLength(1);
+    await expect(internalLabel()).rejects.toThrow(/no APSA parcel/);
+    const { getPackRequirements } = await import("../server/packing/service");
+    await expect(getPackRequirements(ctx(STAFF), ORDER_A)).rejects.toThrow(/no APSA parcel/);
+    await expect(arrange()).rejects.toThrow(/no APSA parcel/);
+    expect(parcels()).toHaveLength(0);
+    expect(world.tables["deliveries"]).toHaveLength(0);
   });
 });
 
@@ -588,7 +660,246 @@ describe("Courier Handoff and returns use the APSA Parcel ID", () => {
   });
 });
 
-// ── 7. UI wiring (source-level) ───────────────────────────────────────────────
+// ── 7. Shipping label validation (P2) ─────────────────────────────────────────
+
+describe("shipping label: print is refused unless every identifier is present", () => {
+  async function ready() {
+    await confirm();
+    await arrange();
+    return shippingLabel();
+  }
+
+  it("a complete label has no issues", async () => {
+    expect(shippingLabelIssues(await ready())).toEqual([]);
+  });
+
+  it("missing parcel → refused (never a placeholder ID)", async () => {
+    const data = await ready();
+    expect(shippingLabelIssues({ ...data, parcelCode: null })).toEqual(["no_parcel"]);
+  });
+
+  it("missing shipment → refused", async () => {
+    await confirm();
+    expect(shippingLabelIssues(await shippingLabel())).toEqual(["no_shipment"]);
+  });
+
+  it("missing tracking → refused", async () => {
+    await confirm();
+    await arrange("VET Express", "");
+    expect(shippingLabelIssues(await shippingLabel())).toEqual(["no_tracking"]);
+  });
+
+  it("unsupported carrier barcode (tracking not Code 128 encodable) → refused", async () => {
+    await confirm();
+    await arrange("VET Express", "ឃ-123");
+    expect(shippingLabelIssues(await shippingLabel())).toEqual(["tracking_unrenderable"]);
+  });
+
+  it("parcel lookup failure → the label read fails (never 'no parcel' silently)", async () => {
+    await confirm();
+    await arrange();
+    const { setParcelRepositoryDbForTests } = await import("../server/parcels/repository");
+    const failing = {
+      from: () => {
+        const q = {
+          select: () => q,
+          eq: () => q,
+          neq: () => q,
+          limit: async () => ({ data: null, error: { message: "connection reset" } }),
+        };
+        return q;
+      },
+    };
+    restores.push(setParcelRepositoryDbForTests(failing));
+    await expect(shippingLabel()).rejects.toThrow(/findActiveParcelByOrder/);
+  });
+});
+
+// ── 8. Authoritative pre-print data (P2) ──────────────────────────────────────
+
+describe("pre-print: fresh server data must match what is shown", () => {
+  async function shown() {
+    await confirm();
+    const a = await arrange();
+    return { a, data: await shippingLabel() };
+  }
+
+  it("unchanged fresh data → ok", async () => {
+    const { data } = await shown();
+    expect(verifyFreshLabels([data], [await shippingLabel()])).toEqual({ kind: "ok" });
+  });
+
+  it("replacement shipment (cancel A, arrange B) → changed, never prints A", async () => {
+    const { a, data } = await shown();
+    const { cancelDelivery } = await import("../server/deliveries/service");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await arrange("VET Express", "VET-42"); // even the SAME carrier + tracking
+    const fresh = await shippingLabel();
+    expect(fresh.delivery?.id).not.toBe(data.delivery?.id);
+    expect(verifyFreshLabels([data], [fresh])).toEqual({ kind: "changed" });
+  });
+
+  it("payment update (COD → paid) → changed", async () => {
+    const { data } = await shown();
+    const fresh: ParcelLabelInput = {
+      ...data,
+      payment: { state: "paid", collect: null, partial: false, checkReason: null },
+    };
+    expect(verifyFreshLabels([data], [fresh])).toEqual({ kind: "changed" });
+  });
+
+  it("COD amount update → changed", async () => {
+    const { data } = await shown();
+    const fresh: ParcelLabelInput = {
+      ...data,
+      payment: { ...data.payment, collect: { amount: 1999, currency: "USD" } },
+    };
+    expect(data.payment.collect?.amount).not.toBe(1999);
+    expect(verifyFreshLabels([data], [fresh])).toEqual({ kind: "changed" });
+  });
+
+  it("identity switch (user, organization, orders) or closing retires the attempt in flight", () => {
+    const guard = createPrintGuard();
+    guard.setContext(printIdentity(USER_A, ORG_A, [ORDER_A]), true);
+    const live = guard.begin();
+    expect(live()).toBe(true);
+    guard.setContext(printIdentity("other-user", ORG_A, [ORDER_A]), true);
+    expect(live()).toBe(false);
+
+    const live2 = guard.begin();
+    guard.setContext(printIdentity("other-user", ORG_B, [ORDER_A]), true);
+    expect(live2()).toBe(false);
+
+    const live3 = guard.begin();
+    guard.setContext(printIdentity("other-user", ORG_B, ["another-order"]), true);
+    expect(live3()).toBe(false);
+
+    const live4 = guard.begin();
+    guard.setContext(printIdentity("other-user", ORG_B, ["another-order"]), false);
+    expect(live4()).toBe(false);
+
+    guard.setContext(printIdentity("other-user", ORG_B, ["another-order"]), true);
+    const live5 = guard.begin();
+    guard.retire(); // unmount / navigation
+    expect(live5()).toBe(false);
+  });
+
+  it("an incomplete fresh label (tracking removed) → invalid", async () => {
+    const { data } = await shown();
+    const fresh: ParcelLabelInput = {
+      ...data,
+      delivery: { ...data.delivery!, trackingNumber: null },
+    };
+    // A tracking change is a change first; with identical shown data it is invalid.
+    expect(verifyFreshLabels([fresh], [fresh])).toEqual({ kind: "invalid" });
+  });
+});
+
+// ── 9. Returns start from the APSA Parcel (P2) ────────────────────────────────
+
+describe("Returns: APSA Parcel → order → authorized returns workflow", () => {
+  const RETURNS = ["orders.read", "orders.return"];
+
+  /** Confirm, ship, deliver; the order line's stock left in a 'sale' movement. */
+  async function deliveredParcel(replaceShipment = false): Promise<string> {
+    await confirm();
+    const code = String(activeParcels()[0]!["parcel_code"]);
+    let shipment = await arrange();
+    if (replaceShipment) {
+      const { cancelDelivery } = await import("../server/deliveries/service");
+      await cancelDelivery(ctx(STAFF), shipment.id, "Wrong courier");
+      shipment = await arrange("J&T Express", "JT-7");
+    }
+    world.tables["deliveries"]!.find((d) => d["id"] === shipment.id)!["status"] = "delivered";
+    (world.tables["inventory_movements"] ??= []).push({
+      id: crypto.randomUUID(),
+      organization_id: ORG_A,
+      movement_type: "sale",
+      reference_type: "order_item",
+      reference_id: "item-1",
+    });
+    return code;
+  }
+
+  it("a parcel scan starts the Returns flow with the order's returnable lines", async () => {
+    const code = await deliveredParcel();
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    const result = await findReturnableOrderByParcel(ctx(RETURNS), code);
+    expect(result.kind).toBe("order");
+    if (result.kind !== "order") return;
+    expect(result.order.orderId).toBe(ORDER_A);
+    expect(result.order.lines.map((l) => [l.orderItemId, l.returnableQuantity])).toEqual([
+      ["item-1", 2],
+    ]);
+  });
+
+  it("parcel and order number resolve the same order and lines", async () => {
+    const code = await deliveredParcel();
+    const svc = await import("../server/returns/service");
+    const byParcel = await svc.findReturnableOrderByParcel(ctx(RETURNS), code);
+    const byNumber = await svc.findReturnableOrder(ctx(RETURNS), "APSA-2026-000777");
+    expect(byParcel).toEqual(byNumber);
+  });
+
+  it("shipment replacement does not affect returns: same parcel, same order", async () => {
+    const code = await deliveredParcel(true);
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    const result = await findReturnableOrderByParcel(ctx(RETURNS), code);
+    expect(result.kind).toBe("order");
+    if (result.kind === "order") expect(result.order.orderId).toBe(ORDER_A);
+  });
+
+  it("tenant isolation: another organization's parcel reads as unknown", async () => {
+    const code = await deliveredParcel();
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    expect(await findReturnableOrderByParcel(ctx(RETURNS, ORG_B), code)).toEqual({
+      kind: "order_not_found",
+    });
+  });
+
+  it("malformed or unknown codes read as unknown", async () => {
+    await deliveredParcel();
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    for (const bad of ["APSA:PCL:v1:short", "APSA:PCL:v1:AAAAAAAAAAAAAAAAAAAAAA", "not-a-parcel"]) {
+      expect(await findReturnableOrderByParcel(ctx(RETURNS), bad)).toEqual({
+        kind: "order_not_found",
+      });
+    }
+  });
+
+  it("permission denial: without orders.return nothing is read", async () => {
+    const code = await deliveredParcel();
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    await expect(findReturnableOrderByParcel(ctx(["orders.read"]), code)).rejects.toThrow(
+      /orders\.return/,
+    );
+  });
+
+  it("not yet delivered: the parcel resolves but the order is not returnable", async () => {
+    await confirm();
+    const code = String(activeParcels()[0]!["parcel_code"]);
+    const { findReturnableOrderByParcel } = await import("../server/returns/service");
+    expect(await findReturnableOrderByParcel(ctx(RETURNS), code)).toEqual({
+      kind: "order_not_delivered",
+    });
+  });
+
+  it("the returns screen routes a scanned APSA code to the parcel lookup", () => {
+    expect(returnLookupFor("  APSA:PCL:v1:AbCdEfGhIjKlMnOpQrStUv ")).toEqual({
+      kind: "parcel",
+      parcelCode: "APSA:PCL:v1:AbCdEfGhIjKlMnOpQrStUv",
+    });
+    expect(returnLookupFor("APSA-2026-000777")).toEqual({
+      kind: "order",
+      orderNumber: "APSA-2026-000777",
+    });
+    expect(returnLookupFor("   ")).toBeNull();
+    const route = source("src/routes/app.returns.new.tsx");
+    expect(route).toContain("findReturnableOrderByParcel(lookup.parcelCode)");
+  });
+});
+
+// ── 10. UI wiring (source-level) ──────────────────────────────────────────────
 
 function source(relative: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relative), "utf8");
@@ -607,8 +918,9 @@ describe("UI wiring", () => {
   it("the shipping dialog never creates a parcel and prints only with a shipment", () => {
     const dialog = source("src/components/labels/ParcelLabelDialog.tsx");
     expect(dialog).not.toContain("createParcel");
-    expect(dialog).toContain("printable={canPrint && allConfirmed && allShipped}");
-    expect(dialog).toContain('t("labels.parcel.needsDelivery")');
+    expect(dialog).toContain("printable={canPrint && allConfirmed && allComplete}");
+    expect(dialog).toContain("shippingLabelIssues(d)");
+    expect(dialog).toContain("verifyFreshLabels(displayed, fresh)");
   });
 
   it("every new string exists in Khmer and English", () => {

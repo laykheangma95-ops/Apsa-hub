@@ -16,8 +16,8 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  * orders; each prints as its own 100×150 mm page.
  *
  * Always available for an order in fulfillment — before packing and with or
- * without a carrier shipment. The server ensures the order's APSA Parcel and
- * returns its permanent code, so the label always shows the same identity on
+ * without a carrier shipment. The server returns the order's APSA Parcel
+ * (created with confirmation) and its permanent code, so the label always shows the same identity on
  * every (re)print; this dialog never creates or chooses one. Nothing prints
  * unless every label in the batch carries its code.
  *

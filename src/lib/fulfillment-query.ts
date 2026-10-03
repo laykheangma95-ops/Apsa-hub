@@ -72,6 +72,22 @@ export const fulfillmentKeys = {
     ] as const,
 };
 
+/**
+ * Drop every cached shipping label for this principal. Called after anything
+ * that changes what a shipping label prints — Arrange Delivery, a shipment
+ * transition (cancel / replace) or a payment change — so a label can never be
+ * printed from a stale cache. (The dialog also re-fetches before every print.)
+ */
+export function evictShippingLabels(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+): void {
+  queryClient.removeQueries({
+    queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
+  });
+}
+
 export const FULFILLMENT_QUERY_PREFIX = partition.prefix;
 export const clearFulfillmentQueries = partition.clear;
 export const enforceFulfillmentCachePrincipal = partition.enforce;

@@ -2,6 +2,7 @@ import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
+import * as parcelsRepo from "@/server/parcels/repository";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import {
   isTerminalDeliveryStatus,
@@ -185,15 +186,16 @@ export async function createDelivery(
   }
 
   /*
-   * A shipment ATTACHES to the order's existing APSA Parcel; it never creates
-   * or replaces it (CORRECTION-003). The parcel is generated at confirmation —
-   * this only backfills an order confirmed before that (idempotent, one active
-   * parcel per order). Resolved BEFORE the shipment is written, so a shipment
-   * never exists without its parcel. Authorized by delivery.create above; the
-   * order was verified confirmed in this organization.
+   * A shipment ATTACHES to the order's existing APSA Parcel; it NEVER creates
+   * or replaces it (CORRECTION-003). The parcel is created atomically with
+   * confirmation (migration 057; historical orders by 058), so a missing one is
+   * refused here rather than minted. Checked BEFORE the shipment is written, so
+   * a shipment never exists without its parcel.
    */
-  const { ensureParcelForOrder } = await import("@/server/parcels/service");
-  const parcel = await ensureParcelForOrder(ctx.organizationId, ctx.userId, input.orderId);
+  const parcel = await parcelsRepo.findActiveParcelByOrder(ctx.organizationId, input.orderId);
+  if (!parcel) {
+    throw conflict("Order has no APSA parcel — it is created when the order is confirmed");
+  }
 
   const result = await repo.createDelivery(ctx.organizationId, ctx.userId, {
     order_id: input.orderId,
@@ -218,12 +220,12 @@ export async function createDelivery(
     const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
     if (readied === "ready") {
       const ready = await requireDetail(ctx.organizationId, result.delivery_id);
-      return { ...ready, parcelId: parcel.id, parcelCode: parcel.parcelCode };
+      return { ...ready, parcelId: parcel.id, parcelCode: parcel.parcel_code };
     }
   } catch {
     // Intentionally ignored; see above.
   }
-  return { ...detail, parcelId: parcel.id, parcelCode: parcel.parcelCode };
+  return { ...detail, parcelId: parcel.id, parcelCode: parcel.parcel_code };
 }
 
 function transitionFailure(status: string, current?: string): Error {

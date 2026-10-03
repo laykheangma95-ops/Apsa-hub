@@ -90,6 +90,23 @@ export const findReturnableOrderFn = createServerFn()
     return findReturnableOrder(authCtx, data.orderNumber);
   });
 
+// ── findReturnableOrderByParcelFn ────────────────────────────────────────────
+
+export const findReturnableOrderByParcelFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        parcelCode: z.string().min(1, "Parcel code is required").max(100, "Parcel code too long"),
+      })
+      .strict()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { findReturnableOrderByParcel } = await import("@/server/returns/service");
+    return findReturnableOrderByParcel(authCtx, data.parcelCode);
+  });
+
 // ── requestCustomerReturnFn ──────────────────────────────────────────────────
 
 export const requestCustomerReturnFn = createServerFn()

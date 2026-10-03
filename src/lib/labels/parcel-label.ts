@@ -154,6 +154,8 @@ export interface ParcelLabelInput {
     checkReason?: ParcelLabelCheckReason | null;
   };
   delivery: {
+    /** The shipment's id (server label data always carries it). */
+    id?: string;
     providerName: string;
     trackingNumber: string | null;
     status: string;

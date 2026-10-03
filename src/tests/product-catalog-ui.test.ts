@@ -1931,8 +1931,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 052 (receiving inventory) belongs to the receiving inventory phase;
     // 053 (stock counts) belongs to the stock count phase;
     // 054 (Pack Order readiness guards) belongs to the V1 fulfillment phase;
-    // 055–056 (damage movement type + customer returns) belong to the returns phase.
-    expect(migrations.at(-1)).toBe("056_customer_returns.sql");
+    // 055–056 (damage movement type + customer returns) belong to the returns phase;
+    // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase.
+    expect(migrations.at(-1)).toBe("058_backfill_apsa_parcels.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

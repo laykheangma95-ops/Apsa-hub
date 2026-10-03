@@ -105,6 +105,8 @@ export interface ParcelLabelData {
    * lacks delivery.read.
    */
   delivery: {
+    /** The shipment's id — pre-print verification detects a replacement. */
+    id: string;
     /** Carrier display name — deliveries.provider_name (snapshot at creation). */
     providerName: string;
     trackingNumber: string | null;

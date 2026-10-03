@@ -72,6 +72,7 @@ import {
 } from "@/lib/orders";
 import { canPackOrder, fulfillmentActions, packHistoryReasonMessage } from "@/lib/pack";
 import { packingKeys } from "@/lib/packing-query";
+import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { RetryDeliveryReadyBoundary } from "@/components/fulfillment/RetryDeliveryReadyAction";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
@@ -406,6 +407,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    */
   function invalidateAfterPayment() {
     void queryClient.invalidateQueries({ queryKey });
+    // The shipping label prints the payment decision (PAID / COD amount).
+    evictShippingLabels(queryClient, userId, routeOrganizationId);
     void queryClient.invalidateQueries({
       queryKey: ["payments", userId, routeOrganizationId],
     });
@@ -1059,6 +1062,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
            */
           void queryClient.invalidateQueries({ queryKey });
           invalidateAfterLifecycleChange();
+          // A new shipment changes what the shipping label prints.
+          evictShippingLabels(queryClient, userId, routeOrganizationId);
           void navigate({ to: "/app/deliveries/$id", params: { id: detail.id } });
         }}
       />
@@ -1084,12 +1089,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       />
       <InternalParcelLabelDialog
         open={parcelLabelOpen}
-        onClose={() => {
-          setParcelLabelOpen(false);
-          // An order confirmed before parcels were generated at confirmation
-          // gets its APSA Parcel on this read; Courier Handoff opens by it.
-          void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
-        }}
+        onClose={() => setParcelLabelOpen(false)}
         orderIds={parcelLabelOpen ? [id] : []}
         userId={userId}
         organizationId={routeOrganizationId}

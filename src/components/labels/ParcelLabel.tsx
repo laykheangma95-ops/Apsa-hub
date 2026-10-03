@@ -255,7 +255,8 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
               />
             ) : null}
             <p className="w-full break-all text-center font-mono text-[6pt] leading-tight">
-              {vm.parcelCode ?? "—"}
+              {/* Missing data is SAID, never masked (the dialog refuses to print it). */}
+              {vm.parcelCode ?? t("labels.parcel.issue.no_parcel")}
             </p>
           </div>
         </section>
