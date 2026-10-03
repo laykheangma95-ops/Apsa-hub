@@ -421,10 +421,14 @@ export async function markOrderPacked(
 }
 
 /**
- * Arrange Delivery after packing: when the order is already packed, move its
+ * Arrange Delivery after packing: when the order is currently packed, move its
  * newly arranged delivery to 'ready' so Courier Handoff can take it. Called by
  * the delivery service after a delivery is created; a no-op for an order that
- * is not packed yet (Mark Packed will ready the delivery instead).
+ * is not packed (Mark Packed will ready the delivery instead).
+ *
+ * The packed check and the readiness write happen in one locked transaction
+ * (ready_packed_delivery_v1), so a reopen racing this call can never leave a
+ * ready delivery behind on an unpacked order.
  */
 export async function readyPackedOrderDelivery(
   organizationId: string,
@@ -434,23 +438,41 @@ export async function readyPackedOrderDelivery(
   const delivery = await deliveriesRepo.findActiveDeliveryForOrder(organizationId, orderId);
   if (!delivery) return "no_delivery";
   if (isPackedDeliveryStatus(delivery.status)) return "already_ready";
+  // Read-only shortcut for the common unpacked case (every Arrange Delivery
+  // runs this). It can only say "no"; a "yes" is re-decided under the RPC's locks.
   if (!(await isCurrentlyPackedByPackOrder(organizationId, orderId))) return "not_packed";
-  return (await moveDeliveryToReady(organizationId, userId, delivery)).kind;
+  const result = await deliveriesRepo.readyPackedDelivery(
+    organizationId,
+    orderId,
+    delivery.id,
+    userId,
+  );
+  switch (result.status) {
+    case "success":
+      return "ready";
+    case "already_ready":
+      return "already_ready";
+    case "not_packed":
+      return "not_packed";
+    default:
+      return "failed";
+  }
 }
 
 /**
- * Retry delivery readiness for an order that is already packed.
+ * Retry delivery readiness for an order that is currently packed.
  *
  * Recovers a packed order whose delivery was left 'pending'/'preparing' — e.g.
  * the best-effort readying after Arrange Delivery failed. It never repacks:
- * no scan counts are taken and the order fulfillment history is not touched.
- * Only the delivery steps still missing are written (pending → preparing →
- * ready), so a retry after a partial failure does not duplicate history, and a
- * delivery already ready reports already_ready without writing anything.
- * Courier Handoff is unchanged — it still takes the delivery from 'ready'.
+ * no scan counts are taken and it never writes the packed marker, so it cannot
+ * recreate Packed. ready_packed_delivery_v1 verifies, under the same locks as
+ * its write, that the order is packed with no newer reopen, then writes only
+ * the delivery steps still missing (pending → preparing → ready). A delivery
+ * already ready reports already_ready without writing anything. Courier
+ * Handoff is unchanged — it still takes the delivery from 'ready'.
  *
  * Same grants as Mark Packed (orders.read + delivery.handoff); the packed fact
- * must come from the current trusted packed state, never from the delivery status.
+ * comes from the current trusted packed state, never from the delivery status.
  */
 export async function retryPackedDeliveryReady(
   ctx: AuthorizationContext,
@@ -473,12 +495,25 @@ export async function retryPackedDeliveryReady(
   if (isPackedDeliveryStatus(delivery.status)) {
     return { kind: "already_ready", deliveryId: delivery.id };
   }
-  if (!(await isCurrentlyPackedByPackOrder(ctx.organizationId, orderId)))
-    return { kind: "not_packed" };
 
-  const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
-  if (moved.kind === "failed") return { kind: "transition_failed", reason: moved.reason };
-  return { kind: moved.kind, deliveryId: delivery.id };
+  const result = await deliveriesRepo.readyPackedDelivery(
+    ctx.organizationId,
+    orderId,
+    delivery.id,
+    ctx.userId,
+  );
+  switch (result.status) {
+    case "success":
+      return { kind: "ready", deliveryId: delivery.id };
+    case "already_ready":
+      return { kind: "already_ready", deliveryId: delivery.id };
+    case "not_packed":
+      return { kind: "not_packed" };
+    case "invalid_order":
+      return { kind: "invalid_order" };
+    default:
+      return { kind: "transition_failed", reason: result.status };
+  }
 }
 
 type DeliveryReadyOutcome =

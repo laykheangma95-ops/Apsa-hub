@@ -27,8 +27,10 @@
  * same way, so Courier Handoff (ready → in_transit) is unchanged.
  *
  * PACKED IS CURRENT STATE, NOT "EVER PACKED". Reopening the order's fulfillment
- * (processing → unfulfilled) clears it: a delivery arranged afterwards stays
- * pending until Pack Order completes again (isOrderCurrentlyPacked).
+ * (processing → unfulfilled) clears it and, in the same transaction, cancels a
+ * 'ready' delivery: a delivery arranged afterwards stays pending until Pack
+ * Order completes again (isOrderCurrentlyPacked). Readying a packed order's
+ * delivery re-checks this under row locks (ready_packed_delivery_v1).
  *
  * TODO(APSA V2): a dedicated packing permission (e.g. fulfillment.mark_packed).
  * V1 keeps the existing model — Mark Packed requires delivery.handoff, the
@@ -43,6 +45,22 @@
  * fulfillment history and/or the delivery history (see the module comment).
  */
 export const PACK_ORDER_PACKED_REASON_CODE = "pack_order_packed";
+
+/**
+ * Delivery history reason when a packed order's delivery is readied on its
+ * behalf (Arrange Delivery auto-ready, Retry delivery ready). Deliberately NOT
+ * the packed marker: readying a delivery is not packing and never recreates
+ * Packed. Written only by ready_packed_delivery_v1 (migration 054); the
+ * `system:` namespace is reserved from generic transition APIs.
+ */
+export const PACK_ORDER_DELIVERY_READY_REASON_CODE = "system:pack_order_delivery_ready";
+
+/**
+ * Delivery history reason when reopening the order's fulfillment cancels its
+ * 'ready' delivery (reopen_order_fulfillment_v1, migration 054). Such a cancel
+ * is part of the reopen, so it does not earn the "retired attempt" exemption.
+ */
+export const ORDER_FULFILLMENT_REOPENED_REASON_CODE = "system:order_fulfillment_reopened";
 
 // ── Pack requirement (what the order needs) ─────────────────────────────────
 
@@ -133,8 +151,12 @@ const RETIRED_DELIVERY_STATUSES: ReadonlySet<string> = new Set(["cancelled", "fa
  *     cancelled or failed: that retires the attempt, not the packed parcel. The
  *     RPC writes it in the same transaction as the delivery's cancelled/failed
  *     row, so both share one timestamp. Callers cannot set that timestamp, so a
- *     generic API cannot forge the exemption.
+ *     generic API cannot forge the exemption. A delivery cancelled BY a reopen
+ *     (ORDER_FULFILLMENT_REOPENED_REASON_CODE) does not count as retired.
  * A tie, or a row without a parseable time, fails closed (not packed).
+ *
+ * The authoritative twin of this rule runs inside ready_packed_delivery_v1
+ * (migration 054) under row locks; this copy drives display and early returns.
  */
 export function isOrderCurrentlyPacked(input: {
   orderFulfillmentHistory: readonly PackHistoryEntry[];
@@ -153,7 +175,11 @@ export function isOrderCurrentlyPacked(input: {
 
   const retiredAt = new Set(
     input.deliveryHistory
-      .filter((h) => RETIRED_DELIVERY_STATUSES.has(h.toStatus))
+      .filter(
+        (h) =>
+          RETIRED_DELIVERY_STATUSES.has(h.toStatus) &&
+          h.reason !== ORDER_FULFILLMENT_REOPENED_REASON_CODE,
+      )
       .map((h) => time(h.at)),
   );
   let lastCleared = Number.NEGATIVE_INFINITY;
@@ -170,7 +196,16 @@ export function packHistoryReasonMessage(
   reason: string | null,
   t: (key: string) => string,
 ): string | null {
-  return reason === PACK_ORDER_PACKED_REASON_CODE ? t("packSession.history.packed") : null;
+  switch (reason) {
+    case PACK_ORDER_PACKED_REASON_CODE:
+      return t("packSession.history.packed");
+    case PACK_ORDER_DELIVERY_READY_REASON_CODE:
+      return t("packSession.history.deliveryReady");
+    case ORDER_FULFILLMENT_REOPENED_REASON_CODE:
+      return t("packSession.history.reopened");
+    default:
+      return null;
+  }
 }
 
 /** Server response for the Order detail fulfillment section. */

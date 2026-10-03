@@ -1108,7 +1108,8 @@
     "retryDeliveryReady": "Retry delivery ready",
     "retryDeliveryReadyHint": "Packed, but the delivery is not ready for handoff yet.",
     "retryDeliveryReadyDone": "Delivery is ready for courier handoff.",
-    "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again."
+    "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again.",
+    "retryDeliveryReadyNotPacked": "The order is no longer packed. Pack it again before courier handoff."
   },
   "orderList": {
     "title": "Orders",
@@ -2502,7 +2503,9 @@
       "body": "This order has no items that require packing."
     },
     "history": {
-      "packed": "Packed"
+      "packed": "Packed",
+      "deliveryReady": "Ready — order already packed",
+      "reopened": "Cancelled — order reopened for packing"
     }
   },
   "shipping": {

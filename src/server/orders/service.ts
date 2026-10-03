@@ -698,6 +698,7 @@ function transitionFailureToError(result: { status: string; current?: string }):
     case "no_change":
       return conflict("Order is already in that status");
     case "terminal":
+    case "order_terminal":
       return conflict("Order is in a terminal state and can no longer be modified");
     case "preconditions_unmet":
       return conflict("An order can only be completed once it is both paid and fulfilled");
@@ -807,15 +808,24 @@ export async function transitionFulfillmentStatus(
     throw conflict(`Cannot move fulfillment status from '${from}' to '${to}'`);
   }
 
-  const result = await repo.transitionStatus(
-    ctx.organizationId,
-    orderId,
-    "fulfillment",
-    from,
-    to,
-    ctx.userId,
-    reason ?? null,
-  );
+  /*
+   * Reopening (processing → unfulfilled) means packing must start over: the
+   * order's packed state clears and a 'ready' delivery is cancelled in the
+   * same transaction, so a reopened order cannot reach Courier Handoff without
+   * Pack Order again.
+   */
+  const result =
+    from === "processing" && to === "unfulfilled"
+      ? await repo.reopenFulfillment(ctx.organizationId, orderId, ctx.userId, reason ?? null)
+      : await repo.transitionStatus(
+          ctx.organizationId,
+          orderId,
+          "fulfillment",
+          from,
+          to,
+          ctx.userId,
+          reason ?? null,
+        );
 
   if (result.status !== "success") throw transitionFailureToError(result);
 
