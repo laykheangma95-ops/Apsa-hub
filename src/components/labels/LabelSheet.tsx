@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { Children, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Printer, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,10 +9,30 @@ import { collectTrapFocusables, resolveTrapFocus } from "@/design-system/focus-t
  * A print overlay for physical labels (product 50×30 mm, parcel 100×150 mm).
  *
  * V1 printing is browser/system only — no printer SDK, no Bluetooth (§7, §28).
- * The overlay shows an on-screen preview that IS the print target: on print, a
- * scoped @media-print stylesheet hides all app chrome and lays each label out as
- * its own physical page at the exact millimetre size, so the barcode/QR are not
- * clipped or rescaled (§27).
+ *
+ * ── THE PREVIEW IS NOT PRINTABLE ──────────────────────────────────────────────
+ * The on-screen preview is for looking at only. Under print media it — and all
+ * app chrome — is removed from layout, so a native browser print (Ctrl/Cmd+P,
+ * the browser's Print menu) can never put a stale, unvalidated preview on
+ * paper: with no print target it outputs nothing.
+ *
+ * Printing happens ONLY from a temporary print target (<LabelPrintTarget>, a
+ * direct child of <body>) that exists from the moment the pre-print check
+ * succeeds until that one print is over:
+ *
+ *   Print pressed → onBeforePrint (fresh authoritative read, permission and
+ *   lifecycle revalidation, identity guard) → target generated from the
+ *   VALIDATED pages → window.print() → target destroyed.
+ *
+ * Ctrl/Cmd+P is routed into that same guarded path. A print the sheet did not
+ * start (browser menu) finds no target: with none it prints nothing, and any
+ * leftover is destroyed before the browser lays the page out. The target is
+ * destroyed when its print ends (afterprint); where the browser's print UI
+ * outlives window.print(), when the merchant is back on the page, bounded by
+ * a time limit. It also goes when the sheet closes or stops being printable.
+ *
+ * In print, each label is its own physical page at the exact millimetre size,
+ * so the barcode/QR are not clipped or rescaled (§27).
  *
  * ── FOCUS (§21) ───────────────────────────────────────────────────────────────
  * A real modal: aria-modal is truthful because focus is actually contained. On
@@ -46,11 +67,13 @@ export interface LabelSheetProps {
    */
   printable?: boolean;
   /**
-   * Runs immediately before window.print(); printing proceeds only if it
-   * resolves true. Used for a fresh server-side authorization so a stale
-   * client view alone can never print sensitive data. A rejection is a refusal.
+   * Runs immediately before printing and resolves to the VALIDATED pages to
+   * print — built from fresh server data after authorization — or null to
+   * refuse. Only those pages reach the printer; the preview never does. A
+   * rejection, null or an empty list is a refusal. Without this hook (labels
+   * with no server-side state, e.g. product labels) the current pages print.
    */
-  onBeforePrint?: () => Promise<boolean>;
+  onBeforePrint?: () => Promise<React.ReactNode[] | null>;
   /**
    * False while a child modal owns focus: this overlay's Tab/Escape trap stands
    * down so only ONE trap is live. Defaults to true.
@@ -59,6 +82,15 @@ export interface LabelSheetProps {
   /** Each child is rendered as its own physical page. */
   children: React.ReactNode;
 }
+
+/** The id of the temporary print target — the only printable element. */
+const PRINT_ROOT_ID = "apsa-print-root";
+
+/**
+ * How long a target may wait for a print UI that outlives window.print()
+ * (asynchronous print dialogs). Past this, it is destroyed unprinted.
+ */
+const PRINT_SESSION_MAX_MS = 5 * 60 * 1000;
 
 const MM_PER_PX = 96 / 25.4; // on-screen preview scale (CSS px per mm at 96dpi)
 
@@ -80,23 +112,114 @@ export function LabelSheet({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [checking, setChecking] = useState(false);
+  // The temporary print target's pages; null whenever nothing may print.
+  const [printPages, setPrintPages] = useState<React.ReactNode[] | null>(null);
+  // Where the one print a target was generated for stands:
+  //   idle     — no print of ours is under way: nothing is printable;
+  //   printing — inside our window.print() call;
+  //   pending  — window.print() returned before the print finished (a browser
+  //              whose print UI is asynchronous, e.g. mobile): the target
+  //              stays until the merchant is back on the page.
+  const phaseRef = useRef<"idle" | "printing" | "pending">("idle");
+  const sessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const childrenRef = useRef(children);
+  childrenRef.current = children;
 
+  /** Destroy the temporary print target and end the print it was made for. */
+  const endPrintSession = useCallback((sync = false) => {
+    phaseRef.current = "idle";
+    if (sessionTimerRef.current !== null) clearTimeout(sessionTimerRef.current);
+    sessionTimerRef.current = null;
+    if (sync) flushSync(() => setPrintPages(null));
+    else setPrintPages(null);
+  }, []);
+
+  /** The ONLY path to paper: validate, generate the target, print, destroy. */
   async function handlePrint() {
     if (checking) return;
+    endPrintSession();
+    let pages: React.ReactNode[] | null;
     if (!onBeforePrint) {
-      window.print();
-      return;
+      pages = Children.toArray(childrenRef.current);
+    } else {
+      setChecking(true);
+      try {
+        pages = await onBeforePrint();
+      } catch {
+        pages = null;
+      }
+      setChecking(false);
     }
-    setChecking(true);
-    let allowed = false;
-    try {
-      allowed = await onBeforePrint();
-    } catch {
-      allowed = false;
+    // Fail closed: a refusal, nothing to print, or a sheet closed meanwhile.
+    if (!pages || pages.length === 0 || !openRef.current) return;
+    flushSync(() => setPrintPages(pages));
+    phaseRef.current = "printing";
+    window.print();
+    // A synchronous print (desktop) already fired afterprint and destroyed the
+    // target. Otherwise the browser's print UI is still up: keep the target
+    // for it, bounded, until the merchant returns to the page.
+    if (phaseRef.current === "printing") {
+      phaseRef.current = "pending";
+      sessionTimerRef.current = setTimeout(() => endPrintSession(), PRINT_SESSION_MAX_MS);
     }
-    setChecking(false);
-    if (allowed) window.print();
   }
+  const handlePrintRef = useRef(handlePrint);
+  handlePrintRef.current = handlePrint;
+  const canStartPrintRef = useRef(false);
+  canStartPrintRef.current = open && printable && active;
+
+  // The target never outlives the sheet being open and printable.
+  useEffect(() => {
+    if (!open || !printable) endPrintSession();
+  }, [open, printable, endPrintSession]);
+  useEffect(() => () => endPrintSession(), [endPrintSession]);
+
+  // Every browser print goes through the guard, or prints nothing.
+  useEffect(() => {
+    if (!open) return;
+    // A print this sheet did not start (the browser's own menu) never finds a
+    // target: it is destroyed before the browser lays the page out.
+    const onBeforeNativePrint = () => {
+      if (phaseRef.current === "idle") endPrintSession(true);
+    };
+    // The print this sheet started is over: destroy its target. (While a print
+    // UI is pending the browser may render again, e.g. on a settings change;
+    // that session ends when the merchant is back on the page instead.)
+    const onAfterPrint = () => {
+      if (phaseRef.current !== "pending") endPrintSession(true);
+    };
+    const onReturnToPage = () => {
+      if (phaseRef.current === "pending") endPrintSession();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") onReturnToPage();
+    };
+    // Ctrl/Cmd+P: never the browser's print of this page — the guarded path.
+    const onPrintShortcut = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== "p") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat && canStartPrintRef.current) void handlePrintRef.current();
+    };
+    window.addEventListener("beforeprint", onBeforeNativePrint);
+    window.addEventListener("afterprint", onAfterPrint);
+    window.addEventListener("keydown", onPrintShortcut, true);
+    window.addEventListener("focus", onReturnToPage);
+    window.addEventListener("pointerdown", onReturnToPage, true);
+    window.addEventListener("keydown", onReturnToPage, true);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeprint", onBeforeNativePrint);
+      window.removeEventListener("afterprint", onAfterPrint);
+      window.removeEventListener("keydown", onPrintShortcut, true);
+      window.removeEventListener("focus", onReturnToPage);
+      window.removeEventListener("pointerdown", onReturnToPage, true);
+      window.removeEventListener("keydown", onReturnToPage, true);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [open, endPrintSession]);
 
   // Focus in on open, back to the invoking control on close (§21). Keyed to
   // `open` only — a child modal standing this overlay down must not restore
@@ -157,28 +280,21 @@ export function LabelSheet({
 
   // Scoped print CSS; @page fixes the physical size and removes printer margins.
   //
-  // Everything that is not #apsa-print-root, inside it, or one of its ancestors
-  // is REMOVED from layout (display:none, not just hidden), and the ancestors —
-  // including this fixed overlay and any h-screen/overflow app shell — become
-  // plain static blocks. The pages then flow in normal document order, so the
-  // printer gets exactly one 100×150 mm page per label. (A fixed overlay is
-  // repeated on every printed page and never fragments, which printed labels
-  // overlapping and duplicated, with a page count set by the app behind it.)
+  // Under print media EVERYTHING in <body> except the temporary print target
+  // is removed from layout (display:none) — the app, this overlay and its
+  // preview included. The target is a direct child of <body>, so its pages
+  // flow in normal document order and the printer gets exactly one page per
+  // label. With no target, nothing prints. On screen the target is never shown.
   const printCss = `
+#${PRINT_ROOT_ID} { display: none; }
 @media print {
   @page { size: ${pageSize.width}mm ${pageSize.height}mm; margin: 0; }
-  html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
-  body *:not(#apsa-print-root):not(#apsa-print-root *):not(:has(#apsa-print-root)) {
-    display: none !important;
+  html, body {
+    margin: 0 !important; padding: 0 !important; background: #fff !important;
+    height: auto !important; min-height: 0 !important; overflow: visible !important;
   }
-  body *:has(#apsa-print-root) {
-    display: block !important; position: static !important; inset: auto !important;
-    width: auto !important; height: auto !important; min-height: 0 !important;
-    max-height: none !important; overflow: visible !important; margin: 0 !important;
-    padding: 0 !important; border: 0 !important; transform: none !important;
-    background: #fff !important; box-shadow: none !important;
-  }
-  #apsa-print-root { display: block !important; position: static !important; margin: 0 !important; }
+  body > *:not(#${PRINT_ROOT_ID}) { display: none !important; }
+  #${PRINT_ROOT_ID} { display: block !important; position: static !important; margin: 0 !important; }
   .apsa-label-page { break-after: page; page-break-after: always; break-inside: avoid; }
   .apsa-label-page:last-child { break-after: auto; page-break-after: auto; }
 }`;
@@ -227,26 +343,53 @@ export function LabelSheet({
       <div className="flex-1 overflow-auto p-4">
         <div className="mx-auto flex w-fit flex-col items-center gap-4">
           {/*
-           * The preview and the print target are the same DOM. On screen each
-           * page is bordered and scaled from millimetres; in print the scoped CSS
-           * above takes over and the border/shadow disappear with the chrome.
+           * Preview only — never the print target. Each page is bordered and
+           * scaled from millimetres; under print media it is not laid out.
            */}
-          <div id="apsa-print-root" className="flex flex-col items-center gap-4">
-            {mapPages(children, pageSize)}
+          <div data-testid="label-preview" className="flex flex-col items-center gap-4">
+            {mapPages(children, pageSize, "apsa-label-preview-page")}
           </div>
         </div>
       </div>
+
+      {printPages
+        ? createPortal(<LabelPrintTarget pages={printPages} pageSize={pageSize} />, document.body)
+        : null}
+    </div>
+  );
+}
+
+/**
+ * The temporary print target: the validated pages, one physical page each.
+ * Rendered as a direct child of <body> only between a successful pre-print
+ * check and the end of that print; LabelSheet's print CSS makes it the only
+ * thing a print can output.
+ */
+export function LabelPrintTarget({
+  pages,
+  pageSize,
+}: {
+  pages: React.ReactNode[];
+  pageSize: { width: number; height: number };
+}) {
+  return (
+    <div id={PRINT_ROOT_ID} aria-hidden="true">
+      {mapPages(pages, pageSize, "apsa-label-page")}
     </div>
   );
 }
 
 /** Wrap each child in a physical-page container sized in millimetres. */
-function mapPages(children: React.ReactNode, pageSize: { width: number; height: number }) {
+function mapPages(
+  children: React.ReactNode,
+  pageSize: { width: number; height: number },
+  pageClass: "apsa-label-page" | "apsa-label-preview-page",
+) {
   const array = Array.isArray(children) ? children : [children];
   return array.map((child, index) => (
     <div
       key={index}
-      className="apsa-label-page bg-white text-black shadow-[0_1px_4px_rgba(0,0,0,0.15)] print:shadow-none"
+      className={`${pageClass} bg-white text-black shadow-[0_1px_4px_rgba(0,0,0,0.15)] print:shadow-none`}
       style={{
         width: `${pageSize.width}mm`,
         height: `${pageSize.height}mm`,

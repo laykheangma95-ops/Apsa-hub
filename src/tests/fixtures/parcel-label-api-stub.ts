@@ -24,6 +24,9 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
   if (!server.permissions.includes("fulfillment.print_label")) {
     throw new Error("403 forbidden");
   }
+  if (server.labelFails) throw new Error("503 label endpoint unavailable");
+  // A cancelled order has no printable shipping label.
+  if (server.orderCancelled) throw new Error("409 order cancelled");
   return {
     merchant: { businessName: "Dara Shop" },
     // A snapshotless order carries NO recipient data (service never infers it).
@@ -34,7 +37,12 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
     reprint: false,
     payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
     // A shipping label exists only for a carrier shipment (CORRECTION-003).
-    delivery: { providerName: "VET Express", trackingNumber: "VET-1", status: "ready" },
+    delivery: {
+      id: server.shipment.id,
+      providerName: "VET Express",
+      trackingNumber: server.shipment.trackingNumber,
+      status: "ready",
+    },
     // The order's APSA Parcel ID — secondary text on the shipping label.
     parcelCode: STUB_PARCEL_CODE,
   };

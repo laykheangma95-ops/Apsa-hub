@@ -10,6 +10,7 @@ import { getInternalParcelLabelData } from "@/lib/api";
 import {
   buildInternalParcelLabel,
   INTERNAL_PARCEL_LABEL_SIZE_MM,
+  type InternalParcelLabelInput,
 } from "@/lib/labels/internal-parcel-label";
 import { runInternalPrePrint } from "@/lib/labels/internal-print-guard";
 import {
@@ -85,10 +86,14 @@ export function InternalParcelLabelDialog({
   if (!open) return null;
 
   /** Pre-print hook: only a fresh, verified, authorized, still-live attempt prints. */
-  async function handleBeforePrint(): Promise<boolean> {
+  async function handleBeforePrint(): Promise<React.ReactNode[] | null> {
     const live = printGuard.begin();
     setPrintNotice(null);
+    let verified: InternalParcelLabelInput[] | null = null;
     const result = await runInternalPrePrint({
+      onVerified: (fresh) => {
+        verified = fresh;
+      },
       displayed: canPrint ? (query.data ?? []) : [],
       queryClient,
       queryKey: labelsKey,
@@ -97,18 +102,25 @@ export function InternalParcelLabelDialog({
       reauthorize: () =>
         reauthorizeCapability(queryClient, userId, organizationId, "fulfillment.print_label"),
     });
-    if (result === "ok") return true;
-    if (result === "retired") return false;
+    if (result === "ok") {
+      // The print target is built from the server's verified labels.
+      return (
+        (verified as InternalParcelLabelInput[] | null)?.map((d) => (
+          <InternalParcelLabel key={d.order.id} vm={buildInternalParcelLabel(d)} />
+        )) ?? null
+      );
+    }
+    if (result === "retired") return null;
     if (result === "denied" || result === "refreshFailed") {
       // Fail closed: the label that could not be re-confirmed leaves the cache,
       // so the preview reloads from the server (a refusal shows as an error).
       void queryClient.cancelQueries({ queryKey: labelsKey, exact: true }).catch(() => undefined);
       queryClient.removeQueries({ queryKey: labelsKey, exact: true });
       setPrintNotice("refreshFailed");
-      return false;
+      return null;
     }
     if (result === "changed") setPrintNotice("changed");
-    return false;
+    return null;
   }
 
   const data = canPrint ? (query.data ?? []) : [];

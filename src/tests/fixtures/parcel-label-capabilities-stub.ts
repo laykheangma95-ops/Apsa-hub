@@ -26,9 +26,25 @@ interface FakeServer {
   capabilityFails: boolean;
   /** Serve a snapshotless (unconfirmed) order with no recipient data. */
   snapshotless: boolean;
+  /** The order's current carrier shipment; replacing it changes id + tracking. */
+  shipment: { id: string; trackingNumber: string };
+  /** The order was cancelled: the server refuses its label (409). */
+  orderCancelled: boolean;
+  /** The label endpoint is unreachable (network / 5xx). */
+  labelFails: boolean;
   capabilityRequests: number;
   labelFetches: string[];
   printCalls: number;
+  /**
+   * What each synchronous print found in the temporary print target, in
+   * order ("" when there was none).
+   */
+  printed: string[];
+  /**
+   * Model a browser whose print UI outlives window.print() (mobile): the call
+   * returns at once and the print pipeline runs later.
+   */
+  asyncPrint: boolean;
   revoke(): void;
   grant(): void;
 }
@@ -43,9 +59,14 @@ const server: FakeServer = {
   permissions: [...ALL_GRANTED],
   capabilityFails: false,
   snapshotless: false,
+  shipment: { id: "shipment-1", trackingNumber: "VET-1" },
+  orderCancelled: false,
+  labelFails: false,
   capabilityRequests: 0,
   labelFetches: [],
   printCalls: 0,
+  printed: [],
+  asyncPrint: false,
   revoke() {
     server.permissions = server.permissions.filter((p) => p !== "fulfillment.print_label");
   },
@@ -54,9 +75,15 @@ const server: FakeServer = {
   },
 };
 window.apsaServer = server;
-// Count print attempts without opening a real print dialog.
+// Count print attempts without opening a real print dialog. By default the
+// call behaves like a desktop browser's: beforeprint, the print itself, then
+// afterprint, all before it returns.
 window.print = () => {
   server.printCalls += 1;
+  if (server.asyncPrint) return;
+  window.dispatchEvent(new Event("beforeprint"));
+  server.printed.push(document.getElementById("apsa-print-root")?.textContent ?? "");
+  window.dispatchEvent(new Event("afterprint"));
 };
 
 export async function getActiveMemberCapabilitiesFn(): Promise<CapabilityResult> {

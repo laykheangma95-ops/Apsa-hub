@@ -154,11 +154,14 @@ export function ParcelLabelDialog({
    *   3. the attempt must still belong to the same open dialog, user,
    *      organization and orders after every await;
    *   4. the print capability is re-authorized server-side.
+   *
+   * Resolves to the pages to print, built from the FRESH data, or null (refuse).
+   * LabelSheet prints only those pages; the preview itself is never printable.
    */
-  async function handleBeforePrint(): Promise<boolean> {
+  async function handleBeforePrint(): Promise<React.ReactNode[] | null> {
     const displayed: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
     if (displayed.length === 0 || displayed.some((d) => shippingLabelIssues(d).length > 0)) {
-      return false;
+      return null;
     }
     const live = printGuard.begin();
     setPrintNotice(null);
@@ -173,19 +176,27 @@ export function ParcelLabelDialog({
       // authorized member is told the refresh failed and offered a retry.
       const stillAllowed = await reauthorizePrint();
       if (stillAllowed && live()) setPrintNotice("refreshFailed");
-      return false;
+      return null;
     }
-    if (!live()) return false;
+    if (!live()) return null;
     // Still the same open dialog, user, organization and orders: the fresh
     // data becomes the preview, so a difference is what the merchant reviews.
     queryClient.setQueryData(labelsKey, fresh);
     const verdict = verifyFreshLabels(displayed, fresh);
     if (verdict.kind !== "ok") {
       setPrintNotice(verdict.kind);
-      return false;
+      return null;
+    }
+    // The destination must still be the order's confirmed snapshot (§9).
+    if (fresh.some((d) => !d.customer.addressConfirmed)) {
+      setPrintNotice("changed");
+      return null;
     }
     const allowed = await reauthorizePrint();
-    return allowed && live();
+    if (!(allowed && live())) return null;
+    // The print target is built from the fresh, verified data — never from
+    // the preview that was on screen when Print was pressed.
+    return fresh.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />);
   }
 
   const data: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];

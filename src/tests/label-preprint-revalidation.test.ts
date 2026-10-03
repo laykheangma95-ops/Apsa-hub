@@ -267,7 +267,7 @@ describe("P2 #1 — shipping label pre-print refresh is a brand-new authoritativ
     const hook = dialog.slice(dialog.indexOf("async function handleBeforePrint"));
     expect(hook).not.toContain("fetchQuery");
     const fetchAt = hook.indexOf("await fetchAuthoritative(queryClient, labelsKey, fetchLabels)");
-    const guardAt = hook.indexOf("if (!live()) return false;");
+    const guardAt = hook.indexOf("if (!live()) return null;");
     const verifyAt = hook.indexOf("verifyFreshLabels(displayed, fresh)");
     expect(fetchAt).toBeGreaterThan(-1);
     expect(guardAt).toBeGreaterThan(fetchAt);
@@ -302,6 +302,7 @@ describe("P2 #2 — internal parcel label is revalidated before printing", () =>
     const { queryClient, displayed, guard } = setup();
     let reads = 0;
     let reauthorized = 0;
+    let verified: InternalParcelLabelInput[] | null = null;
     const result = await runInternalPrePrint({
       displayed,
       queryClient,
@@ -309,10 +310,14 @@ describe("P2 #2 — internal parcel label is revalidated before printing", () =>
       read: () => (reads++, Promise.resolve([internal()])),
       live: guard.begin(),
       reauthorize: () => (reauthorized++, Promise.resolve(true)),
+      onVerified: (fresh) => {
+        verified = fresh;
+      },
     });
     expect(result).toBe("ok");
     expect(reads).toBe(1);
     expect(reauthorized).toBe(1);
+    expect(verified).toEqual([internal()]);
   });
 
   it("never reuses an in-flight background request", async () => {
@@ -351,6 +356,7 @@ describe("P2 #2 — internal parcel label is revalidated before printing", () =>
 
   it("permission revoked between the read and the print → denied, not printed", async () => {
     const { queryClient, displayed, guard } = setup();
+    let verifiedOnDenial = false;
     const result = await runInternalPrePrint({
       displayed,
       queryClient,
@@ -358,8 +364,12 @@ describe("P2 #2 — internal parcel label is revalidated before printing", () =>
       read: () => Promise.resolve([internal()]),
       live: guard.begin(),
       reauthorize: () => Promise.resolve(false),
+      onVerified: () => {
+        verifiedOnDenial = true;
+      },
     });
     expect(result).toBe("denied");
+    expect(verifiedOnDenial).toBe(false);
     // A re-authorization that itself throws is a denial too.
     const again = await runInternalPrePrint({
       displayed,
@@ -533,11 +543,15 @@ describe("P2 #2 — internal parcel label is revalidated before printing", () =>
       "printGuard.setContext(printIdentity(userId, organizationId, orderIds), open)",
     );
     expect(dialog).toContain('"fulfillment.print_label"');
-    expect(dialog).toContain('if (result === "ok") return true;');
     expect(dialog).toContain("queryClient.removeQueries({ queryKey: labelsKey, exact: true });");
-    // Exactly one path returns true.
+    // Exactly one path yields pages to print — the verified fresh labels; every
+    // other path returns null (refuse).
     const hook = dialog.slice(dialog.indexOf("async function handleBeforePrint"));
-    expect((hook.slice(0, hook.indexOf("\n  }\n")).match(/return true/g) ?? []).length).toBe(1);
+    const body = hook.slice(0, hook.indexOf("\n  }\n"));
+    expect(body).toContain('if (result === "ok") {');
+    expect(body).toContain("verified = fresh;");
+    expect((body.match(/return null;/g) ?? []).length).toBe(3);
+    expect(body).not.toMatch(/return (true|false);/);
   });
 
   it("the new notices exist in Khmer and English", () => {

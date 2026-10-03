@@ -54,6 +54,12 @@ describe("the browser suite drives the shipped dialog, not a copy", () => {
       "E. if the fresh authorization request FAILS",
       "F. a snapshotless order shows NO inferred recipient",
       "C. only ONE focus trap is live",
+      "G. native browser print BEFORE authorization prints nothing",
+      "H. native browser print after permission revocation prints nothing",
+      "I. native browser print after order cancellation prints nothing",
+      "J. native browser print after shipment replacement prints only refreshed data",
+      "K. a failed pre-print refresh prints nothing",
+      "L. closing the dialog destroys a print target",
     ]) {
       expect(suite).toContain(proof);
     }
@@ -75,7 +81,7 @@ describe("capability revalidation source rules", () => {
     // Re-authorized as the LAST step, and only honoured if the attempt is
     // still live (same open dialog, user, organization and orders).
     expect(dialog).toContain("const allowed = await reauthorizePrint();");
-    expect(dialog).toContain("return allowed && live();");
+    expect(dialog).toContain("if (!(allowed && live())) return null;");
     // A refused pre-print refresh (e.g. the grant was just revoked) still goes
     // through re-authorization, so a denial evicts the PII and shows denied
     // instead of a generic "refresh failed" (browser proof D).
@@ -86,9 +92,41 @@ describe("capability revalidation source rules", () => {
     );
     expect(hook).toContain("cancelRefetch: true");
     expect(hook).toMatch(/state\?\.status === "success"/);
-    expect(read("src/components/labels/LabelSheet.tsx")).toMatch(
-      /if \(allowed\) window\.print\(\)/,
+    // window.print() is reached only past the refusal check, with a target.
+    const sheet = read("src/components/labels/LabelSheet.tsx");
+    const handler = sheet.slice(sheet.indexOf("async function handlePrint()"));
+    const refusal = handler.indexOf(
+      "if (!pages || pages.length === 0 || !openRef.current) return;",
     );
+    expect(refusal).toBeGreaterThan(-1);
+    expect(handler.indexOf("window.print();")).toBeGreaterThan(refusal);
+    // One call site only.
+    expect((sheet.match(/^\s+window\.print\(\);$/gm) ?? []).length).toBe(1);
+  });
+
+  it("the preview is never the print target; only a validated temporary target prints", () => {
+    const sheet = read("src/components/labels/LabelSheet.tsx");
+    // Under print media everything but the target is removed from layout.
+    expect(sheet).toContain("body > *:not(#${PRINT_ROOT_ID}) { display: none !important; }");
+    // The preview does not carry the print-root id or the printable page class.
+    expect(sheet).toContain('mapPages(children, pageSize, "apsa-label-preview-page")');
+    expect((sheet.match(/id=\{PRINT_ROOT_ID\}/g) ?? []).length).toBe(1);
+    // The target is generated only from validated pages, as a child of <body>.
+    expect(sheet).toContain("flushSync(() => setPrintPages(pages));");
+    expect(sheet).toMatch(/createPortal\(<LabelPrintTarget [^)]*, document\.body\)/);
+    // Native print: unarmed beforeprint and afterprint destroy the target, and
+    // Ctrl/Cmd+P is routed into the guarded path.
+    expect(sheet).toContain('window.addEventListener("beforeprint", onBeforeNativePrint);');
+    expect(sheet).toContain('window.addEventListener("afterprint", onAfterPrint);');
+    expect(sheet).toContain('window.addEventListener("keydown", onPrintShortcut, true);');
+    expect(sheet).toContain("e.preventDefault();");
+    // Both guarded dialogs build the target from FRESH data, not the preview.
+    expect(dialog).toContain(
+      "return fresh.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />);",
+    );
+    const internal = read("src/components/labels/InternalParcelLabelDialog.tsx");
+    expect(internal).toContain("onBeforePrint={handleBeforePrint}");
+    expect(internal).toContain("verified = fresh;");
   });
 
   it("never persists capabilities in browser storage", () => {

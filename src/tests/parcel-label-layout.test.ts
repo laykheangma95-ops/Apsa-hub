@@ -30,7 +30,7 @@ import { inflateSync } from "node:zlib";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18n from "@/lib/i18n";
-import { LabelSheet } from "@/components/labels/LabelSheet";
+import { LabelPrintTarget, LabelSheet } from "@/components/labels/LabelSheet";
 import { ParcelLabel } from "@/components/labels/ParcelLabel";
 import {
   buildParcelLabel,
@@ -278,6 +278,11 @@ function renderSheet(fixtures: typeof LAYOUT_FIXTURES, css: string): string {
       children: pages,
     }),
   );
+  // What actually prints: the temporary print target, a direct child of <body>
+  // (the sheet's own preview of the same pages is never laid out in print).
+  const target = renderToStaticMarkup(
+    createElement(LabelPrintTarget, { pages, pageSize: PARCEL_LABEL_SIZE_MM }),
+  );
   // The sheet is mounted inside an app-like shell — a viewport-height,
   // overflow-hidden layout with a sidebar and tall page content — exactly the
   // situation in which a fixed overlay used to print repeated, overlapping
@@ -286,7 +291,7 @@ function renderSheet(fixtures: typeof LAYOUT_FIXTURES, css: string): string {
     `<!doctype html><html lang="km"><head><meta charset="utf-8"><style>${css}</style></head><body>` +
     `<div class="flex h-screen overflow-hidden"><aside style="width:240px;height:2000px">nav</aside>` +
     `<main class="relative flex-1 overflow-auto p-6"><div style="height:3000px">app content</div>` +
-    `${sheet}</main></div></body></html>`
+    `${sheet}</main></div>${target}</body></html>`
   );
 }
 

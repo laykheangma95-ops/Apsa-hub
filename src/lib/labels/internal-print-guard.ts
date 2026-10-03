@@ -58,6 +58,11 @@ export interface InternalPrePrintOptions {
   live: () => boolean;
   /** Server-side re-authorization of fulfillment.print_label. Fails closed. */
   reauthorize: () => Promise<boolean>;
+  /**
+   * Receives the fresh, verified labels — called only when the result is "ok",
+   * so the print target is generated from validated data, never the preview.
+   */
+  onVerified?: (fresh: InternalParcelLabelInput[]) => void;
 }
 
 /**
@@ -106,5 +111,7 @@ export async function runInternalPrePrint(
     allowed = false;
   }
   if (!live()) return "retired";
-  return allowed ? "ok" : "denied";
+  if (!allowed) return "denied";
+  options.onVerified?.(fresh);
+  return "ok";
 }
