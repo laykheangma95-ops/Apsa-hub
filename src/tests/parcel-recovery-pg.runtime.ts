@@ -15,6 +15,10 @@
  *     then refuses: zero parcels
  *   - recovery holds the lock first → cancellation WAITS, then proceeds by the
  *     existing cancellation rules: one parcel, order cancelled, stock returned
+ *   - negative control: one fixed schedule (unlocked read → pause → cancellation
+ *     takes the lock → resume → cancellation commits) run against a TEST-ONLY
+ *     unlocked recovery yields cancelled + active parcel; against the shipped
+ *     recover_order_parcel_v1 it yields zero parcels — the lock is necessary
  *   - recovery vs recovery (held lock, and an unsynchronised burst) → exactly
  *     one active parcel; the others report 'exists'
  *
@@ -277,6 +281,133 @@ describe("recovery vs recovery (real PostgreSQL)", () => {
     const after = await snapshot(id);
     expect(after.parcels).toBe(1);
     expect({ ...after, parcels: 0 }).toEqual({ ...before, parcels: 0 });
+  });
+});
+
+// ── negative control: the lock is what prevents the invalid state ────────────
+//
+// TEST-ONLY. Two functions are created in this throwaway database (never in a
+// migration, never in production) to replay the OLD recovery shape under one
+// fixed schedule:
+//
+//   test_unlocked_recover_v0 — read lifecycle WITHOUT the order lock, pause,
+//     then insert the parcel if the earlier read said 'confirmed' (the removed
+//     "check in the service → await → service-role insert").
+//   test_gated_shipped_recover — the same unlocked read and the same pause,
+//     then call the SHIPPED recover_order_parcel_v1.
+//
+// The pause is a transaction advisory lock (the gate) that the test holds and
+// releases. Schedule, identical for both:
+//   1. recovery starts, reads lifecycle = confirmed (no lock), waits at the gate
+//   2. cancellation takes the order lock and cancels (not yet committed)
+//   3. the gate opens; recovery proceeds and WAITS on the order row
+//   4. cancellation commits; recovery finishes
+// The unlocked version leaves the forbidden state (cancelled + active parcel);
+// the shipped one re-reads under the lock, sees 'cancelled', writes nothing.
+
+describe("negative control: same schedule, unlocked vs shipped recovery (real PostgreSQL)", () => {
+  const GATE = 59_059;
+
+  beforeAll(async () => {
+    await sql.unsafe(`
+      CREATE FUNCTION test_unlocked_recover_v0(p_org UUID, p_order UUID, p_gate BIGINT)
+      RETURNS JSONB LANGUAGE plpgsql AS $$
+      DECLARE v_lifecycle TEXT; v_id UUID;
+      BEGIN
+        SELECT lifecycle_status::TEXT INTO v_lifecycle
+        FROM public.orders WHERE id = p_order AND organization_id = p_org;   -- no lock
+        PERFORM pg_advisory_xact_lock(p_gate);                               -- pause
+        IF v_lifecycle <> 'confirmed' THEN
+          RETURN jsonb_build_object('status', 'not_confirmed', 'current', v_lifecycle);
+        END IF;
+        IF EXISTS (SELECT 1 FROM public.parcels
+                   WHERE organization_id = p_org AND order_id = p_order AND status <> 'void') THEN
+          RETURN jsonb_build_object('status', 'exists');
+        END IF;
+        INSERT INTO public.parcels (organization_id, order_id, parcel_code, status)
+        VALUES (p_org, p_order, public.new_apsa_parcel_code_v1(), 'created')
+        RETURNING id INTO v_id;
+        RETURN jsonb_build_object('status', 'created', 'observed', v_lifecycle);
+      END $$;
+
+      CREATE FUNCTION test_gated_shipped_recover(p_org UUID, p_order UUID, p_gate BIGINT, p_actor UUID)
+      RETURNS JSONB LANGUAGE plpgsql AS $$
+      DECLARE v_lifecycle TEXT;
+      BEGIN
+        SELECT lifecycle_status::TEXT INTO v_lifecycle
+        FROM public.orders WHERE id = p_order AND organization_id = p_org;   -- no lock
+        PERFORM pg_advisory_xact_lock(p_gate);                               -- pause
+        RETURN public.recover_order_parcel_v1(p_org, p_order, p_actor)
+               || jsonb_build_object('observed_before_pause', v_lifecycle);
+      END $$;
+    `);
+  });
+
+  /** Waits until `pid` is blocked on a lock of the given kind ('advisory' or a row lock). */
+  async function waitForLockWait(pid: number, kind: "advisory" | "row"): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      const [row] =
+        await sql`select wait_event_type, wait_event from pg_stat_activity where pid = ${pid}`;
+      const advisory = row?.wait_event === "advisory";
+      if (row?.wait_event_type === "Lock" && (kind === "advisory" ? advisory : !advisory)) return;
+      await Bun.sleep(25);
+    }
+    throw new Error(`backend ${pid} never waited on a ${kind} lock`);
+  }
+
+  async function runSchedule(call: (conn: SQL, id: string) => Promise<Json>) {
+    const id = await strandedOrder();
+    const gate = await sql.reserve();
+    const recovery = await sql.reserve();
+    const cancel = await sql.reserve();
+    let result: Json;
+    try {
+      await gate`select pg_advisory_lock(${GATE})`;
+      const recoveryPid = await backendPid(recovery);
+      // 1. recovery reads 'confirmed' without the lock, then waits at the gate.
+      const pending = call(recovery, id);
+      await waitForLockWait(recoveryPid, "advisory");
+      // 2. cancellation takes the order lock and cancels, uncommitted.
+      await cancel`begin`;
+      expect((await cancelOn(cancel, id))["status"]).toBe("success");
+      // 3. open the gate: recovery proceeds and must wait on the order row.
+      await gate`select pg_advisory_unlock(${GATE})`;
+      await waitForLockWait(recoveryPid, "row");
+      // 4. cancellation commits; recovery completes.
+      await cancel`commit`;
+      result = await pending;
+    } finally {
+      gate.release();
+      recovery.release();
+      cancel.release();
+    }
+    return { id, result, after: await snapshot(id) };
+  }
+
+  it("UNLOCKED (old shape): the schedule produces a cancelled order with an active parcel", async () => {
+    const { result, after } = await runSchedule((conn, id) =>
+      conn`select test_unlocked_recover_v0(${ORG}::uuid, ${id}::uuid, ${GATE}) as r`.then(
+        (rows) => rows[0].r as Json,
+      ),
+    );
+    expect(result).toMatchObject({ status: "created", observed: "confirmed" });
+    // The forbidden state the lock exists to prevent.
+    expect(after.lifecycle).toBe("cancelled");
+    expect(after.parcels).toBe(1);
+  });
+
+  it("SHIPPED recover_order_parcel_v1: same schedule — waits, re-reads 'cancelled', creates nothing", async () => {
+    const { result, after } = await runSchedule((conn, id) =>
+      conn`select test_gated_shipped_recover(${ORG}::uuid, ${id}::uuid, ${GATE}, ${ACTOR}::uuid) as r`.then(
+        (rows) => rows[0].r as Json,
+      ),
+    );
+    // It saw 'confirmed' before the pause, exactly like the unlocked version...
+    expect(result["observed_before_pause"]).toBe("confirmed");
+    // ...but decided under the lock, after the cancellation committed.
+    expect(result).toMatchObject({ status: "not_confirmed", current: "cancelled" });
+    expect(after.lifecycle).toBe("cancelled");
+    expect(after.parcels).toBe(0);
   });
 });
 

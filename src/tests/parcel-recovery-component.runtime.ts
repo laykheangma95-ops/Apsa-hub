@@ -306,3 +306,154 @@ describe("ParcelRecoveryBoundary", () => {
     expect(notifications).toEqual([`success:${DONE}`]);
   });
 });
+
+// ── Permission generation ─────────────────────────────────────────────────────
+//
+// The recovery permission is part of the operation's identity. A request
+// started while the member could recover belongs to THAT permission
+// generation: once canRecover changes, its late success or error must do
+// nothing — and restoring the permission must never make it eligible again.
+
+describe("ParcelRecoveryBoundary — permission generation", () => {
+  const REVOKED: Props = { ...FIRST, canRecover: false };
+  const detailKey = () => ordersKeys.detail(USER_A, ORG_A, ORDER_1);
+
+  /** Nothing from an old generation reached the UI, the toasts or the caches. */
+  function expectUntouched(invalidated: unknown[], queryClient: QueryClientType) {
+    expect(notifications).toEqual([]);
+    expect(invalidated).toEqual([]);
+    expect(queryClient.getQueryData(detailKey())).toBeUndefined();
+    expect(text()).not.toContain(NOT_CONFIRMED);
+    expect(text()).not.toContain(FAILED);
+  }
+
+  function expectNoControl() {
+    expect(
+      mounted!.root.findAllByType("button").filter((b) => renderedText(b).includes(CREATE)),
+    ).toHaveLength(0);
+    expect(text()).toContain(NO_PERMISSION);
+  }
+
+  async function startPendingThenRevoke(queryClient: QueryClientType) {
+    await mount(queryClient, FIRST);
+    await clickCreate();
+    expect(createButton().props["disabled"]).toBe(true);
+    expect(server.pending).toHaveLength(1);
+    await update(queryClient, REVOKED);
+    expectNoControl();
+    return server.pending[0]!;
+  }
+
+  it("1. revoked during a pending success: the late success does nothing", async () => {
+    const { queryClient, invalidated } = client();
+    const resolveOld = await startPendingThenRevoke(queryClient);
+
+    await act(async () => resolveOld({ ok: true, detail: recoveredDetail(ORDER_1) }));
+    await settle();
+    expectUntouched(invalidated, queryClient);
+    expectNoControl();
+  });
+
+  it("2. revoked during a pending error: the late refusal or failure does nothing", async () => {
+    for (const error of [stale(), new Error("boom")]) {
+      const { queryClient, invalidated } = client();
+      const rejectOld = await startPendingThenRevoke(queryClient);
+
+      await act(async () => rejectOld({ ok: false, error }));
+      await settle();
+      expectUntouched(invalidated, queryClient);
+      expectNoControl();
+      await act(async () => mounted?.unmount());
+      mounted = null;
+      server.pending.length = 0;
+    }
+  });
+
+  it("3. revoked then restored before an old success returns: old discarded, new accepted", async () => {
+    const { queryClient, invalidated } = client();
+    const resolveA = await startPendingThenRevoke(queryClient);
+
+    // Restored: a fresh control, nothing pending from the old generation.
+    await update(queryClient, FIRST);
+    expectFresh();
+
+    // Request B under the restored permission.
+    await clickCreate();
+    expect(server.pending).toHaveLength(2);
+    const resolveB = server.pending[1]!;
+    expect(createButton().props["disabled"]).toBe(true);
+
+    // A returns late: discarded completely, B is still the pending one.
+    await act(async () =>
+      resolveA({ ok: true, detail: { ...recoveredDetail(ORDER_1), tag: "A" } }),
+    );
+    await settle();
+    expectUntouched(invalidated, queryClient);
+    expect(createButton().props["disabled"]).toBe(true);
+
+    // B returns: accepted normally, and the cached detail is B's.
+    await act(async () =>
+      resolveB({ ok: true, detail: { ...recoveredDetail(ORDER_1), tag: "B" } }),
+    );
+    await settle();
+    expect(notifications).toEqual([`success:${DONE}`]);
+    expect((queryClient.getQueryData(detailKey()) as any).tag).toBe("B");
+    expect(JSON.stringify(invalidated)).toBe(
+      JSON.stringify([
+        ordersKeys.detailDeliveries(USER_A, ORG_A, ORDER_1),
+        (await import("@/lib/packing-query")).packingKeys.orderState(USER_A, ORG_A, ORDER_1),
+        ordersKeys.list(USER_A, ORG_A),
+      ]),
+    );
+  });
+
+  it("4. revoked then restored before an old error returns: no stale notice, B still works", async () => {
+    const { queryClient, invalidated } = client();
+    const rejectA = await startPendingThenRevoke(queryClient);
+    await update(queryClient, FIRST);
+    expectFresh();
+    await clickCreate();
+    const resolveB = server.pending[1]!;
+
+    await act(async () => rejectA({ ok: false, error: stale() }));
+    await settle();
+    expectUntouched(invalidated, queryClient);
+    expect(createButton().props["disabled"]).toBe(true); // still B's own pending
+
+    await act(async () => resolveB({ ok: true, detail: recoveredDetail(ORDER_1) }));
+    await settle();
+    expect(notifications).toEqual([`success:${DONE}`]);
+    expect((queryClient.getQueryData(detailKey()) as any).parcelMissing).toBe(false);
+    expect(invalidated).toHaveLength(3);
+  });
+
+  it("5. after a revoke/restore cycle with nothing in flight, a new recovery succeeds normally", async () => {
+    const { queryClient, invalidated } = client();
+    await mount(queryClient, FIRST);
+    await update(queryClient, REVOKED);
+    await update(queryClient, FIRST);
+    server.mode = "created";
+    await clickCreate();
+    expect(notifications).toEqual([`success:${DONE}`]);
+    expect((queryClient.getQueryData(detailKey()) as any).parcelMissing).toBe(false);
+    expect(invalidated).toHaveLength(3);
+  });
+
+  it("6. an old error after restore cannot overwrite the new request's own notice", async () => {
+    const { queryClient, invalidated } = client();
+    const rejectA = await startPendingThenRevoke(queryClient);
+    await update(queryClient, FIRST);
+    server.mode = "failed";
+    await clickCreate(); // B fails immediately with its own notice
+    expect(text()).toContain(FAILED);
+    expect(text()).not.toContain(NOT_CONFIRMED);
+
+    await act(async () => rejectA({ ok: false, error: stale() }));
+    await settle();
+    // A's "no longer confirmed" notice and its detail re-read never appear.
+    expect(text()).toContain(FAILED);
+    expect(text()).not.toContain(NOT_CONFIRMED);
+    expect(invalidated).toEqual([]);
+    expect(notifications).toEqual([]);
+  });
+});

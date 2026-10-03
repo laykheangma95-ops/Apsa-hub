@@ -12,13 +12,16 @@
  *
  * State isolation (same pattern as RetryDeliveryReadyBoundary): the mutation,
  * its pending state and its notice belong to exactly one user + organization +
- * order. Any change of identity remounts a clean instance, and a late response
- * for an old identity is dropped — it neither notifies, nor shows a notice,
- * nor touches caches.
+ * order + PERMISSION GENERATION. Any change of identity, and any change of the
+ * recovery permission, remounts a clean instance; a late response for an old
+ * instance is dropped — it neither notifies, nor shows a notice, nor touches
+ * caches. The generation only ever increases, so restoring the permission
+ * never makes a request from an earlier generation eligible again. The server
+ * remains the authority: this decides only which responses the UI accepts.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, PackagePlus } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { recoverRealOrderParcel } from "@/lib/api";
@@ -39,11 +42,31 @@ export interface ParcelRecoveryProps extends ParcelRecoveryIdentity {
 }
 
 /**
- * Keys the stateful action by every identity dimension, so an order, user or
- * organization switch never carries a pending recovery or its notice over.
+ * A counter that increases every time the recovery permission changes, in
+ * either direction (true → false → true is two new generations, never a return
+ * to the first). Adjusted during render — React's sanctioned pattern for state
+ * derived from a changing prop — so the new generation is in effect on the very
+ * render that sees the new permission.
+ */
+function usePermissionGeneration(canRecover: boolean): number {
+  const [seen, setSeen] = useState({ canRecover, generation: 0 });
+  if (seen.canRecover !== canRecover) {
+    const next = { canRecover, generation: seen.generation + 1 };
+    setSeen(next);
+    return next.generation;
+  }
+  return seen.generation;
+}
+
+/**
+ * Keys the stateful action by every identity dimension AND the permission
+ * generation, so an order, user or organization switch — or a change of the
+ * recovery permission — never carries a pending recovery, its notice, or its
+ * late response over to the new instance.
  */
 export function ParcelRecoveryBoundary(props: ParcelRecoveryProps) {
-  const identity = `${props.userId}\u0000${props.organizationId}\u0000${props.orderId}`;
+  const generation = usePermissionGeneration(props.canRecover);
+  const identity = `${props.userId}\u0000${props.organizationId}\u0000${props.orderId}\u0000${generation}`;
   return <ParcelRecoveryAction key={identity} {...props} />;
 }
 
@@ -58,8 +81,9 @@ export function ParcelRecoveryAction({
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<RecoveryNotice>(null);
-  // Identity is fixed for this instance (the boundary remounts on any change).
-  // Once it unmounts, an in-flight result belongs to an old identity.
+  // Identity and permission generation are fixed for this instance (the
+  // boundary remounts on any change). Once it unmounts, an in-flight result
+  // belongs to an old identity or an old permission generation.
   const activeRef = useRef(true);
   useEffect(() => {
     activeRef.current = true;
@@ -67,13 +91,20 @@ export function ParcelRecoveryAction({
       activeRef.current = false;
     };
   }, []);
+  // Each request gets a token; only the latest request of a mounted instance
+  // may touch state or caches.
+  const latestRequestRef = useRef(0);
+  const isCurrent = useCallback(
+    (token: number) => activeRef.current && token === latestRequestRef.current,
+    [],
+  );
 
   const detailKey = ordersKeys.detail(userId, organizationId, orderId);
 
   const recover = useMutation({
-    mutationFn: () => recoverRealOrderParcel(orderId),
-    onSuccess: async (detail) => {
-      if (!activeRef.current) return;
+    mutationFn: (_token: number) => recoverRealOrderParcel(orderId),
+    onSuccess: async (detail, token) => {
+      if (!isCurrent(token)) return;
       setNotice(null);
       // The server's own answer: parcel present, so this action disappears.
       queryClient.setQueryData(detailKey, detail);
@@ -86,8 +117,8 @@ export function ParcelRecoveryAction({
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
       );
     },
-    onError: async (error) => {
-      if (!activeRef.current) return;
+    onError: async (error, token) => {
+      if (!isCurrent(token)) return;
       const kind = classifyOrderError(error);
       // Cancelled (or otherwise moved) meanwhile: say so and re-read the order.
       if (kind === "stale" || kind === "not_found") {
@@ -121,7 +152,8 @@ export function ParcelRecoveryAction({
           aria-busy={recover.isPending}
           onClick={() => {
             setNotice(null);
-            recover.mutate();
+            latestRequestRef.current += 1;
+            recover.mutate(latestRequestRef.current);
           }}
         >
           <PackagePlus className="size-4" aria-hidden />
