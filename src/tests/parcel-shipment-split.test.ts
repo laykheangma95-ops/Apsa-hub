@@ -55,6 +55,12 @@ interface World {
   packed: boolean;
   /** Make the parcel write inside confirmation fail (rollback path). */
   failParcelOnConfirm?: boolean;
+  /**
+   * A database that has not applied migration 057: confirmation succeeds but
+   * creates no parcel and returns no parcel_id (the hosted state that broke
+   * the parcel label right after confirmation).
+   */
+  pre057?: boolean;
 }
 
 function seed(lifecycle: "draft" | "confirmed" = "draft"): World {
@@ -242,6 +248,10 @@ function makeDb(world: World) {
          * raises and nothing — not even the status change — is committed. The
          * real SQL behaviour is proven in atomic-parcel-confirm.runtime.ts.
          */
+        if (args["p_axis"] === "lifecycle" && args["p_to"] === "confirmed" && world.pre057) {
+          o[col] = args["p_to"];
+          return { data: { status: "success", stock_movements: 0 }, error: null };
+        }
         if (args["p_axis"] === "lifecycle" && args["p_to"] === "confirmed") {
           if (world.failParcelOnConfirm) {
             return { data: null, error: { message: "parcel write failed (test)" } };
@@ -451,6 +461,38 @@ describe("APSA Parcel is generated when the order enters fulfillment", () => {
     await expect(arrange()).rejects.toThrow(/no APSA parcel/);
     expect(parcels()).toHaveLength(0);
     expect(world.tables["deliveries"]).toHaveLength(0);
+  });
+});
+
+// ── 1b. Regression: fresh confirmation on a database without migration 057 ────
+
+describe("a freshly confirmed order owns its APSA Parcel even before migration 057", () => {
+  it("confirmation creates exactly one parcel and the label prints immediately", async () => {
+    world.pre057 = true;
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+    // No refresh, no second navigation: the very next label read succeeds.
+    const data = await internalLabel();
+    expect(data.parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+    expect(isValidParcelCode(data.parcelCode)).toBe(true);
+    // The label read itself never created anything.
+    expect(activeParcels()).toHaveLength(1);
+  });
+
+  it("confirming again never duplicates the parcel", async () => {
+    world.pre057 = true;
+    await confirm();
+    const first = String(activeParcels()[0]!["parcel_code"]);
+    world.tables["orders"]![0]!["lifecycle_status"] = "draft";
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+    expect(String(activeParcels()[0]!["parcel_code"])).toBe(first);
+  });
+
+  it("a migrated database is not double-written: the RPC's parcel is the parcel", async () => {
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+    expect((await internalLabel()).parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
   });
 });
 

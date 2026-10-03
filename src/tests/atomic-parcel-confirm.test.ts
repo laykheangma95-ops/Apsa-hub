@@ -67,11 +67,23 @@ describe("runtime paths never create a parcel outside confirmation", () => {
       "src/server/deliveries/service.ts",
       "src/server/packing/service.ts",
       "src/server/fulfillment/service.ts",
-      "src/server/orders/service.ts",
     ]) {
       const source = code(file);
       expect(source).not.toContain("ensureParcelForOrder");
       expect(source).not.toContain("insertParcel");
     }
+  });
+
+  it("orders service ensures the parcel ONLY inside confirmation, when the RPC reported none", () => {
+    const source = code("src/server/orders/service.ts");
+    expect(source).not.toContain("insertParcel");
+    expect(source.split("ensureParcelForOrder(").length - 1).toBe(1);
+    const fn = source.slice(source.indexOf("export async function transitionLifecycleStatus"));
+    const body = fn.slice(0, fn.indexOf("\nexport "));
+    expect(body).toMatch(
+      /if \(to === "confirmed" && !result\.parcel_id\) \{[\s\S]*ensureParcelForOrder\(/,
+    );
+    // The failure surfaces; it is never swallowed into a parcel-less order.
+    expect(body).toMatch(/orders\.parcel_generation_failed[\s\S]*throw err;/);
   });
 });

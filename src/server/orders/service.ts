@@ -765,6 +765,26 @@ export async function transitionLifecycleStatus(
 
   if (result.status !== "success") throw transitionFailureToError(result);
 
+  // Every confirmed order owns its APSA Parcel from the moment it is confirmed.
+  // Migration 057 creates it inside the confirming transaction and reports it
+  // back; a database that has not applied 057 yet confirms without one, which
+  // left fresh orders with no parcel and a failing parcel label. Then it is
+  // created here, still as part of confirmation, idempotently (one active
+  // parcel per order is enforced by uniq_parcels_org_order_active). A failure
+  // is reported, never swallowed: no label path creates the parcel later.
+  if (to === "confirmed" && !result.parcel_id) {
+    const { ensureParcelForOrder } = await import("@/server/parcels/service");
+    try {
+      await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
+    } catch (err) {
+      reportServerError(err, {
+        event: "orders.parcel_generation_failed",
+        organizationId: ctx.organizationId,
+      });
+      throw err;
+    }
+  }
+
   // The RPC reports how many inventory movements its transaction wrote. Record
   // it on the order's audit entry so the stock consequence of a lifecycle
   // change is legible from the order's own trail, without inventing a second

@@ -372,6 +372,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
       invalidateAfterLifecycleChange();
+      // The pack state read while the order was a draft predates its APSA
+      // Parcel; confirmation created it, so it is read again.
+      void queryClient.invalidateQueries({ queryKey: packStateQueryKey, exact: true });
       setNotice(t("order.confirmedNotice"));
     },
     onError: (error) => {
@@ -520,10 +523,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const packState = packStateQuery.data ?? null;
   const actions = fulfillmentActions({
     canPrintLabel: showPrintLabel,
-    // Wait for the server's packed state so "Pack order" never flashes for a
-    // packed order; on a failed read the pack screen reports it instead.
-    canPack: showPackButton && !packStateQuery.isPending,
+    // The pack slot is rendered from the first paint: a placeholder holds it
+    // until the server's packed state arrives, so "Pack order" neither pops in
+    // late nor flashes for a packed order. On a failed read the pack screen
+    // reports it instead. identityOk mirrors packStateQuery's own `enabled`,
+    // so the placeholder never waits on a query that cannot run.
+    canPack: showPackButton && identityOk,
     packed: packState?.packed ?? false,
+    packPending: packStateQuery.isPending,
     canArrangeDelivery: canCreateDelivery && deliveriesQuery.isSuccess,
     activeDeliveryStatus: activeDelivery?.status ?? null,
     canHandoff: identityOk && capabilities.can("delivery.handoff"),
@@ -932,6 +939,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                       >
                         {t("order.startPacking")}
                       </Link>
+                    );
+                  case "pack_pending":
+                    // Holds the Pack order slot (same size) while the packed
+                    // state loads — announced as busy, never a blank gap.
+                    return (
+                      <div
+                        key={action.key}
+                        role="status"
+                        aria-busy="true"
+                        aria-label={t("common.loading")}
+                        className="flex h-11 w-full items-center justify-center rounded-xl border border-border-default"
+                      >
+                        <Spinner />
+                      </div>
                     );
                   case "packed":
                     // Status carried by icon + label, never colour alone.

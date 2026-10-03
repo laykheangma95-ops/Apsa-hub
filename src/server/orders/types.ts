@@ -189,6 +189,13 @@ export interface TransitionRpcResult {
    * TypeScript can influence it.
    */
   stock_movements?: number;
+  /**
+   * The order's APSA Parcel, returned by a confirmation that created or found
+   * it in the same transaction (migration 057). Absent from a database that
+   * predates 057 — see transitionLifecycleStatus.
+   */
+  parcel_id?: string;
+  parcel_code?: string;
 }
 
 /** Filter/pagination options for listing orders. All optional; all org-scoped by the repository. */

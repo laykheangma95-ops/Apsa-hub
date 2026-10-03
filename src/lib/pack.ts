@@ -158,6 +158,7 @@ export type FulfillmentActionKey =
   | "print_label"
   | "pack"
   | "packed"
+  | "pack_pending"
   | "arrange_delivery"
   | "print_shipping_label"
   | "retry_delivery_ready"
@@ -185,6 +186,12 @@ export function fulfillmentActions(input: {
   canPrintLabel: boolean;
   canPack: boolean;
   packed: boolean;
+  /**
+   * The server's packed state is still loading. The pack slot is then held by
+   * a "pack_pending" placeholder, so Pack order never pops in after the other
+   * actions (and never flashes for an already packed order).
+   */
+  packPending?: boolean;
   canArrangeDelivery: boolean;
   activeDeliveryStatus: string | null;
   canHandoff: boolean;
@@ -196,7 +203,13 @@ export function fulfillmentActions(input: {
 }): FulfillmentAction[] {
   const actions: FulfillmentAction[] = [];
   if (input.canPrintLabel) actions.push({ key: "print_label", disabled: false });
-  if (input.canPack) actions.push({ key: input.packed ? "packed" : "pack", disabled: false });
+  if (input.canPack) {
+    actions.push(
+      input.packPending
+        ? { key: "pack_pending", disabled: true }
+        : { key: input.packed ? "packed" : "pack", disabled: false },
+    );
+  }
   if (input.canArrangeDelivery && input.activeDeliveryStatus === null) {
     actions.push({ key: "arrange_delivery", disabled: false });
   }
