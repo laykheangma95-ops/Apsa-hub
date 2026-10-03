@@ -62,17 +62,9 @@ const fulfillment = async (order: string) =>
     )
   ).rows[0]!.v;
 
-/** Mark Packed with no delivery: unfulfilled → processing tagged with the marker. */
+/** Mark Packed with no delivery: the locked marker write Pack Order uses. */
 const packWithoutDelivery = (order: string) =>
-  f.rpc("transition_order_status_v1", [
-    f.org,
-    order,
-    "fulfillment",
-    "unfulfilled",
-    "processing",
-    f.actor,
-    PACKED,
-  ]);
+  f.rpc("record_order_packed_v1", [f.org, order, f.actor]);
 const arrange = async (order: string) => {
   const result = await f.rpc("create_delivery_v1", [
     f.org,
@@ -231,3 +223,213 @@ describe("privileges", () => {
     }
   });
 });
+
+// ── Timestamp ordering: a Mark Packed that waited behind a reopen ───────────
+//
+// In production the reopen holds the order lock, Mark Packed waits for it, and
+// Mark Packed commits LATER — but its transaction STARTED earlier. PGlite is a
+// single connection, so the wait itself cannot be staged; the timestamp effect
+// can, exactly: BEGIN fixes the packing transaction's start time (what now()
+// and every DEFAULT now() column return), the reopen then runs and is stamped
+// later, and the pack writes after it in the same, earlier-started
+// transaction. With transaction-start stamping the marker lands BEFORE the
+// reopen and the order reads as not packed despite the successful repack.
+
+type Tx = { query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }> };
+
+async function rpcIn(tx: Tx, name: string, args: unknown[]) {
+  const params = args.map((_, i) => `$${i + 1}`).join(",");
+  return (await tx.query<{ r: Json }>(`select ${name}(${params}) as r`, args)).rows[0]!.r;
+}
+
+/** One transaction that starts BEFORE the reopen and packs AFTER it. */
+async function packWaitingBehindReopen(
+  order: string,
+  pack: (tx: Tx) => Promise<void>,
+): Promise<{ startedAt: string }> {
+  return f.db.transaction(async (tx: Tx) => {
+    const startedAt = (await tx.query<{ t: string }>(`select now()::text as t`)).rows[0]!.t;
+    // The reopen holds the order lock and commits first …
+    const reopened = await rpcIn(tx, "reopen_order_fulfillment_v1", [
+      f.org,
+      order,
+      f.actor,
+      "Redo",
+    ]);
+    expect(reopened.status).toBe("success");
+    // … then the pack that was waiting for it writes and commits.
+    await pack(tx);
+    return { startedAt };
+  });
+}
+
+const fulfillmentRows = async (order: string) =>
+  (
+    await f.db.query<{ to_status: string; reason: string | null; at: string }>(
+      `select to_status, reason, changed_at::text as at from order_status_history
+       where order_id=$1 and axis='fulfillment' order by changed_at, id`,
+      [order],
+    )
+  ).rows;
+
+describe("timestamp ordering: pack waits behind reopen, commits later", () => {
+  it("no delivery: the repack is ordered after the reopen → packed, then auto-ready succeeds", async () => {
+    const order = await confirmedOrder();
+    expect((await packWithoutDelivery(order)).status).toBe("success");
+
+    const { startedAt } = await packWaitingBehindReopen(order, async (tx) => {
+      const packed = await rpcIn(tx, "record_order_packed_v1", [f.org, order, f.actor]);
+      expect(packed.status).toBe("success");
+    });
+
+    const rows = await fulfillmentRows(order);
+    const reopenRow = rows.find((r) => r.to_status === "unfulfilled" && r.reason === "Redo")!;
+    const lastMarker = rows.filter((r) => r.reason === PACKED).at(-1)!;
+    // The pack's transaction started before the reopen, yet its marker is later.
+    expect(Date.parse(reopenRow.at)).toBeGreaterThanOrEqual(Date.parse(startedAt));
+    expect(await isAfter(lastMarker.at, reopenRow.at)).toBe(true);
+    expect(await packedNow(order)).toBe(true);
+
+    // Replacement delivery: Arrange Delivery's auto-ready succeeds.
+    const replacement = await arrange(order);
+    expect((await readyPacked(order, replacement)).status).toBe("success");
+    expect(await deliveryStatus(replacement)).toBe("ready");
+  });
+
+  it("with a delivery: Mark Packed's marker-tagged steps are ordered after the reopen → packed and ready", async () => {
+    const order = await confirmedOrder();
+    const delivery = await arrange(order);
+
+    await packWaitingBehindReopen(order, async (tx) => {
+      for (const [from, to] of [
+        ["pending", "preparing"],
+        ["preparing", "ready"],
+      ]) {
+        const moved = await rpcIn(tx, "transition_delivery_status_v1", [
+          f.org,
+          delivery,
+          from,
+          to,
+          f.actor,
+          PACKED,
+        ]);
+        expect(moved.status).toBe("success");
+      }
+    });
+
+    expect(await deliveryStatus(delivery)).toBe("ready");
+    expect(await packedNow(order)).toBe(true);
+    const reopenAt = (await fulfillmentRows(order)).find((r) => r.reason === "Redo")!.at;
+    const markers = (
+      await f.db.query<{ at: string }>(
+        `select created_at::text as at from delivery_status_history
+         where delivery_id=$1 and reason=$2 order by created_at`,
+        [delivery, PACKED],
+      )
+    ).rows;
+    expect(markers).toHaveLength(2);
+    for (const m of markers) expect(await isAfter(m.at, reopenAt)).toBe(true);
+
+    // Retry ready on a replacement left preparing: succeeds on the repacked order.
+    expect((await genericMove(delivery, "ready", "cancelled", "Courier no-show")).status).toBe(
+      "success",
+    );
+    const replacement = await arrange(order);
+    expect((await genericMove(replacement, "pending", "preparing")).status).toBe("success");
+    expect((await readyPacked(order, replacement)).status).toBe("success");
+    expect(await deliveryStatus(replacement)).toBe("ready");
+  });
+
+  it("why the dedicated write exists: the generic order transition stamps transaction START", async () => {
+    // The pre-fix path — Mark Packed through transition_order_status_v1 — in the
+    // same waiting transaction: its marker lands before the reopen and the order
+    // reads as NOT packed. Pack Order no longer writes its marker this way.
+    const order = await confirmedOrder();
+    await packWithoutDelivery(order);
+    await packWaitingBehindReopen(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_order_status_v1", [
+        f.org,
+        order,
+        "fulfillment",
+        "unfulfilled",
+        "processing",
+        f.actor,
+        PACKED,
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expect(await packedNow(order)).toBe(false);
+  });
+
+  it("no inversion even when the clock is behind the order's history (+1µs, never backwards)", async () => {
+    const order = await confirmedOrder();
+    await packWithoutDelivery(order);
+    // A history row stamped an hour in the future (clock skew between writers).
+    const future = (
+      await f.db.query<{ t: string }>(
+        `insert into order_status_history(organization_id,order_id,axis,from_status,to_status,changed_by,reason,changed_at)
+         values($1,$2,'payment','unpaid','unpaid_probe',$3,'skew probe', now() + interval '1 hour')
+         returning changed_at::text as t`,
+        [f.org, order, f.actor],
+      )
+    ).rows[0]!.t;
+    expect((await reopen(order)).status).toBe("success");
+    expect((await packWithoutDelivery(order)).status).toBe("success");
+    const rows = await fulfillmentRows(order);
+    const reopenRow = rows.find((r) => r.reason === "Repack needed")!;
+    const lastMarker = rows.filter((r) => r.reason === PACKED).at(-1)!;
+    expect(await isAfter(reopenRow.at, future)).toBe(true);
+    expect(await isAfter(lastMarker.at, reopenRow.at)).toBe(true);
+    expect(await packedNow(order)).toBe(true);
+  });
+
+  it("paired rows of one event share a time; steps of one operation are 1µs apart", async () => {
+    const order = await confirmedOrder();
+    await packWithoutDelivery(order);
+    const delivery = await arrange(order);
+    expect((await genericMove(delivery, "pending", "cancelled", "Customer moved")).status).toBe(
+      "success",
+    );
+    // The delivery's cancelled row and the order row it drove: one event, one time.
+    const paired = (
+      await f.db.query<Json>(
+        `select oh.changed_at = dh.created_at as same
+         from order_status_history oh, delivery_status_history dh
+         where oh.order_id=$1 and oh.reason='Delivery status: cancelled'
+           and dh.delivery_id=$2 and dh.to_status='cancelled'`,
+        [order, delivery],
+      )
+    ).rows[0]!;
+    expect(paired.same).toBe(true);
+    expect(await packedNow(order)).toBe(true);
+
+    // Recovery on a pending delivery: pending → preparing, then ready 1µs later.
+    const second = await arrange(order);
+    expect((await readyPacked(order, second)).status).toBe("success");
+    const steps = (
+      await f.db.query<{ to_status: string; at: string }>(
+        `select to_status::text, created_at::text as at from delivery_status_history
+         where delivery_id=$1 and from_status is not null order by created_at`,
+        [second],
+      )
+    ).rows;
+    expect(steps.map((s) => s.to_status)).toEqual(["preparing", "ready"]);
+    const gap = (
+      await f.db.query<{ us: number }>(
+        `select (extract(epoch from ($2::timestamptz - $1::timestamptz)) * 1000000)::int as us`,
+        [steps[0]!.at, steps[1]!.at],
+      )
+    ).rows[0]!.us;
+    expect(gap).toBe(1);
+  });
+});
+
+/** Strict timestamptz comparison in SQL (text forms are not always comparable). */
+async function isAfter(later: string, earlier: string): Promise<boolean> {
+  return (
+    await f.db.query<{ v: boolean }>(`select $1::timestamptz > $2::timestamptz as v`, [
+      later,
+      earlier,
+    ])
+  ).rows[0]!.v;
+}

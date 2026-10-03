@@ -765,6 +765,44 @@ function statefulRpc(fn: string, args: any): any {
     });
     return { status: "success" };
   }
+  if (fn === "record_order_packed_v1") {
+    // Mirrors migration 054: the no-delivery Mark Packed marker, under the locks.
+    const order = mockOrders.find((o) => o.id === args.p_order_id && o.organization_id === org);
+    if (!order) return { status: "not_found" };
+    const active = mockDeliveries.some(
+      (d) =>
+        d.order_id === order.id &&
+        d.organization_id === org &&
+        ["pending", "preparing", "ready", "in_transit"].includes(d.status),
+    );
+    if (active) return { status: "has_delivery" };
+    if (order.lifecycle_status !== "confirmed") return { status: "invalid_order" };
+    if (!["unfulfilled", "processing"].includes(order.fulfillment_status)) {
+      return { status: "stale", current: order.fulfillment_status };
+    }
+    const steps: [string, string][] =
+      order.fulfillment_status === "processing"
+        ? [
+            ["processing", "unfulfilled"],
+            ["unfulfilled", "processing"],
+          ]
+        : [["unfulfilled", "processing"]];
+    for (const [from, to] of steps) {
+      mockOrderHistory.push({
+        id: `oh-${mockOrderHistory.length + 1}`,
+        organization_id: org,
+        order_id: order.id,
+        axis: "fulfillment",
+        from_status: from,
+        to_status: to,
+        changed_by: args.p_changed_by,
+        reason: PACK_ORDER_PACKED_REASON_CODE,
+        changed_at: at,
+      });
+    }
+    order.fulfillment_status = "processing";
+    return { status: "success" };
+  }
   if (fn === "transition_delivery_status_v1") {
     const delivery = mockDeliveries.find(
       (d) => d.id === args.p_delivery_id && d.organization_id === org,
@@ -974,15 +1012,17 @@ describe("pack without delivery", () => {
     expect(result).toEqual({ kind: "packed", deliveryId: null });
     // Fulfillment state only — no delivery created, assigned, started or handed off.
     expect(mockDeliveries).toHaveLength(0);
-    expect(rpcCalls.map((c) => c.fn)).toEqual(["transition_order_status_v1"]);
-    expect(rpcCalls[0]!.args).toMatchObject({
+    // The marker is written by the locked record_order_packed_v1, never by the
+    // generic order transition (whose history time is the transaction start).
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["record_order_packed_v1"]);
+    expect(rpcCalls[0]!.args).toEqual({
       p_organization_id: ORG_A,
-      p_axis: "fulfillment",
-      p_expected_from: "unfulfilled",
-      p_to: "processing",
+      p_order_id: ORDER_ID,
       p_changed_by: "user-packer",
-      p_reason: PACK_ORDER_PACKED_REASON_CODE,
     });
+    expect(mockOrderHistory.map((h) => [h.from_status, h.to_status, h.reason])).toEqual([
+      ["unfulfilled", "processing", PACK_ORDER_PACKED_REASON_CODE],
+    ]);
   });
 
   it("print label → pack → packed, all before any delivery exists", async () => {
@@ -2108,6 +2148,7 @@ describe("migration 054 — one packed rule guards every readiness path", () => 
       "reopen_order_fulfillment_v1",
       "ready_packed_delivery_v1",
       "transition_delivery_status_v1",
+      "record_order_packed_v1",
     ]) {
       const statements = bodies()[name]!.split(";");
       const deliveryLock = statements.findIndex(
@@ -2132,13 +2173,46 @@ describe("migration 054 — one packed rule guards every readiness path", () => 
     expect(retry).toBeLessThan(body.indexOf("UPDATE public."));
   });
 
-  it("all four functions are executable by service_role only", () => {
+  it("every history row the packed rule reads gets its time after the order lock — never now()", () => {
+    for (const name of [
+      "reopen_order_fulfillment_v1",
+      "ready_packed_delivery_v1",
+      "transition_delivery_status_v1",
+      "record_order_packed_v1",
+    ]) {
+      const body = bodies()[name]!;
+      const orderLock = body.search(/FROM public\.orders\s+WHERE[^;]*FOR UPDATE/);
+      const stamp = body.indexOf("next_fulfillment_event_at_v1(");
+      expect(orderLock).toBeGreaterThan(-1);
+      expect(stamp).toBeGreaterThan(orderLock);
+      // Every history insert names its timestamp column explicitly…
+      const inserts = [...body.matchAll(/INSERT INTO public\.(\w+_status_history) \(([^)]*)\)/g)];
+      expect(inserts.length).toBeGreaterThan(0);
+      for (const [, table, columns] of inserts) {
+        expect(columns).toContain(table === "order_status_history" ? "changed_at" : "created_at");
+      }
+      // …and the event time is taken before the first write.
+      expect(stamp).toBeLessThan(body.search(/(UPDATE|INSERT INTO) public\./));
+      expect(body).not.toMatch(/clock_timestamp\(\)|\bnow\(\)/);
+    }
+    // The helper is strictly after every existing row of the order, and not callable by clients.
+    const helper = bodies()["next_fulfillment_event_at_v1"]!;
+    expect(helper).toContain("clock_timestamp()");
+    expect(helper.match(/\+ interval '1 microsecond'/g)).toHaveLength(2);
+    expect(sql()).toMatch(
+      /REVOKE EXECUTE ON FUNCTION public\.next_fulfillment_event_at_v1\(UUID, UUID\)\s+FROM PUBLIC, anon, authenticated;/,
+    );
+    expect(sql()).not.toMatch(/GRANT EXECUTE ON FUNCTION public\.next_fulfillment_event_at_v1/);
+  });
+
+  it("the client-callable 054 functions are executable by service_role only", () => {
     const all = sql();
     for (const name of [
       "order_currently_packed_v1",
       "reopen_order_fulfillment_v1",
       "ready_packed_delivery_v1",
       "transition_delivery_status_v1",
+      "record_order_packed_v1",
     ]) {
       expect(all).toMatch(
         new RegExp(

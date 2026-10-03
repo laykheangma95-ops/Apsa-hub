@@ -1501,10 +1501,12 @@ describe("Test 19: No arbitrary-update escape hatch", () => {
     // create_order_v3 (migration 047) supersedes v2 for new writes;
     // update_order_shipping_v1 is the narrow shipping-snapshot write;
     // reopen_order_fulfillment_v1 (migration 054) is the narrow processing →
-    // unfulfilled reopen that also retires a ready delivery. There is still no
+    // unfulfilled reopen that also retires a ready delivery; record_order_packed_v1
+    // (also 054) is Pack Order's marker write with no delivery. There is still no
     // generic order UPDATE — every write is one of these specific RPCs.
     expect(rpcNames.sort()).toEqual([
       "create_order_v3",
+      "record_order_packed_v1",
       "reopen_order_fulfillment_v1",
       "transition_order_status_v1",
       "update_order_shipping_v1",

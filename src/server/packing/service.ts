@@ -20,7 +20,10 @@
  * append-only history with PACK_ORDER_PACKED_REASON_CODE and never creates,
  * assigns, starts or hands off a delivery:
  *   - no delivery yet  → order fulfillment history (unfulfilled → processing)
+ *                        via record_order_packed_v1
  *   - delivery arranged → delivery history, moving it to 'ready'
+ * Both stamp the marker with a time taken AFTER the order row lock (migration
+ * 054), so a Mark Packed that waited behind a reopen is ordered after it.
  * Arranging a delivery later for a packed order moves the new delivery to
  * 'ready' (readyPackedOrderDelivery), so Courier Handoff (ready → in_transit)
  * is unchanged.
@@ -395,13 +398,10 @@ export async function markOrderPacked(
 
   if (alreadyPacked) return { kind: "already_packed", deliveryId: null };
 
-  const recorded = await recordPackedOnOrder(
-    ctx.organizationId,
-    ctx.userId,
-    orderId,
-    order.fulfillment_status,
-  );
-  if (recorded !== "success") return { kind: "transition_failed", reason: recorded };
+  const recorded = await ordersRepo.recordOrderPacked(ctx.organizationId, orderId, ctx.userId);
+  if (recorded.status !== "success") {
+    return { kind: "transition_failed", reason: recorded.status };
+  }
   return { kind: "packed", deliveryId: null };
 }
 
@@ -541,42 +541,6 @@ async function moveDeliveryToReady(
     }
   }
   return { kind: "ready" };
-}
-
-/**
- * Record the packed fact on the order fulfillment history (no delivery exists).
- *
- * unfulfilled → processing carries the reason. An order already 'processing'
- * with no active delivery (only reachable through a manual fulfillment
- * transition) cannot write a processing → processing row, so the marker is the
- * pair processing → unfulfilled → processing, both rows tagged with the reason.
- */
-async function recordPackedOnOrder(
-  organizationId: string,
-  userId: string,
-  orderId: string,
-  fulfillmentStatus: string,
-): Promise<string> {
-  const steps: readonly (readonly [string, string])[] =
-    fulfillmentStatus === "unfulfilled"
-      ? [["unfulfilled", "processing"]]
-      : [
-          ["processing", "unfulfilled"],
-          ["unfulfilled", "processing"],
-        ];
-  for (const [from, to] of steps) {
-    const result = await ordersRepo.transitionStatus(
-      organizationId,
-      orderId,
-      "fulfillment",
-      from,
-      to,
-      userId,
-      PACK_ORDER_PACKED_REASON_CODE,
-    );
-    if (result.status !== "success") return result.status;
-  }
-  return "success";
 }
 
 /**
