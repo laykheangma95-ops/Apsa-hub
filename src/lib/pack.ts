@@ -26,6 +26,10 @@
  * delivery for an already-packed order moves the new delivery to "ready" the
  * same way, so Courier Handoff (ready → in_transit) is unchanged.
  *
+ * PACKED IS CURRENT STATE, NOT "EVER PACKED". Reopening the order's fulfillment
+ * (processing → unfulfilled) clears it: a delivery arranged afterwards stays
+ * pending until Pack Order completes again (isOrderCurrentlyPacked).
+ *
  * TODO(APSA V2): a dedicated packing permission (e.g. fulfillment.mark_packed).
  * V1 keeps the existing model — Mark Packed requires delivery.handoff, the
  * operational grant the person at the packing bench already holds.
@@ -104,19 +108,61 @@ export function isPackedDeliveryStatus(status: string | null | undefined): boole
   return status === "ready" || status === "in_transit";
 }
 
+/** One order fulfillment-axis or delivery history row, as the packed rule reads it. */
+export interface PackHistoryEntry {
+  toStatus: string;
+  reason: string | null;
+  /** changed_at (order history) or created_at (delivery history). */
+  at: string;
+}
+
+/** Delivery statuses that retire an attempt; the RPC moves the order to unfulfilled with them. */
+const RETIRED_DELIVERY_STATUSES: ReadonlySet<string> = new Set(["cancelled", "failed"]);
+
 /**
- * Whether an order counts as packed: its active delivery is ready (or further),
- * or any order-fulfillment or delivery history row carries the packed reason.
- * The server computes this from org-scoped history; this is the shared rule.
+ * Whether the order is CURRENTLY packed by Pack Order — not merely "was packed
+ * once". The latest packing event on the order's timeline decides:
+ *   - packed:  a history row carrying PACK_ORDER_PACKED_REASON_CODE (order
+ *              fulfillment or delivery history; only Pack Order writes it)
+ *   - cleared: the order fulfillment moving back to 'unfulfilled' — packing was
+ *              reopened ("packing stopped; back in the queue"), so the order
+ *              must go through Pack Order again
+ * Two moves to 'unfulfilled' are not a clear:
+ *   - Pack Order's own re-record step, which carries the packed reason
+ *   - the move transition_delivery_status_v1 writes when a delivery attempt is
+ *     cancelled or failed: that retires the attempt, not the packed parcel. The
+ *     RPC writes it in the same transaction as the delivery's cancelled/failed
+ *     row, so both share one timestamp. Callers cannot set that timestamp, so a
+ *     generic API cannot forge the exemption.
+ * A tie, or a row without a parseable time, fails closed (not packed).
  */
-export function isOrderPackedFromHistory(input: {
-  activeDeliveryStatus: string | null;
-  historyReasons: readonly (string | null)[];
+export function isOrderCurrentlyPacked(input: {
+  orderFulfillmentHistory: readonly PackHistoryEntry[];
+  deliveryHistory: readonly PackHistoryEntry[];
 }): boolean {
-  return (
-    isPackedDeliveryStatus(input.activeDeliveryStatus) ||
-    input.historyReasons.includes(PACK_ORDER_PACKED_REASON_CODE)
+  const time = (at: string): number => {
+    const ms = Date.parse(at);
+    return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+  };
+
+  let lastPacked = Number.NEGATIVE_INFINITY;
+  for (const h of [...input.orderFulfillmentHistory, ...input.deliveryHistory]) {
+    if (h.reason === PACK_ORDER_PACKED_REASON_CODE) lastPacked = Math.max(lastPacked, time(h.at));
+  }
+  if (lastPacked === Number.NEGATIVE_INFINITY) return false;
+
+  const retiredAt = new Set(
+    input.deliveryHistory
+      .filter((h) => RETIRED_DELIVERY_STATUSES.has(h.toStatus))
+      .map((h) => time(h.at)),
   );
+  let lastCleared = Number.NEGATIVE_INFINITY;
+  for (const h of input.orderFulfillmentHistory) {
+    if (h.toStatus !== "unfulfilled" || h.reason === PACK_ORDER_PACKED_REASON_CODE) continue;
+    const at = time(h.at);
+    if (!retiredAt.has(at)) lastCleared = Math.max(lastCleared, at);
+  }
+  return lastPacked > lastCleared;
 }
 
 /** Localized text for a history reason this module wrote; null for any other reason. */

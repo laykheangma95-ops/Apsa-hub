@@ -25,6 +25,10 @@
  * 'ready' (readyPackedOrderDelivery), so Courier Handoff (ready → in_transit)
  * is unchanged.
  *
+ * Packed is current state: reopening the order's fulfillment (processing →
+ * unfulfilled) clears it, so a delivery arranged afterwards stays pending until
+ * Mark Packed runs again. A cancelled/failed delivery attempt does not clear it.
+ *
  * Inventory is NOT touched: stock was consumed at order confirmation.
  *
  * Never import this file from browser-bundled code.
@@ -38,7 +42,7 @@ import { classifyScan } from "@/lib/barcode/scan-router";
 import { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "@/lib/barcode/normalize";
 import {
   PACK_ORDER_PACKED_REASON_CODE,
-  isOrderPackedFromHistory,
+  isOrderCurrentlyPacked,
   isPackedDeliveryStatus,
 } from "@/lib/pack";
 import type {
@@ -160,8 +164,8 @@ export async function getPackRequirements(
 }
 
 /**
- * Whether the order has been marked packed: its active delivery is ready (or
- * further), or the trusted packed marker exists (hasTrustedPackedMarker).
+ * Whether the order is packed: its active delivery is ready (or further), or
+ * Pack Order's trusted packed state is current (isCurrentlyPackedByPackOrder).
  */
 async function isOrderPacked(
   organizationId: string,
@@ -169,12 +173,15 @@ async function isOrderPacked(
   activeDeliveryStatus: string | null,
 ): Promise<boolean> {
   if (isPackedDeliveryStatus(activeDeliveryStatus)) return true;
-  return hasTrustedPackedMarker(organizationId, orderId);
+  return isCurrentlyPackedByPackOrder(organizationId, orderId);
 }
 
 /**
- * Whether Pack Order itself recorded the order as packed: the packed reason on
- * the order's fulfillment history or on any of its deliveries' history.
+ * Whether Pack Order's packed state is CURRENT for the order: the reserved
+ * packed reason (order fulfillment or any delivery's history) is newer than the
+ * last time the order's fulfillment was reopened to 'unfulfilled'
+ * (isOrderCurrentlyPacked has the rule). Packed once, then reopened, is not
+ * packed: a delivery arranged afterwards waits for Pack Order again.
  *
  * The marker is trusted because it is reserved — generic order and delivery
  * transition APIs reject it (isReservedOperationalReason), so only this
@@ -183,26 +190,24 @@ async function isOrderPacked(
  * readying a delivery on the packed order's behalf depends on this check only.
  * All reads org-scoped.
  */
-async function hasTrustedPackedMarker(organizationId: string, orderId: string): Promise<boolean> {
+async function isCurrentlyPackedByPackOrder(
+  organizationId: string,
+  orderId: string,
+): Promise<boolean> {
   const orderHistory = await ordersRepo.listStatusHistory(organizationId, orderId);
-  const orderReasons = orderHistory.filter((h) => h.axis === "fulfillment").map((h) => h.reason);
-  if (isOrderPackedFromHistory({ activeDeliveryStatus: null, historyReasons: orderReasons })) {
-    return true;
-  }
-
   const deliveries = await deliveriesRepo.listDeliveries(organizationId, { order_id: orderId });
-  for (const delivery of deliveries) {
-    const history = await deliveriesRepo.listDeliveryHistory(organizationId, delivery.id);
-    if (
-      isOrderPackedFromHistory({
-        activeDeliveryStatus: null,
-        historyReasons: history.map((h) => h.reason),
-      })
-    ) {
-      return true;
-    }
-  }
-  return false;
+  const deliveryHistories = await Promise.all(
+    deliveries.map((d) => deliveriesRepo.listDeliveryHistory(organizationId, d.id)),
+  );
+
+  return isOrderCurrentlyPacked({
+    orderFulfillmentHistory: orderHistory
+      .filter((h) => h.axis === "fulfillment")
+      .map((h) => ({ toStatus: h.to_status, reason: h.reason, at: h.changed_at })),
+    deliveryHistory: deliveryHistories
+      .flat()
+      .map((h) => ({ toStatus: h.to_status, reason: h.reason, at: h.created_at })),
+  });
 }
 
 /**
@@ -429,7 +434,7 @@ export async function readyPackedOrderDelivery(
   const delivery = await deliveriesRepo.findActiveDeliveryForOrder(organizationId, orderId);
   if (!delivery) return "no_delivery";
   if (isPackedDeliveryStatus(delivery.status)) return "already_ready";
-  if (!(await hasTrustedPackedMarker(organizationId, orderId))) return "not_packed";
+  if (!(await isCurrentlyPackedByPackOrder(organizationId, orderId))) return "not_packed";
   return (await moveDeliveryToReady(organizationId, userId, delivery)).kind;
 }
 
@@ -445,7 +450,7 @@ export async function readyPackedOrderDelivery(
  * Courier Handoff is unchanged — it still takes the delivery from 'ready'.
  *
  * Same grants as Mark Packed (orders.read + delivery.handoff); the packed fact
- * must come from the trusted marker, never from the delivery status.
+ * must come from the current trusted packed state, never from the delivery status.
  */
 export async function retryPackedDeliveryReady(
   ctx: AuthorizationContext,
@@ -468,7 +473,8 @@ export async function retryPackedDeliveryReady(
   if (isPackedDeliveryStatus(delivery.status)) {
     return { kind: "already_ready", deliveryId: delivery.id };
   }
-  if (!(await hasTrustedPackedMarker(ctx.organizationId, orderId))) return { kind: "not_packed" };
+  if (!(await isCurrentlyPackedByPackOrder(ctx.organizationId, orderId)))
+    return { kind: "not_packed" };
 
   const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
   if (moved.kind === "failed") return { kind: "transition_failed", reason: moved.reason };
