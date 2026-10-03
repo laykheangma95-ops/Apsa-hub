@@ -58,7 +58,35 @@ export const fulfillmentKeys = {
   /** The prefix covering every parcel-label entry for a principal (eviction target). */
   parcelLabelsPrefix: (userId: string, organizationId: string) =>
     [FULFILLMENT_QUERY_ROOT, userId, organizationId, "parcel-labels"] as const,
+  /**
+   * Internal APSA Parcel label data (parcel code, order number, item count — no
+   * PII). Partitioned by principal like every other fulfillment entry.
+   */
+  internalLabels: (userId: string, organizationId: string, orderIds: readonly string[]) =>
+    [
+      FULFILLMENT_QUERY_ROOT,
+      userId,
+      organizationId,
+      "internal-parcel-labels",
+      [...orderIds].sort(),
+    ] as const,
 };
+
+/**
+ * Drop every cached shipping label for this principal. Called after anything
+ * that changes what a shipping label prints — Arrange Delivery, a shipment
+ * transition (cancel / replace) or a payment change — so a label can never be
+ * printed from a stale cache. (The dialog also re-fetches before every print.)
+ */
+export function evictShippingLabels(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+): void {
+  queryClient.removeQueries({
+    queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
+  });
+}
 
 export const FULFILLMENT_QUERY_PREFIX = partition.prefix;
 export const clearFulfillmentQueries = partition.clear;

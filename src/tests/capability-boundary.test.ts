@@ -34,7 +34,13 @@ function findFiles(dir: string, exts: string[]): string[] {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (exts.some((ext) => entry.name.endsWith(ext))) out.push(path.relative(ROOT, full));
+      else if (exts.some((ext) => entry.name.endsWith(ext))) {
+        // Always "/"-separated, so path comparisons below (e.g. excluding
+        // src/lib/capabilities.ts from its own consumer scan) hold on Windows
+        // exactly as on CI — otherwise the declaration file counts as its own
+        // consumer and an unused key passes locally.
+        out.push(path.relative(ROOT, full).split(path.sep).join("/"));
+      }
     }
   })(abs);
   return out;

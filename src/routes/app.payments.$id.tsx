@@ -72,6 +72,7 @@ import {
 } from "@/lib/api";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { ordersKeys } from "@/lib/orders-query";
+import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { notifyError, notifySuccess } from "@/lib/feedback";
 import { fullTimestamp } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -199,6 +200,8 @@ function PaymentDetailScreen() {
       queryKey: ordersKeys.principal(userId, routeOrganizationId),
     });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    // The shipping label prints the payment decision (PAID / COD amount).
+    evictShippingLabels(queryClient, userId, routeOrganizationId);
   }
 
   function handleActionError(err: unknown) {

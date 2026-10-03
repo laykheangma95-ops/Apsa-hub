@@ -9,7 +9,9 @@
  * and absent — it proves:
  *
  *   - each page is exactly 100 × 150 mm and the PDF has one page per parcel;
- *   - the payment box, QR, Code 128 and footer lie fully inside the page;
+ *   - the payment box, APSA Parcel ID box, tracking Code 128 slot and footer lie
+ *     fully inside the page (CORRECTION-003: the shipping label shows the APSA
+ *     Parcel ID as text; its one barcode is the carrier tracking number);
  *   - nothing in the top block (receiver, address, carrier, items) reaches the
  *     payment box — no item line is clipped or overlaps it, the "+N more" note
  *     is visible, and the COD amount is the topmost element at its own centre;
@@ -28,7 +30,7 @@ import { inflateSync } from "node:zlib";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18n from "@/lib/i18n";
-import { LabelSheet } from "@/components/labels/LabelSheet";
+import { LabelPrintTarget, LabelSheet } from "@/components/labels/LabelSheet";
 import { ParcelLabel } from "@/components/labels/ParcelLabel";
 import {
   buildParcelLabel,
@@ -192,9 +194,13 @@ interface Measured {
   top: Box;
   bottom: Box;
   payment: Box;
-  qr: Box;
-  qrSvg: Box | null;
+  /** The 30 mm APSA Parcel box: small QR + Parcel ID (secondary identifier). */
+  apsaId: Box;
+  /** The small APSA Parcel QR inside it. */
+  apsaQr: Box | null;
   code128: Box | null;
+  /** The tracking barcode SVG, or its same-size "no tracking" placeholder. */
+  code128Slot: Box | null;
   code128Svg: Box | null;
   footer: Box;
   itemsSection: Box;
@@ -226,9 +232,11 @@ const MEASURE = `(() => {
     return {
       id: page.querySelector('[data-fixture]')?.getAttribute('data-fixture'),
       page: box(page), label: box(q('parcel-label')), top: box(top), bottom: box(q('parcel-label-bottom')),
-      payment: box(q('parcel-label-payment')), qr: box(q('parcel-label-qr')),
-      qrSvg: box(q('parcel-label-qr')?.querySelector('svg')),
-      code128: box(q('parcel-label-code128')), code128Svg: box(q('parcel-label-code128')?.querySelector('svg')),
+      payment: box(q('parcel-label-payment')), apsaId: box(q('parcel-label-apsa-id')),
+      apsaQr: box(q('parcel-label-apsa-qr')?.querySelector('svg')),
+      code128: box(q('parcel-label-code128')),
+      code128Slot: box(q('parcel-label-code128')?.querySelector('svg') ?? q('parcel-label-code128')?.firstElementChild),
+      code128Svg: box(q('parcel-label-code128')?.querySelector('svg')),
       footer: box(q('parcel-label-footer')), itemsSection: box(q('parcel-label-items')),
       itemLines: [...page.querySelectorAll('[data-testid="parcel-label-items"] li')].map(box),
       moreItems: box(q('parcel-label-more-items')),
@@ -270,6 +278,11 @@ function renderSheet(fixtures: typeof LAYOUT_FIXTURES, css: string): string {
       children: pages,
     }),
   );
+  // What actually prints: the temporary print target, a direct child of <body>
+  // (the sheet's own preview of the same pages is never laid out in print).
+  const target = renderToStaticMarkup(
+    createElement(LabelPrintTarget, { pages, pageSize: PARCEL_LABEL_SIZE_MM }),
+  );
   // The sheet is mounted inside an app-like shell — a viewport-height,
   // overflow-hidden layout with a sidebar and tall page content — exactly the
   // situation in which a fixed overlay used to print repeated, overlapping
@@ -278,7 +291,7 @@ function renderSheet(fixtures: typeof LAYOUT_FIXTURES, css: string): string {
     `<!doctype html><html lang="km"><head><meta charset="utf-8"><style>${css}</style></head><body>` +
     `<div class="flex h-screen overflow-hidden"><aside style="width:240px;height:2000px">nav</aside>` +
     `<main class="relative flex-1 overflow-auto p-6"><div style="height:3000px">app content</div>` +
-    `${sheet}</main></div></body></html>`
+    `${sheet}</main></div>${target}</body></html>`
   );
 }
 
@@ -505,17 +518,32 @@ describe.skipIf(!READY && !ON_CI)("parcel label — rendered geometry in Chromiu
     describe(id, () => {
       const get = () => measured.find((m) => m.id === id)!;
 
-      it("payment box, QR, Code 128 and footer lie fully inside the page", () => {
+      it("payment box, APSA Parcel ID box, tracking Code 128 slot and footer lie fully inside the page", () => {
         const m = get();
-        for (const box of [m.bottom, m.payment, m.qr, m.code128!, m.footer]) {
+        for (const box of [m.bottom, m.payment, m.apsaId, m.code128!, m.footer]) {
           expect(box).not.toBeNull();
           expect(inside(box, PAGE_BOX)).toBe(true);
         }
-        // QR keeps its full 30 mm; Code 128 keeps its full width and height.
-        expect(m.qrSvg!.width).toBeGreaterThanOrEqual(30 - EPS);
-        expect(m.qrSvg!.height).toBeGreaterThanOrEqual(30 - EPS);
-        expect(m.code128Svg!.width).toBeGreaterThanOrEqual(92 - EPS);
-        expect(m.code128Svg!.height).toBeGreaterThanOrEqual(12 - EPS);
+        // The APSA Parcel ID box keeps its full 30 mm; the tracking slot keeps
+        // its full width and height whether or not a tracking number exists.
+        expect(m.apsaId.width).toBeGreaterThanOrEqual(30 - EPS);
+        expect(m.apsaId.height).toBeGreaterThanOrEqual(30 - EPS);
+        expect(m.code128Slot!.width).toBeGreaterThanOrEqual(92 - EPS);
+        expect(m.code128Slot!.height).toBeGreaterThanOrEqual(12 - EPS);
+        const fixture = LAYOUT_FIXTURES.find((f) => f.id === id)!;
+        // A tracking number always prints as a real barcode.
+        if (fixture.input.delivery?.trackingNumber) {
+          expect(m.code128Svg).not.toBeNull();
+        }
+        // The APSA Parcel QR is SMALL and secondary: it sits wholly inside its
+        // 30 mm box, stays scannable (≥ 18 mm), and is far narrower than the
+        // primary full-width tracking barcode.
+        if (fixture.input.parcelCode) {
+          expect(m.apsaQr).not.toBeNull();
+          expect(inside(m.apsaQr!, m.apsaId)).toBe(true);
+          expect(m.apsaQr!.width).toBeGreaterThanOrEqual(18 - EPS);
+          expect(m.apsaQr!.width).toBeLessThan(m.code128Slot!.width / 3);
+        }
       });
 
       it("nothing above reaches the payment box; no item line is clipped", () => {

@@ -119,6 +119,8 @@ export async function organizationName(organizationId: string): Promise<string |
 }
 
 export interface LatestDeliveryRow {
+  /** The shipment's identity — lets the label detect a replaced shipment. */
+  id: string;
   provider_name: string;
   external_tracking_number: string | null;
   status: string;
@@ -184,7 +186,7 @@ export async function latestDeliveryForOrder(
 ): Promise<LatestDeliveryRow | null> {
   const { data, error } = await db
     .from("deliveries")
-    .select("provider_name, external_tracking_number, status, created_at")
+    .select("id, provider_name, external_tracking_number, status, created_at")
     .eq("organization_id", organizationId)
     .eq("order_id", orderId)
     .order("created_at", { ascending: false })

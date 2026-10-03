@@ -28,7 +28,6 @@ import {
   type ParcelLabelInput,
 } from "../lib/labels/parcel-label";
 import { ParcelLabel } from "../components/labels/ParcelLabel";
-import { isValidParcelCode } from "../lib/barcode/parcel-code";
 
 const ORG_A = "11111111-1111-4111-8111-111111111111";
 const ORDER_ID = "12345678-90ab-4cde-8f01-234567890abc";
@@ -541,8 +540,15 @@ describe("label — products", () => {
     const vm = buildParcelLabel(input());
     expect(vm.items.map((l) => l.text)).toEqual(["2 × Iced Coffee — Large", "1 × Croissant"]);
     const html = render(input());
-    expect(html).toContain("Iced Coffee — Large");
-    expect(html).toContain("2 ×");
+    // Packing list: every line shows quantity, product name and variant.
+    expect(html).toContain(T.packingList.replace("{{count}}", "3"));
+    expect((html.match(/data-testid="parcel-label-item"/g) ?? []).length).toBe(2);
+    expect(html).toMatch(/data-testid="parcel-label-item-qty"[^>]*>2 ×</);
+    expect(html).toMatch(/data-testid="parcel-label-item-name"[^>]*>Iced Coffee</);
+    expect(html).toMatch(/data-testid="parcel-label-item-variant"[^>]*> — Large</);
+    expect(html).toMatch(/data-testid="parcel-label-item-name"[^>]*>Croissant</);
+    // A line without a variant renders no variant element.
+    expect((html.match(/data-testid="parcel-label-item-variant"/g) ?? []).length).toBe(1);
   });
 
   it("long Khmer/English names wrap (break-words, 2-row clamp) and use more row budget", () => {
@@ -690,11 +696,16 @@ describe("label — carrier", () => {
 });
 
 describe("label — payment", () => {
-  it("COD shows the exact collectible amount, prominently (USD)", () => {
+  it("COD shows 'Collect: <amount>' as the most prominent block (USD)", () => {
     const html = render(input());
-    expect(html).toContain(T.codToCollect);
-    expect(html).toContain("$35.00");
-    expect(html).toContain("text-[22pt]");
+    const cod = /data-testid="parcel-label-cod"[\s\S]*?<\/div>/.exec(html)![0];
+    expect(cod).toContain(T.collect);
+    expect(cod).toContain("$35.00");
+    // Prominent: the heaviest border on the label and the largest type.
+    expect(cod).toContain("border-[1.2mm]");
+    expect(cod).toContain("text-[22pt]");
+    expect(html.indexOf(T.collect)).toBeLessThan(html.indexOf("$35.00"));
+    expect(html).not.toContain(T.paymentVerified);
   });
 
   it("COD in KHR shows riel exactly", () => {
@@ -714,12 +725,21 @@ describe("label — payment", () => {
     expect(html).toContain(T.balanceDue);
   });
 
-  it("PAID shows a small PAID mark and NO amount at all", () => {
+  it("Paid by bank shows '✓ Payment verified' and NO amount at all", () => {
     const html = render(input({ payment: { state: "paid", collect: null } }));
-    expect(html).toContain(T.paid);
+    expect(html).toContain(`✓ ${T.paymentVerified}`);
     expect(html).toContain(T.paidNoCollect);
     expect(html).not.toContain("$");
-    expect(html).not.toContain(T.codToCollect);
+    expect(html).not.toContain(T.collect);
+    expect(html).not.toContain('data-testid="parcel-label-cod"');
+  });
+
+  it("Paid never prints the paid amount, even when the order total is known", () => {
+    const html = render(
+      input({ payment: { state: "paid", collect: { amount: 3500, currency: "USD" } } }),
+    );
+    expect(html).toContain(T.paymentVerified);
+    expect(html).not.toContain("35.00");
   });
 
   it("PAID ignores any stray amount the input carries", () => {
@@ -757,19 +777,57 @@ describe("label — payment", () => {
   });
 });
 
-describe("label — QR + Code 128", () => {
-  it("renders BOTH codes, encoding the same canonical parcel identity", () => {
+describe("shipping label — APSA Parcel ID as text + carrier tracking Code 128", () => {
+  // The carrier's document: the TRACKING Code 128 is the primary, full-width
+  // barcode. A SMALL APSA Parcel QR + Parcel ID are the merchant's internal
+  // identifier (the full-size APSA codes are on the internal parcel label).
+  it("shows a small APSA Parcel QR and the Parcel ID beside the primary tracking barcode", () => {
     const vm = buildParcelLabel(input(), { now: FIXED_NOW });
-    expect(vm.qr!.payload).toBe(PARCEL_CODE);
-    expect(vm.code128!.payload).toBe(PARCEL_CODE);
-    expect(isValidParcelCode(vm.qr!.payload)).toBe(true);
+    expect(vm.parcelCode).toBe(PARCEL_CODE);
+    expect(vm.apsaQr!.payload).toBe(PARCEL_CODE);
+    expect(vm.apsaQr!.payload).not.toBe(vm.trackingCode128!.payload);
     const html = render(input());
-    expect(html).toContain('data-testid="parcel-label-qr"');
-    expect(html).toContain('data-testid="parcel-label-code128"');
+    expect(html).toContain('data-testid="parcel-label-apsa-id"');
+    expect(html).toContain('data-testid="parcel-label-apsa-qr"');
     expect(html).toContain(PARCEL_CODE);
+    expect(html).toContain(T.apsaParcelId);
+    // Two codes: the small APSA QR and the tracking Code 128.
+    expect((html.match(/<svg/g) ?? []).length).toBe(2);
   });
 
-  it("no PII, money, product or order data is encoded in either code", () => {
+  it("the APSA QR is small and the tracking barcode stays primary (full width)", () => {
+    const html = render(input());
+    expect(html).toContain('data-testid="parcel-label-apsa-qr" class="size-[20mm]');
+    expect(html).toContain("h-[12mm] w-full");
+    // Reading order: tracking barcode is the last, widest code on the page.
+    expect(html.indexOf('data-testid="parcel-label-apsa-qr"')).toBeLessThan(
+      html.indexOf('data-testid="parcel-label-code128"'),
+    );
+  });
+
+  it("the APSA QR encodes only the parcel code — no PII, money or order data", () => {
+    const vm = buildParcelLabel(input());
+    for (const s of [
+      "Sokha",
+      "012 345 678",
+      "BKK1",
+      "35.00",
+      "Iced Coffee",
+      "APSA-2026-001048",
+      ORDER_ID,
+    ]) {
+      expect(vm.apsaQr!.payload).not.toContain(s);
+    }
+  });
+
+  it("the one barcode encodes the carrier tracking number — never the APSA code", () => {
+    const vm = buildParcelLabel(input());
+    expect(vm.trackingCode128!.payload).toBe("VET-123");
+    expect(vm.trackingCode128!.payload).not.toContain(PARCEL_CODE);
+    expect(render(input())).toContain('data-testid="parcel-label-code128"');
+  });
+
+  it("no PII, money, product or order data is encoded in the tracking barcode", () => {
     const vm = buildParcelLabel(input());
     for (const s of [
       "Sokha",
@@ -783,46 +841,44 @@ describe("label — QR + Code 128", () => {
       ORDER_ID,
       CUSTOMER_ID,
     ]) {
-      expect(vm.qr!.payload).not.toContain(s);
-      expect(vm.code128!.payload).not.toContain(s);
+      expect(vm.trackingCode128!.payload).not.toContain(s);
     }
   });
 
-  it("a reprint reuses the exact same code and identical code graphics", () => {
+  it("without a tracking number: a same-height placeholder, no barcode, no order-UUID fallback", () => {
+    const html = render(
+      input({ delivery: { providerName: "VET Express", trackingNumber: null, status: "ready" } }),
+    );
+    expect(html).toContain(T.noTracking);
+    expect(html).toContain("h-[12mm] w-full");
+    // Only the small APSA QR remains; no tracking barcode is invented.
+    expect((html.match(/<svg/g) ?? []).length).toBe(1);
+    expect(html).toContain('data-testid="parcel-label-apsa-qr"');
+    expect(html).not.toContain(ORDER_ID);
+  });
+
+  it("without an APSA Parcel ID the text slot shows a dash — never an order UUID", () => {
+    const html = render(input({ parcelCode: null }));
+    expect(html).toContain('data-testid="parcel-label-apsa-id"');
+    expect(html).not.toContain(ORDER_ID);
+  });
+
+  it("a reprint keeps the same parcel ID and identical tracking barcode", () => {
     const first = buildParcelLabel(input(), { now: FIXED_NOW });
     const reprint = buildParcelLabel(input({ reprint: true }), {
       now: new Date("2026-12-01T00:00:00Z"),
     });
     expect(reprint.parcelCode).toBe(first.parcelCode);
-    expect(reprint.qr!.svg).toBe(first.qr!.svg);
-    expect(reprint.code128!.svg).toBe(first.code128!.svg);
+    expect(reprint.trackingCode128!.svg).toBe(first.trackingCode128!.svg);
   });
 
-  it("without a parcel code: a placeholder, no codes, no order-UUID fallback", () => {
-    const html = render(input({ parcelCode: null }));
-    expect(html).toContain(T.codesPending);
-    expect(html).not.toContain("<svg");
-    expect(html).not.toContain(ORDER_ID);
-  });
-
-  it("print geometry: QR ≥ 0.5 mm/module with a 4-module quiet zone at 30 mm", () => {
+  it("print geometry: tracking Code 128 spans the label width with X ≥ 0.17 mm and 10-module quiet zones", () => {
     const vm = buildParcelLabel(input());
-    const dim = Number(/viewBox="0 0 (\d+) /.exec(vm.qr!.svg)![1]);
-    const modules = dim / 4; // moduleSize 4
-    expect(30 / modules).toBeGreaterThanOrEqual(0.5);
-    // First dark module starts after the 4-module quiet zone.
-    const firstRect = /<rect x="(\d+)" y="(\d+)" width="\d+" height="4"/.exec(vm.qr!.svg)!;
-    expect(Number(firstRect[1])).toBeGreaterThanOrEqual(16);
-    expect(Number(firstRect[2])).toBeGreaterThanOrEqual(16);
-  });
-
-  it("print geometry: Code 128 spans the label width with X ≥ 0.17 mm and 10-module quiet zones", () => {
-    const vm = buildParcelLabel(input());
-    const width = Number(/viewBox="0 0 (\d+) /.exec(vm.code128!.svg)![1]);
+    const width = Number(/viewBox="0 0 (\d+) /.exec(vm.trackingCode128!.svg)![1]);
     const modules = width / 2; // moduleWidth 2
     const printableMm = PARCEL_LABEL_SIZE_MM.width - 8; // 4 mm padding each side
     expect(printableMm / modules).toBeGreaterThanOrEqual(0.17);
-    const firstBar = /<rect x="(\d+)"/.exec(vm.code128!.svg)!;
+    const firstBar = /<rect x="(\d+)"/.exec(vm.trackingCode128!.svg)!;
     expect(Number(firstBar[1])).toBe(20); // 10 quiet modules × 2
     expect(render(input())).toContain("h-[12mm] w-full");
   });
@@ -846,7 +902,7 @@ describe("deterministic fixtures — paid parcel and COD parcel", () => {
 
   it("paid parcel fixture", () => {
     const html = render(input({ payment: { state: "paid", collect: null } }));
-    expect(html).toContain(T.paid);
+    expect(html).toContain(T.paymentVerified);
     expect(html).not.toContain("$35.00");
   });
 });

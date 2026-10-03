@@ -100,8 +100,9 @@ async function loadOrderVariantIndex(
  * Get the pack requirements for an order: each line item with its current
  * variant barcode for scan validation, plus the parcel the order is packed into.
  *
- * The order must be confirmed and in an eligible fulfillment state, and its
- * parcel label must exist (Print Parcel Label comes before packing).
+ * The order must be confirmed and in an eligible fulfillment state. Its APSA
+ * Parcel exists from confirmation (created atomically, migration 057); no label
+ * print or delivery is required first, and nothing here creates a parcel.
  * Returns null if the order does not exist or belongs to another org.
  */
 export async function getPackRequirements(
@@ -120,13 +121,11 @@ export async function getPackRequirements(
     );
   }
 
+  // The APSA Parcel is created with confirmation (CORRECTION-003, migration
+  // 057; historical orders by 058). Pack Order reads it — it never creates one.
   const parcel = await parcelsRepo.findActiveParcelByOrder(ctx.organizationId, orderId);
-  if (!parcel) {
-    throw publicError("Order has no parcel identity — print the parcel label before packing", 400);
-  }
-
-  if (parcel.status === "void") {
-    throw publicError("Parcel has been voided — cannot pack", 400);
+  if (!parcel || parcel.status === "void") {
+    throw publicError("Order has no APSA parcel — it is created when the order is confirmed", 409);
   }
 
   const { items, variantMap, barcodesByProduct } = await loadOrderVariantIndex(

@@ -58,6 +58,8 @@ import {
   type ReturnableOrderResult,
 } from "@/lib/returns";
 import * as repo from "./repository";
+import * as parcelsRepo from "@/server/parcels/repository";
+import { isValidParcelCode } from "@/lib/barcode/parcel-code";
 
 /** Most returns one list call returns (newest first). */
 export const RETURNS_LIST_LIMIT = 100;
@@ -228,7 +230,39 @@ export async function findReturnableOrder(
     return { kind: "order_not_found" };
   }
 
-  const order = await repo.findOrderByNumber(ctx.organizationId, trimmed);
+  return returnableOrderFor(ctx, await repo.findOrderByNumber(ctx.organizationId, trimmed));
+}
+
+/**
+ * Start a return from the APSA Parcel — the order's stable warehouse identity
+ * (CORRECTION-003): scan the parcel QR, resolve its order, continue the same
+ * authorized Request → Receive → Inspect → Complete workflow.
+ *
+ * The parcel is resolved ONLY inside the caller's organization: another
+ * tenant's parcel, a malformed code and an unknown code all read exactly like
+ * an unknown order. The parcel never changes when a shipment is cancelled or
+ * replaced, so a return started from it always reaches the same order. Same
+ * permission as the order-number path, checked before anything is read.
+ */
+export async function findReturnableOrderByParcel(
+  ctx: AuthorizationContext,
+  parcelCode: string,
+): Promise<ReturnableOrderResult> {
+  requireReturnAccess(ctx);
+
+  if (typeof parcelCode !== "string" || !isValidParcelCode(parcelCode)) {
+    return { kind: "order_not_found" };
+  }
+  const parcel = await parcelsRepo.findParcelByCode(ctx.organizationId, parcelCode);
+  if (!parcel) return { kind: "order_not_found" };
+  return returnableOrderFor(ctx, await repo.findOrderById(ctx.organizationId, parcel.order_id));
+}
+
+/** What of this order can still come back — shared by both entry points. */
+async function returnableOrderFor(
+  ctx: AuthorizationContext,
+  order: Awaited<ReturnType<typeof repo.findOrderByNumber>>,
+): Promise<ReturnableOrderResult> {
   if (!order) return { kind: "order_not_found" };
   if (!RETURNABLE_LIFECYCLES.has(order.lifecycle_status)) return { kind: "order_not_returnable" };
   if (!(await repo.hasDeliveredDelivery(ctx.organizationId, order.id))) {

@@ -2,6 +2,7 @@ import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
+import * as parcelsRepo from "@/server/parcels/repository";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import {
   isTerminalDeliveryStatus,
@@ -42,6 +43,17 @@ export interface DeliveryHistoryEntry {
 
 export interface DeliveryDetail extends DeliverySummary {
   history: DeliveryHistoryEntry[];
+}
+
+/**
+ * A newly arranged carrier shipment and the APSA Parcel it is attached to
+ * (CORRECTION-003). The parcel is the order's: it existed before the shipment
+ * (generated at confirmation) and outlives it — a cancelled shipment's
+ * replacement attaches to the very same parcel.
+ */
+export interface CreatedDelivery extends DeliveryDetail {
+  parcelId: string;
+  parcelCode: string;
 }
 
 export interface CreateDeliveryServiceInput {
@@ -135,7 +147,7 @@ function createFailure(status: string): Error {
 export async function createDelivery(
   ctx: AuthorizationContext,
   input: CreateDeliveryServiceInput,
-): Promise<DeliveryDetail> {
+): Promise<CreatedDelivery> {
   ctx.require("delivery.create");
 
   const order = await repo.findOrderForOrg(ctx.organizationId, input.orderId);
@@ -173,6 +185,18 @@ export async function createDelivery(
     throw conflict("Order already has an active delivery");
   }
 
+  /*
+   * A shipment ATTACHES to the order's existing APSA Parcel; it NEVER creates
+   * or replaces it (CORRECTION-003). The parcel is created atomically with
+   * confirmation (migration 057; historical orders by 058), so a missing one is
+   * refused here rather than minted. Checked BEFORE the shipment is written, so
+   * a shipment never exists without its parcel.
+   */
+  const parcel = await parcelsRepo.findActiveParcelByOrder(ctx.organizationId, input.orderId);
+  if (!parcel) {
+    throw conflict("Order has no APSA parcel — it is created when the order is confirmed");
+  }
+
   const result = await repo.createDelivery(ctx.organizationId, ctx.userId, {
     order_id: input.orderId,
     location_id: locationId,
@@ -194,11 +218,14 @@ export async function createDelivery(
   try {
     const { readyPackedOrderDelivery } = await import("@/server/packing/service");
     const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
-    if (readied === "ready") return requireDetail(ctx.organizationId, result.delivery_id);
+    if (readied === "ready") {
+      const ready = await requireDetail(ctx.organizationId, result.delivery_id);
+      return { ...ready, parcelId: parcel.id, parcelCode: parcel.parcel_code };
+    }
   } catch {
     // Intentionally ignored; see above.
   }
-  return detail;
+  return { ...detail, parcelId: parcel.id, parcelCode: parcel.parcel_code };
 }
 
 function transitionFailure(status: string, current?: string): Error {

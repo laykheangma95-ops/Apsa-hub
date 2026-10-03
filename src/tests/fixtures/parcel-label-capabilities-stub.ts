@@ -26,9 +26,36 @@ interface FakeServer {
   capabilityFails: boolean;
   /** Serve a snapshotless (unconfirmed) order with no recipient data. */
   snapshotless: boolean;
+  /** The order's current carrier shipment; replacing it changes id + tracking. */
+  shipment: { id: string; trackingNumber: string };
+  /** The order was cancelled: the server refuses its label (409). */
+  orderCancelled: boolean;
+  /** The label endpoint is unreachable (network / 5xx). */
+  labelFails: boolean;
   capabilityRequests: number;
   labelFetches: string[];
   printCalls: number;
+  /**
+   * What each synchronous print found in the temporary print target, in
+   * order ("" when there was none).
+   */
+  printed: string[];
+  /**
+   * Model a browser whose print UI outlives window.print(): the print begins
+   * inside the call (beforeprint) but the call returns while it is still in
+   * progress; it completes later, on its own, via completePrint().
+   */
+  asyncPrint: boolean;
+  /** Complete an asynchronous print: the browser fires afterprint. */
+  completePrint(): void;
+  /** The order's payment as the server currently has it. */
+  payment: {
+    state: "paid" | "cod";
+    paid: boolean;
+    collect: { amount: number; currency: "USD" | "KHR" } | null;
+    partial: boolean;
+    checkReason: null;
+  };
   revoke(): void;
   grant(): void;
 }
@@ -43,9 +70,18 @@ const server: FakeServer = {
   permissions: [...ALL_GRANTED],
   capabilityFails: false,
   snapshotless: false,
+  shipment: { id: "shipment-1", trackingNumber: "VET-1" },
+  orderCancelled: false,
+  labelFails: false,
   capabilityRequests: 0,
   labelFetches: [],
   printCalls: 0,
+  printed: [],
+  asyncPrint: false,
+  completePrint() {
+    window.dispatchEvent(new Event("afterprint"));
+  },
+  payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
   revoke() {
     server.permissions = server.permissions.filter((p) => p !== "fulfillment.print_label");
   },
@@ -54,9 +90,15 @@ const server: FakeServer = {
   },
 };
 window.apsaServer = server;
-// Count print attempts without opening a real print dialog.
+// Count print attempts without opening a real print dialog. By default the
+// call behaves like a desktop browser's: beforeprint, the print itself, then
+// afterprint, all before it returns.
 window.print = () => {
   server.printCalls += 1;
+  window.dispatchEvent(new Event("beforeprint"));
+  if (server.asyncPrint) return;
+  server.printed.push(document.getElementById("apsa-print-root")?.textContent ?? "");
+  window.dispatchEvent(new Event("afterprint"));
 };
 
 export async function getActiveMemberCapabilitiesFn(): Promise<CapabilityResult> {

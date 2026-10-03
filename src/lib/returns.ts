@@ -23,6 +23,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { CapabilityView } from "@/lib/capabilities";
 import { parseQuantity } from "@/lib/inventory";
+import { looksLikeParcelCode } from "@/lib/barcode/parcel-code";
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -491,6 +492,28 @@ export async function findReturnableOrder(orderNumber: string): Promise<Returnab
   const { findReturnableOrderFn } = await import("@/api/returns");
   const result = await findReturnableOrderFn({ data: { orderNumber } });
   return result as unknown as ReturnableOrderResult;
+}
+
+/** Start a return from a scanned APSA Parcel QR (resolved server-side, org-scoped). */
+export async function findReturnableOrderByParcel(
+  parcelCode: string,
+): Promise<ReturnableOrderResult> {
+  const { findReturnableOrderByParcelFn } = await import("@/api/returns");
+  const result = await findReturnableOrderByParcelFn({ data: { parcelCode } });
+  return result as unknown as ReturnableOrderResult;
+}
+
+/**
+ * The returns search field takes an order number OR an APSA Parcel code (typed
+ * or scanned). A value carrying the APSA parcel prefix is a parcel lookup.
+ */
+export function returnLookupFor(
+  text: string,
+): { kind: "parcel"; parcelCode: string } | { kind: "order"; orderNumber: string } | null {
+  const trimmed = text.trim();
+  if (looksLikeParcelCode(trimmed)) return { kind: "parcel", parcelCode: trimmed };
+  const orderNumber = normalizeOrderNumber(trimmed);
+  return orderNumber === null ? null : { kind: "order", orderNumber };
 }
 
 export async function requestCustomerReturn(

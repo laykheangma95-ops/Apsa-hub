@@ -750,6 +750,9 @@ export async function transitionLifecycleStatus(
     throw conflict(`Cannot move order lifecycle from '${from}' to '${to}'`);
   }
 
+  // Confirming creates the order's APSA Parcel inside the same database
+  // transaction, under the order lock (migration 057, CORRECTION-003): the
+  // confirmation and the parcel commit together or not at all.
   const result = await repo.transitionStatus(
     ctx.organizationId,
     orderId,

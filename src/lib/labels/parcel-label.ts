@@ -11,10 +11,12 @@
  *     server's amount, or CHECK PAYMENT — formatted with the shared formatMoney.
  *     It NEVER recomputes an amount and never prints one unless the state is
  *     COD (§18);
- *   - renders BOTH a QR and a Code 128 barcode of the SAME canonical parcel
- *     identity (APSA:PCL:v1:<token>). Without a parcel code there are no codes
- *     at all (the dialog assigns one before printing) — the label never falls
- *     back to printing an order UUID.
+ *   - is the SHIPPING label (CORRECTION-003): it exists for a carrier shipment.
+ *     Its PRIMARY barcode is the carrier TRACKING number (full-width Code 128)
+ *     — what the courier scans. A SMALL APSA Parcel QR plus the Parcel ID are
+ *     the merchant's secondary, internal identifier (the full-size APSA codes
+ *     live on the internal parcel label, ./internal-parcel-label.ts). The label
+ *     never prints an order UUID.
  *
  * It carries no user-facing prose (wording is the component's i18n job). It
  * deliberately has no field for email, notes, analytics or any credential — the
@@ -152,6 +154,8 @@ export interface ParcelLabelInput {
     checkReason?: ParcelLabelCheckReason | null;
   };
   delivery: {
+    /** The shipment's id (server label data always carries it). */
+    id?: string;
     providerName: string;
     trackingNumber: string | null;
     status: string;
@@ -210,11 +214,17 @@ export interface ParcelLabelViewModel {
     trackingNumber: string | null;
     serviceName: string | null;
   } | null;
-  /** QR of the parcel identity; null until a parcel code exists. */
-  qr: { payload: string; svg: string } | null;
-  /** Code 128 of the SAME parcel identity; null until a parcel code exists. */
-  code128: { payload: string; svg: string } | null;
-  /** Human-readable parcel code, or null when not yet assigned. */
+  /**
+   * Code 128 of the carrier TRACKING number — the courier's identifier. Null
+   * without a tracking number (or one Code 128 cannot encode).
+   */
+  trackingCode128: { payload: string; svg: string } | null;
+  /**
+   * SMALL QR of the APSA Parcel ID — the merchant's internal identifier,
+   * secondary to the tracking barcode. Null without a valid parcel code.
+   */
+  apsaQr: { payload: string; svg: string } | null;
+  /** The APSA Parcel ID, printed as secondary text only (never scannable here). */
   parcelCode: string | null;
   /** ISO timestamp of when this label was generated. */
   printTimestamp: string;
@@ -255,7 +265,7 @@ function truncateGraphemes(text: string, max: number): string {
   return out.trimEnd();
 }
 
-function formatPrintedAt(now: Date): string {
+export function formatPrintedAt(now: Date): string {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: PRINT_TIME_ZONE,
     year: "numeric",
@@ -367,21 +377,17 @@ export function buildParcelLabel(
   }
   const overflowCount = allLines.length - shown.length;
 
-  // Codes: only ever the canonical parcel identity. A malformed or absent code
-  // yields NO code rather than a fallback that could expose an order UUID.
+  // Secondary APSA Parcel ID (text only). A malformed code is dropped rather
+  // than printed, and nothing ever falls back to an order UUID.
   const parcelCode =
     input.parcelCode && isValidParcelCode(input.parcelCode) ? input.parcelCode : null;
-  const qr = parcelCode
-    ? {
-        payload: parcelCode,
-        svg: renderQrSvg(parcelCode, { moduleSize: 4, quietModules: 4, ecLevel: "M" }),
-      }
-    : null;
-  const code128 =
-    parcelCode && isCode128Encodable(parcelCode)
+  // The shipping label's one barcode: the carrier tracking number.
+  const tracking = input.delivery?.trackingNumber?.trim() || null;
+  const trackingCode128 =
+    tracking && isCode128Encodable(tracking)
       ? {
-          payload: parcelCode,
-          svg: renderCode128Svg(parcelCode, { moduleWidth: 2, height: 40, quietModules: 10 }),
+          payload: tracking,
+          svg: renderCode128Svg(tracking, { moduleWidth: 2, height: 40, quietModules: 10 }),
         }
       : null;
 
@@ -435,8 +441,13 @@ export function buildParcelLabel(
           serviceName: input.delivery.serviceName?.trim() || null,
         }
       : null,
-    qr,
-    code128,
+    trackingCode128,
+    apsaQr: parcelCode
+      ? {
+          payload: parcelCode,
+          svg: renderQrSvg(parcelCode, { moduleSize: 4, quietModules: 4, ecLevel: "M" }),
+        }
+      : null,
     parcelCode,
     printTimestamp: now.toISOString(),
     printedAt: formatPrintedAt(now),

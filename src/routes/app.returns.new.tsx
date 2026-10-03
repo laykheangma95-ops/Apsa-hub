@@ -1,8 +1,14 @@
 /**
  * /app/returns/new — Request a customer return.
  *
- *   order number → the delivered order's lines (ordered / already returned /
- *   can return) → choose quantities → Request return → /app/returns/$returnId
+ *   order number OR APSA Parcel (typed, or scanned from the parcel QR) → the
+ *   delivered order's lines (ordered / already returned / can return) → choose
+ *   quantities → Request return → /app/returns/$returnId
+ *
+ * The APSA Parcel is the order's stable warehouse identity (CORRECTION-003): it
+ * survives shipment cancellation and replacement, so a parcel scan always
+ * resolves the same order. The server resolves it inside the caller's
+ * organization only.
  *
  * Every decision is the server's (src/server/returns/service.ts and migration
  * 056's request_customer_return_v1):
@@ -39,7 +45,8 @@ import {
   canAccessReturns,
   classifyReturnError,
   findReturnableOrder,
-  normalizeOrderNumber,
+  findReturnableOrderByParcel,
+  returnLookupFor,
   requestCustomerReturn,
   requestReturnMessageKey,
   returnErrorKey,
@@ -129,13 +136,16 @@ function NewReturnScreen({ userId, organizationId, onRequested }: NewReturnIdent
 
   async function findOrder(event: FormEvent) {
     event.preventDefault();
-    const orderNumber = normalizeOrderNumber(orderText);
-    if (orderNumber === null || busy) return;
+    const lookup = returnLookupFor(orderText);
+    if (lookup === null || busy) return;
     const live = guard.begin();
     setBusy(true);
     setMessage(null);
     try {
-      const result = await findReturnableOrder(orderNumber);
+      const result =
+        lookup.kind === "parcel"
+          ? await findReturnableOrderByParcel(lookup.parcelCode)
+          : await findReturnableOrder(lookup.orderNumber);
       if (!live()) return;
       if (result.kind === "order") {
         setOrder(result.order);
@@ -215,7 +225,7 @@ function NewReturnScreen({ userId, organizationId, onRequested }: NewReturnIdent
               type="submit"
               variant="outline"
               className="tap-target h-12 gap-2"
-              disabled={busy || normalizeOrderNumber(orderText) === null}
+              disabled={busy || returnLookupFor(orderText) === null}
               aria-busy={busy}
             >
               <Search className="size-4" aria-hidden />

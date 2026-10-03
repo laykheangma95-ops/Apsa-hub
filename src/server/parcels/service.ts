@@ -74,13 +74,35 @@ export async function createParcelForOrder(
     throw publicError("A parcel identity can only be created for a confirmed order", 409);
   }
 
-  const existing = await repo.findActiveParcelByOrder(ctx.organizationId, orderId);
+  return ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
+}
+
+/**
+ * Return the order's active APSA Parcel, creating it exactly once.
+ *
+ * The APSA Parcel is the ORDER's internal warehouse identity (CORRECTION-003):
+ * it is generated when the order enters fulfillment (confirmation) and stays
+ * the same through packing, every carrier shipment, handoff and returns. A
+ * carrier shipment (delivery) attaches to it; it never creates or replaces it.
+ *
+ * INTERNAL — no capability check. Callers have already authorized their own
+ * operation and verified the order belongs to `organizationId` and is
+ * confirmed. The partial unique index uniq_parcels_org_order_active keeps one
+ * active parcel per order even when two requests race; the loser reads and
+ * returns the winner.
+ */
+export async function ensureParcelForOrder(
+  organizationId: string,
+  userId: string | null,
+  orderId: string,
+): Promise<Parcel> {
+  const existing = await repo.findActiveParcelByOrder(organizationId, orderId);
   if (existing) return rowToParcel(existing);
 
   const parcelCode = generateParcelCode();
 
   try {
-    const row = await repo.insertParcel(ctx.organizationId, orderId, parcelCode, ctx.userId);
+    const row = await repo.insertParcel(organizationId, orderId, parcelCode, userId);
     return rowToParcel(row);
   } catch (err: unknown) {
     // Race: another request created the parcel between our check and insert.
@@ -88,7 +110,7 @@ export async function createParcelForOrder(
     // and return the winner.
     const msg = (err as { message?: string })?.message ?? "";
     if (msg.includes("uniq_parcels_org_order_active") || msg.includes("duplicate")) {
-      const retry = await repo.findActiveParcelByOrder(ctx.organizationId, orderId);
+      const retry = await repo.findActiveParcelByOrder(organizationId, orderId);
       if (retry) return rowToParcel(retry);
     }
     throw err;
