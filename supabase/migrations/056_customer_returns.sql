@@ -358,6 +358,117 @@ ALTER TABLE public.inventory_movements
     OR reference_type IS NOT DISTINCT FROM 'customer_return_item'
   );
 
+-- ── 7b. Completion is the ONLY writer of customer-return movements ──────────
+--
+-- The shape CHECKs above say WHAT a return movement may look like; this
+-- trigger says WHO may write one and for WHICH figures. Without it, any path
+-- that can insert a ledger row (e.g. the generic inventory API, which accepts a
+-- free-form reference) could file `return` +n under a return line and move
+-- stock for a return that is only requested or inspected — and, through the
+-- ledger's unique reference index, block the real completion afterwards.
+--
+-- complete_customer_return_v1 marks its own transaction with the return it is
+-- completing (transaction-local setting, reset before it returns). Every
+-- customer-return movement must then:
+--   * be written inside that mark, for a line of exactly that return;
+--   * belong to the same organization as the line (ownership);
+--   * name the line's product and variant;
+--   * carry exactly the line's quantity (+quantity for `return`,
+--     −damaged_quantity for `damage`, damaged > 0);
+--   * sit at the location the line's sale was taken from;
+--   * be written while the return is still `inspected` and the line not yet
+--     completed.
+-- Anything else raises, so nothing is written. A reference that only LOOKS
+-- like the reserved one (case/whitespace variants) is refused outright, and a
+-- customer-return movement can never be re-pointed by UPDATE.
+-- (No PostgREST role can set an `apsa.*` setting: set_config is not exposed,
+-- and a transaction-local setting cannot outlive the RPC's transaction.)
+
+CREATE OR REPLACE FUNCTION public.guard_customer_return_movement()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_mark      TEXT;
+  v_item      RECORD;
+  v_sale_loc  UUID;
+  v_sale_found BOOLEAN;
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND OLD.reference_type IS NOT NULL
+     AND lower(btrim(OLD.reference_type)) = 'customer_return_item' THEN
+    RAISE EXCEPTION 'customer_return_movement_reserved: customer return movements cannot be modified';
+  END IF;
+
+  IF NEW.reference_type IS NULL
+     OR lower(btrim(NEW.reference_type)) <> 'customer_return_item' THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.reference_type <> 'customer_return_item' OR TG_OP <> 'INSERT' THEN
+    RAISE EXCEPTION 'customer_return_movement_reserved: reserved reference type';
+  END IF;
+
+  v_mark := nullif(current_setting('apsa.customer_return_completion', true), '');
+
+  SELECT i.id, i.return_id, i.order_item_id, i.product_id, i.variant_id, i.quantity,
+         i.damaged_quantity, i.return_movement_id, i.damage_movement_id, r.status
+  INTO v_item
+  FROM public.customer_return_items i
+  JOIN public.customer_returns r
+    ON r.id = i.return_id AND r.organization_id = i.organization_id
+  WHERE i.id = NEW.reference_id
+    AND i.organization_id = NEW.organization_id;
+
+  IF NOT FOUND
+     OR v_mark IS NULL
+     OR v_mark <> v_item.return_id::TEXT THEN
+    RAISE EXCEPTION 'customer_return_movement_reserved: customer return movements are written only by complete_customer_return_v1';
+  END IF;
+
+  IF v_item.status <> 'inspected'
+     OR v_item.damaged_quantity IS NULL
+     OR v_item.return_movement_id IS NOT NULL
+     OR v_item.damage_movement_id IS NOT NULL THEN
+    RAISE EXCEPTION 'customer_return_movement_invalid: return line is not awaiting completion';
+  END IF;
+
+  IF NEW.variant_id <> v_item.variant_id OR NEW.product_id <> v_item.product_id THEN
+    RAISE EXCEPTION 'customer_return_movement_invalid: variant does not match the return line';
+  END IF;
+
+  IF NOT (
+    (NEW.movement_type = 'return' AND NEW.quantity_delta = v_item.quantity)
+    OR (NEW.movement_type = 'damage' AND v_item.damaged_quantity > 0
+        AND NEW.quantity_delta = -v_item.damaged_quantity)
+  ) THEN
+    RAISE EXCEPTION 'customer_return_movement_invalid: quantity does not match the return line';
+  END IF;
+
+  SELECT true, m.location_id INTO v_sale_found, v_sale_loc
+  FROM public.inventory_movements m
+  WHERE m.organization_id = NEW.organization_id
+    AND m.variant_id      = v_item.variant_id
+    AND m.movement_type   = 'sale'
+    AND m.reference_type  = 'order_item'
+    AND m.reference_id    = v_item.order_item_id;
+
+  IF v_sale_found IS NOT TRUE OR NEW.location_id IS DISTINCT FROM v_sale_loc THEN
+    RAISE EXCEPTION 'customer_return_movement_invalid: location does not match the sale';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_customer_return_movement() FROM PUBLIC, anon, authenticated;
+
+CREATE TRIGGER inventory_movements_customer_return_guard
+  BEFORE INSERT OR UPDATE ON public.inventory_movements
+  FOR EACH ROW EXECUTE FUNCTION public.guard_customer_return_movement();
+
 -- ── 8. No cancellation after a customer return ──────────────────────────────
 -- Cancelling a confirmed order (migration 026) appends a `return` for every
 -- sold line. If units are coming back through a customer return, that would
@@ -937,6 +1048,10 @@ BEGIN
   END IF;
 
   -- ── Ledger: per line, back to exactly where the sale took it from.
+  -- Mark this transaction as completing THIS return: the only context in which
+  -- guard_customer_return_movement admits a customer-return movement.
+  PERFORM set_config('apsa.customer_return_completion', v_return.id::TEXT, true);
+
   FOR v_item IN
     SELECT i.* FROM public.customer_return_items i
     WHERE i.return_id = v_return.id
@@ -985,6 +1100,8 @@ BEGIN
       'damage_movement_id', v_dmg_mov
     ));
   END LOOP;
+
+  PERFORM set_config('apsa.customer_return_completion', '', true);
 
   UPDATE public.customer_returns SET status = 'completed', updated_at = now()
   WHERE id = v_return.id;

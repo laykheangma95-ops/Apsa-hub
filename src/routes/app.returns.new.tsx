@@ -29,11 +29,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { ReturnsAccess } from "@/components/returns/ReturnsAccess";
+import { useCapabilities, useSensitiveCapabilityRevalidation } from "@/hooks/use-capabilities";
+import { useOperationGuard } from "@/hooks/use-operation-guard";
 import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import {
   MAX_ORDER_NUMBER_LENGTH,
   buildReturnRequest,
+  canAccessReturns,
   classifyReturnError,
   findReturnableOrder,
   normalizeOrderNumber,
@@ -55,30 +58,67 @@ export const Route = createFileRoute("/app/returns/new")({
 
 function NewReturnRoute() {
   const { session, organizationId } = Route.useRouteContext();
-  // Keyed by principal: a different member or organization in this tab starts
-  // from a blank request, never from the previous member's order.
+  const navigate = useNavigate();
   return (
-    <NewReturnScreen
-      key={`${session.userId}/${organizationId}`}
+    <NewReturnIdentityBoundary
       userId={session.userId}
       organizationId={organizationId}
+      onBack={() => void navigate({ to: "/app/returns" })}
+      onRequested={(returnId) =>
+        void navigate({ to: "/app/returns/$returnId", params: { returnId } })
+      }
     />
   );
 }
 
-function NewReturnScreen({ userId, organizationId }: { userId: string; organizationId: string }) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const capabilities = useCapabilities();
+interface NewReturnIdentityProps {
+  userId: string;
+  organizationId: string;
+  onBack: () => void;
+  /** Called only for a request the CURRENT screen identity made. */
+  onRequested: (returnId: string) => void;
+}
 
-  const identityOk =
-    Boolean(userId) &&
-    Boolean(organizationId) &&
-    (capabilities.state !== "ready" || capabilities.organizationId === organizationId);
-  // Offered only; every returns call re-checks both server-side.
-  const canReturn =
-    identityOk && capabilities.can("orders.return") && capabilities.can("orders.read");
+/**
+ * Keyed by principal: a different member (sign-out / sign-in) or organization
+ * starts from a blank request, never from the previous member's order, and
+ * retires every operation the previous screen started.
+ */
+export function NewReturnIdentityBoundary(props: NewReturnIdentityProps) {
+  return <NewReturnOperation key={`${props.userId}\u0000${props.organizationId}`} {...props} />;
+}
+
+function NewReturnOperation(props: NewReturnIdentityProps) {
+  const { t } = useTranslation();
+  const capabilities = useCapabilities();
+  useSensitiveCapabilityRevalidation(props.userId, props.organizationId, true);
+  const allowed = canAccessReturns(capabilities, props.organizationId);
+
+  return (
+    <ScreenBleed surface="raised" bottom="none">
+      <AppHeader
+        title={t("returns.request.title")}
+        subtitle={t("returns.request.subtitle")}
+        onBack={props.onBack}
+      />
+      <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 pb-6 lg:max-w-[var(--screen-max-wide)]">
+        <ReturnsAccess
+          userId={props.userId}
+          organizationId={props.organizationId}
+          allowed={allowed}
+          denied={<CapabilityDeniedState capabilities={capabilities} />}
+        >
+          {() => <NewReturnScreen {...props} />}
+        </ReturnsAccess>
+      </main>
+    </ScreenBleed>
+  );
+}
+
+function NewReturnScreen({ userId, organizationId, onRequested }: NewReturnIdentityProps) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const guard = useOperationGuard();
 
   const [orderText, setOrderText] = useState("");
   const [order, setOrder] = useState<ReturnableOrder | null>(null);
@@ -91,10 +131,12 @@ function NewReturnScreen({ userId, organizationId }: { userId: string; organizat
     event.preventDefault();
     const orderNumber = normalizeOrderNumber(orderText);
     if (orderNumber === null || busy) return;
+    const live = guard.begin();
     setBusy(true);
     setMessage(null);
     try {
       const result = await findReturnableOrder(orderNumber);
+      if (!live()) return;
       if (result.kind === "order") {
         setOrder(result.order);
         setQuantities({});
@@ -102,9 +144,10 @@ function NewReturnScreen({ userId, organizationId }: { userId: string; organizat
         setMessage(t(returnableOrderMessageKey(result) ?? "returns.error.generic"));
       }
     } catch (err) {
+      if (!live()) return;
       setMessage(t(returnErrorKey(classifyReturnError(err))));
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
@@ -116,178 +159,162 @@ function NewReturnScreen({ userId, organizationId }: { userId: string; organizat
     // Same request → same key, so a retry after a lost response is replayed by
     // the server instead of creating a second return.
     const requestKey = keyHolder.current.keyFor(returnRequestFingerprint(order.orderId, request));
+    // Started for THIS user, organization and grant; a late answer for a
+    // retired identity must not navigate, touch the cache or set state.
+    const live = guard.begin();
     setBusy(true);
     setMessage(null);
     try {
       const result = await requestCustomerReturn(requestKey, order.orderId, request);
+      if (!live()) return;
       if (result.kind === "requested") {
         keyHolder.current.release();
         void queryClient.invalidateQueries({
           queryKey: returnsKeys.principal(userId, organizationId),
         });
-        void navigate({ to: "/app/returns/$returnId", params: { returnId: result.returnId } });
+        onRequested(result.returnId);
         return;
       }
       // Refused: nothing was written. A changed request gets a new key.
       keyHolder.current.release();
       setMessage(t(requestReturnMessageKey(result) ?? "returns.error.generic"));
     } catch (err) {
+      if (!live()) return;
       // Key kept: retrying the same request after a network failure must reach
       // the server under the same key.
       setMessage(t(returnErrorKey(classifyReturnError(err))));
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
   return (
-    <ScreenBleed surface="raised" bottom="none">
-      <AppHeader
-        title={t("returns.request.title")}
-        subtitle={t("returns.request.subtitle")}
-        onBack={() => void navigate({ to: "/app/returns" })}
-      />
-
-      <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 pb-6 lg:max-w-[var(--screen-max-wide)]">
-        {!canReturn ? (
-          <CapabilityDeniedState capabilities={capabilities} />
-        ) : (
-          <div className="content-in flex flex-col gap-4">
-            {order === null ? (
-              <Section title={t("returns.request.findTitle")}>
-                <form className="flex flex-col gap-2" onSubmit={(event) => void findOrder(event)}>
-                  <Label htmlFor="return-order" className="text-label text-text-secondary">
-                    {t("returns.request.orderLabel")}
-                  </Label>
-                  <Input
-                    id="return-order"
-                    className="tnum h-12"
-                    value={orderText}
-                    maxLength={MAX_ORDER_NUMBER_LENGTH}
-                    autoComplete="off"
-                    autoFocus
-                    disabled={busy}
-                    aria-describedby="return-order-hint"
-                    placeholder={t("returns.request.orderPlaceholder")}
-                    onChange={(event) => setOrderText(event.target.value)}
-                  />
-                  <span id="return-order-hint" className="text-caption text-text-secondary">
-                    {t("returns.request.orderHint")}
-                  </span>
-                  <Button
-                    type="submit"
-                    variant="outline"
-                    className="tap-target h-12 gap-2"
-                    disabled={busy || normalizeOrderNumber(orderText) === null}
-                    aria-busy={busy}
+    <div className="content-in flex flex-col gap-4">
+      {order === null ? (
+        <Section title={t("returns.request.findTitle")}>
+          <form className="flex flex-col gap-2" onSubmit={(event) => void findOrder(event)}>
+            <Label htmlFor="return-order" className="text-label text-text-secondary">
+              {t("returns.request.orderLabel")}
+            </Label>
+            <Input
+              id="return-order"
+              className="tnum h-12"
+              value={orderText}
+              maxLength={MAX_ORDER_NUMBER_LENGTH}
+              autoComplete="off"
+              autoFocus
+              disabled={busy}
+              aria-describedby="return-order-hint"
+              placeholder={t("returns.request.orderPlaceholder")}
+              onChange={(event) => setOrderText(event.target.value)}
+            />
+            <span id="return-order-hint" className="text-caption text-text-secondary">
+              {t("returns.request.orderHint")}
+            </span>
+            <Button
+              type="submit"
+              variant="outline"
+              className="tap-target h-12 gap-2"
+              disabled={busy || normalizeOrderNumber(orderText) === null}
+              aria-busy={busy}
+            >
+              <Search className="size-4" aria-hidden />
+              {busy ? t("returns.request.finding") : t("returns.request.find")}
+            </Button>
+          </form>
+        </Section>
+      ) : (
+        <Section
+          title={t("returns.request.linesTitle")}
+          action={
+            <span className="text-caption tnum text-text-secondary">
+              {t("returns.list.order", { number: order.orderNumber })}
+            </span>
+          }
+        >
+          <div className="flex flex-col gap-3">
+            {nothingReturnable ? (
+              <p className="text-body-sm text-text-secondary">
+                {t("returns.request.nothingReturnable")}
+              </p>
+            ) : null}
+            <ul className="flex flex-col gap-3" aria-label={t("returns.request.linesTitle")}>
+              {order.lines.map((line) => {
+                const name = line.variantName
+                  ? `${line.productName} · ${line.variantName}`
+                  : line.productName;
+                return (
+                  <li
+                    key={line.orderItemId}
+                    className="flex flex-col gap-2 rounded-xl border border-border-default bg-surface-primary px-3 py-2"
                   >
-                    <Search className="size-4" aria-hidden />
-                    {busy ? t("returns.request.finding") : t("returns.request.find")}
-                  </Button>
-                </form>
-              </Section>
-            ) : (
-              <Section
-                title={t("returns.request.linesTitle")}
-                action={
-                  <span className="text-caption tnum text-text-secondary">
-                    {t("returns.list.order", { number: order.orderNumber })}
-                  </span>
-                }
-              >
-                <div className="flex flex-col gap-3">
-                  {nothingReturnable ? (
-                    <p className="text-body-sm text-text-secondary">
-                      {t("returns.request.nothingReturnable")}
-                    </p>
-                  ) : null}
-                  <ul className="flex flex-col gap-3" aria-label={t("returns.request.linesTitle")}>
-                    {order.lines.map((line) => {
-                      const name = line.variantName
-                        ? `${line.productName} · ${line.variantName}`
-                        : line.productName;
-                      return (
-                        <li
-                          key={line.orderItemId}
-                          className="flex flex-col gap-2 rounded-xl border border-border-default bg-surface-primary px-3 py-2"
-                        >
-                          <span className="text-label text-text-primary" lang="km">
-                            {name}
-                          </span>
-                          <span className="text-caption tnum flex flex-wrap gap-x-3 text-text-secondary">
-                            <span>
-                              {t("returns.request.ordered", { count: line.orderedQuantity })}
-                            </span>
-                            {line.alreadyReturned > 0 ? (
-                              <span>
-                                {t("returns.request.alreadyReturned", {
-                                  count: line.alreadyReturned,
-                                })}
-                              </span>
-                            ) : null}
-                            <span>
-                              {t("returns.request.returnable", { count: line.returnableQuantity })}
-                            </span>
-                          </span>
-                          {line.returnableQuantity > 0 ? (
-                            <div
-                              role="group"
-                              aria-label={t("returns.request.quantityLabel", { name })}
-                            >
-                              <QuantityStepper
-                                value={quantities[line.orderItemId] ?? 0}
-                                min={0}
-                                max={line.returnableQuantity}
-                                onChange={(value) =>
-                                  setQuantities((current) => ({
-                                    ...current,
-                                    [line.orderItemId]: value,
-                                  }))
-                                }
-                              />
-                            </div>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {!nothingReturnable && request === null ? (
-                    <p className="text-caption text-text-secondary">
-                      {t("returns.request.selectHint")}
-                    </p>
-                  ) : null}
-                  <Button
-                    className="tap-target h-12 w-full gap-2"
-                    disabled={busy || request === null}
-                    aria-busy={busy}
-                    onClick={() => void submit()}
-                  >
-                    <Undo2 className="size-4" aria-hidden />
-                    {busy ? t("returns.request.submitting") : t("returns.request.submit")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="tap-target h-12 w-full"
-                    disabled={busy}
-                    onClick={() => {
-                      setOrder(null);
-                      setQuantities({});
-                      setMessage(null);
-                      keyHolder.current.release();
-                    }}
-                  >
-                    {t("returns.request.changeOrder")}
-                  </Button>
-                </div>
-              </Section>
-            )}
-
-            <div role="status" aria-live="polite">
-              {message ? <p className="text-caption text-status-warning-text">{message}</p> : null}
-            </div>
+                    <span className="text-label text-text-primary" lang="km">
+                      {name}
+                    </span>
+                    <span className="text-caption tnum flex flex-wrap gap-x-3 text-text-secondary">
+                      <span>{t("returns.request.ordered", { count: line.orderedQuantity })}</span>
+                      {line.alreadyReturned > 0 ? (
+                        <span>
+                          {t("returns.request.alreadyReturned", {
+                            count: line.alreadyReturned,
+                          })}
+                        </span>
+                      ) : null}
+                      <span>
+                        {t("returns.request.returnable", { count: line.returnableQuantity })}
+                      </span>
+                    </span>
+                    {line.returnableQuantity > 0 ? (
+                      <div role="group" aria-label={t("returns.request.quantityLabel", { name })}>
+                        <QuantityStepper
+                          value={quantities[line.orderItemId] ?? 0}
+                          min={0}
+                          max={line.returnableQuantity}
+                          onChange={(value) =>
+                            setQuantities((current) => ({
+                              ...current,
+                              [line.orderItemId]: value,
+                            }))
+                          }
+                        />
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+            {!nothingReturnable && request === null ? (
+              <p className="text-caption text-text-secondary">{t("returns.request.selectHint")}</p>
+            ) : null}
+            <Button
+              className="tap-target h-12 w-full gap-2"
+              disabled={busy || request === null}
+              aria-busy={busy}
+              onClick={() => void submit()}
+            >
+              <Undo2 className="size-4" aria-hidden />
+              {busy ? t("returns.request.submitting") : t("returns.request.submit")}
+            </Button>
+            <Button
+              variant="outline"
+              className="tap-target h-12 w-full"
+              disabled={busy}
+              onClick={() => {
+                setOrder(null);
+                setQuantities({});
+                setMessage(null);
+                keyHolder.current.release();
+              }}
+            >
+              {t("returns.request.changeOrder")}
+            </Button>
           </div>
-        )}
-      </main>
-    </ScreenBleed>
+        </Section>
+      )}
+
+      <div role="status" aria-live="polite">
+        {message ? <p className="text-caption text-status-warning-text">{message}</p> : null}
+      </div>
+    </div>
   );
 }

@@ -53,6 +53,7 @@ import {
   type ReturnDetailResult,
   type ReturnRequestLine,
   type ReturnStepResult,
+  type ReturnListResult,
   type ReturnSummary,
   type ReturnableOrderResult,
 } from "@/lib/returns";
@@ -163,14 +164,17 @@ async function loadDetail(
   return toDetail(row, orders[0]?.order_number ?? "", items, events);
 }
 
-/** Newest first. Order number and unit count only. */
-export async function listCustomerReturns(
-  ctx: AuthorizationContext,
-): Promise<{ returns: ReturnSummary[] }> {
+/**
+ * The newest RETURNS_LIST_LIMIT returns. Order number and unit count only.
+ * `truncated` says out loud that older returns exist beyond this page; each
+ * unit count is summed over EVERY line of its return (paged reads), never a
+ * capped subset.
+ */
+export async function listCustomerReturns(ctx: AuthorizationContext): Promise<ReturnListResult> {
   requireReturnAccess(ctx);
 
-  const rows = await repo.listReturns(ctx.organizationId, RETURNS_LIST_LIMIT);
-  if (rows.length === 0) return { returns: [] };
+  const { rows, truncated } = await repo.listReturns(ctx.organizationId, RETURNS_LIST_LIMIT);
+  if (rows.length === 0) return { returns: [], truncated };
 
   const [orders, items] = await Promise.all([
     repo.listOrderRefs(ctx.organizationId, [...new Set(rows.map((row) => row.order_id))]),
@@ -194,6 +198,7 @@ export async function listCustomerReturns(
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     })),
+    truncated,
   };
 }
 

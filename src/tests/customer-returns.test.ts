@@ -21,7 +21,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { financialFixture } from "./helpers/payment-order-fixture";
-import { setReturnsRepositoryDbForTests } from "../server/returns/repository";
+import {
+  MAX_PAGES,
+  PAGE_SIZE,
+  listReturnEvents,
+  setReturnsRepositoryDbForTests,
+} from "../server/returns/repository";
+import { setInventoryRepositoryDbForTests } from "../server/inventory/repository";
+import { recordMovement } from "../server/inventory/service";
 import {
   completeCustomerReturn,
   findReturnableOrder,
@@ -84,6 +91,16 @@ function columnList(value: string): string {
     .join(", ");
 }
 
+/**
+ * PostgREST's max-rows: no response carries more rows than this, whatever the
+ * request asked for — silently. The adapter enforces it so a repository that
+ * forgets to page fails here exactly as it would in production.
+ */
+const POSTGREST_MAX_ROWS = 1000;
+
+/** Every response the adapter served, for asserting reads were capped and paged. */
+const served: Array<{ table: string; rows: number }> = [];
+
 function sqlDb() {
   function query(table: string) {
     const where: string[] = [];
@@ -91,15 +108,17 @@ function sqlDb() {
     const ordering: string[] = [];
     let columns = "*";
     let limit: number | undefined;
+    let offset = 0;
     let mode: "many" | "single" | "maybe" = "many";
 
     async function run() {
       let sql = `select ${columns} from ${table}`;
       if (where.length) sql += ` where ${where.join(" and ")}`;
       if (ordering.length) sql += ` order by ${ordering.join(",")}`;
-      if (limit !== undefined) sql += ` limit ${limit}`;
+      sql += ` limit ${Math.min(limit ?? POSTGREST_MAX_ROWS, POSTGREST_MAX_ROWS)} offset ${offset}`;
       try {
         const rows = JSON.parse(JSON.stringify((await f.db.query(sql, values)).rows));
+        served.push({ table, rows: rows.length });
         if (mode === "many") return { data: rows, error: null };
         if (rows.length > 1) return { data: null, error: { message: "multiple rows" } };
         if (rows.length === 0 && mode === "single") {
@@ -138,6 +157,11 @@ function sqlDb() {
         limit = n;
         return chain;
       },
+      range(from: number, to: number) {
+        offset = from;
+        limit = to - from + 1;
+        return chain;
+      },
       single() {
         mode = "single";
         return run();
@@ -155,7 +179,28 @@ function sqlDb() {
 
   return {
     from(table: string) {
-      return query(ident(table));
+      const t = ident(table);
+      const base = query(t);
+      base.insert = (row: Record<string, unknown>) => {
+        const entries = Object.entries(row).filter(([, v]) => v !== undefined);
+        const sql = `insert into ${t}(${entries.map(([k]) => ident(k)).join(",")})
+          values(${entries.map((_, i) => `$${i + 1}`).join(",")}) returning *`;
+        const exec = async () => {
+          try {
+            const rows = (
+              await f.db.query(
+                sql,
+                entries.map(([, v]) => v),
+              )
+            ).rows;
+            return { data: JSON.parse(JSON.stringify(rows[0] ?? null)), error: null };
+          } catch (error: any) {
+            return { data: null, error: { code: error?.code, message: String(error?.message) } };
+          }
+        };
+        return { select: () => ({ single: exec }) };
+      };
+      return base;
     },
     async rpc(fn: string, args: Record<string, unknown>) {
       const entries = Object.entries(args);
@@ -375,7 +420,13 @@ let locationB: string;
 
 beforeAll(async () => {
   f = await financialFixture();
-  restore = setReturnsRepositoryDbForTests(sqlDb());
+  const db = sqlDb();
+  const restoreReturns = setReturnsRepositoryDbForTests(db);
+  const restoreInventory = setInventoryRepositoryDbForTests(db);
+  restore = () => {
+    restoreReturns();
+    restoreInventory();
+  };
   await f.db.query(`insert into auth.users(id,email) values($1,'member-b@test.invalid')`, [
     MEMBER_B,
   ]);
@@ -1067,7 +1118,7 @@ describe("append-only history and ledger shape (service role included)", () => {
          values($1,$2,$3,$4,5,'restock','customer_return_item',$5)`,
         [f.org, s.product, s.variant, location, crypto.randomUUID()],
       ),
-    ).rejects.toThrow(/inventory_movements_customer_return_shape/);
+    ).rejects.toThrow(/customer_return_movement_reserved/);
   });
 });
 
@@ -1181,5 +1232,385 @@ describe("pure rules", () => {
         v && typeof v === "object" ? flatten(v, `${prefix}${k}.`) : [`${prefix}${k}`],
       );
     expect(flatten((km as any).returns).sort()).toEqual(flatten((en as any).returns).sort());
+  });
+});
+
+// ── P1: the generic inventory path cannot bypass the Returns workflow ────────
+
+describe("generic inventory writes can never create a customer-return movement", () => {
+  const ADJUSTER = [
+    "inventory.adjust",
+    "inventory.receive_stock",
+    "inventory.read",
+    "inventory.view_movements",
+  ];
+
+  /** Every way the generic API could try to file stock under a return line. */
+  async function expectGenericRefused(detail: ReturnDetail, s: Seeded) {
+    const line = detail.lines[0]!;
+    for (const referenceType of [
+      "customer_return_item",
+      "Customer_Return_Item",
+      " customer_return_item ",
+    ]) {
+      for (const movementType of ["return", "restock", "manual_adjustment"] as const) {
+        await expect(
+          recordMovement(ctx(f.org, ADJUSTER), {
+            productId: s.product,
+            variantId: s.variant,
+            locationId: location,
+            quantityDelta: line.quantity,
+            movementType,
+            referenceType,
+            referenceId: line.returnItemId,
+            reason: "bypass attempt",
+          }),
+        ).rejects.toThrow(/reserved for customer returns/);
+      }
+    }
+  }
+
+  async function insertAs(
+    org: string,
+    s: Seeded,
+    delta: number,
+    type: "return" | "damage",
+    returnItemId: string,
+    at: string | null = location,
+  ) {
+    return f.db.query(
+      `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+         movement_type,reference_type,reference_id)
+       values($1,$2,$3,$4,$5,$6,'customer_return_item',$7)`,
+      [org, s.product, s.variant, at, delta, type, returnItemId],
+    );
+  }
+
+  /** Inside a transaction marked as completing `returnId` — the completion context. */
+  async function insideCompletionMark(returnId: string, write: (tx: any) => Promise<unknown>) {
+    await f.db.transaction(async (tx: any) => {
+      await tx.query(`select set_config('apsa.customer_return_completion', $1, true)`, [returnId]);
+      await write(tx);
+    });
+  }
+
+  it("a requested return cannot alter stock through the generic API — nothing is written", async () => {
+    const s = await seedVariant(f.org);
+    await stockIn(f.org, s, 10, location);
+    const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
+    const returnId = await requested(f.org, order, [{ item: 0, quantity: 2 }]);
+    const detail = ok(await getCustomerReturnDetail(f.org, returnId));
+    const stockBefore = await onHand(s.variant, location);
+    const ledgerBefore = (await ledger(s.variant)).length;
+    const auditBefore = await countRows("audit_logs");
+
+    await expectGenericRefused(detail, s);
+    // Even below the API, with the line's exact figures.
+    await expect(insertAs(f.org, s, 2, "return", detail.lines[0]!.returnItemId)).rejects.toThrow(
+      /written only by complete_customer_return_v1/,
+    );
+
+    expect(await onHand(s.variant, location)).toBe(stockBefore);
+    expect((await ledger(s.variant)).length).toBe(ledgerBefore);
+    expect(await countRows("audit_logs")).toBe(auditBefore);
+    expect(ok(await getCustomerReturnDetail(f.org, returnId)).status).toBe("requested");
+  });
+
+  it("an inspected return cannot alter stock — not by the API, not by a direct ledger insert", async () => {
+    const s = await seedVariant(f.org);
+    await stockIn(f.org, s, 10, location);
+    const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
+    const detail = await inspected(f.org, order, [{ item: 0, quantity: 2, damaged: 1 }]);
+    const itemId = detail.lines[0]!.returnItemId;
+    const stockBefore = await onHand(s.variant, location);
+    const ledgerBefore = (await ledger(s.variant)).length;
+    const auditBefore = await countRows("audit_logs");
+
+    await expectGenericRefused(detail, s);
+    await expect(insertAs(f.org, s, 2, "return", itemId)).rejects.toThrow(
+      /written only by complete_customer_return_v1/,
+    );
+    await expect(insertAs(f.org, s, -1, "damage", itemId)).rejects.toThrow(
+      /written only by complete_customer_return_v1/,
+    );
+
+    expect(await onHand(s.variant, location)).toBe(stockBefore);
+    expect((await ledger(s.variant)).length).toBe(ledgerBefore);
+    expect(await countRows("audit_logs")).toBe(auditBefore);
+    expect(ok(await getCustomerReturnDetail(f.org, detail.returnId)).status).toBe("inspected");
+  });
+
+  it("inside the completion context SQL still verifies ownership, variant, quantity and location", async () => {
+    const s = await seedVariant(f.org);
+    const other = await seedVariant(f.org);
+    const sB = await seedVariant(f.orgB);
+    await stockIn(f.org, s, 10, location);
+    const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
+    const detail = await inspected(f.org, order, [{ item: 0, quantity: 2, damaged: 1 }]);
+    const anotherReturn = await inspected(
+      f.org,
+      await seedOrder(f.org, [{ s, quantity: 1 }], { location }),
+      [{ item: 0, quantity: 1, damaged: 0 }],
+    );
+    const itemId = detail.lines[0]!.returnItemId;
+    const ledgerBefore = (await ledger(s.variant)).length;
+
+    const attempts: Array<[string, RegExp, (tx: any) => Promise<unknown>]> = [
+      [
+        "another organization's movement",
+        /written only by complete_customer_return_v1/,
+        (tx) =>
+          tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,$4,2,'return','customer_return_item',$5)`,
+            [f.orgB, sB.product, sB.variant, locationB, itemId],
+          ),
+      ],
+      [
+        "a mark for a different return",
+        /written only by complete_customer_return_v1/,
+        async (tx) => {
+          await tx.query(`select set_config('apsa.customer_return_completion', $1, true)`, [
+            anotherReturn.returnId,
+          ]);
+          return tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,$4,2,'return','customer_return_item',$5)`,
+            [f.org, s.product, s.variant, location, itemId],
+          );
+        },
+      ],
+      [
+        "the wrong variant",
+        /variant does not match/,
+        (tx) =>
+          tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,$4,2,'return','customer_return_item',$5)`,
+            [f.org, other.product, other.variant, location, itemId],
+          ),
+      ],
+      [
+        "the wrong return quantity",
+        /quantity does not match/,
+        (tx) =>
+          tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,$4,5,'return','customer_return_item',$5)`,
+            [f.org, s.product, s.variant, location, itemId],
+          ),
+      ],
+      [
+        "the wrong damage quantity",
+        /quantity does not match/,
+        (tx) =>
+          tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,$4,-2,'damage','customer_return_item',$5)`,
+            [f.org, s.product, s.variant, location, itemId],
+          ),
+      ],
+      [
+        "the wrong location",
+        /location does not match/,
+        (tx) =>
+          tx.query(
+            `insert into inventory_movements(organization_id,product_id,variant_id,location_id,quantity_delta,
+               movement_type,reference_type,reference_id) values($1,$2,$3,NULL,2,'return','customer_return_item',$4)`,
+            [f.org, s.product, s.variant, itemId],
+          ),
+      ],
+    ];
+    for (const [, error, write] of attempts) {
+      await expect(insideCompletionMark(detail.returnId, write)).rejects.toThrow(error);
+    }
+
+    expect((await ledger(s.variant)).length).toBe(ledgerBefore);
+    expect(await returnMovements(s.variant)).toHaveLength(0);
+  });
+
+  it("legitimate completion still succeeds, and its movements cannot be altered afterwards", async () => {
+    const s = await seedVariant(f.org);
+    await stockIn(f.org, s, 10, location);
+    const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
+    const detail = await inspected(f.org, order, [{ item: 0, quantity: 2, damaged: 1 }]);
+    await expectGenericRefused(detail, s);
+
+    const done = ok(
+      await completeCustomerReturn(ctx(f.org), {
+        returnId: detail.returnId,
+        expected: currentInspection(detail)!,
+      }),
+    );
+    expect(done.status).toBe("completed");
+    expect(await onHand(s.variant, location)).toBe(8 + 1);
+    const moves = await returnMovements(s.variant);
+    expect(moves.map((m: any) => [m.movement_type, m.quantity_delta])).toEqual([
+      ["return", 2],
+      ["damage", -1],
+    ]);
+
+    // The completion mark does not outlive its transaction.
+    const mark = (
+      await f.db.query<{ v: string | null }>(
+        `select current_setting('apsa.customer_return_completion', true) as v`,
+      )
+    ).rows[0]!.v;
+    expect(mark ?? "").toBe("");
+    await expect(
+      f.db.query(`update inventory_movements set quantity_delta = 5 where id = $1`, [moves[0].id]),
+    ).rejects.toThrow(/customer_return_movement_reserved/);
+    await expect(insertAs(f.org, s, 2, "return", done.lines[0]!.returnItemId)).rejects.toThrow(
+      /written only by complete_customer_return_v1/,
+    );
+    expect(await onHand(s.variant, location)).toBe(9);
+  });
+});
+
+// ── P2: complete reads under PostgREST's row cap ─────────────────────────────
+
+describe("complete reads under PostgREST's 1000-row cap", () => {
+  it("history is complete beyond 1000 events, read in capped pages", async () => {
+    const s = await seedVariant(f.org);
+    await stockIn(f.org, s, 10, location);
+    const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
+    const detail = await inspected(f.org, order, [{ item: 0, quantity: 2, damaged: 0 }]);
+    await f.db.query(
+      `insert into customer_return_events(organization_id,return_id,from_status,to_status,actor)
+       select $1,$2,'inspected','inspected',$3 from generate_series(1,1500)`,
+      [f.org, detail.returnId, f.actor],
+    );
+    const total = await countRows("customer_return_events", "return_id=$1", [detail.returnId]);
+    expect(total).toBeGreaterThan(1500);
+
+    // The cap is real: one un-paged request sees only the first 1000.
+    const capped = await (sqlDb() as any)
+      .from("customer_return_events")
+      .select("id")
+      .eq("return_id", detail.returnId);
+    expect(capped.data).toHaveLength(POSTGREST_MAX_ROWS);
+
+    served.length = 0;
+    const full = ok(await getCustomerReturnDetail(f.org, detail.returnId));
+    expect(full.history).toHaveLength(total);
+    const pages = served.filter((r) => r.table === "customer_return_events").map((r) => r.rows);
+    expect(pages[0]).toBe(PAGE_SIZE);
+    expect(pages.length).toBeGreaterThanOrEqual(2);
+    expect(pages.every((rows) => rows <= POSTGREST_MAX_ROWS)).toBe(true);
+  });
+
+  it("unit totals and remaining quantities are exact when a read spans more than 1000 rows", async () => {
+    const s = await seedVariant(f.org);
+    await stockIn(f.org, s, 2000, location);
+    const orderId = crypto.randomUUID();
+    const orderNumber = `BIG-${orderId.slice(0, 8)}`;
+    await f.db.query(
+      `insert into orders(id,organization_id,order_number,source,currency,subtotal_minor,total_minor,created_by,location_id)
+       values($1,$2,$3,'MANUAL','USD',1100000,1100000,$4,$5)`,
+      [orderId, f.org, orderNumber, f.actor, location],
+    );
+    await f.db.query(
+      `insert into order_items(organization_id,order_id,product_id,variant_id,product_name_snapshot,
+         unit_price_minor,quantity,line_total_minor)
+       select $1,$2,$3,$4,'ស្រោមជើង',1000,1,1000 from generate_series(1,1100)`,
+      [f.org, orderId, s.product, s.variant],
+    );
+    const confirmed = await f.rpc("transition_order_status_v1", [
+      f.org,
+      orderId,
+      "lifecycle",
+      "draft",
+      "confirmed",
+      f.actor,
+      null,
+    ]);
+    expect(confirmed.status).toBe("success");
+    await f.db.query(
+      `insert into deliveries(organization_id,order_id,location_id,provider_name,status,created_by)
+       values($1,$2,$3,'Manual courier','delivered',$4)`,
+      [f.org, orderId, location, f.actor],
+    );
+    const items = (
+      await f.db.query<{ id: string }>(`select id from order_items where order_id=$1 order by id`, [
+        orderId,
+      ])
+    ).rows.map((r) => r.id);
+
+    const returnIds: string[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      const result = await requestCustomerReturn(ctx(f.org), {
+        requestKey: crypto.randomUUID(),
+        orderId,
+        lines: items.slice(i * 100, i * 100 + 100).map((id) => ({ orderItemId: id, quantity: 1 })),
+      });
+      if (result.kind !== "requested") throw new Error(JSON.stringify(result));
+      returnIds.push(result.returnId);
+    }
+
+    served.length = 0;
+    const list = await listCustomerReturns(ctx(f.org));
+    const ours = list.returns.filter((r) => returnIds.includes(r.returnId));
+    expect(ours).toHaveLength(11);
+    expect(ours.every((r) => r.quantity === 100)).toBe(true);
+    expect(ours.reduce((sum, r) => sum + r.quantity, 0)).toBe(1100);
+    // The item read hit the cap and was paged rather than truncated.
+    expect(
+      served.some((r) => r.table === "customer_return_items" && r.rows === POSTGREST_MAX_ROWS),
+    ).toBe(true);
+
+    const lookup = await findReturnableOrder(ctx(f.org), orderNumber);
+    expect(lookup.kind).toBe("order");
+    if (lookup.kind !== "order") return;
+    expect(lookup.order.lines).toHaveLength(1100);
+    expect(lookup.order.lines.every((l) => l.alreadyReturned === 1)).toBe(true);
+    expect(lookup.order.lines.every((l) => l.returnableQuantity === 0)).toBe(true);
+  }, 120000);
+
+  it("reports a partial list instead of passing the first page off as every return", async () => {
+    const s = await seedVariant(f.org);
+    const existing = await countRows("customer_returns", "organization_id=$1", [f.org]);
+    const needed = Math.max(101 - existing, 1);
+    await stockIn(f.org, s, needed + 10, location);
+    const order = await seedOrder(
+      f.org,
+      Array.from({ length: needed }, () => ({ s, quantity: 1 })),
+      { location },
+    );
+    for (let i = 0; i < needed; i += 1) {
+      await requested(f.org, order, [{ item: i, quantity: 1 }]);
+    }
+    expect(await countRows("customer_returns", "organization_id=$1", [f.org])).toBeGreaterThan(100);
+
+    const list = await listCustomerReturns(ctx(f.org));
+    expect(list.returns).toHaveLength(100);
+    expect(list.truncated).toBe(true);
+
+    const listB = await listCustomerReturns(ctx(f.orgB));
+    expect(listB.truncated).toBe(false);
+  }, 120000);
+
+  it("a read that would exceed the page budget fails loudly instead of truncating", async () => {
+    let ranges = 0;
+    const fullPages: any = {
+      select: () => fullPages,
+      eq: () => fullPages,
+      order: () => fullPages,
+      range: async () => {
+        ranges += 1;
+        return {
+          data: Array.from({ length: PAGE_SIZE }, (_, i) => ({ id: String(i) })),
+          error: null,
+        };
+      },
+    };
+    const restoreFake = setReturnsRepositoryDbForTests({ from: () => fullPages });
+    try {
+      await expect(listReturnEvents(f.org, crypto.randomUUID())).rejects.toThrow(
+        /refusing a partial read/,
+      );
+      expect(ranges).toBe(MAX_PAGES);
+    } finally {
+      restoreFake();
+    }
   });
 });

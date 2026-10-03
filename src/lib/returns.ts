@@ -20,6 +20,8 @@
  *
  * Safe to bundle for the browser: no Supabase, no server imports, no secrets.
  */
+import type { QueryClient } from "@tanstack/react-query";
+import type { CapabilityView } from "@/lib/capabilities";
 import { parseQuantity } from "@/lib/inventory";
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -375,12 +377,108 @@ export const returnsKeys = {
     [RETURNS_QUERY_ROOT, userId, organizationId, "detail", returnId] as const,
 };
 
+/**
+ * May this screen show returns for `organizationId`? Presentation only — every
+ * returns call re-checks orders.return + orders.read server-side. Uses the
+ * SENSITIVE reader: a return names an order, so a snapshot the server has not
+ * just confirmed (a failed refresh) does not count as granted.
+ */
+export function canAccessReturns(capabilities: CapabilityView, organizationId: string): boolean {
+  return (
+    Boolean(organizationId) &&
+    capabilities.organizationId === organizationId &&
+    capabilities.canSensitive("orders.return") &&
+    capabilities.canSensitive("orders.read")
+  );
+}
+
+/** The last returns grant observed per QueryClient and principal. */
+const LAST_RETURNS_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
+
+/**
+ * Evict every cached return of a principal the moment the screen observes it
+ * may not see returns (and on the first denied observation, so data retained
+ * from an earlier grant fails closed). In-flight reads are cancelled before
+ * the synchronous removal so they cannot write the payload back.
+ *
+ * Call during render, BEFORE anything reads the cache — the returns screens
+ * call it from ReturnsAccess, which renders nothing cached when denied.
+ */
+export function enforceReturnsCapabilityCache(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  allowed: boolean,
+): void {
+  try {
+    let record = LAST_RETURNS_GRANT.get(queryClient);
+    if (!record) {
+      record = new Map();
+      LAST_RETURNS_GRANT.set(queryClient, record);
+    }
+    const principal = `${userId}\u0000${organizationId}`;
+    const previous = record.get(principal);
+    record.set(principal, allowed);
+    if (allowed || previous === false) return;
+
+    const queryKey = returnsKeys.principal(userId, organizationId);
+    void queryClient.cancelQueries({ queryKey }).catch(() => undefined);
+    queryClient.removeQueries({ queryKey });
+  } catch {
+    // Never block rendering. ReturnsAccess still refuses the subtree.
+  }
+}
+
+// ── Late responses ───────────────────────────────────────────────────────────
+
+/**
+ * Tells an async callback whether the screen that started it is still the
+ * screen it would update. A guard belongs to ONE mounted identity — the
+ * returns screens key their stateful layer by user, organization, return and
+ * grant, so sign-out, an organization switch, a permission change or leaving
+ * the screen unmounts it and retires every operation it started.
+ *
+ * begin() is called when an operation starts; the function it returns is true
+ * only while that same mounted generation is live. A retired response must not
+ * set state, write or invalidate the cache, or navigate.
+ */
+export interface OperationGuard {
+  activate(): void;
+  retire(): void;
+  begin(): () => boolean;
+}
+
+export function createOperationGuard(): OperationGuard {
+  let generation = 0;
+  let active = false;
+  return {
+    activate() {
+      active = true;
+      generation += 1;
+    },
+    retire() {
+      active = false;
+      generation += 1;
+    },
+    begin() {
+      const started = generation;
+      return () => active && generation === started;
+    },
+  };
+}
+
 // ── Server function wrappers ─────────────────────────────────────────────────
 
-export async function listCustomerReturns(): Promise<ReturnSummary[]> {
+export interface ReturnListResult {
+  returns: ReturnSummary[];
+  /** More (older) returns exist than this list shows. */
+  truncated: boolean;
+}
+
+export async function listCustomerReturns(): Promise<ReturnListResult> {
   const { listCustomerReturnsFn } = await import("@/api/returns");
   const result = await listCustomerReturnsFn();
-  return (result as unknown as { returns: ReturnSummary[] }).returns;
+  return result as unknown as ReturnListResult;
 }
 
 export async function getCustomerReturn(returnId: string): Promise<ReturnDetailResult> {

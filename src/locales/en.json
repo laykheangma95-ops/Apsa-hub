@@ -2685,7 +2685,8 @@
       "units_one": "{{count}} item",
       "units_other": "{{count}} items",
       "errorTitle": "Returns didn't load",
-      "errorBody": "Check your connection and try again."
+      "errorBody": "Check your connection and try again.",
+      "partial": "Showing the newest {{count}} returns. Older returns are not listed here."
     },
     "request": {
       "title": "New return",

@@ -36,11 +36,14 @@ import { Button } from "@/components/ui/button";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { OperationalState } from "@/components/common/OperationalState";
 import { ReturnStatusLabel } from "@/components/returns/ReturnStatusLabel";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { ReturnsAccess } from "@/components/returns/ReturnsAccess";
+import { useCapabilities, useSensitiveCapabilityRevalidation } from "@/hooks/use-capabilities";
+import { useOperationGuard } from "@/hooks/use-operation-guard";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { inventoryKeys } from "@/lib/inventory";
 import {
   buildInspection,
+  canAccessReturns,
   classifyReturnError,
   completeCustomerReturn,
   currentInspection,
@@ -67,13 +70,62 @@ export const Route = createFileRoute("/app/returns/$returnId")({
 function ReturnDetailRoute() {
   const { session, organizationId } = Route.useRouteContext();
   const { returnId } = Route.useParams();
+  const navigate = useNavigate();
   return (
-    <ReturnDetailScreen
-      key={`${session.userId}/${organizationId}/${returnId}`}
+    <ReturnDetailIdentityBoundary
       userId={session.userId}
       organizationId={organizationId}
       returnId={returnId}
+      onBack={() => void navigate({ to: "/app/returns" })}
     />
+  );
+}
+
+interface ReturnDetailIdentityProps {
+  userId: string;
+  organizationId: string;
+  returnId: string;
+  onBack: () => void;
+}
+
+/**
+ * Keyed by every identity dimension, so a different member (sign-out /
+ * sign-in), organization or return mounts a clean screen and retires every
+ * operation the previous one started.
+ */
+export function ReturnDetailIdentityBoundary(props: ReturnDetailIdentityProps) {
+  const identity = `${props.userId}\u0000${props.organizationId}\u0000${props.returnId}`;
+  return <ReturnDetailOperation key={identity} {...props} />;
+}
+
+function ReturnDetailOperation(props: ReturnDetailIdentityProps) {
+  const { t } = useTranslation();
+  const capabilities = useCapabilities();
+  // A return names an order: keep the grant confirmed while the screen is open.
+  useSensitiveCapabilityRevalidation(props.userId, props.organizationId, true);
+  const allowed = canAccessReturns(capabilities, props.organizationId);
+
+  // Never the cached order number: the denied header is generic.
+  const denied = (
+    <ScreenBleed surface="raised" bottom="none">
+      <AppHeader title={t("returns.detail.title")} onBack={props.onBack} />
+      <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 pb-6">
+        <CapabilityDeniedState capabilities={capabilities} />
+      </main>
+    </ScreenBleed>
+  );
+
+  // The stateful screen exists only while allowed, so losing the grant
+  // unmounts it (retiring its operations) before any cached payload is read.
+  return (
+    <ReturnsAccess
+      userId={props.userId}
+      organizationId={props.organizationId}
+      allowed={allowed}
+      denied={denied}
+    >
+      {() => <ReturnDetailScreen {...props} />}
+    </ReturnsAccess>
   );
 }
 
@@ -85,29 +137,17 @@ function ReturnDetailScreen({
   userId,
   organizationId,
   returnId,
-}: {
-  userId: string;
-  organizationId: string;
-  returnId: string;
-}) {
+  onBack,
+}: ReturnDetailIdentityProps) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const capabilities = useCapabilities();
-
-  const identityOk =
-    Boolean(userId) &&
-    Boolean(organizationId) &&
-    (capabilities.state !== "ready" || capabilities.organizationId === organizationId);
-  // Offered only; every returns call re-checks both server-side.
-  const canReturn =
-    identityOk && capabilities.can("orders.return") && capabilities.can("orders.read");
+  const guard = useOperationGuard();
 
   const detailKey = returnsKeys.detail(userId, organizationId, returnId);
   const detailQuery = useQuery({
     queryKey: detailKey,
     queryFn: () => getCustomerReturn(returnId),
-    enabled: canReturn,
   });
 
   const [busy, setBusy] = useState(false);
@@ -133,10 +173,15 @@ function ReturnDetailScreen({
 
   async function runStep(step: () => Promise<ReturnStepResult>, onOk?: () => void) {
     if (busy) return;
+    // Started for THIS user, organization, return and grant. If any of them
+    // changes (or the screen is left) before the answer arrives, the answer is
+    // dropped: no state, no cache write, no invalidation.
+    const live = guard.begin();
     setBusy(true);
     setMessage(null);
     try {
       const result = await step();
+      if (!live()) return;
       if (result.kind === "ok") {
         showDetail(result.detail);
         setEditing(false);
@@ -151,9 +196,10 @@ function ReturnDetailScreen({
       }
       setMessage(t(returnStepMessageKey(result) ?? "returns.error.generic"));
     } catch (err) {
+      if (!live()) return;
       setMessage(t(returnErrorKey(classifyReturnError(err))));
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
@@ -164,20 +210,9 @@ function ReturnDetailScreen({
           ? t("returns.detail.order", { number: detail.orderNumber })
           : t("returns.detail.title")
       }
-      onBack={() => void navigate({ to: "/app/returns" })}
+      onBack={onBack}
     />
   );
-
-  if (!canReturn) {
-    return (
-      <ScreenBleed surface="raised" bottom="none">
-        {header}
-        <main className="mx-auto w-full max-w-[var(--screen-max)] px-4 pt-3 pb-6">
-          <CapabilityDeniedState capabilities={capabilities} />
-        </main>
-      </ScreenBleed>
-    );
-  }
 
   const inspecting = detail !== null && (detail.status === "received" || editing);
   // Untouched lines start at what is recorded (0 damaged before any inspection).

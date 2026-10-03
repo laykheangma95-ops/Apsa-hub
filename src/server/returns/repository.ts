@@ -6,6 +6,13 @@
  * queries via supabaseAdmin. Every write is one of migration 056's RPCs, which
  * re-validate everything themselves under row locks. Never import from
  * browser-bundled code.
+ *
+ * Row limits: PostgREST answers at most PAGE_SIZE rows per request (its
+ * max-rows), silently. Every multi-row read here therefore pages with a
+ * deterministic order (ending in the primary key) until a short page proves
+ * the end, and splits long `in (...)` lists into chunks. Nothing is summed or
+ * shown from a page that might be partial; a read that would need more than
+ * MAX_PAGES pages fails loudly instead of returning a truncated answer.
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
 
@@ -22,6 +29,52 @@ export function setReturnsRepositoryDbForTests(testDb: unknown): () => void {
 
 function errMessage(error: unknown): string {
   return (error as { message?: string })?.message ?? "unknown error";
+}
+
+// ── Complete reads ───────────────────────────────────────────────────────────
+
+/** A PostgREST query that can still be given a row range. */
+interface RangeableQuery {
+  range(from: number, to: number): PromiseLike<{ data: unknown; error: unknown }>;
+}
+
+/** PostgREST's per-response row cap (max-rows). A full page may not be the end. */
+export const PAGE_SIZE = 1000;
+/** Upper bound on pages for one read; beyond it the read fails, never truncates. */
+export const MAX_PAGES = 100;
+/** Ids per `in (...)` filter, keeping request URLs well inside proxy limits. */
+export const IN_CHUNK_SIZE = 100;
+
+/**
+ * Every row of a query, page by page. `build` must return a FRESH query with a
+ * deterministic order ending in a unique column each time it is called.
+ */
+async function readAll<T>(label: string, build: () => RangeableQuery): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const from = page * PAGE_SIZE;
+    const { data, error } = await build().range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`${label}: ${errMessage(error)}`);
+    const batch = (data ?? []) as T[];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) return rows;
+  }
+  throw new Error(`${label}: more than ${PAGE_SIZE * MAX_PAGES} rows; refusing a partial read`);
+}
+
+/** readAll over `ids` split into chunks (de-duplicated). */
+async function readAllIn<T>(
+  label: string,
+  ids: readonly string[],
+  build: (chunk: string[]) => RangeableQuery,
+): Promise<T[]> {
+  const unique = [...new Set(ids)];
+  const rows: T[] = [];
+  for (let i = 0; i < unique.length; i += IN_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + IN_CHUNK_SIZE);
+    rows.push(...(await readAll<T>(label, () => build(chunk))));
+  }
+  return rows;
 }
 
 // ── Rows ─────────────────────────────────────────────────────────────────────
@@ -83,19 +136,24 @@ export interface ReturnOrderItemRow {
 
 // ── Returns ──────────────────────────────────────────────────────────────────
 
+/**
+ * The newest `limit` returns, and whether more exist. One extra row is read so
+ * a full list is reported as partial instead of passing for everything.
+ */
 export async function listReturns(
   organizationId: string,
   limit: number,
-): Promise<CustomerReturnRow[]> {
+): Promise<{ rows: CustomerReturnRow[]; truncated: boolean }> {
   const { data, error } = await db
     .from("customer_returns")
     .select("*")
     .eq("organization_id", organizationId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
-    .limit(limit);
+    .limit(limit + 1);
   if (error) throw new Error(`listReturns: ${errMessage(error)}`);
-  return (data ?? []) as CustomerReturnRow[];
+  const rows = (data ?? []) as CustomerReturnRow[];
+  return { rows: rows.slice(0, limit), truncated: rows.length > limit };
 }
 
 export async function findReturn(
@@ -116,31 +174,31 @@ export async function listReturnItems(
   organizationId: string,
   returnIds: readonly string[],
 ): Promise<CustomerReturnItemRow[]> {
-  if (returnIds.length === 0) return [];
-  const { data, error } = await db
-    .from("customer_return_items")
-    .select("*")
-    .eq("organization_id", organizationId)
-    .in("return_id", [...returnIds])
-    .order("created_at", { ascending: true })
-    .order("id", { ascending: true });
-  if (error) throw new Error(`listReturnItems: ${errMessage(error)}`);
-  return (data ?? []) as CustomerReturnItemRow[];
+  return readAllIn<CustomerReturnItemRow>("listReturnItems", returnIds, (chunk) =>
+    db
+      .from("customer_return_items")
+      .select("*")
+      .eq("organization_id", organizationId)
+      .in("return_id", chunk)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true }),
+  );
 }
 
+/** The complete history of one return, oldest first. */
 export async function listReturnEvents(
   organizationId: string,
   returnId: string,
 ): Promise<CustomerReturnEventRow[]> {
-  const { data, error } = await db
-    .from("customer_return_events")
-    .select("id, return_id, from_status, to_status, created_at")
-    .eq("organization_id", organizationId)
-    .eq("return_id", returnId)
-    .order("created_at", { ascending: true })
-    .order("id", { ascending: true });
-  if (error) throw new Error(`listReturnEvents: ${errMessage(error)}`);
-  return (data ?? []) as CustomerReturnEventRow[];
+  return readAll<CustomerReturnEventRow>("listReturnEvents", () =>
+    db
+      .from("customer_return_events")
+      .select("id, return_id, from_status, to_status, created_at")
+      .eq("organization_id", organizationId)
+      .eq("return_id", returnId)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true }),
+  );
 }
 
 /** Everything already requested for these order lines, across all returns. */
@@ -148,14 +206,17 @@ export async function listRequestedQuantities(
   organizationId: string,
   orderItemIds: readonly string[],
 ): Promise<Array<{ order_item_id: string; quantity: number }>> {
-  if (orderItemIds.length === 0) return [];
-  const { data, error } = await db
-    .from("customer_return_items")
-    .select("order_item_id, quantity")
-    .eq("organization_id", organizationId)
-    .in("order_item_id", [...orderItemIds]);
-  if (error) throw new Error(`listRequestedQuantities: ${errMessage(error)}`);
-  return (data ?? []) as Array<{ order_item_id: string; quantity: number }>;
+  return readAllIn<{ id: string; order_item_id: string; quantity: number }>(
+    "listRequestedQuantities",
+    orderItemIds,
+    (chunk) =>
+      db
+        .from("customer_return_items")
+        .select("id, order_item_id, quantity")
+        .eq("organization_id", organizationId)
+        .in("order_item_id", chunk)
+        .order("id", { ascending: true }),
+  );
 }
 
 // ── Orders (identity and lines only — no money, no customer) ────────────────
@@ -164,14 +225,14 @@ export async function listOrderRefs(
   organizationId: string,
   orderIds: readonly string[],
 ): Promise<ReturnOrderRow[]> {
-  if (orderIds.length === 0) return [];
-  const { data, error } = await db
-    .from("orders")
-    .select("id, order_number, lifecycle_status")
-    .eq("organization_id", organizationId)
-    .in("id", [...orderIds]);
-  if (error) throw new Error(`listOrderRefs: ${errMessage(error)}`);
-  return (data ?? []) as ReturnOrderRow[];
+  return readAllIn<ReturnOrderRow>("listOrderRefs", orderIds, (chunk) =>
+    db
+      .from("orders")
+      .select("id, order_number, lifecycle_status")
+      .eq("organization_id", organizationId)
+      .in("id", chunk)
+      .order("id", { ascending: true }),
+  );
 }
 
 export async function findOrderByNumber(
@@ -192,17 +253,17 @@ export async function listOrderItems(
   organizationId: string,
   orderId: string,
 ): Promise<ReturnOrderItemRow[]> {
-  const { data, error } = await db
-    .from("order_items")
-    .select(
-      "id, order_id, product_name_snapshot, variant_name_snapshot, sku_snapshot, quantity, created_at",
-    )
-    .eq("organization_id", organizationId)
-    .eq("order_id", orderId)
-    .order("created_at", { ascending: true })
-    .order("id", { ascending: true });
-  if (error) throw new Error(`listOrderItems: ${errMessage(error)}`);
-  return (data ?? []) as ReturnOrderItemRow[];
+  return readAll<ReturnOrderItemRow>("listOrderItems", () =>
+    db
+      .from("order_items")
+      .select(
+        "id, order_id, product_name_snapshot, variant_name_snapshot, sku_snapshot, quantity, created_at",
+      )
+      .eq("organization_id", organizationId)
+      .eq("order_id", orderId)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true }),
+  );
 }
 
 export async function hasDeliveredDelivery(
@@ -225,16 +286,20 @@ export async function listSoldOrderItemIds(
   organizationId: string,
   orderItemIds: readonly string[],
 ): Promise<string[]> {
-  if (orderItemIds.length === 0) return [];
-  const { data, error } = await db
-    .from("inventory_movements")
-    .select("reference_id")
-    .eq("organization_id", organizationId)
-    .eq("movement_type", "sale")
-    .eq("reference_type", "order_item")
-    .in("reference_id", [...orderItemIds]);
-  if (error) throw new Error(`listSoldOrderItemIds: ${errMessage(error)}`);
-  return ((data ?? []) as Array<{ reference_id: string }>).map((row) => row.reference_id);
+  const rows = await readAllIn<{ id: string; reference_id: string }>(
+    "listSoldOrderItemIds",
+    orderItemIds,
+    (chunk) =>
+      db
+        .from("inventory_movements")
+        .select("id, reference_id")
+        .eq("organization_id", organizationId)
+        .eq("movement_type", "sale")
+        .eq("reference_type", "order_item")
+        .in("reference_id", chunk)
+        .order("id", { ascending: true }),
+  );
+  return rows.map((row) => row.reference_id);
 }
 
 // ── Write RPCs (migration 056) ───────────────────────────────────────────────

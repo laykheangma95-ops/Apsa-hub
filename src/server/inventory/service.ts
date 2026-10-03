@@ -161,6 +161,19 @@ function requiredPermissionFor(movementType: InventoryMovementTypeDb): string {
   }
 }
 
+/**
+ * References only a dedicated domain workflow may write. Compared trimmed and
+ * case-insensitively, exactly as migration 056's ledger guard does.
+ */
+const RESERVED_REFERENCE_TYPES: ReadonlySet<string> = new Set(["customer_return_item"]);
+
+export function isReservedReferenceType(referenceType: string | null | undefined): boolean {
+  return (
+    typeof referenceType === "string" &&
+    RESERVED_REFERENCE_TYPES.has(referenceType.trim().toLowerCase())
+  );
+}
+
 // ── Service functions ─────────────────────────────────────────────────────────
 
 export interface RecordMovementInput {
@@ -204,6 +217,13 @@ export async function recordMovement(
 
   if (!Number.isInteger(input.quantityDelta) || input.quantityDelta === 0) {
     throw publicError("quantity_delta must be a non-zero integer", 400);
+  }
+
+  // Customer-return movements are written only by the Returns completion RPC
+  // (migration 056, enforced there by guard_customer_return_movement). Refused
+  // here first so nothing — not even the adjustment audit row — is written.
+  if (isReservedReferenceType(input.referenceType)) {
+    throw publicError("reference_type is reserved for customer returns", 400);
   }
 
   ctx.require(requiredPermissionFor(input.movementType));
