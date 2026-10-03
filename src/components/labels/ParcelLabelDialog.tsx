@@ -12,9 +12,23 @@ import {
   useSensitiveCapabilityRevalidation,
 } from "@/hooks/use-capabilities";
 import { createParcel, getParcelLabelData } from "@/lib/api";
-import { buildParcelLabel, PARCEL_LABEL_SIZE_MM } from "@/lib/labels/parcel-label";
+import {
+  buildParcelLabel,
+  isDeliveryArranged,
+  PARCEL_LABEL_SIZE_MM,
+} from "@/lib/labels/parcel-label";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import { fulfillmentKeys } from "@/lib/fulfillment-query";
+
+/**
+ * A label needs its identity created here only when delivery is arranged yet
+ * the code is missing (a delivery arranged before identity moved into
+ * arrangement, or an identity write that failed after the delivery committed).
+ * Before delivery is arranged no identity is generated at all.
+ */
+function needsParcelCode(d: ParcelLabelInput): boolean {
+  return !d.parcelCode && isDeliveryArranged(d);
+}
 
 /**
  * Parcel label preview + print (§13, §17). Accepts one or many order ids; each
@@ -22,8 +36,11 @@ import { fulfillmentKeys } from "@/lib/fulfillment-query";
  *
  * ── PARCEL IDENTITY INTEGRATION ──────────────────────────────────────────────
  *
- * When the labels load, every order without a parcel code gets one created via
- * createParcelFn (idempotent), and the labels refetch. Orders that already have
+ * Arranging delivery generates the parcel identity (createDelivery, server). An
+ * order with no delivery arranged yet prints nothing: the dialog says "Arrange
+ * delivery first" and no identity is created here. An order whose delivery is
+ * arranged but whose code is missing gets one via createParcelFn (idempotent),
+ * and the labels refetch. Orders that already have
  * a parcel code reuse it unchanged — reprinting never generates a new identity.
  * The QR and the Code 128 barcode both encode that same parcel identity.
  *
@@ -87,7 +104,7 @@ export function ParcelLabelDialog({
    */
   const ensureParcelsMutation = useMutation({
     mutationFn: async (labelData: ParcelLabelInput[]) => {
-      const needsParcel = labelData.filter((d) => !d.parcelCode);
+      const needsParcel = labelData.filter(needsParcelCode);
       if (needsParcel.length === 0) return;
       await Promise.all(needsParcel.map((d) => createParcel(d.order.id)));
     },
@@ -102,17 +119,33 @@ export function ParcelLabelDialog({
   const batchKey = orderIds.join(",");
   const attemptedBatch = useRef<string | null>(null);
   const loaded = canPrint && query.isSuccess ? query.data : null;
-  const missingCodes = loaded ? loaded.some((d) => !d.parcelCode) : false;
+  const missingCodes = loaded ? loaded.some(needsParcelCode) : false;
   useEffect(() => {
     if (!open) {
       attemptedBatch.current = null;
+      // Never reopen onto a previous opening's payload: it may predate the
+      // delivery (and so the parcel identity) and would render "not assigned"
+      // — and drive the auto-assign — until the refetch landed.
+      queryClient.removeQueries({
+        queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, organizationId),
+      });
       return;
     }
     if (!loaded || !missingCodes || !canCreateParcel) return;
     if (attemptedBatch.current === batchKey) return;
     attemptedBatch.current = batchKey;
     ensureParcelsMutation.mutate(loaded);
-  }, [open, loaded, missingCodes, canCreateParcel, batchKey, ensureParcelsMutation]);
+  }, [
+    open,
+    loaded,
+    missingCodes,
+    canCreateParcel,
+    batchKey,
+    ensureParcelsMutation,
+    queryClient,
+    userId,
+    organizationId,
+  ]);
 
   if (!open) return null;
 
@@ -138,7 +171,12 @@ export function ParcelLabelDialog({
    */
   async function handleBeforePrint(): Promise<boolean> {
     const currentData: ParcelLabelInput[] = canPrint ? (query.data ?? []) : [];
-    if (currentData.length === 0 || currentData.some((d) => !d.parcelCode)) return false;
+    if (
+      currentData.length === 0 ||
+      currentData.some((d) => !d.parcelCode || !isDeliveryArranged(d))
+    ) {
+      return false;
+    }
     return reauthorizePrint();
   }
 
@@ -151,6 +189,10 @@ export function ParcelLabelDialog({
   const confirmed = data.filter((d) => d.customer.addressConfirmed);
   const allConfirmed = data.length > 0 && unconfirmed.length === 0;
   const allCoded = data.length > 0 && data.every((d) => !!d.parcelCode);
+  // The parcel identity is generated when delivery is arranged, so an order
+  // without one cannot print yet — it is told to arrange delivery first.
+  const awaitingDelivery = data.filter((d) => !isDeliveryArranged(d));
+  const allArranged = data.length > 0 && awaitingDelivery.length === 0;
   // Creation failed, or succeeded yet the refetched labels still lack a code.
   const codeError =
     ensureParcelsMutation.isError ||
@@ -178,7 +220,7 @@ export function ParcelLabelDialog({
         onClose={onClose}
         title={title}
         pageSize={PARCEL_LABEL_SIZE_MM}
-        printable={canPrint && allConfirmed && allCoded}
+        printable={canPrint && allConfirmed && allArranged && allCoded}
         active={confirmTarget === null}
         onBeforePrint={handleBeforePrint}
         controls={
@@ -223,6 +265,11 @@ export function ParcelLabelDialog({
                       </li>
                     ))}
                 </ul>
+              ) : null}
+              {awaitingDelivery.length > 0 ? (
+                <p role="status" className="text-caption text-text-muted">
+                  {t("labels.parcel.needsDelivery")}
+                </p>
               ) : null}
               {missingCodes && !canCreateParcel ? (
                 <p role="status" className="text-caption text-text-muted">

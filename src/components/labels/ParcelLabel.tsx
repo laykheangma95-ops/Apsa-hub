@@ -226,8 +226,23 @@ export function ParcelLabel({ vm }: { vm: ParcelLabelViewModel }) {
                 dangerouslySetInnerHTML={{ __html: vm.qr.svg }}
               />
             ) : (
-              <div className="flex h-full w-full items-center justify-center border-[0.3mm] border-dashed border-black p-[1.5mm] text-center text-[7pt]">
-                {t("labels.parcel.codesPending")}
+              /*
+               * "Not assigned yet" is only true before delivery is arranged —
+               * arranging it generates the parcel identity. After that a missing
+               * code is in flight, never "not assigned".
+               */
+              <div
+                data-testid="parcel-label-codes-placeholder"
+                className="flex h-full w-full flex-col items-center justify-center border-[0.3mm] border-dashed border-black p-[1.5mm] text-center text-[7pt]"
+              >
+                {vm.deliveryArranged ? (
+                  t("labels.parcel.codesAssigning")
+                ) : (
+                  <>
+                    <span>{t("labels.parcel.codesPending")}</span>
+                    <span className="font-bold">{t("labels.parcel.arrangeFirst")}</span>
+                  </>
+                )}
               </div>
             )}
           </div>

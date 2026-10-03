@@ -222,9 +222,12 @@ export async function getParcelLabelData(
         : Promise.resolve(null),
       repo.orderPaymentTotals(ctx.organizationId, orderId),
       repo.orderPaymentStates(ctx.organizationId, orderId),
-      import("@/server/parcels/service")
-        .then((m) => m.getParcelCodeForOrder(ctx.organizationId, orderId))
-        .catch(() => null),
+      // A failed lookup fails the label read. It is never swallowed into "no
+      // code yet": that rendered "Parcel code not assigned yet" for orders whose
+      // identity existed.
+      import("@/server/parcels/service").then((m) =>
+        m.getParcelCodeForOrder(ctx.organizationId, orderId),
+      ),
     ]);
 
   // The destination is the ORDER's snapshot, never the mutable customer default.
@@ -259,6 +262,10 @@ export async function getParcelLabelData(
   // wrong way; only an active or delivered delivery is printed.
   const delivery =
     latestDelivery && LABEL_DELIVERY_STATUSES.has(latestDelivery.status) ? latestDelivery : null;
+  // Arranging delivery is what generates the parcel identity, so without
+  // delivery.read (no delivery row is read at all) an existing identity is the
+  // proof that delivery was arranged.
+  const deliveryArranged = ctx.can("delivery.read") ? delivery !== null : parcelCode !== null;
 
   return {
     merchant: { businessName: businessName ?? "", phone, logoUrl: null },
@@ -287,6 +294,7 @@ export async function getParcelLabelData(
           serviceName: null,
         }
       : null,
+    deliveryArranged,
     parcelCode,
   };
 }

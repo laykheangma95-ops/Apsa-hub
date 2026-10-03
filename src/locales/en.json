@@ -982,6 +982,15 @@
     "recordPayment": "Record payment",
     "arrangeDelivery": "Arrange delivery",
     "printParcelLabel": "Print parcel label",
+    "printLabelNeedsDelivery": "Arrange delivery first.",
+    "deliveryChoice": {
+      "title": "Delivery",
+      "body": "Arranging delivery creates the parcel code, QR and barcode for the label.",
+      "arrangeNow": "Arrange delivery now",
+      "later": "Add delivery later",
+      "awaiting": "Awaiting delivery arrangement",
+      "awaitingBody": "The order is saved. Arrange delivery from the order when you are ready — the parcel label prints after that."
+    },
     "startPacking": "Pack order",
     "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
@@ -2425,7 +2434,10 @@
       "order": "Order",
       "codesPending": "Parcel code not assigned yet",
       "needsParcelCode": "These labels need a parcel code before printing. Ask an owner or manager to print them.",
-      "parcelCodeError": "Could not assign a parcel code. Please try again."
+      "parcelCodeError": "Could not assign a parcel code. Please try again.",
+      "arrangeFirst": "Arrange delivery first.",
+      "codesAssigning": "Assigning parcel code…",
+      "needsDelivery": "Arrange delivery first. Arranging delivery creates the parcel code, QR and barcode for the label."
     }
   },
   "pack": {

@@ -798,9 +798,18 @@ describe("label — QR + Code 128", () => {
     expect(reprint.code128!.svg).toBe(first.code128!.svg);
   });
 
-  it("without a parcel code: a placeholder, no codes, no order-UUID fallback", () => {
-    const html = render(input({ parcelCode: null }));
+  it("before delivery is arranged: 'not assigned yet' + 'arrange delivery first', no codes, no order-UUID fallback", () => {
+    const html = render(input({ parcelCode: null, delivery: null, deliveryArranged: false }));
     expect(html).toContain(T.codesPending);
+    expect(html).toContain(T.arrangeFirst);
+    expect(html).not.toContain("<svg");
+    expect(html).not.toContain(ORDER_ID);
+  });
+
+  it("delivery arranged but code still in flight: never 'not assigned yet'", () => {
+    const html = render(input({ parcelCode: null }));
+    expect(html).toContain(T.codesAssigning);
+    expect(html).not.toContain(T.codesPending);
     expect(html).not.toContain("<svg");
     expect(html).not.toContain(ORDER_ID);
   });

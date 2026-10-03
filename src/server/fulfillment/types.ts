@@ -117,6 +117,13 @@ export interface ParcelLabelData {
     serviceName: string | null;
   } | null;
   /**
+   * Whether delivery is arranged — the gate for printing: a label is printable
+   * only once delivery is arranged (which is what generates the parcel
+   * identity). With delivery.read: the latest delivery is active or delivered.
+   * Without it no delivery row is read, so an existing identity is the proof.
+   */
+  deliveryArranged: boolean;
+  /**
    * The permanent opaque parcel code (APSA:PCL:v1:<token>) when the order has
    * an active parcel identity, or null for orders without one. The label builder
    * uses this to encode the parcel code in the QR instead of the order UUID.

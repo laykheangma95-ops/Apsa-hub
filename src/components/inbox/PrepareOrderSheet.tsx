@@ -25,6 +25,7 @@ import { parseDeliveryFee } from "@/lib/delivery-fee";
 import { localName } from "@/lib/format";
 import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { useLanguage } from "@/lib/i18n";
+import { DeliveryArrangementChoice } from "@/components/delivery/DeliveryArrangementChoice";
 import {
   classifyOrderError,
   channelToSourceDb,
@@ -706,9 +707,12 @@ export function PrepareOrderSheet({
           ) : null}
 
           {step.detail.order.lifecycleStatus === "confirmed" ? (
-            <p className="text-body text-center text-text-secondary">
-              {t("conversation.prepareOrder.confirmed")}
-            </p>
+            <>
+              <p className="text-body text-center text-text-secondary">
+                {t("conversation.prepareOrder.confirmed")}
+              </p>
+              <DeliveryArrangementChoice orderId={step.detail.order.id} />
+            </>
           ) : (
             <Button
               className="tap-target h-12 w-full"
