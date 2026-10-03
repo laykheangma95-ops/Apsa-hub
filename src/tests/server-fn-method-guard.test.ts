@@ -11,36 +11,33 @@
  *
  * How the guard works (structural, not a name list of mutations):
  *   1. Every createServerFn in src/ (tests excluded) is discovered from the
- *      TypeScript AST (helpers/server-fn-inventory.ts), with its declared
- *      method read from the real call argument.
- *   2. A function may be GET only if it is registered in READ_ONLY_SERVER_FNS
+ *      TypeScript AST (helpers/server-fn-inventory.ts) by IMPORT BINDING — the
+ *      canonical import, an alias and a namespace import are all seen — with
+ *      its declared method read from the real call argument.
+ *   2. Only the canonical form is allowed: `import { createServerFn } from
+ *      "@tanstack/react-start"` called directly. Aliases, namespace/default
+ *      imports, re-exports, dynamic imports of the framework module and
+ *      non-call references fail, so no future form can slip past step 1.
+ *   3. A function may be GET only if it is registered in READ_ONLY_SERVER_FNS
  *      below with a reason. EVERY other server function must declare
- *      `{ method: "POST" }` explicitly. So a new server function that forgets
- *      the method fails here until someone either makes it POST or consciously
- *      registers it as a read.
- *   3. A registered read must look like one: a read-verb name, and no
+ *      `{ method: "POST" }` explicitly.
+ *   4. A registered read must look like one: a read-verb name, and no
  *      write-verb call anywhere in its handler body (beyond the reviewed
  *      session-maintenance calls listed on its entry).
- *   4. The registry cannot go stale: every entry must still exist as GET.
+ *   5. The registry cannot go stale: every entry must still exist as GET.
+ *
+ * The rules live in helpers/server-fn-policy.ts; server-fn-inventory-fixtures
+ * .test.ts proves each one fires on a deliberately unsafe fixture.
  */
 import { describe, expect, it } from "bun:test";
-import { inventoryServerFns, type ServerFnDefinition } from "./helpers/server-fn-inventory";
-
-interface ReadOnlyEntry {
-  reason: string;
-  /**
-   * Write-verb calls the handler is allowed to make because they maintain the
-   * caller's OWN session cookies (token refresh / clearing an expired or
-   * revoked session) — never domain data. Reviewed individually.
-   */
-  sessionMaintenance?: string[];
-}
+import { inventoryServerFns } from "./helpers/server-fn-inventory";
+import { checkServerFnPolicy, type ReadOnlyRegistry } from "./helpers/server-fn-policy";
 
 /**
  * The ONLY server functions allowed to use GET. Adding an entry is a security
  * review decision: the function must not change any domain state.
  */
-export const READ_ONLY_SERVER_FNS: Record<string, ReadOnlyEntry> = {
+export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   // auth / session
   getSessionFn: {
     reason: "reads the cookie session; refreshes the caller's own expired access token",
@@ -118,75 +115,55 @@ export const READ_ONLY_SERVER_FNS: Record<string, ReadOnlyEntry> = {
   listTeamFn: { reason: "list read" },
 };
 
-const READ_NAME = /^(get|list|find|lookup|search|resolve|preview|validate|check)[A-Z]/;
-
-/** A call whose name says it writes. Read handlers must not make one. */
-const WRITE_CALL =
-  /^(create|update|upsert|insert|delete|remove|record|mark|transition|confirm|cancel|refund|reverse|verify|correct|attach|archive|generate|receive|inspect|complete|request|invite|resend|change|deactivate|reactivate|accept|assign|recover|retry|sign|clear|write|set|add|pack|ingest)(?:[A-Z]|$)/;
-
-/** Client factories, not writes. */
-const NON_WRITE_FACTORIES = new Set(["createAnonAuthClient", "createServerClient", "createClient"]);
-
 const inventory = inventoryServerFns();
+const violations = checkServerFnPolicy(inventory, READ_ONLY_SERVER_FNS);
 const byName = new Map(inventory.definitions.map((d) => [d.name, d]));
-const describeFn = (d: ServerFnDefinition) => `${d.name} (${d.file}:${d.line}, method=${d.method})`;
 
 describe("server-function inventory", () => {
   it("discovers the server functions (sanity floor)", () => {
     expect(inventory.definitions.length).toBeGreaterThanOrEqual(124);
   });
 
+  it("createServerFn is only reached through the canonical import + direct call", () => {
+    expect(
+      violations.nonCanonical,
+      'Use `import { createServerFn } from "@tanstack/react-start"` and call it directly — ' +
+        "aliases, namespace imports, re-exports and indirect references hide server functions from this guard.",
+    ).toEqual([]);
+  });
+
   it("every createServerFn is an exported const (nothing hides from the inventory)", () => {
-    expect(inventory.unboundCalls).toEqual([]);
+    expect(violations.unbound).toEqual([]);
   });
 
   it("server function names are unique", () => {
-    expect(byName.size).toBe(inventory.definitions.length);
+    expect(violations.duplicateNames).toEqual([]);
   });
 
   it("no server function computes its method at runtime", () => {
-    const dynamic = inventory.definitions.filter((d) => d.method === "non-literal");
-    expect(dynamic.map(describeFn)).toEqual([]);
+    expect(violations.nonLiteralMethod).toEqual([]);
   });
 });
 
 describe("APSA rule: mutations are POST, GET is read-only", () => {
   it('every server function not registered as a read declares method: "POST" explicitly', () => {
-    const offenders = inventory.definitions.filter(
-      (d) => !(d.name in READ_ONLY_SERVER_FNS) && d.method !== "POST",
-    );
     expect(
-      offenders.map(describeFn),
+      violations.notPost,
       'State-changing server functions must use createServerFn({ method: "POST" }). ' +
         "If this function is genuinely read-only, register it in READ_ONLY_SERVER_FNS with a reason.",
     ).toEqual([]);
   });
 
   it("every registered read still exists and is GET (registry cannot go stale)", () => {
-    const stale = Object.keys(READ_ONLY_SERVER_FNS).filter(
-      (name) => byName.get(name)?.effectiveMethod !== "GET",
-    );
-    expect(stale).toEqual([]);
+    expect(violations.staleReads).toEqual([]);
   });
 
   it("registered reads have read-verb names", () => {
-    const misnamed = Object.keys(READ_ONLY_SERVER_FNS).filter((name) => !READ_NAME.test(name));
-    expect(misnamed).toEqual([]);
+    expect(violations.misnamedReads).toEqual([]);
   });
 
   it("registered read handlers make no write-verb call beyond reviewed session maintenance", () => {
-    const violations: string[] = [];
-    for (const [name, entry] of Object.entries(READ_ONLY_SERVER_FNS)) {
-      const def = byName.get(name);
-      if (!def) continue;
-      const allowed = new Set(entry.sessionMaintenance ?? []);
-      for (const callee of def.handlerCallees) {
-        if (NON_WRITE_FACTORIES.has(callee) || allowed.has(callee)) continue;
-        if (WRITE_CALL.test(callee) && !READ_NAME.test(callee))
-          violations.push(`${name} → ${callee}`);
-      }
-    }
-    expect(violations).toEqual([]);
+    expect(violations.writesInReads).toEqual([]);
   });
 
   it("the staging findings and every high-risk mutation are POST", () => {
