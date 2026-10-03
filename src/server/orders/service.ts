@@ -711,6 +711,28 @@ function transitionFailureToError(result: { status: string; current?: string }):
 }
 
 /**
+ * Create (or find) the APSA Parcel of an order whose confirmation committed.
+ * The only parcel write in the orders service: used by confirmation's pre-057
+ * parcel write and by a confirmation retry that recovers a failed one.
+ * Idempotent — one active parcel per order (uniq_parcels_org_order_active).
+ */
+async function ensureConfirmedOrderParcel(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<void> {
+  const { ensureParcelForOrder } = await import("@/server/parcels/service");
+  try {
+    await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
+  } catch (err) {
+    reportServerError(err, {
+      event: "orders.parcel_generation_failed",
+      organizationId: ctx.organizationId,
+    });
+    throw err;
+  }
+}
+
+/**
  * Move the order's lifecycle status.
  *
  * *** INVENTORY CONSEQUENCE (written by the DB, in the same transaction) ***
@@ -746,6 +768,28 @@ export async function transitionLifecycleStatus(
   const order = await loadTransitionTarget(ctx, orderId);
   const from = order.lifecycle_status;
 
+  // Recovery: a confirmation whose post-RPC parcel write failed (below) left
+  // the order confirmed without its APSA Parcel. Retrying the confirmation
+  // completes it — the parcel is created now, exactly once — instead of being
+  // rejected as "already confirmed", so the order never needs a manual
+  // lifecycle reset. A confirmed order that already owns its parcel falls
+  // through to the ordinary rejection.
+  if (to === "confirmed" && from === "confirmed") {
+    const { findActiveParcelByOrder } = await import("@/server/parcels/repository");
+    if (!(await findActiveParcelByOrder(ctx.organizationId, orderId))) {
+      await ensureConfirmedOrderParcel(ctx, orderId);
+      await bestEffortAudit(ctx, {
+        action: "orders.update",
+        resourceType: "orders",
+        resourceId: orderId,
+        beforeJson: { lifecycle_status: from, parcel: null },
+        afterJson: { lifecycle_status: to, parcel: "created" },
+        ...(reason ? { reason } : {}),
+      });
+      return requireDetail(ctx.organizationId, orderId);
+    }
+  }
+
   if (!isValidLifecycleTransition(from, to)) {
     throw conflict(`Cannot move order lifecycle from '${from}' to '${to}'`);
   }
@@ -771,18 +815,10 @@ export async function transitionLifecycleStatus(
   // left fresh orders with no parcel and a failing parcel label. Then it is
   // created here, still as part of confirmation, idempotently (one active
   // parcel per order is enforced by uniq_parcels_org_order_active). A failure
-  // is reported, never swallowed: no label path creates the parcel later.
+  // is reported, never swallowed: no label path creates the parcel later, and
+  // retrying the confirmation recovers the order (see above).
   if (to === "confirmed" && !result.parcel_id) {
-    const { ensureParcelForOrder } = await import("@/server/parcels/service");
-    try {
-      await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
-    } catch (err) {
-      reportServerError(err, {
-        event: "orders.parcel_generation_failed",
-        organizationId: ctx.organizationId,
-      });
-      throw err;
-    }
+    await ensureConfirmedOrderParcel(ctx, orderId);
   }
 
   // The RPC reports how many inventory movements its transaction wrote. Record

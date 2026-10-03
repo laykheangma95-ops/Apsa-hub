@@ -162,6 +162,7 @@ function fakeQuery(result: QueryResult) {
   const q = {
     select: () => q,
     eq: () => q,
+    neq: () => q,
     order: () => q,
     limit: () => q,
     range: () => q,
@@ -189,6 +190,7 @@ async function withOrderDb<T>(
   fn: (calls: RpcCall[]) => Promise<T>,
 ): Promise<T> {
   const { setOrderRepositoryDbForTests } = await import("../server/orders/repository");
+  const { setParcelRepositoryDbForTests } = await import("../server/parcels/repository");
   const calls: RpcCall[] = [];
   const testDb = {
     from: (table: string) => fakeQuery(opts.tables?.[table] ?? { data: null, error: null }),
@@ -216,11 +218,13 @@ async function withOrderDb<T>(
       return result;
     },
   };
-  const restore = setOrderRepositoryDbForTests(testDb);
+  const restoreOrders = setOrderRepositoryDbForTests(testDb);
+  const restoreParcels = setParcelRepositoryDbForTests(testDb);
   try {
     return await fn(calls);
   } finally {
-    restore();
+    restoreParcels();
+    restoreOrders();
   }
 }
 
@@ -427,6 +431,8 @@ describe("Test 4: duplicate confirmation cannot double-decrement", () => {
           orders: orderRow({ lifecycle_status: "confirmed" }),
           order_items: twoLinesSameVariant,
           order_status_history: itemRows([]),
+          // ...and it owns its APSA Parcel, so there is nothing to recover.
+          parcels: itemRows([{ id: "parcel-1", order_id: ORDER_ID, status: "created" }]),
         },
       },
       async (calls) => {

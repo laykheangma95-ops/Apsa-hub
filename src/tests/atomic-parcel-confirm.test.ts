@@ -78,12 +78,23 @@ describe("runtime paths never create a parcel outside confirmation", () => {
     const source = code("src/server/orders/service.ts");
     expect(source).not.toContain("insertParcel");
     expect(source.split("ensureParcelForOrder(").length - 1).toBe(1);
+    // The single parcel write lives in a private helper that surfaces failure.
+    const helperAt = source.indexOf("async function ensureConfirmedOrderParcel(");
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = source.slice(helperAt, source.indexOf("\n}\n", helperAt));
+    expect(helper).toContain("ensureParcelForOrder(");
+    expect(helper).toMatch(/orders\.parcel_generation_failed[\s\S]*throw err;/);
+    // ...called only from confirmation: the pre-057 fallback and the retry
+    // that recovers a confirmed order left without its parcel.
+    expect(source.split("ensureConfirmedOrderParcel(").length - 1).toBe(3);
     const fn = source.slice(source.indexOf("export async function transitionLifecycleStatus"));
     const body = fn.slice(0, fn.indexOf("\nexport "));
+    expect(body.split("ensureConfirmedOrderParcel(").length - 1).toBe(2);
     expect(body).toMatch(
-      /if \(to === "confirmed" && !result\.parcel_id\) \{[\s\S]*ensureParcelForOrder\(/,
+      /if \(to === "confirmed" && from === "confirmed"\) \{[\s\S]*findActiveParcelByOrder[\s\S]*ensureConfirmedOrderParcel\(/,
     );
-    // The failure surfaces; it is never swallowed into a parcel-less order.
-    expect(body).toMatch(/orders\.parcel_generation_failed[\s\S]*throw err;/);
+    expect(body).toMatch(
+      /if \(to === "confirmed" && !result\.parcel_id\) \{\s*await ensureConfirmedOrderParcel\(/,
+    );
   });
 });

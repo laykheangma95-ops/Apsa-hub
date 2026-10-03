@@ -61,6 +61,8 @@ interface World {
    * the parcel label right after confirmation).
    */
   pre057?: boolean;
+  /** Make the next N direct parcel inserts fail (the fallback write after confirmation). */
+  failParcelInserts?: number;
 }
 
 function seed(lifecycle: "draft" | "confirmed" = "draft"): World {
@@ -152,6 +154,10 @@ function makeDb(world: World) {
     const run = () => {
       if (insertRow !== null) {
         const row = insertRow;
+        if (table === "parcels" && (world.failParcelInserts ?? 0) > 0) {
+          world.failParcelInserts! -= 1;
+          return { data: null, error: { message: "parcel insert failed (test)" } };
+        }
         if (table === "parcels") {
           const clash = world.tables["parcels"]!.some(
             (p) =>
@@ -479,17 +485,50 @@ describe("a freshly confirmed order owns its APSA Parcel even before migration 0
     expect(activeParcels()).toHaveLength(1);
   });
 
-  it("confirming again never duplicates the parcel", async () => {
+  it("a failed parcel write is recovered by retrying confirmation — exactly one parcel", async () => {
+    world.pre057 = true;
+    world.failParcelInserts = 1;
+    // Injected parcel creation failure: confirmation throws.
+    await expect(confirm()).rejects.toThrow(/parcel insert failed/);
+    // The order committed as confirmed but has no parcel yet — still recoverable.
+    expect(world.tables["orders"]![0]!["lifecycle_status"]).toBe("confirmed");
+    expect(activeParcels()).toHaveLength(0);
+    const rpcCallsBefore = world.rpcCalls.length;
+    // Retry the confirmation as-is: no manual lifecycle reset.
+    await confirm();
+    expect(world.tables["orders"]![0]!["lifecycle_status"]).toBe("confirmed");
+    // The retry did not re-run the transition (no second stock consumption).
+    expect(world.rpcCalls.length).toBe(rpcCallsBefore);
+    expect(activeParcels()).toHaveLength(1);
+    expect(isValidParcelCode(String(activeParcels()[0]!["parcel_code"]))).toBe(true);
+    expect((await internalLabel()).parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+  });
+
+  it("confirming again never duplicates the parcel — a parcelled confirmed order is refused", async () => {
     world.pre057 = true;
     await confirm();
     const first = String(activeParcels()[0]!["parcel_code"]);
-    world.tables["orders"]![0]!["lifecycle_status"] = "draft";
-    await confirm();
+    await expect(confirm()).rejects.toThrow(/Cannot move order lifecycle/);
+    await expect(confirm()).rejects.toThrow(/Cannot move order lifecycle/);
     expect(activeParcels()).toHaveLength(1);
     expect(String(activeParcels()[0]!["parcel_code"])).toBe(first);
   });
 
+  it("printing and Arrange Delivery never create the missing parcel — only a confirmation retry does", async () => {
+    world.pre057 = true;
+    world.failParcelInserts = 1;
+    await expect(confirm()).rejects.toThrow();
+    await expect(internalLabel()).rejects.toThrow(/no APSA parcel/);
+    await shippingLabel().catch(() => undefined);
+    await expect(arrange()).rejects.toThrow(/no APSA parcel/);
+    expect(parcels()).toHaveLength(0);
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+  });
+
   it("a migrated database is not double-written: the RPC's parcel is the parcel", async () => {
+    // Any direct insert would fail: only the RPC may create the parcel here.
+    world.failParcelInserts = 99;
     await confirm();
     expect(activeParcels()).toHaveLength(1);
     expect((await internalLabel()).parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
