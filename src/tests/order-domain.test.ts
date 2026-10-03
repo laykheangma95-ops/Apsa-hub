@@ -1521,11 +1521,14 @@ describe("Test 19: No arbitrary-update escape hatch", () => {
     // update_order_shipping_v1 is the narrow shipping-snapshot write;
     // reopen_order_fulfillment_v1 (migration 054) is the narrow processing →
     // unfulfilled reopen that also retires a ready delivery; record_order_packed_v1
-    // (also 054) is Pack Order's marker write with no delivery. There is still no
-    // generic order UPDATE — every write is one of these specific RPCs.
+    // (also 054) is Pack Order's marker write with no delivery;
+    // recover_order_parcel_v1 (migration 059) creates the APSA Parcel a confirmed
+    // order is missing, under the order lock. There is still no generic order
+    // UPDATE — every write is one of these specific RPCs.
     expect(rpcNames.sort()).toEqual([
       "create_order_v3",
       "record_order_packed_v1",
+      "recover_order_parcel_v1",
       "reopen_order_fulfillment_v1",
       "transition_order_status_v1",
       "update_order_shipping_v1",
@@ -1763,7 +1766,8 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       executableSql(rpcMigration()) +
       executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql")) +
       executableSql(readSource("supabase/migrations/047_order_shipping_snapshot.sql")) +
-      executableSql(readSource("supabase/migrations/054_pack_order_readiness_guards.sql"));
+      executableSql(readSource("supabase/migrations/054_pack_order_readiness_guards.sql")) +
+      executableSql(readSource("supabase/migrations/059_recover_order_parcel.sql"));
     // The other migration-054 functions — ready_packed_delivery_v1,
     // order_currently_packed_v1 and the re-declared transition_delivery_status_v1
     // and create_delivery_v1 — are called by the deliveries repository, not this

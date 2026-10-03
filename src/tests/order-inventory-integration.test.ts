@@ -431,9 +431,9 @@ describe("Test 4: duplicate confirmation cannot double-decrement", () => {
           orders: orderRow({ lifecycle_status: "confirmed" }),
           order_items: twoLinesSameVariant,
           order_status_history: itemRows([]),
-          // ...and it owns its APSA Parcel, so there is nothing to recover.
-          parcels: itemRows([{ id: "parcel-1", order_id: ORDER_ID, status: "created" }]),
         },
+        // ...and it owns its APSA Parcel, so the locked recovery finds nothing to do.
+        rpc: { recover_order_parcel_v1: { data: { status: "exists" }, error: null } },
       },
       async (calls) => {
         const err = await expectRejects(() =>

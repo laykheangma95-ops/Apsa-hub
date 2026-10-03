@@ -80,6 +80,7 @@ import type {
   OrderStatusHistoryRow,
   OrderSourceDb,
   ListOrdersOptions,
+  RecoverParcelRpcResult,
 } from "./types";
 
 // ── Exported domain types ─────────────────────────────────────────────────────
@@ -134,6 +135,13 @@ export interface OrderStatusHistoryEntry {
 export interface OrderDetail extends OrderSummary {
   items: OrderLineDetail[];
   statusHistory: OrderStatusHistoryEntry[];
+  /**
+   * True when the order is confirmed and owns no active APSA Parcel — a
+   * confirmation whose parcel write failed. Order detail then offers the
+   * recovery action. A display hint read at load time only: the recovery RPC
+   * re-decides under the order lock. Absent when not read.
+   */
+  parcelMissing?: boolean;
 }
 
 // ── Mappers ───────────────────────────────────────────────────────────────────
@@ -711,18 +719,22 @@ function transitionFailureToError(result: { status: string; current?: string }):
 }
 
 /**
- * Create (or find) the APSA Parcel of an order whose confirmation committed.
- * The only parcel write in the orders service: used by confirmation's pre-057
- * parcel write and by a confirmation retry that recovers a failed one.
- * Idempotent — one active parcel per order (uniq_parcels_org_order_active).
+ * Create the APSA Parcel of a confirmed order that has none, through the ONE
+ * atomic authority (migration 059, recover_order_parcel_v1): the order row is
+ * locked, its lifecycle re-read and its active parcel checked in the same
+ * transaction as the insert. The service never decides "still confirmed" and
+ * then writes the parcel in a separate step — a cancellation committing in
+ * between would give a cancelled order an active parcel.
+ *
+ * The only parcel write in the orders service. Idempotent ('exists' when the
+ * order already owns its parcel). A failure is reported, never swallowed.
  */
-async function ensureConfirmedOrderParcel(
+async function recoverParcelAtomically(
   ctx: AuthorizationContext,
   orderId: string,
-): Promise<void> {
-  const { ensureParcelForOrder } = await import("@/server/parcels/service");
+): Promise<RecoverParcelRpcResult> {
   try {
-    await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
+    return await repo.recoverOrderParcel(ctx.organizationId, orderId, ctx.userId);
   } catch (err) {
     reportServerError(err, {
       event: "orders.parcel_generation_failed",
@@ -730,6 +742,53 @@ async function ensureConfirmedOrderParcel(
     });
     throw err;
   }
+}
+
+/** Maps a refused parcel recovery to the same HTTP-shaped errors as a transition. */
+function parcelRecoveryRefusal(result: RecoverParcelRpcResult): Error {
+  if (result.status === "not_found") return notFound("Order not found");
+  return conflict(
+    `Order status changed concurrently (now ${result.current ?? "unknown"}) — re-read and retry`,
+  );
+}
+
+async function auditParcelRecovered(
+  ctx: AuthorizationContext,
+  orderId: string,
+  reason?: string | null,
+): Promise<void> {
+  await bestEffortAudit(ctx, {
+    action: "orders.update",
+    resourceType: "orders",
+    resourceId: orderId,
+    beforeJson: { lifecycle_status: "confirmed", parcel: null },
+    afterJson: { lifecycle_status: "confirmed", parcel: "created" },
+    ...(reason ? { reason } : {}),
+  });
+}
+
+/**
+ * Recover a confirmed order left without its APSA Parcel — the Order detail
+ * "Create APSA Parcel" action. Same authority as confirmation (orders.confirm):
+ * it completes what confirmation owed, it is not a new capability. Never
+ * changes lifecycle, never moves stock, never writes status history.
+ *
+ * Refused (nothing written) for an order that is not confirmed — draft,
+ * cancelled, completed — or not in the caller's organization (404, same shape
+ * as a missing order). An order that already owns its parcel gets it back
+ * unchanged; a second parcel is never created.
+ */
+export async function recoverOrderParcel(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<OrderDetail> {
+  ctx.require("orders.confirm");
+  const result = await recoverParcelAtomically(ctx, orderId);
+  if (result.status === "not_found" || result.status === "not_confirmed") {
+    throw parcelRecoveryRefusal(result);
+  }
+  if (result.status === "created") await auditParcelRecovered(ctx, orderId);
+  return { ...(await requireDetail(ctx.organizationId, orderId)), parcelMissing: false };
 }
 
 /**
@@ -770,24 +829,17 @@ export async function transitionLifecycleStatus(
 
   // Recovery: a confirmation whose post-RPC parcel write failed (below) left
   // the order confirmed without its APSA Parcel. Retrying the confirmation
-  // completes it — the parcel is created now, exactly once — instead of being
-  // rejected as "already confirmed", so the order never needs a manual
-  // lifecycle reset. A confirmed order that already owns its parcel falls
-  // through to the ordinary rejection.
+  // completes it through the atomic recovery (exactly one parcel, decided under
+  // the order lock) instead of being rejected as "already confirmed", so the
+  // order never needs a manual lifecycle reset. A confirmed order that already
+  // owns its parcel falls through to the ordinary rejection.
   if (to === "confirmed" && from === "confirmed") {
-    const { findActiveParcelByOrder } = await import("@/server/parcels/repository");
-    if (!(await findActiveParcelByOrder(ctx.organizationId, orderId))) {
-      await ensureConfirmedOrderParcel(ctx, orderId);
-      await bestEffortAudit(ctx, {
-        action: "orders.update",
-        resourceType: "orders",
-        resourceId: orderId,
-        beforeJson: { lifecycle_status: from, parcel: null },
-        afterJson: { lifecycle_status: to, parcel: "created" },
-        ...(reason ? { reason } : {}),
-      });
-      return requireDetail(ctx.organizationId, orderId);
+    const recovered = await recoverParcelAtomically(ctx, orderId);
+    if (recovered.status === "created") {
+      await auditParcelRecovered(ctx, orderId, reason);
+      return { ...(await requireDetail(ctx.organizationId, orderId)), parcelMissing: false };
     }
+    if (recovered.status !== "exists") throw parcelRecoveryRefusal(recovered);
   }
 
   if (!isValidLifecycleTransition(from, to)) {
@@ -813,12 +865,17 @@ export async function transitionLifecycleStatus(
   // Migration 057 creates it inside the confirming transaction and reports it
   // back; a database that has not applied 057 yet confirms without one, which
   // left fresh orders with no parcel and a failing parcel label. Then it is
-  // created here, still as part of confirmation, idempotently (one active
-  // parcel per order is enforced by uniq_parcels_org_order_active). A failure
-  // is reported, never swallowed: no label path creates the parcel later, and
-  // retrying the confirmation recovers the order (see above).
+  // created here, still as part of confirmation, through the same atomic
+  // recovery: the lifecycle is re-checked under the order lock, so a
+  // cancellation that committed right after the confirmation is never given a
+  // parcel. A failure is reported, never swallowed: no label path creates the
+  // parcel later, and retrying the confirmation (or Order detail's "Create APSA
+  // Parcel", recoverOrderParcel) recovers the order.
   if (to === "confirmed" && !result.parcel_id) {
-    await ensureConfirmedOrderParcel(ctx, orderId);
+    const recovered = await recoverParcelAtomically(ctx, orderId);
+    if (recovered.status !== "created" && recovered.status !== "exists") {
+      throw parcelRecoveryRefusal(recovered);
+    }
   }
 
   // The RPC reports how many inventory movements its transaction wrote. Record
@@ -1043,7 +1100,11 @@ export async function getOrderById(
   orderId: string,
 ): Promise<OrderDetail> {
   ctx.require("orders.read");
-  return requireDetail(ctx.organizationId, orderId);
+  const detail = await requireDetail(ctx.organizationId, orderId);
+  const parcelMissing =
+    detail.lifecycleStatus === "confirmed" &&
+    !(await repo.hasActiveParcel(ctx.organizationId, orderId));
+  return { ...detail, parcelMissing };
 }
 
 /**

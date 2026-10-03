@@ -1110,6 +1110,13 @@
     "retryDeliveryReadyDone": "Delivery is ready for courier handoff.",
     "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again.",
     "retryDeliveryReadyNotPacked": "The order is no longer packed. Pack it again before courier handoff.",
+    "parcelMissingTitle": "APSA Parcel not created yet",
+    "parcelMissingBody": "This order is confirmed, but its APSA Parcel was not created. Labels, packing and delivery wait for it.",
+    "parcelMissingNoPermission": "Ask a member who can confirm orders to create the APSA Parcel.",
+    "createParcel": "Create APSA Parcel",
+    "createParcelDone": "APSA Parcel created.",
+    "createParcelFailed": "Could not create the APSA Parcel. Try again.",
+    "createParcelNotConfirmed": "This order is no longer confirmed, so no APSA Parcel was created.",
     "printShippingLabel": "Print shipping label",
     "shippingLabelNeedsDelivery": "Available after delivery is arranged."
   },

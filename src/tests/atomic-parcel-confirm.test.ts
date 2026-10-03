@@ -69,32 +69,81 @@ describe("runtime paths never create a parcel outside confirmation", () => {
       "src/server/fulfillment/service.ts",
     ]) {
       const source = code(file);
-      expect(source).not.toContain("ensureParcelForOrder");
-      expect(source).not.toContain("insertParcel");
+      expect(source).not.toContain("recoverOrderParcel");
+      expect(source).not.toContain("recover_order_parcel_v1");
+      expect(source).not.toMatch(/from\("parcels"\)[\s\S]{0,80}\.insert\(/);
     }
   });
 
-  it("orders service ensures the parcel ONLY inside confirmation, when the RPC reported none", () => {
+  it("no service-role parcel insert exists: every parcel write is a locked RPC (057 / 059)", () => {
+    for (const file of [
+      "src/server/orders/repository.ts",
+      "src/server/orders/service.ts",
+      "src/server/parcels/repository.ts",
+      "src/server/parcels/service.ts",
+    ]) {
+      const source = code(file);
+      expect(source).not.toContain("insertParcel");
+      expect(source).not.toContain("ensureParcelForOrder");
+      expect(source).not.toMatch(/from\("parcels"\)[\s\S]{0,80}\.insert\(/);
+    }
+    expect(code("src/server/orders/repository.ts")).toContain('rpc("recover_order_parcel_v1"');
+  });
+
+  it("orders service recovers the parcel only through the atomic RPC, inside confirmation or recovery", () => {
     const source = code("src/server/orders/service.ts");
-    expect(source).not.toContain("insertParcel");
-    expect(source.split("ensureParcelForOrder(").length - 1).toBe(1);
-    // The single parcel write lives in a private helper that surfaces failure.
-    const helperAt = source.indexOf("async function ensureConfirmedOrderParcel(");
+    // One private helper is the only caller of the repository RPC, and it
+    // surfaces failure rather than swallowing it.
+    expect(source.split("repo.recoverOrderParcel(").length - 1).toBe(1);
+    const helperAt = source.indexOf("async function recoverParcelAtomically(");
     expect(helperAt).toBeGreaterThan(-1);
     const helper = source.slice(helperAt, source.indexOf("\n}\n", helperAt));
-    expect(helper).toContain("ensureParcelForOrder(");
+    expect(helper).toContain("repo.recoverOrderParcel(");
     expect(helper).toMatch(/orders\.parcel_generation_failed[\s\S]*throw err;/);
-    // ...called only from confirmation: the pre-057 fallback and the retry
-    // that recovers a confirmed order left without its parcel.
-    expect(source.split("ensureConfirmedOrderParcel(").length - 1).toBe(3);
+    // Called from: the confirmation retry, the pre-057 path, and the explicit
+    // recovery action (which requires the confirmation permission).
+    expect(source.split("recoverParcelAtomically(ctx").length - 1).toBe(3);
     const fn = source.slice(source.indexOf("export async function transitionLifecycleStatus"));
     const body = fn.slice(0, fn.indexOf("\nexport "));
-    expect(body.split("ensureConfirmedOrderParcel(").length - 1).toBe(2);
     expect(body).toMatch(
-      /if \(to === "confirmed" && from === "confirmed"\) \{[\s\S]*findActiveParcelByOrder[\s\S]*ensureConfirmedOrderParcel\(/,
+      /if \(to === "confirmed" && from === "confirmed"\) \{\s*const recovered = await recoverParcelAtomically\(/,
     );
     expect(body).toMatch(
-      /if \(to === "confirmed" && !result\.parcel_id\) \{\s*await ensureConfirmedOrderParcel\(/,
+      /if \(to === "confirmed" && !result\.parcel_id\) \{\s*const recovered = await recoverParcelAtomically\(/,
     );
+    const rec = source.slice(source.indexOf("export async function recoverOrderParcel("));
+    expect(rec.slice(0, rec.indexOf("\n}\n"))).toMatch(
+      /ctx\.require\("orders\.confirm"\);\s*const result = await recoverParcelAtomically\(/,
+    );
+  });
+});
+
+describe("migration 059 — recovery is one locked decision", () => {
+  const m059 = () => code("supabase/migrations/059_recover_order_parcel.sql");
+
+  it("locks the order row, then re-reads lifecycle, then checks/creates the parcel", () => {
+    const sql = m059();
+    const lock = sql.search(
+      /FROM public\.orders\s+WHERE id = p_order_id AND organization_id = p_organization_id\s+FOR UPDATE;/,
+    );
+    const gate = sql.indexOf("IF v_lifecycle <> 'confirmed' THEN");
+    const check = sql.indexOf("FROM public.parcels");
+    const insert = sql.indexOf("INSERT INTO public.parcels");
+    expect(lock).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(lock);
+    expect(check).toBeGreaterThan(gate);
+    expect(insert).toBeGreaterThan(check);
+  });
+
+  it("is service_role only and writes no lifecycle, stock or history", () => {
+    const sql = m059();
+    expect(sql).toMatch(
+      /REVOKE EXECUTE ON FUNCTION public\.recover_order_parcel_v1\(UUID, UUID, UUID\)\s+FROM PUBLIC, anon, authenticated;/,
+    );
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.recover_order_parcel_v1\(UUID, UUID, UUID\) TO service_role;/,
+    );
+    const body = sql.slice(sql.indexOf("AS $$"), sql.lastIndexOf("$$;"));
+    expect(body).not.toMatch(/UPDATE public\.orders|inventory_movements|order_status_history/);
   });
 });

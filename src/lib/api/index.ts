@@ -1219,6 +1219,17 @@ export async function confirmRealOrder(orderId: string): Promise<RealOrderDetail
   return mapOrderDetailToUi(detail);
 }
 
+/**
+ * Recovery for a confirmed order left without its APSA Parcel — never a
+ * lifecycle change. The server re-checks confirmed + no parcel under the order
+ * lock and creates exactly one.
+ */
+export async function recoverRealOrderParcel(orderId: string): Promise<RealOrderDetail> {
+  const { recoverOrderParcelFn } = await import("@/api/orders");
+  const detail = await recoverOrderParcelFn({ data: { orderId } });
+  return mapOrderDetailToUi(detail);
+}
+
 /** Cancel flow (requirement 5): draft|confirmed -> cancelled. Restores stock server-side when it applies. */
 export async function cancelRealOrder(orderId: string, reason?: string): Promise<RealOrderDetail> {
   const { transitionOrderLifecycleFn } = await import("@/api/orders");
