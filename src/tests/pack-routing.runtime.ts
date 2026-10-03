@@ -13,6 +13,18 @@
  * navigation chrome, the label dialog and toasts are replaced. The fake packing
  * server is stateful and org-scoped, so packed state, refresh and tenant
  * isolation are observed through the routed UI.
+ *
+ * /app/pack/ (trailing slash) once rendered blank: the parent route decided
+ * "child open" from a pathname prefix, so the trailing slash disabled the queue
+ * and rendered an Outlet with no matching child. The parent now reads the
+ * router's own match for /app/pack/$orderId (tests I/J).
+ *
+ * The fake server proves ROUTING, not server authority. The real service and
+ * SQL layers are covered elsewhere: tenant isolation and packed persistence in
+ * pack-order-v1.test.ts and scan-to-pack-security.test.ts (real services),
+ * parcel-tenant-isolation.test.ts, and pack-order-readiness-sql (PGlite, every
+ * migration); current-shipment selection after a replacement shipment in
+ * parcel-shipment-split.test.ts (real services on one shared world).
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -52,6 +64,8 @@ interface FakeServer {
   /** State-changing Mark Packed calls (stock-moving side effects). */
   packMutations: number;
   markCalls: { orderId: string; packedLines: unknown }[];
+  /** Ready-to-Pack queue fetches — the queue must not load behind Pack Order. */
+  queueLoads: number;
 }
 
 const server: FakeServer = {
@@ -61,6 +75,7 @@ const server: FakeServer = {
   deliveries: 0,
   packMutations: 0,
   markCalls: [],
+  queueLoads: 0,
 };
 
 function resetServer() {
@@ -98,6 +113,7 @@ function resetServer() {
   server.deliveries = 0;
   server.packMutations = 0;
   server.markCalls = [];
+  server.queueLoads = 0;
 }
 
 /** Org-scoped lookup: another organization's order is indistinguishable from none. */
@@ -161,8 +177,9 @@ mock.module("@/api/packing", () => ({
 
 mock.module("@/lib/api", () => ({
   ...actualApi,
-  listReadyToPack: async (): Promise<actualApi.ReadyToPackRow[]> =>
-    [...server.orders.entries()]
+  listReadyToPack: async (): Promise<actualApi.ReadyToPackRow[]> => {
+    server.queueLoads += 1;
+    return [...server.orders.entries()]
       .filter(([, o]) => o.organizationId === server.organizationId && !o.packed)
       .map(([orderId, o]) => ({
         orderId,
@@ -176,7 +193,8 @@ mock.module("@/lib/api", () => ({
         paid: true,
         collect: { amount: 0, currency: "USD" },
         deliveryStatus: null,
-      })),
+      }));
+  },
 }));
 
 mock.module("@/components/barcode/CameraScanSheet", () => ({
@@ -461,5 +479,79 @@ describe("/app/pack/$orderId — nested Pack Order route", () => {
     expect(buttons(i18n.t("packSession.markPacked.action"))).toHaveLength(0);
     expect(server.markCalls).toHaveLength(0);
     expect(server.orders.get(ORDER_B)!.packed).toBe(false);
+  });
+});
+
+describe("/app/pack/ — trailing slash", () => {
+  it("I. /app/pack/ (trailing slash) renders the Ready-to-Pack queue, never a blank screen", async () => {
+    await open("/app/pack/");
+    expect(text()).toContain(i18n.t(QUEUE_TITLE));
+    expect(text()).toContain("APSA-1001");
+    expect(text()).not.toContain(i18n.t(PACK_ORDER_TITLE));
+    expect(text()).not.toContain("OTHER-ORG-2002");
+  });
+
+  it("I. a reload of /app/pack/ still renders the queue", async () => {
+    await open("/app/pack/");
+    await open("/app/pack/");
+    expect(text()).toContain(i18n.t(QUEUE_TITLE));
+    expect(text()).toContain("APSA-1001");
+  });
+
+  it("I. /app/pack/ → Pack Order → back → forward keeps each screen intact", async () => {
+    await open("/app/pack/");
+    expect(text()).toContain(i18n.t(QUEUE_TITLE));
+
+    await act(async () => {
+      await router.navigate({ to: "/app/pack/$orderId", params: { orderId: ORDER_A } });
+    });
+    await settle();
+    expect(pathname()).toBe(`/app/pack/${ORDER_A}`);
+    expect(text()).toContain(i18n.t(PACK_ORDER_TITLE));
+    expect(text()).not.toContain(i18n.t(QUEUE_TITLE));
+
+    await act(async () => router.history.back());
+    await settle();
+    expect(text()).toContain(i18n.t(QUEUE_TITLE));
+    expect(text()).toContain("APSA-1001");
+    expect(text()).not.toContain(i18n.t(PACK_ORDER_TITLE));
+
+    await act(async () => router.history.forward());
+    await settle();
+    expect(pathname()).toBe(`/app/pack/${ORDER_A}`);
+    expect(text()).toContain(i18n.t(PACK_ORDER_TITLE));
+    expect(text()).not.toContain(i18n.t(QUEUE_TITLE));
+  });
+});
+
+describe("/app/pack ⇄ /app/pack/$orderId — history", () => {
+  it("J. queue → Pack Order → back → forward through browser history", async () => {
+    await open("/app/pack");
+    await act(async () => {
+      await router.navigate({ to: "/app/pack/$orderId", params: { orderId: ORDER_A } });
+    });
+    await settle();
+    expect(text()).toContain(i18n.t(PACK_ORDER_TITLE));
+
+    await act(async () => router.history.back());
+    await settle();
+    expect(pathname()).toBe("/app/pack");
+    expect(text()).toContain(i18n.t(QUEUE_TITLE));
+    expect(text()).toContain("APSA-1001");
+    expect(text()).not.toContain(i18n.t(PACK_ORDER_TITLE));
+
+    await act(async () => router.history.forward());
+    await settle();
+    expect(pathname()).toBe(`/app/pack/${ORDER_A}`);
+    expect(text()).toContain(i18n.t(PACK_ORDER_TITLE));
+    expect(text()).not.toContain(i18n.t(QUEUE_TITLE));
+  });
+
+  it("J. a reload of Pack Order renders Pack Order, and never loads the queue behind it", async () => {
+    await open(`/app/pack/${ORDER_A}`);
+    await open(`/app/pack/${ORDER_A}`);
+    expect(text()).toContain(i18n.t(PACK_ORDER_TITLE));
+    expect(text()).not.toContain(i18n.t(QUEUE_TITLE));
+    expect(server.queueLoads).toBe(0);
   });
 });

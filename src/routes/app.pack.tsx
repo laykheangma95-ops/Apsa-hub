@@ -1,4 +1,4 @@
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useMatch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Printer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -130,8 +130,16 @@ function PackScreen() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [printIds, setPrintIds] = useState<string[] | null>(null);
 
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const packOrderOpen = pathname !== "/app/pack" && pathname.startsWith("/app/pack/");
+  // Whether the per-order child route (/app/pack/$orderId) is the active match,
+  // read from the router's own match state rather than the pathname: a pathname
+  // test misread /app/pack/ (trailing slash) as a child, disabled the queue and
+  // rendered an empty Outlet — a blank screen.
+  const packOrderOpen =
+    useMatch({
+      from: "/app/pack/$orderId",
+      shouldThrow: false,
+      select: () => true,
+    }) === true;
 
   const query = useQuery({
     queryKey: fulfillmentKeys.readyToPack(session.userId, organizationId),

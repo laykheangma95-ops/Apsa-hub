@@ -9,7 +9,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dir, "../..");
 
-it("/app/pack renders the queue and /app/pack/$orderId renders Pack Order through the router", () => {
+it("/app/pack and /app/pack/ render the queue, /app/pack/$orderId renders Pack Order, through the router", () => {
   const result = spawnSync(
     process.execPath,
     ["test", path.join(root, "src/tests/pack-routing.runtime.ts")],
