@@ -1930,8 +1930,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 051 (courier handoff permission) belongs to the courier handoff phase;
     // 052 (receiving inventory) belongs to the receiving inventory phase;
     // 053 (stock counts) belongs to the stock count phase;
-    // 054 (Pack Order readiness guards) belongs to the V1 fulfillment phase.
-    expect(migrations.at(-1)).toBe("054_pack_order_readiness_guards.sql");
+    // 054 (Pack Order readiness guards) belongs to the V1 fulfillment phase;
+    // 055–056 (damage movement type + customer returns) belong to the returns phase.
+    expect(migrations.at(-1)).toBe("056_customer_returns.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

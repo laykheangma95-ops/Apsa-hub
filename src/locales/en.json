@@ -1967,7 +1967,8 @@
       "sale": "Sold",
       "return": "Returned",
       "manual_adjustment": "Manual adjustment",
-      "restock": "Stock received"
+      "restock": "Stock received",
+      "damage": "Damaged"
     },
     "error": {
       "title": "Movements didn't load",
@@ -2659,5 +2660,121 @@
     "viewOrder": "View order",
     "viewDelivery": "View delivery",
     "done": "Done"
+  },
+  "returns": {
+    "entry": "Returns",
+    "title": "Customer returns",
+    "subtitle": "Items customers send back after delivery",
+    "status": {
+      "requested": "Requested",
+      "received": "Received",
+      "inspected": "Inspected",
+      "completed": "Completed"
+    },
+    "action": {
+      "receive": "Receive return",
+      "inspect": "Save inspection",
+      "complete": "Complete return"
+    },
+    "list": {
+      "new": "New return",
+      "loading": "Loading returns",
+      "emptyTitle": "No returns yet",
+      "emptyBody": "When a customer sends items back after delivery, start a return here.",
+      "order": "Order {{number}}",
+      "units_one": "{{count}} item",
+      "units_other": "{{count}} items",
+      "errorTitle": "Returns didn't load",
+      "errorBody": "Check your connection and try again.",
+      "partial": "Showing the newest {{count}} returns. Older returns are not listed here."
+    },
+    "request": {
+      "title": "New return",
+      "subtitle": "Choose a delivered order and what is coming back",
+      "findTitle": "Which order is coming back?",
+      "orderLabel": "Order number",
+      "orderPlaceholder": "APSA-2026-000123",
+      "orderHint": "Only delivered orders can be returned.",
+      "find": "Find order",
+      "finding": "Finding…",
+      "linesTitle": "What is coming back?",
+      "ordered": "Ordered {{count}}",
+      "alreadyReturned": "Already returned {{count}}",
+      "returnable": "Can return {{count}}",
+      "quantityLabel": "Quantity to return: {{name}}",
+      "nothingReturnable": "Everything on this order has already been returned.",
+      "selectHint": "Choose at least one item to return.",
+      "submit": "Request return",
+      "submitting": "Requesting…",
+      "changeOrder": "Choose another order"
+    },
+    "detail": {
+      "title": "Return",
+      "loading": "Loading return",
+      "order": "Order {{number}}",
+      "linesTitle": "Items",
+      "quantity": "Returned {{count}}",
+      "split": "{{resellable}} resellable · {{damaged}} damaged",
+      "notInspected": "Not inspected yet",
+      "historyTitle": "History",
+      "notFoundTitle": "Return not found",
+      "notFoundBody": "It may belong to another business or no longer exist.",
+      "back": "Back to returns"
+    },
+    "receive": {
+      "title": "Has the parcel arrived?",
+      "body": "Receive the return once the items are physically back with you. Stock does not change yet.",
+      "submitting": "Saving…"
+    },
+    "inspect": {
+      "title": "Inspect the items",
+      "body": "For each item, choose how many units are damaged. The rest go back on sale when you complete the return.",
+      "resellable": "Resellable",
+      "damaged": "Damaged",
+      "damagedLabel": "Damaged units: {{name}}",
+      "submitting": "Saving…",
+      "edit": "Edit inspection",
+      "cancelEdit": "Keep current inspection"
+    },
+    "complete": {
+      "title": "Complete the return",
+      "body": "Completing writes the stock changes below. This cannot be undone.",
+      "backToStock_one": "{{count}} unit back on sale",
+      "backToStock_other": "{{count}} units back on sale",
+      "recordedDamaged_one": "{{count}} damaged unit recorded, not for sale",
+      "recordedDamaged_other": "{{count}} damaged units recorded, not for sale",
+      "totalResellable": "Back on sale",
+      "totalDamaged": "Damaged (not for sale)",
+      "submitting": "Completing…"
+    },
+    "completed": {
+      "title": "Return completed",
+      "body": "Resellable items are back in stock. Damaged items are recorded in the stock history and are not for sale."
+    },
+    "history": {
+      "label": "Customer return",
+      "requested": "Return requested",
+      "received": "Return received",
+      "inspected": "Items inspected",
+      "completed": "Return completed"
+    },
+    "replayed": "This step was already saved — nothing was recorded twice.",
+    "error": {
+      "generic": "Something went wrong. Nothing was changed — try again.",
+      "denied": "Your account cannot manage customer returns.",
+      "invalid": "Some quantities are not valid. Check them and try again.",
+      "orderNotFound": "No order with that number in this business.",
+      "orderNotReturnable": "This order is not a completed sale, so nothing can be returned.",
+      "orderNotDelivered": "This order has not been delivered yet. Only delivered orders can be returned.",
+      "requestConflict": "This return was already sent with different items. Start again.",
+      "invalidItems": "Some items cannot be returned. Find the order again and retry.",
+      "quantityExceedsRemaining": "More than can still be returned. Find the order again to see what is left.",
+      "returnNotFound": "This return no longer exists in this business.",
+      "notReceived": "Receive the return before inspecting it.",
+      "notInspected": "Inspect the items before completing the return.",
+      "alreadyCompleted": "This return is already completed.",
+      "stale": "The inspection changed since you opened it. Check the updated figures and confirm again.",
+      "invalidLines": "Every item needs a damaged count between 0 and its quantity."
+    }
   }
 }

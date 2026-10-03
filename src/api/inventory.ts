@@ -61,7 +61,16 @@ export const recordMovementFn = createServerFn()
           .int("quantity_delta must be an integer")
           .refine((n) => n !== 0, "quantity_delta must not be zero"),
         movementType: movementTypeSchema,
-        referenceType: z.string().max(100).nullish(),
+        // customer_return_item is reserved for the Returns completion RPC; the
+        // service and the ledger guard (migration 056) refuse it as well.
+        referenceType: z
+          .string()
+          .max(100)
+          .refine(
+            (value) => value.trim().toLowerCase() !== "customer_return_item",
+            "reference_type is reserved for customer returns",
+          )
+          .nullish(),
         referenceId: z.string().uuid().nullish(),
         reason: z.string().max(1000).nullish(),
       })
