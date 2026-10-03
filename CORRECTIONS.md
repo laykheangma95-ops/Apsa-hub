@@ -43,14 +43,19 @@ Corrections are listed newest first.
 
 ### CORRECTION-003
 
-**Date:** 2026-10-03
+**Date:** 2026-10-03 (revised 2026-10-03: the shipping label carries a small, secondary APSA Parcel QR — see **Shipping label**)
 **Affects:** supabase/migrations/050_parcels.sql (header — historical, not edited), src/server/parcels/service.ts, src/server/orders/service.ts (`transitionLifecycleStatus`), src/server/packing/service.ts (`getPackRequirements`), src/server/deliveries/service.ts (`createDelivery`), src/server/fulfillment/service.ts, src/lib/labels/*, src/components/labels/*, src/routes/app.orders.$id.tsx, src/routes/app.pack.tsx
 **Section:** Fulfillment — APSA Parcel (internal identity) vs Carrier Shipment
 **Original:** The parcel identity was created lazily when a parcel label was first printed (or, in the unmerged PR #109, when delivery was arranged), and a single label mixed the APSA QR/Code 128 with carrier, tracking and receiver data.
 **Correction:** Project owner decision — APSA has two separate objects:
-- **APSA Parcel** — the ORDER's internal warehouse identity (Parcel ID + QR + Code 128 of the same opaque `APSA:PCL:v1:` code). Generated when the order is confirmed (enters fulfillment); stable through Pack Order, Mark Packed, warehouse/shelf lookup, inventory operations, Courier Handoff, returns and audit. Used only by APSA; the courier never scans it.
-- **Carrier Shipment** (`deliveries`) — created only by Arrange Delivery; carries carrier, tracking number, service and shipping metadata. It ATTACHES to the existing APSA Parcel and never creates, replaces or voids it.
-- **Two labels.** The internal APSA Parcel label (QR, Code 128, Parcel ID; no carrier, no customer data) is always available for an order in fulfillment. The shipping label (carrier, tracking Code 128, sender, receiver, COD) is available only once a shipment exists; it may show the APSA Parcel ID as secondary text, never as a scannable APSA code.
+- **APSA Parcel** — the ORDER's internal warehouse identity (Parcel ID + QR + Code 128 of the same opaque `APSA:PCL:v1:` code). Created when the order is confirmed (enters fulfillment); stable for the life of the parcel; independent of any carrier shipment. Used by merchant operations: Pack Order, Mark Packed, parcel lookup, warehouse/shelf search, inventory operations, Courier Handoff, returns and internal audit. The courier never scans it.
+- **Carrier Shipment** (`deliveries`) — created only by Arrange Delivery; carries carrier, tracking number, service and shipping metadata. It can be cancelled and recreated. It ATTACHES to the existing APSA Parcel and never creates, replaces or voids it.
+- **Internal APSA Parcel label** — APSA QR, Code 128 and Parcel ID; no carrier, no customer data. Always available for an order in fulfillment.
+- **Shipping label** — available only once a shipment exists. It carries TWO machine-readable identifiers that serve different domains and never replace one another:
+  - **Primary: carrier tracking barcode (Code 128)** — external logistics; scanned by the courier company. The courier scans ONLY this barcode.
+  - **Secondary: small APSA Parcel QR (or Code 128)** — merchant warehouse operations (Pack Order, parcel lookup, warehouse search, Courier Handoff, returns, internal audit). Merchant staff scan ONLY this code.
+  - Also on the label: the APSA Parcel ID as text; a packing list (product, variant, quantity); payment information — Paid → "Payment Verified" with no amount; COD → "Collect: <Amount>", visually prominent.
+  - This supersedes the earlier wording of this entry that the shipping label shows the APSA Parcel ID only as text and never as a scannable APSA code.
 - **Cancellation.** Cancelling a shipment leaves the APSA Parcel, its label and packing history untouched; the replacement shipment attaches to the same parcel and gets a new shipping label. No repacking.
 - **Courier Handoff** identifies the parcel by its APSA Parcel ID, then confirms the carrier shipment attached to it.
 - Attachment is resolved through the order (one active parcel per order, `uniq_parcels_org_order_active`); an explicit `deliveries.parcel_id` column is deferred until split shipments need it.
