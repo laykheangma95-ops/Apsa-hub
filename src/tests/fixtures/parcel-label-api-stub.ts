@@ -40,8 +40,4 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
   };
 }
 
-export async function createParcel(_orderId: string): Promise<{ parcelCode: string }> {
-  return { parcelCode: STUB_PARCEL_CODE };
-}
-
 export async function updateOrderShipping(): Promise<void> {}

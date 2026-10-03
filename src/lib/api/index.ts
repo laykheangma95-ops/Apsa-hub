@@ -667,18 +667,6 @@ export async function getInternalParcelLabelData(
   return getInternalParcelLabelDataFn({ data: { orderId } });
 }
 
-/**
- * Create or retrieve the parcel identity for an order. Idempotent: if a parcel
- * already exists it is returned without creating a new one. The server requires
- * fulfillment.create_parcel.
- */
-export async function createParcel(
-  orderId: string,
-): Promise<{ id: string; parcelCode: string; orderId: string; status: string; createdAt: string }> {
-  const { createParcelFn } = await import("@/api/parcels");
-  return createParcelFn({ data: { orderId } });
-}
-
 /* ------------------------------ Scan identity router --------------------- */
 
 export type ScanResolutionType = "product" | "parcel" | "variant" | "order" | "unknown";

@@ -136,8 +136,10 @@ export const UI_PERMISSION_KEYS = [
   // can print without unrestricted customer PII (migration 046, PR #80 §20).
   // getParcelLabelData feeds it straight into ctx.require.
   "fulfillment.print_label",
-  // Parcel identity — src/server/parcels/service.ts (migration 050).
-  "fulfillment.create_parcel",
+  // fulfillment.create_parcel is deliberately NOT a UI key: the APSA Parcel is
+  // server-owned (CORRECTION-003) — created at order confirmation and ensured
+  // by the internal label / Pack Order reads — so no browser surface creates
+  // one. The grant (migration 050) is still enforced server-side.
   // Team — src/server/team/service.ts
   "team.read",
   "team.invite",
