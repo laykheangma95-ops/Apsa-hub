@@ -168,7 +168,11 @@ export function ParcelLabelDialog({
         staleTime: 0,
       });
     } catch {
-      if (live()) setPrintNotice("refreshFailed");
+      // The refusal may be a revoked grant: re-authorize so a denial evicts
+      // the label PII and shows the denied state (fail closed). Only a still
+      // authorized member is told the refresh failed and offered a retry.
+      const stillAllowed = await reauthorizePrint();
+      if (stillAllowed && live()) setPrintNotice("refreshFailed");
       return false;
     }
     if (!live()) return false;

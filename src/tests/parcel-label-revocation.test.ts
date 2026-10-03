@@ -76,6 +76,14 @@ describe("capability revalidation source rules", () => {
     // still live (same open dialog, user, organization and orders).
     expect(dialog).toContain("const allowed = await reauthorizePrint();");
     expect(dialog).toContain("return allowed && live();");
+    // A refused pre-print refresh (e.g. the grant was just revoked) still goes
+    // through re-authorization, so a denial evicts the PII and shows denied
+    // instead of a generic "refresh failed" (browser proof D).
+    const refreshFailure = dialog.slice(dialog.indexOf("} catch {"));
+    expect(refreshFailure.indexOf("await reauthorizePrint()")).toBeGreaterThan(-1);
+    expect(refreshFailure.indexOf("await reauthorizePrint()")).toBeLessThan(
+      refreshFailure.indexOf('setPrintNotice("refreshFailed")'),
+    );
     expect(hook).toContain("cancelRefetch: true");
     expect(hook).toMatch(/state\?\.status === "success"/);
     expect(read("src/components/labels/LabelSheet.tsx")).toMatch(
