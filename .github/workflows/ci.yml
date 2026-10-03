@@ -91,6 +91,24 @@ jobs:
     name: Test suite (bun test src/tests/)
     runs-on: ubuntu-latest
     needs: build
+    # A real PostgreSQL server for the tests that need more than one
+    # connection (lock contention cannot be shown on single-connection PGlite):
+    # src/tests/parcel-recovery-pg.test.ts. A throwaway database is created per
+    # run; nothing here is a Supabase project or holds any secret.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APSA_TEST_PG_URL: postgres://postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

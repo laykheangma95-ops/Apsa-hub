@@ -1295,6 +1295,32 @@ describe("Order detail action visibility", () => {
     // The packed state comes from the server, not from the delivery status.
     expect(src).toContain("getOrderPackStateFn");
   });
+
+  it("while the packed state loads, the pack slot is held — Pack order never pops in", () => {
+    const loading = fulfillmentActions({ ...base, packPending: true });
+    const loaded = fulfillmentActions({ ...base, packPending: false });
+    // Same slot, same position, from the first render: placeholder → Pack order.
+    expect(loading.map((a) => a.key)).toEqual(["print_label", "pack_pending", "arrange_delivery"]);
+    expect(loading.find((a) => a.key === "pack_pending")!.disabled).toBe(true);
+    expect(loaded.map((a) => a.key)).toEqual(["print_label", "pack", "arrange_delivery"]);
+    expect(loading.length).toBe(loaded.length);
+    // A packed order never flashes "Pack order" while loading.
+    expect(keys({ ...base, packed: true, packPending: true } as typeof base)).toEqual([
+      "print_label",
+      "pack_pending",
+      "arrange_delivery",
+    ]);
+  });
+
+  it("the Order detail screen holds the pack slot instead of hiding it while loading", async () => {
+    const src = await Bun.file(new URL("../routes/app.orders.$id.tsx", import.meta.url)).text();
+    expect(src).not.toContain("canPack: showPackButton && !packStateQuery.isPending");
+    expect(src).toContain("packPending: packStateQuery.isPending");
+    expect(src).toContain('case "pack_pending":');
+    // Confirmation re-reads the pack state (it now has an APSA Parcel).
+    const confirm = src.slice(src.indexOf("const confirmMutation"));
+    expect(confirm.slice(0, confirm.indexOf("});"))).toContain("queryKey: packStateQueryKey");
+  });
 });
 
 describe("Pack Order screen does not wait for a delivery", () => {

@@ -202,3 +202,95 @@ describe("migration 058 — historical backfill (separate from runtime)", () => 
     expect(await count(draft)).toBe(0);
   });
 });
+
+describe("migration 059 — recovery of a confirmed order left without its parcel", () => {
+  /** The real pre-057 confirmation: lifecycle, stock 'sale' and history — no parcel. */
+  async function strandedOrder(): Promise<string> {
+    const id = await draftOrder();
+    const result = await f.rpc("transition_order_before_payment_authority_v1", [
+      f.org,
+      id,
+      "lifecycle",
+      "draft",
+      "confirmed",
+      f.actor,
+      null,
+    ]);
+    expect(result.status).toBe("success");
+    return id;
+  }
+  const recover = (id: string, org = f.org) => f.rpc("recover_order_parcel_v1", [org, id, f.actor]);
+
+  async function withParcelWritesBlocked(fn: () => Promise<void>) {
+    await f.db.exec(`
+      create function test_block_parcel() returns trigger language plpgsql as $$
+      begin raise exception 'parcel write failed (test)'; end $$;
+      create trigger test_block_parcel before insert on parcels
+        for each row execute function test_block_parcel();`);
+    try {
+      await fn();
+    } finally {
+      await f.db.exec(`drop trigger test_block_parcel on parcels;
+        drop function test_block_parcel();`);
+    }
+  }
+
+  it("confirmation side effects happen once; failed and successful recoveries never repeat them", async () => {
+    const id = await strandedOrder();
+    const confirmed = await snapshot(id);
+    expect(confirmed.lifecycle).toBe("confirmed");
+    expect(confirmed.parcels).toBe(0);
+    expect(confirmed.movements).toBe(1); // one 'sale' per line, written once
+    expect(confirmed.history).toBeGreaterThan(0);
+
+    // Repeated recovery failures: each raises and rolls back — no side effect.
+    await withParcelWritesBlocked(async () => {
+      await expect(recover(id)).rejects.toThrow(/parcel write failed/);
+      await expect(recover(id)).rejects.toThrow(/parcel write failed/);
+    });
+    expect(await snapshot(id)).toEqual(confirmed);
+
+    // A replayed confirmation is refused (stale) and moves no stock.
+    expect((await confirm(id)).status).toBe("stale");
+    expect(await snapshot(id)).toEqual(confirmed);
+
+    // Recovery creates exactly one parcel and nothing else.
+    const created = await recover(id);
+    expect(created.status).toBe("created");
+    expect(String(created.parcel_code)).toMatch(CODE_RE);
+    expect(await snapshot(id)).toEqual({ ...confirmed, parcels: 1 });
+
+    // Again: the same parcel back, nothing written.
+    const again = await recover(id);
+    expect(again).toMatchObject({ status: "exists", parcel_id: created.parcel_id });
+    expect(await snapshot(id)).toEqual({ ...confirmed, parcels: 1 });
+  });
+
+  it("refuses draft, cancelled and cross-tenant orders, writing nothing", async () => {
+    const draft = await draftOrder();
+    expect(await recover(draft)).toMatchObject({ status: "not_confirmed", current: "draft" });
+    expect((await snapshot(draft)).parcels).toBe(0);
+
+    const cancelled = await strandedOrder();
+    await f.rpc("transition_order_status_v1", [
+      f.org,
+      cancelled,
+      "lifecycle",
+      "confirmed",
+      "cancelled",
+      f.actor,
+      "test",
+    ]);
+    const before = await snapshot(cancelled);
+    expect(await recover(cancelled)).toMatchObject({
+      status: "not_confirmed",
+      current: "cancelled",
+    });
+    expect(await snapshot(cancelled)).toEqual(before);
+    expect(before.parcels).toBe(0);
+
+    const stranded = await strandedOrder();
+    expect(await recover(stranded, f.orgB)).toMatchObject({ status: "not_found" });
+    expect((await snapshot(stranded)).parcels).toBe(0);
+  });
+});

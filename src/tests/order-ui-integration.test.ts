@@ -271,8 +271,12 @@ describe("Error states are classified and mapped to translated copy, never raw e
       route.indexOf("const confirmMutation"),
       route.indexOf("const cancelMutation"),
     );
-    expect(confirmBlock).toMatch(/classifyOrderError\(error\) === "stale"/);
-    expect(confirmBlock).toMatch(/query\.refetch\(\)/);
+    // Every confirmation failure re-reads the order — a stale one included. A
+    // confirmation can also commit and then fail on its APSA Parcel; only the
+    // re-read shows the persisted (confirmed, parcel missing) order and its
+    // recovery action.
+    const onError = confirmBlock.slice(confirmBlock.indexOf("onError:"));
+    expect(onError).toMatch(/^onError: \(\) => \{[\s\S]*?void query\.refetch\(\);\s*\},/);
   });
 
   it("no route or sheet in this phase interpolates a raw caught error's message into JSX", () => {

@@ -189,6 +189,28 @@ export interface TransitionRpcResult {
    * TypeScript can influence it.
    */
   stock_movements?: number;
+  /**
+   * The order's APSA Parcel, returned by a confirmation that created or found
+   * it in the same transaction (migration 057). Absent from a database that
+   * predates 057 — see transitionLifecycleStatus.
+   */
+  parcel_id?: string;
+  parcel_code?: string;
+}
+
+/**
+ * recover_order_parcel_v1 (migration 059): the order row is locked and its
+ * lifecycle re-read before anything is decided, in one transaction.
+ *   created        — the confirmed order had no active parcel; exactly one now
+ *   exists         — it already had one; nothing was written
+ *   not_confirmed  — the order is not confirmed (e.g. cancelled); nothing written
+ *   not_found      — no such order in this organization
+ */
+export interface RecoverParcelRpcResult {
+  status: "created" | "exists" | "not_confirmed" | "not_found";
+  current?: string;
+  parcel_id?: string;
+  parcel_code?: string;
 }
 
 /** Filter/pagination options for listing orders. All optional; all org-scoped by the repository. */

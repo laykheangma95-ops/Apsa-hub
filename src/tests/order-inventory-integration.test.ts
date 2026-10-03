@@ -162,6 +162,7 @@ function fakeQuery(result: QueryResult) {
   const q = {
     select: () => q,
     eq: () => q,
+    neq: () => q,
     order: () => q,
     limit: () => q,
     range: () => q,
@@ -189,19 +190,41 @@ async function withOrderDb<T>(
   fn: (calls: RpcCall[]) => Promise<T>,
 ): Promise<T> {
   const { setOrderRepositoryDbForTests } = await import("../server/orders/repository");
+  const { setParcelRepositoryDbForTests } = await import("../server/parcels/repository");
   const calls: RpcCall[] = [];
   const testDb = {
     from: (table: string) => fakeQuery(opts.tables?.[table] ?? { data: null, error: null }),
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ fn: name, args });
-      return opts.rpc?.[name] ?? { data: { status: "success" }, error: null };
+      const result = opts.rpc?.[name] ?? { data: { status: "success" }, error: null };
+      // Migration 057: a successful lifecycle → confirmed also returns the
+      // order's APSA Parcel, created in the same transaction.
+      const data = result.data as Record<string, unknown> | null;
+      if (
+        name === "transition_order_status_v1" &&
+        args["p_axis"] === "lifecycle" &&
+        args["p_to"] === "confirmed" &&
+        data?.["status"] === "success"
+      ) {
+        return {
+          ...result,
+          data: {
+            parcel_id: "parcel-1",
+            parcel_code: "APSA:PCL:v1:abcdefghijklmnopqrstuv",
+            ...data,
+          },
+        };
+      }
+      return result;
     },
   };
-  const restore = setOrderRepositoryDbForTests(testDb);
+  const restoreOrders = setOrderRepositoryDbForTests(testDb);
+  const restoreParcels = setParcelRepositoryDbForTests(testDb);
   try {
     return await fn(calls);
   } finally {
-    restore();
+    restoreParcels();
+    restoreOrders();
   }
 }
 
@@ -409,6 +432,8 @@ describe("Test 4: duplicate confirmation cannot double-decrement", () => {
           order_items: twoLinesSameVariant,
           order_status_history: itemRows([]),
         },
+        // ...and it owns its APSA Parcel, so the locked recovery finds nothing to do.
+        rpc: { recover_order_parcel_v1: { data: { status: "exists" }, error: null } },
       },
       async (calls) => {
         const err = await expectRejects(() =>

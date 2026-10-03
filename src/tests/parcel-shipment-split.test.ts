@@ -55,6 +55,17 @@ interface World {
   packed: boolean;
   /** Make the parcel write inside confirmation fail (rollback path). */
   failParcelOnConfirm?: boolean;
+  /**
+   * A database that has not applied migration 057: confirmation succeeds but
+   * creates no parcel and returns no parcel_id (the hosted state that broke
+   * the parcel label right after confirmation).
+   */
+  pre057?: boolean;
+  /**
+   * Make the next N parcel writes of recover_order_parcel_v1 fail (the parcel
+   * write after a pre-057 confirmation, or a recovery attempt).
+   */
+  failParcelInserts?: number;
 }
 
 function seed(lifecycle: "draft" | "confirmed" = "draft"): World {
@@ -226,6 +237,26 @@ function makeDb(world: World) {
 
   const order = () => world.tables["orders"]!.find((o) => o["id"] === ORDER_A)!;
 
+  /** The order's active parcel, created once if missing (057 / 059 semantics). */
+  function activeOrNewParcel(o: Row, actor: unknown): { parcel: Row; created: boolean } {
+    const existing = world.tables["parcels"]!.find(
+      (p) => p["order_id"] === o["id"] && p["status"] !== "void",
+    );
+    if (existing) return { parcel: existing, created: false };
+    const parcel = {
+      id: crypto.randomUUID(),
+      organization_id: o["organization_id"],
+      order_id: o["id"],
+      parcel_code: `APSA:PCL:v1:${crypto.randomUUID().replaceAll("-", "").slice(0, 22)}`,
+      status: "created",
+      created_by: actor,
+      created_at: tick(),
+      updated_at: tick(),
+    };
+    world.tables["parcels"]!.push(parcel);
+    return { parcel, created: true };
+  }
+
   return {
     from: (table: string) => query(table),
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -242,27 +273,16 @@ function makeDb(world: World) {
          * raises and nothing — not even the status change — is committed. The
          * real SQL behaviour is proven in atomic-parcel-confirm.runtime.ts.
          */
+        if (args["p_axis"] === "lifecycle" && args["p_to"] === "confirmed" && world.pre057) {
+          o[col] = args["p_to"];
+          return { data: { status: "success", stock_movements: 0 }, error: null };
+        }
         if (args["p_axis"] === "lifecycle" && args["p_to"] === "confirmed") {
           if (world.failParcelOnConfirm) {
             return { data: null, error: { message: "parcel write failed (test)" } };
           }
           o[col] = args["p_to"];
-          let parcel = world.tables["parcels"]!.find(
-            (p) => p["order_id"] === o["id"] && p["status"] !== "void",
-          );
-          if (!parcel) {
-            parcel = {
-              id: crypto.randomUUID(),
-              organization_id: o["organization_id"],
-              order_id: o["id"],
-              parcel_code: `APSA:PCL:v1:${crypto.randomUUID().replaceAll("-", "").slice(0, 22)}`,
-              status: "created",
-              created_by: args["p_changed_by"],
-              created_at: tick(),
-              updated_at: tick(),
-            };
-            world.tables["parcels"]!.push(parcel);
-          }
+          const { parcel } = activeOrNewParcel(o, args["p_changed_by"]);
           return {
             data: {
               status: "success",
@@ -275,6 +295,38 @@ function makeDb(world: World) {
         }
         o[col] = args["p_to"];
         return { data: { status: "success", stock_movements: 0 }, error: null };
+      }
+      /*
+       * Mirrors migration 059: under the order lock, re-read lifecycle; refuse
+       * (write nothing) unless confirmed; return the active parcel if any;
+       * otherwise create exactly one. A parcel-write failure raises. The real
+       * locking is proven against PostgreSQL in parcel-recovery-pg.runtime.ts.
+       */
+      if (name === "recover_order_parcel_v1") {
+        const o = world.tables["orders"]!.find(
+          (r) =>
+            r["id"] === args["p_order_id"] && r["organization_id"] === args["p_organization_id"],
+        );
+        if (!o) return { data: { status: "not_found" }, error: null };
+        if (o["lifecycle_status"] !== "confirmed") {
+          return { data: { status: "not_confirmed", current: o["lifecycle_status"] }, error: null };
+        }
+        const hasParcel = world.tables["parcels"]!.some(
+          (p) => p["order_id"] === o["id"] && p["status"] !== "void",
+        );
+        if (!hasParcel && (world.failParcelInserts ?? 0) > 0) {
+          world.failParcelInserts! -= 1;
+          return { data: null, error: { message: "parcel insert failed (test)" } };
+        }
+        const { parcel, created } = activeOrNewParcel(o, args["p_actor"]);
+        return {
+          data: {
+            status: created ? "created" : "exists",
+            parcel_id: parcel["id"],
+            parcel_code: parcel["parcel_code"],
+          },
+          error: null,
+        };
       }
       if (name === "create_delivery_v1") {
         const id = crypto.randomUUID();
@@ -451,6 +503,191 @@ describe("APSA Parcel is generated when the order enters fulfillment", () => {
     await expect(arrange()).rejects.toThrow(/no APSA parcel/);
     expect(parcels()).toHaveLength(0);
     expect(world.tables["deliveries"]).toHaveLength(0);
+  });
+});
+
+// ── 1b. Regression: fresh confirmation on a database without migration 057 ────
+
+describe("a freshly confirmed order owns its APSA Parcel even before migration 057", () => {
+  it("confirmation creates exactly one parcel and the label prints immediately", async () => {
+    world.pre057 = true;
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+    // No refresh, no second navigation: the very next label read succeeds.
+    const data = await internalLabel();
+    expect(data.parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+    expect(isValidParcelCode(data.parcelCode)).toBe(true);
+    // The label read itself never created anything.
+    expect(activeParcels()).toHaveLength(1);
+  });
+
+  const transitions = () => world.rpcCalls.filter((n) => n === "transition_order_status_v1");
+  const recoveries = () => world.rpcCalls.filter((n) => n === "recover_order_parcel_v1");
+
+  it("a failed parcel write is recovered by retrying confirmation — exactly one parcel", async () => {
+    world.pre057 = true;
+    world.failParcelInserts = 1;
+    // Injected parcel creation failure: confirmation throws.
+    await expect(confirm()).rejects.toThrow(/parcel insert failed/);
+    // The order committed as confirmed but has no parcel yet — still recoverable.
+    expect(lifecycle()).toBe("confirmed");
+    expect(activeParcels()).toHaveLength(0);
+    const transitionsBefore = transitions().length;
+    // Retry the confirmation as-is: no manual lifecycle reset.
+    await confirm();
+    expect(lifecycle()).toBe("confirmed");
+    // The retry did not re-run the transition (no second stock consumption);
+    // it went through the atomic recovery RPC.
+    expect(transitions()).toHaveLength(transitionsBefore);
+    expect(recoveries().length).toBeGreaterThanOrEqual(2);
+    expect(activeParcels()).toHaveLength(1);
+    expect(isValidParcelCode(String(activeParcels()[0]!["parcel_code"]))).toBe(true);
+    expect((await internalLabel()).parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+  });
+
+  it("confirming again never duplicates the parcel — a parcelled confirmed order is refused", async () => {
+    world.pre057 = true;
+    await confirm();
+    const first = String(activeParcels()[0]!["parcel_code"]);
+    await expect(confirm()).rejects.toThrow(/Cannot move order lifecycle/);
+    await expect(confirm()).rejects.toThrow(/Cannot move order lifecycle/);
+    expect(activeParcels()).toHaveLength(1);
+    expect(String(activeParcels()[0]!["parcel_code"])).toBe(first);
+  });
+
+  it("printing and Arrange Delivery never create the missing parcel — only recovery does", async () => {
+    world.pre057 = true;
+    world.failParcelInserts = 1;
+    await expect(confirm()).rejects.toThrow();
+    await expect(internalLabel()).rejects.toThrow(/no APSA parcel/);
+    await shippingLabel().catch(() => undefined);
+    await expect(arrange()).rejects.toThrow(/no APSA parcel/);
+    expect(parcels()).toHaveLength(0);
+    await confirm();
+    expect(activeParcels()).toHaveLength(1);
+  });
+
+  it("a migrated database is not double-written: the RPC's parcel is the parcel", async () => {
+    // Any recovery write would fail: only the confirming RPC may create it here.
+    world.failParcelInserts = 99;
+    await confirm();
+    expect(recoveries()).toHaveLength(0);
+    expect(activeParcels()).toHaveLength(1);
+    expect((await internalLabel()).parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+  });
+});
+
+// ── 1c. Recovery survives a refresh: Order detail offers "Create APSA Parcel" ──
+
+const lifecycle = () => world.tables["orders"]![0]!["lifecycle_status"];
+
+async function readDetail(perms = STAFF, organizationId = ORG_A) {
+  const { getOrderById } = await import("../server/orders/service");
+  return getOrderById(ctx(perms, organizationId), ORDER_A);
+}
+
+async function recover(perms = STAFF, organizationId = ORG_A) {
+  const { recoverOrderParcel } = await import("../server/orders/service");
+  return recoverOrderParcel(ctx(perms, organizationId), ORDER_A);
+}
+
+describe("a confirmed order stranded without its parcel is recoverable after a refresh", () => {
+  const transitions = () => world.rpcCalls.filter((n) => n === "transition_order_status_v1");
+  const recoveries = () => world.rpcCalls.filter((n) => n === "recover_order_parcel_v1");
+
+  async function strand() {
+    world.pre057 = true;
+    world.failParcelInserts = 1;
+    await expect(confirm()).rejects.toThrow(/parcel insert failed/);
+    expect(lifecycle()).toBe("confirmed");
+    expect(activeParcels()).toHaveLength(0);
+  }
+
+  it("refresh → recovery offered → recover → label, Pack Order and Arrange Delivery work", async () => {
+    await strand();
+    // "Refresh": a brand-new read of the persisted order, not the failed
+    // confirmation's in-memory state. It is confirmed — never a pretend draft.
+    const reopened = await readDetail();
+    expect(reopened.lifecycleStatus).toBe("confirmed");
+    expect(reopened.parcelMissing).toBe(true);
+    const { mapOrderDetailToUi } = await import("../lib/orders");
+    expect(mapOrderDetailToUi(reopened).parcelMissing).toBe(true);
+
+    const transitionsBefore = transitions().length;
+    const recovered = await recover();
+    expect(recovered.lifecycleStatus).toBe("confirmed");
+    expect(recovered.parcelMissing).toBe(false);
+    expect(transitions()).toHaveLength(transitionsBefore); // no lifecycle reset / re-run
+    expect(activeParcels()).toHaveLength(1);
+
+    // The recovery action disappears on the next read.
+    expect((await readDetail()).parcelMissing).toBe(false);
+    // Parcel label available.
+    const label = await internalLabel();
+    expect(label.parcelCode).toBe(String(activeParcels()[0]!["parcel_code"]));
+    // Pack Order available.
+    const { getPackRequirements } = await import("../server/packing/service");
+    await expect(getPackRequirements(ctx(STAFF), ORDER_A)).resolves.toBeTruthy();
+    // Arrange Delivery continues, attached to the same parcel.
+    await arrange();
+    expect(world.tables["deliveries"]).toHaveLength(1);
+    expect(activeParcels()).toHaveLength(1);
+  });
+
+  it("repeated recovery failures write nothing; the next success creates exactly one parcel", async () => {
+    await strand();
+    world.failParcelInserts = 2;
+    await expect(recover()).rejects.toThrow(/parcel insert failed/);
+    await expect(recover()).rejects.toThrow(/parcel insert failed/);
+    expect(lifecycle()).toBe("confirmed");
+    expect(activeParcels()).toHaveLength(0);
+    await recover();
+    await recover();
+    expect(activeParcels()).toHaveLength(1);
+  });
+
+  it("an order that already owns its parcel never gets another", async () => {
+    await confirm();
+    const first = String(activeParcels()[0]!["parcel_code"]);
+    expect((await readDetail()).parcelMissing).toBe(false);
+    const again = await recover();
+    expect(again.parcelMissing).toBe(false);
+    expect(activeParcels()).toHaveLength(1);
+    expect(String(activeParcels()[0]!["parcel_code"])).toBe(first);
+  });
+
+  it("a member without orders.confirm cannot recover — refused before any database call", async () => {
+    await strand();
+    const before = recoveries().length;
+    await expect(recover(STAFF.filter((p) => p !== "orders.confirm"))).rejects.toThrow(
+      /Missing permission: orders\.confirm/,
+    );
+    expect(recoveries()).toHaveLength(before);
+    expect(activeParcels()).toHaveLength(0);
+  });
+
+  it("another organization cannot recover this order — opaque not-found, nothing written", async () => {
+    await strand();
+    await expect(recover(STAFF, ORG_B)).rejects.toThrow(/Order not found/);
+    expect(activeParcels()).toHaveLength(0);
+  });
+
+  it("a cancelled order is refused and gets no parcel", async () => {
+    await strand();
+    const { transitionLifecycleStatus } = await import("../server/orders/service");
+    await transitionLifecycleStatus(ctx([...STAFF, "orders.cancel"]), ORDER_A, "cancelled");
+    expect(lifecycle()).toBe("cancelled");
+    expect((await readDetail()).parcelMissing).toBe(false);
+    await expect(recover()).rejects.toThrow(/changed concurrently \(now cancelled\)/);
+    expect(parcels()).toHaveLength(0);
+  });
+
+  it("a draft order cannot use the recovery path", async () => {
+    expect(lifecycle()).toBe("draft");
+    expect((await readDetail()).parcelMissing).toBe(false);
+    await expect(recover()).rejects.toThrow(/changed concurrently \(now draft\)/);
+    expect(lifecycle()).toBe("draft");
+    expect(parcels()).toHaveLength(0);
   });
 });
 

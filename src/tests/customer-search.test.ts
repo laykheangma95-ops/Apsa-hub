@@ -757,7 +757,8 @@ describe("No migration was required, and the schema says why", () => {
     // phase), 054 (Pack Order readiness guards — V1 fulfillment phase), and
     // 055–056 (damage movement type + customer returns — returns phase), and
     // 057–058 (atomic APSA Parcel on confirm + parcel backfill — parcel/shipment
-    // phase); anything from 059 up would be new.
-    expect(migrations.filter((f) => /^059|^0[6-9]\d/.test(f))).toEqual([]);
+    // phase), and 059 (APSA Parcel recovery under the order lock — parcel
+    // post-merge repair); anything from 060 up would be new.
+    expect(migrations.filter((f) => /^0[6-9]\d/.test(f))).toEqual([]);
   });
 });

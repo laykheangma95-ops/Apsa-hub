@@ -71,30 +71,6 @@ export async function findParcelByCode(
   return rows[0] ?? null;
 }
 
-export async function insertParcel(
-  organizationId: string,
-  orderId: string,
-  parcelCode: string,
-  createdBy: string | null,
-): Promise<ParcelRow> {
-  const { data, error } = await db
-    .from("parcels")
-    .insert({
-      organization_id: organizationId,
-      order_id: orderId,
-      parcel_code: parcelCode,
-      status: "created",
-      created_by: createdBy,
-    })
-    .select(
-      "id, organization_id, order_id, parcel_code, status, created_by, created_at, updated_at",
-    )
-    .single();
-
-  if (error) throw new Error(`insertParcel: ${errMessage(error)}`);
-  return data as ParcelRow;
-}
-
 export interface ParcelWithOrderRow {
   id: string;
   parcel_code: string;

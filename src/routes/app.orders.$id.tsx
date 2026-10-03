@@ -74,6 +74,7 @@ import { canPackOrder, fulfillmentActions, packHistoryReasonMessage } from "@/li
 import { packingKeys } from "@/lib/packing-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { RetryDeliveryReadyBoundary } from "@/components/fulfillment/RetryDeliveryReadyAction";
+import { ParcelRecoveryBoundary } from "@/components/fulfillment/ParcelRecoveryAction";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
@@ -308,7 +309,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       const { getOrderPackStateFn } = await import("@/api/packing");
       return getOrderPackStateFn({ data: { orderId: id } });
     },
-    enabled: query.isSuccess && identityOk && capabilities.can("orders.read"),
+    // A confirmed order without its APSA Parcel has no pack state to read; the
+    // recovery action below is offered instead.
+    enabled:
+      query.isSuccess && !query.data.parcelMissing && identityOk && capabilities.can("orders.read"),
   });
 
   /*
@@ -372,10 +376,16 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
       invalidateAfterLifecycleChange();
+      // The pack state read while the order was a draft predates its APSA
+      // Parcel; confirmation created it, so it is read again.
+      void queryClient.invalidateQueries({ queryKey: packStateQueryKey, exact: true });
       setNotice(t("order.confirmedNotice"));
     },
-    onError: (error) => {
-      if (classifyOrderError(error) === "stale") void query.refetch();
+    onError: () => {
+      // Re-read on every failure: a confirmation can commit and still fail on
+      // its APSA Parcel, and the persisted order (confirmed, parcel missing)
+      // must replace the stale draft so the recovery action appears.
+      void query.refetch();
     },
   });
 
@@ -470,6 +480,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   const { order } = query.data!;
   const items = order.items;
+  // Confirmed, but its APSA Parcel was never created (the server's read, so it
+  // survives a refresh). Labels, packing and delivery wait for the parcel; the
+  // recovery action is offered in their place.
+  const parcelMissing = query.data!.parcelMissing && order.lifecycleStatus === "confirmed";
   // State says the transition is possible; the capability snapshot says this
   // member may ask for it. Both must hold for the control to appear, and the
   // server checks the permission again on the transition itself
@@ -518,19 +532,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * Packing never waits for a delivery. Display only — the server re-checks.
    */
   const packState = packStateQuery.data ?? null;
-  const actions = fulfillmentActions({
-    canPrintLabel: showPrintLabel,
-    // Wait for the server's packed state so "Pack order" never flashes for a
-    // packed order; on a failed read the pack screen reports it instead.
-    canPack: showPackButton && !packStateQuery.isPending,
-    packed: packState?.packed ?? false,
-    canArrangeDelivery: canCreateDelivery && deliveriesQuery.isSuccess,
-    activeDeliveryStatus: activeDelivery?.status ?? null,
-    canHandoff: identityOk && capabilities.can("delivery.handoff"),
-    parcelCode: packState?.parcelCode ?? null,
-    canPrintShippingLabel: showShippingLabel && deliveriesQuery.isSuccess,
-    shipmentArranged,
-  });
+  const actions = parcelMissing
+    ? []
+    : fulfillmentActions({
+        canPrintLabel: showPrintLabel,
+        // The pack slot is rendered from the first paint: a placeholder holds it
+        // until the server's packed state arrives, so "Pack order" neither pops in
+        // late nor flashes for a packed order. On a failed read the pack screen
+        // reports it instead. identityOk mirrors packStateQuery's own `enabled`,
+        // so the placeholder never waits on a query that cannot run.
+        canPack: showPackButton && identityOk,
+        packed: packState?.packed ?? false,
+        packPending: packStateQuery.isPending,
+        canArrangeDelivery: canCreateDelivery && deliveriesQuery.isSuccess,
+        activeDeliveryStatus: activeDelivery?.status ?? null,
+        canHandoff: identityOk && capabilities.can("delivery.handoff"),
+        parcelCode: packState?.parcelCode ?? null,
+        canPrintShippingLabel: showShippingLabel && deliveriesQuery.isSuccess,
+        shipmentArranged,
+      });
 
   const payments = paymentsQuery.data?.items ?? [];
   /*
@@ -876,6 +896,17 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           )}
         </Section>
 
+        {parcelMissing && identityOk ? (
+          <Section title={t("order.fulfillment")}>
+            <ParcelRecoveryBoundary
+              userId={userId}
+              organizationId={routeOrganizationId}
+              orderId={id}
+              canRecover={capabilities.can("orders.confirm")}
+            />
+          </Section>
+        ) : null}
+
         {actions.length > 0 ? (
           <Section title={t("order.fulfillment")}>
             {/* V1 flow — see fulfillmentActions (src/lib/pack.ts) for the order. */}
@@ -932,6 +963,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                       >
                         {t("order.startPacking")}
                       </Link>
+                    );
+                  case "pack_pending":
+                    // Holds the Pack order slot (same size) while the packed
+                    // state loads — announced as busy, never a blank gap.
+                    return (
+                      <div
+                        key={action.key}
+                        role="status"
+                        aria-busy="true"
+                        aria-label={t("common.loading")}
+                        className="flex h-11 w-full items-center justify-center rounded-xl border border-border-default"
+                      >
+                        <Spinner />
+                      </div>
                     );
                   case "packed":
                     // Status carried by icon + label, never colour alone.

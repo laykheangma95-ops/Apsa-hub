@@ -181,6 +181,21 @@ export const transitionOrderLifecycleFn = createServerFn()
     return transitionLifecycleStatus(authCtx, data.orderId, data.to, data.reason ?? null);
   });
 
+/**
+ * Recover a confirmed order left without its APSA Parcel (Order detail "Create
+ * APSA Parcel"). Same authority as confirmation, enforced in the service; the
+ * lifecycle check and the parcel write are one locked database decision.
+ */
+export const recoverOrderParcelFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { recoverOrderParcel } = await import("@/server/orders/service");
+    return recoverOrderParcel(authCtx, data.orderId);
+  });
+
 /** @deprecated Always rejects; callers must use Payment recording/verification. */
 export const transitionOrderPaymentFn = createServerFn()
   .validator((data: unknown) =>

@@ -35,6 +35,7 @@ import type {
   CreateOrderInput,
   CreateOrderRpcResult,
   TransitionRpcResult,
+  RecoverParcelRpcResult,
   UpdateOrderShippingRpcResult,
   OrderShippingSnapshotInput,
   ListOrdersOptions,
@@ -186,6 +187,39 @@ export async function transitionStatus(
 
   if (error) throw new Error(`transitionStatus: ${errMessage(error)}`);
   return data as TransitionRpcResult;
+}
+
+/**
+ * Create the APSA Parcel of a confirmed order that has none — the ONE atomic
+ * authority (migration 059, recover_order_parcel_v1). The lifecycle check and
+ * the parcel write happen under the order row lock in a single transaction, so
+ * a cancellation can never slip between them.
+ */
+export async function recoverOrderParcel(
+  organizationId: string,
+  orderId: string,
+  actor: string | null,
+): Promise<RecoverParcelRpcResult> {
+  const { data, error } = await db.rpc("recover_order_parcel_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_actor: actor,
+  });
+  if (error) throw new Error(`recoverOrderParcel: ${errMessage(error)}`);
+  return data as RecoverParcelRpcResult;
+}
+
+/** Whether the order owns an active (non-void) APSA Parcel. Read-only display hint. */
+export async function hasActiveParcel(organizationId: string, orderId: string): Promise<boolean> {
+  const { data, error } = await db
+    .from("parcels")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .neq("status", "void")
+    .limit(1);
+  if (error) throw new Error(`hasActiveParcel: ${errMessage(error)}`);
+  return ((data ?? []) as unknown[]).length > 0;
 }
 
 /**

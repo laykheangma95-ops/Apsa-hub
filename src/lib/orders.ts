@@ -173,6 +173,12 @@ export function mapOrderLineToUi(line: ServerOrderLineDetail): OrderItem {
 export interface RealOrderDetail {
   order: Order;
   items: OrderItem[];
+  /**
+   * The server read the order as confirmed with no active APSA Parcel (a
+   * confirmation whose parcel write failed). Decides only whether Order detail
+   * OFFERS the recovery action; the recovery itself re-decides under lock.
+   */
+  parcelMissing: boolean;
 }
 
 /** Maps one server order detail (order + lines + status history) to the UI shape. */
@@ -181,6 +187,7 @@ export function mapOrderDetailToUi(detail: ServerOrderDetail): RealOrderDetail {
   return {
     order: { ...mapOrderSummaryToUi(detail), items, statusHistory: detail.statusHistory },
     items,
+    parcelMissing: detail.parcelMissing === true,
   };
 }
 

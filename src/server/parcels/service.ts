@@ -3,8 +3,8 @@
  *
  * A parcel identity is a permanent, opaque code (APSA:PCL:v1:<token>) assigned
  * to a physical package. Creating one is idempotent: if the order already has an
- * active parcel, the existing identity is returned. The code is generated
- * server-side from crypto randomness and never changes.
+ * active parcel, the existing identity is returned. The code is generated in
+ * the database (new_apsa_parcel_code_v1, migration 057) and never changes.
  *
  * Resolving a parcel code is tenant-isolated: scanning a code from Org A in
  * Org B returns null (opaque not-found). The resolver returns a minimal summary
@@ -12,10 +12,9 @@
  *
  * Never import this file from browser-bundled code.
  */
-import { randomBytes } from "node:crypto";
 import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
-import { isValidParcelCode, PARCEL_CODE_PREFIX } from "@/lib/barcode/parcel-code";
+import { isValidParcelCode } from "@/lib/barcode/parcel-code";
 import * as ordersRepo from "@/server/orders/repository";
 import * as repo from "./repository";
 
@@ -37,11 +36,6 @@ export interface ParcelResolution {
   itemCount: number;
 }
 
-function generateParcelCode(): string {
-  const token = randomBytes(16).toString("base64url");
-  return `${PARCEL_CODE_PREFIX}${token}`;
-}
-
 function rowToParcel(row: repo.ParcelRow): Parcel {
   return {
     id: row.id,
@@ -58,8 +52,11 @@ function rowToParcel(row: repo.ParcelRow): Parcel {
  * Idempotent: if the order already has an active parcel, it is returned without
  * creating a new one. A new parcel is only created when none exists.
  *
- * The order must exist in the caller's organization and be in a confirmed
- * lifecycle state (a draft or terminal order cannot be packed).
+ * The order must exist in the caller's organization and be confirmed. That
+ * check and the parcel write are ONE atomic database decision under the order
+ * row lock (migration 059, recover_order_parcel_v1) — never "read lifecycle,
+ * then insert", which let a cancellation committing in between give a
+ * cancelled order an active parcel.
  */
 export async function createParcelForOrder(
   ctx: AuthorizationContext,
@@ -67,54 +64,15 @@ export async function createParcelForOrder(
 ): Promise<Parcel> {
   ctx.require("fulfillment.create_parcel");
 
-  const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
-  if (!order) throw publicError("Order not found", 404);
-
-  if (order.lifecycle_status !== "confirmed") {
+  const result = await ordersRepo.recoverOrderParcel(ctx.organizationId, orderId, ctx.userId);
+  if (result.status === "not_found") throw publicError("Order not found", 404);
+  if (result.status === "not_confirmed") {
     throw publicError("A parcel identity can only be created for a confirmed order", 409);
   }
 
-  return ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId);
-}
-
-/**
- * Return the order's active APSA Parcel, creating it exactly once.
- *
- * The APSA Parcel is the ORDER's internal warehouse identity (CORRECTION-003):
- * it is generated when the order enters fulfillment (confirmation) and stays
- * the same through packing, every carrier shipment, handoff and returns. A
- * carrier shipment (delivery) attaches to it; it never creates or replaces it.
- *
- * INTERNAL — no capability check. Callers have already authorized their own
- * operation and verified the order belongs to `organizationId` and is
- * confirmed. The partial unique index uniq_parcels_org_order_active keeps one
- * active parcel per order even when two requests race; the loser reads and
- * returns the winner.
- */
-export async function ensureParcelForOrder(
-  organizationId: string,
-  userId: string | null,
-  orderId: string,
-): Promise<Parcel> {
-  const existing = await repo.findActiveParcelByOrder(organizationId, orderId);
-  if (existing) return rowToParcel(existing);
-
-  const parcelCode = generateParcelCode();
-
-  try {
-    const row = await repo.insertParcel(organizationId, orderId, parcelCode, userId);
-    return rowToParcel(row);
-  } catch (err: unknown) {
-    // Race: another request created the parcel between our check and insert.
-    // The unique index (org, order, status<>void) rejects the duplicate. Read
-    // and return the winner.
-    const msg = (err as { message?: string })?.message ?? "";
-    if (msg.includes("uniq_parcels_org_order_active") || msg.includes("duplicate")) {
-      const retry = await repo.findActiveParcelByOrder(organizationId, orderId);
-      if (retry) return rowToParcel(retry);
-    }
-    throw err;
-  }
+  const row = await repo.findActiveParcelByOrder(ctx.organizationId, orderId);
+  if (!row) throw publicError("The order's parcel changed concurrently — re-read and retry", 409);
+  return rowToParcel(row);
 }
 
 /**
