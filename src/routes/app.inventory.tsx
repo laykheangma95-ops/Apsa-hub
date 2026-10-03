@@ -29,6 +29,7 @@ import {
   PackageX,
   Search,
   TriangleAlert,
+  Undo2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -259,6 +260,8 @@ function InventoryListScreen() {
   const canReceive = canScan && capabilities.can("inventory.receive_stock");
   // Offered only; every stock count call re-checks inventory.adjust server-side.
   const canCount = canScan && capabilities.can("inventory.adjust");
+  // Offered only; every returns call re-checks orders.return + orders.read server-side.
+  const canReturn = capabilities.can("orders.return") && capabilities.can("orders.read");
   function resolveScan(code: string) {
     void (async () => {
       try {
@@ -364,6 +367,14 @@ function InventoryListScreen() {
                 <Link to="/app/inventory/count">
                   <ClipboardCheck className="size-4" aria-hidden />
                   {t("stockCount.action")}
+                </Link>
+              </Button>
+            ) : null}
+            {canReturn ? (
+              <Button asChild variant="outline" className="tap-target h-12 w-full gap-2">
+                <Link to="/app/returns">
+                  <Undo2 className="size-4" aria-hidden />
+                  {t("returns.entry")}
                 </Link>
               </Button>
             ) : null}

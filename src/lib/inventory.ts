@@ -29,13 +29,14 @@ import type { CatalogProduct } from "@/lib/catalog";
 
 // ── Shapes returned by the server (src/server/inventory/service.ts) ──────────
 
-/** The V1 movement taxonomy — migration 021's enum, exactly. */
+/** The V1 movement taxonomy — migration 021's enum plus migration 055's `damage`. */
 export const INVENTORY_MOVEMENT_TYPES = [
   "initial",
   "sale",
   "return",
   "manual_adjustment",
   "restock",
+  "damage",
 ] as const;
 
 export type InventoryMovementType = (typeof INVENTORY_MOVEMENT_TYPES)[number];

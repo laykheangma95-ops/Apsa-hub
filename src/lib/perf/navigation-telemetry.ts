@@ -27,6 +27,7 @@ const APP_SECTIONS = [
   "payments",
   "pos",
   "products",
+  "returns",
   "settings",
   "team",
 ] as const;

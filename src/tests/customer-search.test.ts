@@ -754,8 +754,9 @@ describe("No migration was required, and the schema says why", () => {
     // phase's status-count RPC), 050 (parcel identity — fulfillment parcels
     // phase), 051 (courier handoff permission — courier handoff phase), 052
     // (receiving inventory — receiving phase), 053 (stock counts — stock count
-    // phase), and 054 (Pack Order readiness guards — V1 fulfillment phase);
-    // anything from 055 up would be new.
-    expect(migrations.filter((f) => /^05[5-9]|^0[6-9]\d/.test(f))).toEqual([]);
+    // phase), 054 (Pack Order readiness guards — V1 fulfillment phase), and
+    // 055–056 (damage movement type + customer returns — returns phase);
+    // anything from 057 up would be new.
+    expect(migrations.filter((f) => /^05[7-9]|^0[6-9]\d/.test(f))).toEqual([]);
   });
 });

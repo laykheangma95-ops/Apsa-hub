@@ -31,6 +31,7 @@ import { Route as AppPackRouteImport } from './routes/app.pack'
 import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppPosRouteImport } from './routes/app.pos'
 import { Route as AppProductsRouteImport } from './routes/app.products'
+import { Route as AppReturnsRouteImport } from './routes/app.returns'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppTeamRouteImport } from './routes/app.team'
 import { Route as DesignInboxSimulatorRouteImport } from './routes/design.inbox-simulator'
@@ -48,6 +49,8 @@ import { Route as AppPackOrderIdRouteImport } from './routes/app.pack.$orderId'
 import { Route as AppParcelsCodeRouteImport } from './routes/app.parcels.$code'
 import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
 import { Route as AppProductsIdRouteImport } from './routes/app.products.$id'
+import { Route as AppReturnsReturnIdRouteImport } from './routes/app.returns.$returnId'
+import { Route as AppReturnsNewRouteImport } from './routes/app.returns.new'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -159,6 +162,11 @@ const AppProductsRoute = AppProductsRouteImport.update({
   path: '/products',
   getParentRoute: () => AppRoute,
 } as any)
+const AppReturnsRoute = AppReturnsRouteImport.update({
+  id: '/returns',
+  path: '/returns',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -244,6 +252,16 @@ const AppProductsIdRoute = AppProductsIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppProductsRoute,
 } as any)
+const AppReturnsReturnIdRoute = AppReturnsReturnIdRouteImport.update({
+  id: '/$returnId',
+  path: '/$returnId',
+  getParentRoute: () => AppReturnsRoute,
+} as any)
+const AppReturnsNewRoute = AppReturnsNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => AppReturnsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -267,6 +285,7 @@ export interface FileRoutesByFullPath {
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
+  '/app/returns': typeof AppReturnsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
@@ -284,6 +303,8 @@ export interface FileRoutesByFullPath {
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
+  '/app/returns/$returnId': typeof AppReturnsReturnIdRoute
+  '/app/returns/new': typeof AppReturnsNewRoute
   '/app/customers/': typeof AppCustomersIndexRoute
 }
 export interface FileRoutesByTo {
@@ -307,6 +328,7 @@ export interface FileRoutesByTo {
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
+  '/app/returns': typeof AppReturnsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
@@ -324,6 +346,8 @@ export interface FileRoutesByTo {
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
+  '/app/returns/$returnId': typeof AppReturnsReturnIdRoute
+  '/app/returns/new': typeof AppReturnsNewRoute
   '/app/customers': typeof AppCustomersIndexRoute
 }
 export interface FileRoutesById {
@@ -349,6 +373,7 @@ export interface FileRoutesById {
   '/app/payments': typeof AppPaymentsRouteWithChildren
   '/app/pos': typeof AppPosRoute
   '/app/products': typeof AppProductsRouteWithChildren
+  '/app/returns': typeof AppReturnsRouteWithChildren
   '/app/settings': typeof AppSettingsRoute
   '/app/team': typeof AppTeamRoute
   '/design/inbox-simulator': typeof DesignInboxSimulatorRoute
@@ -366,6 +391,8 @@ export interface FileRoutesById {
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
   '/app/products/$id': typeof AppProductsIdRoute
+  '/app/returns/$returnId': typeof AppReturnsReturnIdRoute
+  '/app/returns/new': typeof AppReturnsNewRoute
   '/app/customers/': typeof AppCustomersIndexRoute
 }
 export interface FileRouteTypes {
@@ -392,6 +419,7 @@ export interface FileRouteTypes {
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
+    | '/app/returns'
     | '/app/settings'
     | '/app/team'
     | '/design/inbox-simulator'
@@ -409,6 +437,8 @@ export interface FileRouteTypes {
     | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
+    | '/app/returns/$returnId'
+    | '/app/returns/new'
     | '/app/customers/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -432,6 +462,7 @@ export interface FileRouteTypes {
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
+    | '/app/returns'
     | '/app/settings'
     | '/app/team'
     | '/design/inbox-simulator'
@@ -449,6 +480,8 @@ export interface FileRouteTypes {
     | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
+    | '/app/returns/$returnId'
+    | '/app/returns/new'
     | '/app/customers'
   id:
     | '__root__'
@@ -473,6 +506,7 @@ export interface FileRouteTypes {
     | '/app/payments'
     | '/app/pos'
     | '/app/products'
+    | '/app/returns'
     | '/app/settings'
     | '/app/team'
     | '/design/inbox-simulator'
@@ -490,6 +524,8 @@ export interface FileRouteTypes {
     | '/app/parcels/$code'
     | '/app/payments/$id'
     | '/app/products/$id'
+    | '/app/returns/$returnId'
+    | '/app/returns/new'
     | '/app/customers/'
   fileRoutesById: FileRoutesById
 }
@@ -665,6 +701,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProductsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/returns': {
+      id: '/app/returns'
+      path: '/returns'
+      fullPath: '/app/returns'
+      preLoaderRoute: typeof AppReturnsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings': {
       id: '/app/settings'
       path: '/settings'
@@ -784,6 +827,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProductsIdRouteImport
       parentRoute: typeof AppProductsRoute
     }
+    '/app/returns/$returnId': {
+      id: '/app/returns/$returnId'
+      path: '/$returnId'
+      fullPath: '/app/returns/$returnId'
+      preLoaderRoute: typeof AppReturnsReturnIdRouteImport
+      parentRoute: typeof AppReturnsRoute
+    }
+    '/app/returns/new': {
+      id: '/app/returns/new'
+      path: '/new'
+      fullPath: '/app/returns/new'
+      preLoaderRoute: typeof AppReturnsNewRouteImport
+      parentRoute: typeof AppReturnsRoute
+    }
   }
 }
 
@@ -874,6 +931,20 @@ const AppProductsRouteWithChildren = AppProductsRoute._addFileChildren(
   AppProductsRouteChildren,
 )
 
+interface AppReturnsRouteChildren {
+  AppReturnsReturnIdRoute: typeof AppReturnsReturnIdRoute
+  AppReturnsNewRoute: typeof AppReturnsNewRoute
+}
+
+const AppReturnsRouteChildren: AppReturnsRouteChildren = {
+  AppReturnsReturnIdRoute: AppReturnsReturnIdRoute,
+  AppReturnsNewRoute: AppReturnsNewRoute,
+}
+
+const AppReturnsRouteWithChildren = AppReturnsRoute._addFileChildren(
+  AppReturnsRouteChildren,
+)
+
 interface AppRouteChildren {
   AppAnalyticsRoute: typeof AppAnalyticsRoute
   AppDeliveriesRoute: typeof AppDeliveriesRouteWithChildren
@@ -884,6 +955,7 @@ interface AppRouteChildren {
   AppPaymentsRoute: typeof AppPaymentsRouteWithChildren
   AppPosRoute: typeof AppPosRoute
   AppProductsRoute: typeof AppProductsRouteWithChildren
+  AppReturnsRoute: typeof AppReturnsRouteWithChildren
   AppSettingsRoute: typeof AppSettingsRoute
   AppTeamRoute: typeof AppTeamRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -903,6 +975,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppPaymentsRoute: AppPaymentsRouteWithChildren,
   AppPosRoute: AppPosRoute,
   AppProductsRoute: AppProductsRouteWithChildren,
+  AppReturnsRoute: AppReturnsRouteWithChildren,
   AppSettingsRoute: AppSettingsRoute,
   AppTeamRoute: AppTeamRoute,
   AppIndexRoute: AppIndexRoute,

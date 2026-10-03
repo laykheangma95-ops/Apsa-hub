@@ -76,7 +76,9 @@ export const Route = createFileRoute("/app/inventory/$variantId")({
 });
 
 function movementTone(movement: InventoryMovement): NonNullable<TimelineItem["tone"]> {
-  if (movement.movementType === "manual_adjustment") return "warning";
+  if (movement.movementType === "manual_adjustment" || movement.movementType === "damage") {
+    return "warning";
+  }
   return movement.quantityDelta < 0 ? "danger" : "success";
 }
 
@@ -199,13 +201,15 @@ function InventoryDetailScreen() {
           // Business language, never the enum value: "Stock received", not
           // "restock"; "Sold", not "sale".
           title: `${t(movementTypeLabelKey(movement.movementType))} · ${formatMovementDelta(movement.quantityDelta)}`,
-          // A stock-count adjustment's stored reason is a fixed system label;
-          // show it in the merchant's language instead.
+          // A stock-count adjustment's or customer return's stored reason is a
+          // fixed system label; show it in the merchant's language instead.
           ...(movement.referenceType === "stock_count"
             ? { detail: t("stockCount.history.label") }
-            : movement.reason
-              ? { detail: movement.reason }
-              : {}),
+            : movement.referenceType === "customer_return_item"
+              ? { detail: t("returns.history.label") }
+              : movement.reason
+                ? { detail: movement.reason }
+                : {}),
           meta: place ? `${when} · ${place}` : when,
           tone: movementTone(movement),
         };
