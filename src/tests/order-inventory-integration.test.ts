@@ -194,7 +194,26 @@ async function withOrderDb<T>(
     from: (table: string) => fakeQuery(opts.tables?.[table] ?? { data: null, error: null }),
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ fn: name, args });
-      return opts.rpc?.[name] ?? { data: { status: "success" }, error: null };
+      const result = opts.rpc?.[name] ?? { data: { status: "success" }, error: null };
+      // Migration 057: a successful lifecycle → confirmed also returns the
+      // order's APSA Parcel, created in the same transaction.
+      const data = result.data as Record<string, unknown> | null;
+      if (
+        name === "transition_order_status_v1" &&
+        args["p_axis"] === "lifecycle" &&
+        args["p_to"] === "confirmed" &&
+        data?.["status"] === "success"
+      ) {
+        return {
+          ...result,
+          data: {
+            parcel_id: "parcel-1",
+            parcel_code: "APSA:PCL:v1:abcdefghijklmnopqrstuv",
+            ...data,
+          },
+        };
+      }
+      return result;
     },
   };
   const restore = setOrderRepositoryDbForTests(testDb);
