@@ -20,12 +20,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Apsi, Spinner } from "@/design-system";
-import i18n, { useTranslation } from "@/lib/i18n";
+import { headTranslator, useTranslation } from "@/lib/i18n";
 import { slugify } from "@/lib/slug";
 
 export const Route = createFileRoute("/onboarding")({
-  head: () => ({
-    meta: [{ title: i18n.t("onboarding.head.title") }],
+  head: ({ match }) => ({
+    meta: [{ title: headTranslator(match.context.language)("onboarding.head.title") }],
   }),
 
   // Server-side guard. Never move this into an effect: that would flash the

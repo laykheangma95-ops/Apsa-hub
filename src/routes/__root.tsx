@@ -10,7 +10,9 @@ import {
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
-import { LanguageProvider } from "../lib/i18n";
+import { LanguageProvider, useLanguage } from "../lib/i18n";
+import { ssrLanguageFromCookie } from "../lib/language";
+import { getRequestLanguage } from "../lib/request-language";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
 function NotFoundComponent() {
@@ -75,6 +77,12 @@ function ErrorComponent({ error, reset }: { error: unknown; reset: () => void })
 }
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
+  /*
+   * The render language, from the request's language cookie on the server.
+   * It is dehydrated with the route context, so the browser's first hydration
+   * render uses exactly the language the server rendered.
+   */
+  beforeLoad: async () => ({ language: await getRequestLanguage() }),
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -125,8 +133,19 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 });
 
 function RootShell({ children }: { children: ReactNode }) {
+  const { language } = Route.useRouteContext();
   return (
-    <html lang="km">
+    <LanguageProvider initialLanguage={ssrLanguageFromCookie(language)}>
+      <RootDocument>{children}</RootDocument>
+    </LanguageProvider>
+  );
+}
+
+function RootDocument({ children }: { children: ReactNode }) {
+  // lang and data-lang always name the language the page is rendered in.
+  const { language } = useLanguage();
+  return (
+    <html lang={language} data-lang={language}>
       <head>
         <HeadContent />
       </head>
@@ -143,10 +162,8 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <LanguageProvider>
-        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-        <Outlet />
-      </LanguageProvider>
+      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+      <Outlet />
     </QueryClientProvider>
   );
 }
