@@ -1747,21 +1747,27 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       executableSql(readSource("supabase/migrations/054_pack_order_readiness_guards.sql"));
     // The other migration-054 functions — ready_packed_delivery_v1,
     // order_currently_packed_v1 and the re-declared transition_delivery_status_v1
-    // — are called by the deliveries repository, not this one.
+    // and create_delivery_v1 — are called by the deliveries repository, not this
+    // one. 054 also re-states transition_order_status_v1's grant (re-declared
+    // wrapper), so names are compared as a set.
     const deliveriesRepositoryFunctions = new Set([
       "ready_packed_delivery_v1",
       "order_currently_packed_v1",
       "transition_delivery_status_v1",
+      "create_delivery_v1",
     ]);
-    const granted = [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
-      .map((m) => m[1]!)
-      .filter(
-        (name) =>
-          name !== "create_order_v1" &&
-          name !== "create_order_v2" &&
-          !deliveriesRepositoryFunctions.has(name),
-      )
-      .sort();
+    const granted = [
+      ...new Set(
+        [...sql.matchAll(/GRANT EXECUTE ON FUNCTION public\.(\w+)/g)]
+          .map((m) => m[1]!)
+          .filter(
+            (name) =>
+              name !== "create_order_v1" &&
+              name !== "create_order_v2" &&
+              !deliveriesRepositoryFunctions.has(name),
+          ),
+      ),
+    ].sort();
     const called = [...readSource("src/server/orders/repository.ts").matchAll(/db\.rpc\("(\w+)"/g)]
       .map((m) => m[1])
       .sort();

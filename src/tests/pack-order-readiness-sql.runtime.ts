@@ -340,10 +340,11 @@ describe("timestamp ordering: pack waits behind reopen, commits later", () => {
     expect(await deliveryStatus(replacement)).toBe("ready");
   });
 
-  it("why the dedicated write exists: the generic order transition stamps transaction START", async () => {
-    // The pre-fix path — Mark Packed through transition_order_status_v1 — in the
-    // same waiting transaction: its marker lands before the reopen and the order
-    // reads as NOT packed. Pack Order no longer writes its marker this way.
+  it("the generic order transition no longer stamps transaction START either", async () => {
+    // The pre-fix path — a marker-tagged write through transition_order_status_v1
+    // — in the same waiting transaction. Before, its row took the transaction
+    // start time, landed before the reopen, and the order read as NOT packed.
+    // Its fulfillment history now comes from the same helper, after the lock.
     const order = await confirmedOrder();
     await packWithoutDelivery(order);
     await packWaitingBehindReopen(order, async (tx) => {
@@ -358,7 +359,7 @@ describe("timestamp ordering: pack waits behind reopen, commits later", () => {
       ]);
       expect(r.status).toBe("success");
     });
-    expect(await packedNow(order)).toBe(false);
+    expect(await packedNow(order)).toBe(true);
   });
 
   it("no inversion even when the clock is behind the order's history (+1µs, never backwards)", async () => {
@@ -433,3 +434,304 @@ async function isAfter(later: string, earlier: string): Promise<boolean> {
     ])
   ).rows[0]!.v;
 }
+
+// ── Every fulfillment-history writer is ordered after the lock ──────────────
+//
+// For each writer: a transaction starts (fixing its transaction-start time),
+// then another transaction's event commits and is stamped later (the probe),
+// then the writer runs in the earlier-started transaction — the same timestamp
+// situation as a writer that waited for a lock. Every fulfillment-history row
+// the writer adds must be ordered AFTER the probe. A writer stamping
+// transaction-start time (DEFAULT now()) would land before it.
+
+interface NewRow {
+  id: string;
+  src: string;
+  at: string;
+  after: boolean;
+}
+
+async function writerRowsAfterConcurrentEvent(
+  order: string,
+  writer: (tx: Tx) => Promise<void>,
+): Promise<NewRow[]> {
+  return f.db.transaction(async (tx: Tx) => {
+    await tx.query(`select now()`);
+    const probeAt = (
+      await tx.query<{ t: string }>(
+        `insert into order_status_history(organization_id,order_id,axis,from_status,to_status,changed_by,reason,changed_at)
+         values($1,$2,'payment','unpaid','probe',$3,'concurrent event probe',
+                clock_timestamp() + interval '1 millisecond')
+         returning changed_at::text as t`,
+        [f.org, order, f.actor],
+      )
+    ).rows[0]!.t;
+    const rows = () =>
+      tx.query<NewRow>(
+        `select id::text, src, at::text, at > $2::timestamptz as after from (
+           select id, 'order' as src, changed_at as at from order_status_history
+           where order_id=$1 and axis='fulfillment'
+           union all
+           select dh.id, 'delivery', dh.created_at from delivery_status_history dh
+           join deliveries d on d.id = dh.delivery_id where d.order_id=$1
+         ) x`,
+        [order, probeAt],
+      );
+    const before = new Set((await rows()).rows.map((r) => r.id));
+    await writer(tx);
+    return (await rows()).rows.filter((r) => !before.has(r.id));
+  });
+}
+
+function expectAllAfter(rows: NewRow[], expected: number) {
+  expect(rows).toHaveLength(expected);
+  for (const row of rows) expect(row).toMatchObject({ after: true });
+}
+
+/** An order already packed, with a delivery at `status` (readied by recovery). */
+async function packedOrderWithDelivery(status: "pending" | "preparing" | "ready" | "in_transit") {
+  const order = await confirmedOrder();
+  await packWithoutDelivery(order);
+  const delivery = await arrange(order);
+  if (status === "preparing") await genericMove(delivery, "pending", "preparing");
+  if (status === "ready" || status === "in_transit") await readyPacked(order, delivery);
+  if (status === "in_transit") await genericMove(delivery, "ready", "in_transit");
+  return { order, delivery };
+}
+
+describe("one timestamp strategy: every fulfillment-history writer stamps after its lock", () => {
+  it("Pack Order without a delivery (record_order_packed_v1)", async () => {
+    const order = await confirmedOrder();
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      expect((await rpcIn(tx, "record_order_packed_v1", [f.org, order, f.actor])).status).toBe(
+        "success",
+      );
+    });
+    expectAllAfter(rows, 1);
+  });
+
+  it("Pack Order with a delivery (marker-tagged transition_delivery_status_v1)", async () => {
+    const order = await confirmedOrder();
+    const delivery = await arrange(order);
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_delivery_status_v1", [
+        f.org,
+        delivery,
+        "pending",
+        "preparing",
+        f.actor,
+        PACKED,
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expectAllAfter(rows, 1);
+  });
+
+  it("Reopen (reopen_order_fulfillment_v1) — both rows of the event share one time", async () => {
+    const { order } = await packedOrderWithDelivery("ready");
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      expect(
+        (await rpcIn(tx, "reopen_order_fulfillment_v1", [f.org, order, f.actor, "Redo"])).status,
+      ).toBe("success");
+    });
+    expectAllAfter(rows, 2);
+    expect(rows[0]!.at).toBe(rows[1]!.at);
+  });
+
+  it("Generic delivery Ready (transition_delivery_status_v1 preparing → ready)", async () => {
+    const { order, delivery } = await packedOrderWithDelivery("preparing");
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_delivery_status_v1", [
+        f.org,
+        delivery,
+        "preparing",
+        "ready",
+        f.actor,
+        null,
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expectAllAfter(rows, 1);
+  });
+
+  it("Automatic Ready / Retry Ready (ready_packed_delivery_v1)", async () => {
+    const { order, delivery } = await packedOrderWithDelivery("pending");
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      expect(
+        (await rpcIn(tx, "ready_packed_delivery_v1", [f.org, order, delivery, f.actor])).status,
+      ).toBe("success");
+    });
+    expectAllAfter(rows, 2);
+  });
+
+  it("Delivery cancellation — the delivery row and the order row it drives share one time", async () => {
+    const { order, delivery } = await packedOrderWithDelivery("ready");
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_delivery_status_v1", [
+        f.org,
+        delivery,
+        "ready",
+        "cancelled",
+        f.actor,
+        "Customer moved",
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expectAllAfter(rows, 2);
+    expect(rows[0]!.at).toBe(rows[1]!.at);
+    // And the retired-attempt exemption still recognises the pair: still packed.
+    expect(await packedNow(order)).toBe(true);
+  });
+
+  it("Delivery failure (transition_delivery_status_v1 in_transit → failed)", async () => {
+    const { order, delivery } = await packedOrderWithDelivery("in_transit");
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_delivery_status_v1", [
+        f.org,
+        delivery,
+        "in_transit",
+        "failed",
+        f.actor,
+        "Recipient unreachable",
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expectAllAfter(rows, 2);
+    expect(rows[0]!.at).toBe(rows[1]!.at);
+  });
+
+  it("Arrange Delivery (create_delivery_v1) — both rows of the event share one time", async () => {
+    const order = await confirmedOrder();
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "create_delivery_v1", [
+        f.org,
+        order,
+        f.actor,
+        null,
+        null,
+        null,
+        "Courier",
+        null,
+        null,
+      ]);
+      expect(r.status).toBe("success");
+    });
+    expectAllAfter(rows, 2);
+    expect(rows[0]!.at).toBe(rows[1]!.at);
+  });
+
+  it("Generic order fulfillment transition (transition_order_status_v1, axis fulfillment)", async () => {
+    const order = await confirmedOrder();
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_order_status_v1", [
+        f.org,
+        order,
+        "fulfillment",
+        "unfulfilled",
+        "processing",
+        f.actor,
+        null,
+      ]);
+      expect(r).toMatchObject({ status: "success", axis: "fulfillment", stock_movements: 0 });
+    });
+    expectAllAfter(rows, 1);
+  });
+
+  it("Order cancellation's fulfillment → cancelled row (lifecycle path, stock untouched here)", async () => {
+    const order = await confirmedOrder();
+    const rows = await writerRowsAfterConcurrentEvent(order, async (tx) => {
+      const r = await rpcIn(tx, "transition_order_status_v1", [
+        f.org,
+        order,
+        "lifecycle",
+        "confirmed",
+        "cancelled",
+        f.actor,
+        "Customer cancelled",
+      ]);
+      expect(r).toMatchObject({ status: "success", axis: "lifecycle", to: "cancelled" });
+    });
+    expectAllAfter(rows, 1);
+    // Exactly one fulfillment → cancelled row: the 026 body did not write a second.
+    const cancelled = (
+      await f.db.query<Json>(
+        `select count(*)::int as n from order_status_history
+         where order_id=$1 and axis='fulfillment' and to_status='cancelled'`,
+        [order],
+      )
+    ).rows[0]!;
+    expect(cancelled.n).toBe(1);
+    expect(await fulfillment(order)).toBe("cancelled");
+    // A refused cancellation (stale) writes nothing at all.
+    expect(
+      (
+        await f.rpc("transition_order_status_v1", [
+          f.org,
+          order,
+          "lifecycle",
+          "confirmed",
+          "cancelled",
+          f.actor,
+          null,
+        ])
+      ).status,
+    ).toBe("stale");
+  });
+
+  it("the helper is the ONLY source of fulfillment-history timestamps (database catalog)", async () => {
+    const writers = (
+      await f.db.query<{ name: string; src: string }>(
+        `select p.proname as name, p.prosrc as src
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public'
+           and (p.prosrc ~* 'INSERT INTO public\\.order_status_history'
+             or p.prosrc ~* 'INSERT INTO public\\.delivery_status_history')`,
+      )
+    ).rows;
+    const names = writers.map((w) => w.name).sort();
+    // Every function in the database that writes order or delivery history.
+    expect(names).toEqual([
+      "create_delivery_v1",
+      "ready_packed_delivery_v1",
+      "record_order_packed_v1",
+      "reopen_order_fulfillment_v1",
+      "sync_order_payment_state",
+      "transition_delivery_status_v1",
+      "transition_order_before_payment_authority_v1",
+      "transition_order_status_v1",
+    ]);
+    for (const { name, src } of writers) {
+      if (name === "sync_order_payment_state") {
+        // Payment/refund axes only — not fulfillment history.
+        expect(src).not.toMatch(/'fulfillment'/);
+        continue;
+      }
+      if (name === "transition_order_before_payment_authority_v1") {
+        // The 026 body. Executable by no role: reachable only through the
+        // transition_order_status_v1 wrapper, which handles every fulfillment
+        // write itself (the two cases above prove its rows are helper-stamped).
+        const priv = (
+          await f.db.query<Json>(
+            `select has_function_privilege('service_role',
+               'public.transition_order_before_payment_authority_v1(uuid,uuid,text,text,text,uuid,text)',
+               'EXECUTE') as svc`,
+          )
+        ).rows[0]!;
+        expect(priv.svc).toBe(false);
+        continue;
+      }
+      // Everything else: stamped by the helper, called after an order row lock.
+      const stamp = src.indexOf("next_fulfillment_event_at_v1(");
+      const orderLock = src.search(/FROM public\.orders\s+WHERE[^;]*FOR UPDATE/);
+      expect({ name, usesHelper: stamp > -1 }).toEqual({ name, usesHelper: true });
+      expect({ name, afterLock: orderLock > -1 && stamp > orderLock }).toEqual({
+        name,
+        afterLock: true,
+      });
+      expect({ name, ownClock: /clock_timestamp\(\)|\bnow\(\)/.test(src) }).toEqual({
+        name,
+        ownClock: false,
+      });
+    }
+  });
+});

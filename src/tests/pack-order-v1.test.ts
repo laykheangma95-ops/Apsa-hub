@@ -2173,12 +2173,14 @@ describe("migration 054 — one packed rule guards every readiness path", () => 
     expect(retry).toBeLessThan(body.indexOf("UPDATE public."));
   });
 
-  it("every history row the packed rule reads gets its time after the order lock — never now()", () => {
+  it("every fulfillment-history writer gets its time after the order lock — never now()", () => {
     for (const name of [
       "reopen_order_fulfillment_v1",
       "ready_packed_delivery_v1",
       "transition_delivery_status_v1",
       "record_order_packed_v1",
+      "create_delivery_v1",
+      "transition_order_status_v1",
     ]) {
       const body = bodies()[name]!;
       const orderLock = body.search(/FROM public\.orders\s+WHERE[^;]*FOR UPDATE/);

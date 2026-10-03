@@ -1,8 +1,8 @@
 -- Migration: 054_pack_order_readiness_guards
 -- V1 Pack Order (PR #107): a delivery is 'ready' only while its order is
 -- CURRENTLY packed, on every path, decided by ONE rule under row locks.
--- Forward-only; no tables or columns. Adds five functions and re-declares
--- transition_delivery_status_v1 (027) with a guard on '→ ready' and lock-ordered timestamps.
+-- Forward-only; no tables or columns. Adds five functions and re-declares three
+-- existing ones (transition_delivery_status_v1, create_delivery_v1, transition_order_status_v1).
 --
 -- ── The one packed rule: order_currently_packed_v1 ───────────────────────────
 -- The order is packed when its newest Pack Order marker (reason
@@ -25,17 +25,24 @@
 -- The packed rule compares history timestamps, so they must follow the order in
 -- which fulfillment events really commit. A history row's DEFAULT now() is the
 -- transaction START time: a transaction that waited for a lock commits after
--- the lock holder yet would carry an older timestamp. Therefore every row the
--- rule reads — packed markers, reopens, retired (cancelled/failed) attempts —
--- is written by a function in this file with an explicit timestamp from
--- next_fulfillment_event_at_v1, taken only AFTER the order row lock is held.
--- Every such writer locks the same order row, so they serialize on it and the
+-- the lock holder yet would carry an older timestamp. Therefore EVERY writer of
+-- fulfillment history — every delivery_status_history row and every
+-- order_status_history row on the fulfillment axis — is a function in this file
+-- and takes its timestamp from next_fulfillment_event_at_v1, the only source,
+-- called only AFTER the order row lock is held:
+--   Pack Order ............ record_order_packed_v1, transition_delivery_status_v1
+--   Reopen ................ reopen_order_fulfillment_v1
+--   Auto / Retry Ready .... ready_packed_delivery_v1
+--   Generic Ready, cancel,
+--   fail, hand-off ........ transition_delivery_status_v1
+--   Arrange Delivery ...... create_delivery_v1
+--   Generic fulfillment
+--   and order cancel ...... transition_order_status_v1 (wrapper; see below)
+-- Every writer locks the same order row, so they serialize on it and the
 -- timestamps are strictly increasing in commit order. Rows that are two halves
 -- of one event (a delivery row and the order row it drives; a reopen and the
 -- delivery it cancels) share one timestamp; consecutive steps of one operation
 -- get +1µs each so their order is deterministic.
--- Mark Packed no longer writes its marker through transition_order_status_v1
--- (transaction-start time); with no delivery it uses record_order_packed_v1.
 
 -- ── Event timestamp ─────────────────────────────────────────────────────────
 -- Caller MUST hold the order's row lock. Strictly after every history row the
@@ -574,4 +581,239 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.record_order_packed_v1(UUID, UUID, UUID)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_order_packed_v1(UUID, UUID, UUID)
+  TO service_role;
+
+-- ── Arrange Delivery: create_delivery_v1 on the same timestamp strategy ──────
+--
+-- Re-declares create_delivery_v1 (027) unchanged except that its two history
+-- rows — the delivery's 'pending' row and the order's unfulfilled → processing
+-- row it drives (one event, one time) — take their time from
+-- next_fulfillment_event_at_v1 after the order lock, instead of DEFAULT now().
+CREATE OR REPLACE FUNCTION public.create_delivery_v1(
+  p_organization_id          UUID,
+  p_order_id                 UUID,
+  p_created_by               UUID DEFAULT NULL,
+  p_location_id              UUID DEFAULT NULL,
+  p_provider_id              UUID DEFAULT NULL,
+  p_provider_key             TEXT DEFAULT NULL,
+  p_provider_name            TEXT DEFAULT NULL,
+  p_external_tracking_number TEXT DEFAULT NULL,
+  p_cod_amount_minor         BIGINT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+  v_order         RECORD;
+  v_provider      RECORD;
+  v_location_id   UUID;
+  v_provider_key  TEXT;
+  v_provider_name TEXT;
+  v_delivery_id   UUID;
+  v_at            TIMESTAMPTZ;
+BEGIN
+  -- This lock serializes duplicate-create attempts for the same order.
+  SELECT id, organization_id, location_id, currency, lifecycle_status, fulfillment_status
+    INTO v_order
+  FROM public.orders
+  WHERE id = p_order_id AND organization_id = p_organization_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN RETURN jsonb_build_object('status', 'order_not_found'); END IF;
+  IF v_order.lifecycle_status <> 'confirmed' THEN
+    RETURN jsonb_build_object('status', 'order_not_confirmed');
+  END IF;
+  IF v_order.fulfillment_status IN ('fulfilled', 'cancelled') THEN
+    RETURN jsonb_build_object('status', 'order_fulfillment_terminal');
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.deliveries
+    WHERE organization_id = p_organization_id AND order_id = p_order_id
+      AND status IN ('pending', 'preparing', 'ready', 'in_transit')
+  ) THEN
+    RETURN jsonb_build_object('status', 'duplicate_active');
+  END IF;
+
+  v_location_id := COALESCE(p_location_id, v_order.location_id);
+  IF v_location_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.locations
+    WHERE id = v_location_id AND organization_id = p_organization_id
+  ) THEN
+    RETURN jsonb_build_object('status', 'location_not_found');
+  END IF;
+
+  IF p_provider_id IS NOT NULL THEN
+    SELECT provider_key, name, active INTO v_provider
+    FROM public.delivery_providers
+    WHERE id = p_provider_id AND organization_id = p_organization_id;
+    IF NOT FOUND THEN RETURN jsonb_build_object('status', 'provider_not_found'); END IF;
+    IF NOT v_provider.active THEN RETURN jsonb_build_object('status', 'provider_inactive'); END IF;
+    v_provider_key := v_provider.provider_key;
+    v_provider_name := v_provider.name;
+  ELSE
+    v_provider_key := NULLIF(trim(p_provider_key), '');
+    v_provider_name := NULLIF(trim(p_provider_name), '');
+    IF v_provider_name IS NULL THEN
+      RETURN jsonb_build_object('status', 'provider_required');
+    END IF;
+  END IF;
+
+  IF p_cod_amount_minor IS NOT NULL AND p_cod_amount_minor < 0 THEN
+    RETURN jsonb_build_object('status', 'invalid_cod_amount');
+  END IF;
+
+  -- Added by 054: the event time, taken under the order lock (see the header).
+  v_at := public.next_fulfillment_event_at_v1(p_organization_id, p_order_id);
+
+  INSERT INTO public.deliveries (
+    organization_id, order_id, location_id, provider_id, provider_key, provider_name,
+    external_tracking_number, cod_amount_minor, cod_currency, status, created_by
+  ) VALUES (
+    p_organization_id, p_order_id, v_location_id, p_provider_id,
+    v_provider_key, v_provider_name, NULLIF(trim(p_external_tracking_number), ''),
+    p_cod_amount_minor, CASE WHEN p_cod_amount_minor IS NULL THEN NULL ELSE v_order.currency END,
+    'pending', p_created_by
+  ) RETURNING id INTO v_delivery_id;
+
+  INSERT INTO public.delivery_status_history (
+    organization_id, delivery_id, from_status, to_status, changed_by, reason, created_at
+  ) VALUES (
+    p_organization_id, v_delivery_id, NULL, 'pending', p_created_by, 'Delivery created', v_at
+  );
+
+  -- pending maps to processing. Do not duplicate Order history if an existing
+  -- manual fulfillment action had already moved the Order to processing.
+  IF v_order.fulfillment_status = 'unfulfilled' THEN
+    UPDATE public.orders SET fulfillment_status = 'processing' WHERE id = p_order_id;
+    INSERT INTO public.order_status_history (
+      organization_id, order_id, axis, from_status, to_status, changed_by, reason, changed_at
+    ) VALUES (
+      p_organization_id, p_order_id, 'fulfillment', 'unfulfilled', 'processing',
+      p_created_by, 'Delivery created', v_at
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'status', 'success', 'delivery_id', v_delivery_id, 'order_fulfillment', 'processing'
+  );
+END;
+$$;
+
+-- CREATE OR REPLACE keeps the existing ACL; restated so this file is
+-- self-describing (and the migration safety check sees the REVOKE).
+REVOKE EXECUTE ON FUNCTION public.create_delivery_v1(UUID, UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, BIGINT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_delivery_v1(UUID, UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, BIGINT)
+  TO service_role;
+
+-- ── Generic order transitions: fulfillment history on the same strategy ─────
+--
+-- Re-declares the transition_order_status_v1 wrapper (040). Payment/refund are
+-- refused exactly as in 040. Lifecycle transitions still run the 026 body
+-- (transition_order_before_payment_authority_v1) untouched — it owns the stock
+-- consequences, which this migration does not change. Only the FULFILLMENT
+-- history it would otherwise stamp with transaction-start time moves here:
+--
+--   * axis 'fulfillment': handled in this wrapper with the same checks, writes
+--     and result envelope as the 026 body, stamped by
+--     next_fulfillment_event_at_v1 under the order lock.
+--   * lifecycle → 'cancelled': the 026 body also writes the cross-axis
+--     fulfillment → 'cancelled' row, but only while fulfillment is not already
+--     'cancelled'. Holding the order lock, this wrapper applies the same
+--     preconditions the 026 body checks, writes that fulfillment row itself
+--     with a helper timestamp, then delegates — so the 026 body changes the
+--     lifecycle and stock as before and skips its own fulfillment write. If the
+--     delegate ever disagreed with the pre-check, the whole call is rolled back.
+CREATE OR REPLACE FUNCTION public.transition_order_status_v1(
+  p_organization_id UUID,
+  p_order_id        UUID,
+  p_axis            TEXT,
+  p_expected_from   TEXT,
+  p_to              TEXT,
+  p_changed_by      UUID DEFAULT NULL,
+  p_reason          TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+  v_order   RECORD;
+  v_current TEXT;
+  v_at      TIMESTAMPTZ;
+  v_result  JSONB;
+BEGIN
+  IF p_axis IN ('payment', 'refund') THEN
+    RETURN jsonb_build_object('status', 'payment_domain_required');
+  END IF;
+
+  IF p_axis = 'fulfillment' THEN
+    SELECT id, lifecycle_status, fulfillment_status INTO v_order
+    FROM public.orders
+    WHERE id = p_order_id AND organization_id = p_organization_id
+    FOR UPDATE;
+    IF NOT FOUND THEN RETURN jsonb_build_object('status', 'not_found'); END IF;
+
+    v_current := v_order.fulfillment_status::TEXT;
+    IF v_current <> p_expected_from THEN
+      RETURN jsonb_build_object('status', 'stale', 'current', v_current);
+    END IF;
+    IF v_current = p_to THEN
+      RETURN jsonb_build_object('status', 'no_change', 'current', v_current);
+    END IF;
+    IF v_order.lifecycle_status IN ('cancelled', 'completed') THEN
+      RETURN jsonb_build_object('status', 'terminal',
+                                'lifecycle', v_order.lifecycle_status::TEXT);
+    END IF;
+
+    v_at := public.next_fulfillment_event_at_v1(p_organization_id, p_order_id);
+    UPDATE public.orders SET fulfillment_status = p_to::public.order_fulfillment_status
+    WHERE id = p_order_id;
+    INSERT INTO public.order_status_history (
+      organization_id, order_id, axis, from_status, to_status, changed_by, reason, changed_at
+    ) VALUES (
+      p_organization_id, p_order_id, 'fulfillment', v_current, p_to, p_changed_by, p_reason, v_at
+    );
+    RETURN jsonb_build_object('status', 'success', 'axis', p_axis,
+                              'from', v_current, 'to', p_to, 'stock_movements', 0);
+  END IF;
+
+  IF p_axis = 'lifecycle' AND p_to = 'cancelled' THEN
+    SELECT id, lifecycle_status, fulfillment_status INTO v_order
+    FROM public.orders
+    WHERE id = p_order_id AND organization_id = p_organization_id
+    FOR UPDATE;
+    IF FOUND
+       AND v_order.lifecycle_status::TEXT = p_expected_from
+       AND v_order.lifecycle_status NOT IN ('cancelled', 'completed')
+       AND v_order.fulfillment_status <> 'cancelled' THEN
+      v_at := public.next_fulfillment_event_at_v1(p_organization_id, p_order_id);
+      INSERT INTO public.order_status_history (
+        organization_id, order_id, axis, from_status, to_status, changed_by, reason, changed_at
+      ) VALUES (
+        p_organization_id, p_order_id, 'fulfillment', v_order.fulfillment_status::TEXT,
+        'cancelled', p_changed_by, 'Order cancelled', v_at
+      );
+      UPDATE public.orders SET fulfillment_status = 'cancelled' WHERE id = p_order_id;
+
+      v_result := public.transition_order_before_payment_authority_v1(
+        p_organization_id, p_order_id, p_axis, p_expected_from, p_to, p_changed_by, p_reason);
+      IF v_result->>'status' <> 'success' THEN
+        RAISE EXCEPTION 'transition_order_status_v1: cancellation pre-check disagreed: %', v_result;
+      END IF;
+      RETURN v_result;
+    END IF;
+  END IF;
+
+  RETURN public.transition_order_before_payment_authority_v1(
+    p_organization_id, p_order_id, p_axis, p_expected_from, p_to, p_changed_by, p_reason);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.transition_order_status_v1(UUID, UUID, TEXT, TEXT, TEXT, UUID, TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.transition_order_status_v1(UUID, UUID, TEXT, TEXT, TEXT, UUID, TEXT)
   TO service_role;
