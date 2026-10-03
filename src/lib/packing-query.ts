@@ -17,6 +17,8 @@ export const packingKeys = {
     partition.principal(userId, organizationId),
   requirements: (userId: string, organizationId: string, orderId: string) =>
     [PACKING_QUERY_ROOT, userId, organizationId, "requirements", orderId] as const,
+  orderState: (userId: string, organizationId: string, orderId: string) =>
+    [PACKING_QUERY_ROOT, userId, organizationId, "order-state", orderId] as const,
 };
 
 export const PACKING_QUERY_PREFIX = partition.prefix;

@@ -233,7 +233,10 @@ describe("Create Delivery", () => {
         return recorded;
       },
     );
-    expect(calls).toHaveLength(1);
+    // After the one write, Arrange Delivery reads whether the order is currently
+    // packed (order_currently_packed_v1, migration 054) — read-only; this order
+    // is not packed, so nothing else runs.
+    expect(calls.map(({ fn }) => fn)).toEqual(["create_delivery_v1", "order_currently_packed_v1"]);
     expect(calls[0]?.fn).toBe("create_delivery_v1");
     expect(calls[0]?.args["p_organization_id"]).toBe(ORG_A);
     expect(calls[0]?.args["p_created_by"]).toBe(USER_A);
@@ -570,6 +573,8 @@ describe("Golden merchant fulfillment flow", () => {
     expect(calls.map(({ fn }) => fn)).toEqual([
       "transition_delivery_status_v1",
       "create_delivery_v1",
+      // Read-only packed check after Arrange Delivery (migration 054).
+      "order_currently_packed_v1",
     ]);
   });
 });

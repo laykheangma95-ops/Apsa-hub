@@ -2,6 +2,7 @@ import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
+import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import {
   isTerminalDeliveryStatus,
   isValidDeliveryTransition,
@@ -182,7 +183,22 @@ export async function createDelivery(
     cod_amount_minor: codAmountMinor,
   });
   if (result.status !== "success" || !result.delivery_id) throw createFailure(result.status);
-  return requireDetail(ctx.organizationId, result.delivery_id);
+  const detail = await requireDetail(ctx.organizationId, result.delivery_id);
+
+  /*
+   * V1 fulfillment: an order may be packed before its delivery is arranged.
+   * The new delivery for an already-packed order goes straight to 'ready' so
+   * Courier Handoff can take it. Best-effort — the delivery exists either way,
+   * and a failure leaves it 'pending' (Mark Packed again readies it).
+   */
+  try {
+    const { readyPackedOrderDelivery } = await import("@/server/packing/service");
+    const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
+    if (readied === "ready") return requireDetail(ctx.organizationId, result.delivery_id);
+  } catch {
+    // Intentionally ignored; see above.
+  }
+  return detail;
 }
 
 function transitionFailure(status: string, current?: string): Error {
@@ -203,6 +219,9 @@ function transitionFailure(status: string, current?: string): Error {
       return conflict("Order is terminal and its delivery can no longer be modified");
     case "order_fulfillment_terminal":
       return conflict("Order fulfillment conflicts with this delivery transition");
+    case "not_packed":
+      // Only a currently packed order's delivery may be ready (migration 054).
+      return conflict("Pack the order with Pack Order before its delivery can be ready");
     default:
       return new Error(`Delivery transition failed: ${status}`);
   }
@@ -215,6 +234,11 @@ async function transition(
   reason?: string | null,
 ): Promise<DeliveryDetail> {
   ctx.require("delivery.update");
+  // Reserved operational markers (Pack Order's packed reason, the courier
+  // handoff code) are written only by their owning services, never here.
+  if (isReservedOperationalReason(reason)) {
+    throw publicError("This reason is reserved for an internal workflow", 400);
+  }
   const delivery = await repo.findDeliveryById(ctx.organizationId, deliveryId);
   if (!delivery) throw notFound("Delivery not found");
   if (isTerminalDeliveryStatus(delivery.status)) {

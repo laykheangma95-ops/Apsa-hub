@@ -982,8 +982,7 @@
     "recordPayment": "Record payment",
     "arrangeDelivery": "Arrange delivery",
     "printParcelLabel": "Print parcel label",
-    "startPicking": "Start picking",
-    "startPacking": "Start packing",
+    "startPacking": "Pack order",
     "createReplacementDelivery": "Create replacement delivery",
     "markPacked": "Mark as packing",
     "markReady": "Mark as ready",
@@ -1102,7 +1101,15 @@
       "codNote": "Cash on delivery — the courier still holds this money. It is not counted as paid.",
       "submit": "Record payment",
       "working": "Recording…"
-    }
+    },
+    "packed": "Packed",
+    "courierHandoff": "Courier handoff",
+    "handoffAfterPacking": "Available once the order is packed.",
+    "retryDeliveryReady": "Retry delivery ready",
+    "retryDeliveryReadyHint": "Packed, but the delivery is not ready for handoff yet.",
+    "retryDeliveryReadyDone": "Delivery is ready for courier handoff.",
+    "retryDeliveryReadyFailed": "Could not make the delivery ready. Try again.",
+    "retryDeliveryReadyNotPacked": "The order is no longer packed. Pack it again before courier handoff."
   },
   "orderList": {
     "title": "Orders",
@@ -2421,31 +2428,6 @@
       "parcelCodeError": "Could not assign a parcel code. Please try again."
     }
   },
-  "pick": {
-    "title": "Scan to Pick",
-    "backToOrder": "Back to order",
-    "progress": "Picking progress",
-    "allPicked": "All items picked",
-    "scanPrompt": "Scan product barcode",
-    "scanPlaceholder": "Scan or type barcode",
-    "submit": "Go",
-    "itemList": "Items to pick",
-    "error": {
-      "title": "Could not load pick list",
-      "body": "Something went wrong while loading the order items. Please try again."
-    },
-    "empty": {
-      "title": "Nothing to pick",
-      "body": "This order has no items that require picking."
-    },
-    "scan": {
-      "accepted": "Correct item scanned",
-      "wrongProduct": "Wrong product — not in this order",
-      "wrongVariant": "Wrong variant — check the item",
-      "overQuantity": "Already picked enough of this item",
-      "alreadyComplete": "All items already picked"
-    }
-  },
   "pack": {
     "title": "Ready to Pack",
     "subtitle": "Confirmed orders waiting to be packed",
@@ -2468,29 +2450,49 @@
     }
   },
   "packSession": {
-    "title": "Scan to Pack",
+    "title": "Pack Order",
     "orderInfo": "Order",
     "progress": "Packing progress",
-    "readyToSeal": "All items packed — ready to seal",
+    "packedCount": "{{packed}} / {{total}} packed",
+    "readyToSeal": "All items packed — seal the parcel",
     "submit": "Go",
     "itemList": "Items to pack",
+    "labelHint": "Stick the printed label on the parcel, then pack each item into it.",
+    "camera": "Scan with camera",
     "parcel": {
-      "scanPrompt": "Scan parcel code",
-      "scanHint": "Scan the parcel label to verify you have the correct box for this order.",
-      "placeholder": "Scan or type parcel code",
-      "accepted": "Correct parcel verified",
+      "accepted": "Correct parcel label",
       "wrong": "Wrong parcel — not for this order",
-      "alreadyVerified": "Parcel already verified",
-      "verified": "Parcel verified"
+      "alreadyVerified": "Parcel label already checked",
+      "verified": "Parcel label checked"
     },
     "product": {
-      "scanPrompt": "Scan product barcode",
+      "scanPrompt": "Scan product barcode or QR",
       "placeholder": "Scan or type barcode",
       "accepted": "Correct item packed",
+      "manualAccepted": "Item confirmed by hand",
       "wrongProduct": "Wrong product — not in this order",
       "wrongVariant": "Wrong variant — check the item",
       "duplicate": "Already packed enough of this item",
       "alreadyComplete": "All items already packed"
+    },
+    "manual": {
+      "searchLabel": "Search items",
+      "searchPlaceholder": "Name, SKU or barcode",
+      "confirm": "Confirm",
+      "confirmAria": "Confirm one {{name}} packed by hand",
+      "noBarcode": "No barcode",
+      "noResults": "No items match your search"
+    },
+    "markPacked": {
+      "action": "Mark Packed",
+      "remaining": "{{count}} more to pack",
+      "ready": "Every item is in the parcel",
+      "noPermission": "You don't have permission to mark orders packed.",
+      "success": "Order packed",
+      "alreadyPacked": "This order is already packed",
+      "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
+      "incomplete": "Some items are not packed yet.",
+      "failed": "Could not mark the order packed. Please try again."
     },
     "error": {
       "title": "Could not load pack session",
@@ -2499,6 +2501,11 @@
     "empty": {
       "title": "Nothing to pack",
       "body": "This order has no items that require packing."
+    },
+    "history": {
+      "packed": "Packed",
+      "deliveryReady": "Ready — order already packed",
+      "reopened": "Cancelled — order reopened for packing"
     }
   },
   "shipping": {

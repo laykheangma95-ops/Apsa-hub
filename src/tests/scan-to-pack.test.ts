@@ -6,6 +6,9 @@
  * computation, phase derivation, server result application, local duplicate
  * detection, canPackOrder eligibility, and session immutability.
  *
+ * Pack Order V1 workflow behaviour (manual confirm, mixed scan/manual, duplicate
+ * handling, Mark Packed gating) lives in src/tests/pack-order-v1.test.ts.
+ *
  * Run: bun test src/tests/scan-to-pack.test.ts
  */
 import { describe, it, expect } from "bun:test";
@@ -63,23 +66,25 @@ function applyProductAccepted(
 // ── createPackSession ───────────────────────────────────────────────────────
 
 describe("createPackSession", () => {
-  it("creates a session in awaiting_parcel phase", () => {
+  it("starts straight in the packing phase — no separate pick or parcel gate", () => {
     const session = sessionWith([makeRequirement()]);
     expect(session.orderId).toBe("order-1");
+    expect(session.parcelCode).toBe(PARCEL_CODE);
     expect(session.parcelVerified).toBe(false);
     expect(session.packed).toHaveLength(0);
     expect(session.requirements).toHaveLength(1);
-    expect(getPackPhase(session)).toBe("awaiting_parcel");
+    expect(getPackPhase(session)).toBe("packing");
   });
 });
 
 // ── Parcel verification ─────────────────────────────────────────────────────
 
 describe("applyServerParcelAccepted", () => {
-  it("transitions to scanning_products phase", () => {
+  it("records the optional parcel-label check without changing progress", () => {
     const session = verifyParcel(sessionWith([makeRequirement()]));
     expect(session.parcelVerified).toBe(true);
-    expect(getPackPhase(session)).toBe("scanning_products");
+    expect(getPackPhase(session)).toBe("packing");
+    expect(computePackProgress(session).totalPacked).toBe(0);
   });
 
   it("does not mutate the original session", () => {

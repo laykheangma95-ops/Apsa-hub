@@ -72,6 +72,7 @@ import {
   type OrderStatusAxis,
 } from "./state-machine";
 import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
+import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import { ORDER_SOURCES } from "./types";
 import type {
   OrderRow,
@@ -222,6 +223,16 @@ async function bestEffortAudit(
 
 function badRequest(message: string): Error {
   return publicError(message, 400);
+}
+
+/**
+ * Generic transitions accept a free-text reason; a reserved operational marker
+ * (e.g. Pack Order's packed reason) may only be written by its owning service.
+ */
+function rejectReservedReason(reason: string | null | undefined): void {
+  if (isReservedOperationalReason(reason)) {
+    throw badRequest("This reason is reserved for an internal workflow");
+  }
 }
 
 function notFound(message: string): Error {
@@ -684,9 +695,13 @@ function transitionFailureToError(result: { status: string; current?: string }):
       return conflict(
         `Order status changed concurrently (now ${result.current ?? "unknown"}) — re-read and retry`,
       );
+    case "retry":
+      // The order's delivery kept changing during a reopen; nothing was written.
+      return conflict("Order delivery changed concurrently — re-read and retry");
     case "no_change":
       return conflict("Order is already in that status");
     case "terminal":
+    case "order_terminal":
       return conflict("Order is in a terminal state and can no longer be modified");
     case "preconditions_unmet":
       return conflict("An order can only be completed once it is both paid and fulfilled");
@@ -726,6 +741,7 @@ export async function transitionLifecycleStatus(
   // Permission is checked before the order is loaded, so an unauthorized caller
   // cannot use timing or error shape to learn whether an order id is real.
   ctx.require(permission);
+  rejectReservedReason(reason);
 
   const order = await loadTransitionTarget(ctx, orderId);
   const from = order.lifecycle_status;
@@ -778,6 +794,26 @@ export async function transitionPaymentStatus(
   throw conflict("Order payment transitions are deprecated; use the Payment domain");
 }
 
+/** How many times a reopen is re-run after the RPC reports a concurrent delivery change. */
+const REOPEN_ATTEMPTS = 3;
+
+/**
+ * reopen_order_fulfillment_v1 returns 'retry' — writing nothing — when the
+ * order's active delivery was created or changed between its delivery lookup
+ * and its order lock. Each attempt is a fresh transaction that sees the new
+ * delivery; if the order keeps changing, the caller gets a retryable conflict.
+ */
+async function reopenFulfillmentWithRetry(
+  ctx: AuthorizationContext,
+  orderId: string,
+  reason: string | null,
+) {
+  for (let attempt = 1; ; attempt++) {
+    const result = await repo.reopenFulfillment(ctx.organizationId, orderId, ctx.userId, reason);
+    if (result.status !== "retry" || attempt >= REOPEN_ATTEMPTS) return result;
+  }
+}
+
 /** Move the order's fulfillment status. */
 export async function transitionFulfillmentStatus(
   ctx: AuthorizationContext,
@@ -786,6 +822,7 @@ export async function transitionFulfillmentStatus(
   reason?: string | null,
 ): Promise<OrderDetail> {
   ctx.require(FULFILLMENT_TRANSITION_PERMISSIONS[to]);
+  rejectReservedReason(reason);
 
   const order = await loadTransitionTarget(ctx, orderId);
   const from = order.fulfillment_status;
@@ -794,15 +831,24 @@ export async function transitionFulfillmentStatus(
     throw conflict(`Cannot move fulfillment status from '${from}' to '${to}'`);
   }
 
-  const result = await repo.transitionStatus(
-    ctx.organizationId,
-    orderId,
-    "fulfillment",
-    from,
-    to,
-    ctx.userId,
-    reason ?? null,
-  );
+  /*
+   * Reopening (processing → unfulfilled) means packing must start over: the
+   * order's packed state clears and a 'ready' delivery is cancelled in the
+   * same transaction, so a reopened order cannot reach Courier Handoff without
+   * Pack Order again.
+   */
+  const result =
+    from === "processing" && to === "unfulfilled"
+      ? await reopenFulfillmentWithRetry(ctx, orderId, reason ?? null)
+      : await repo.transitionStatus(
+          ctx.organizationId,
+          orderId,
+          "fulfillment",
+          from,
+          to,
+          ctx.userId,
+          reason ?? null,
+        );
 
   if (result.status !== "success") throw transitionFailureToError(result);
 

@@ -740,7 +740,11 @@ async function createDelivery(org: string, order: string, cod: number | null = n
   return rpc("create_delivery_v1", [org, order, f.actor, null, null, null, "Courier", null, cod]);
 }
 async function moveDelivery(org: string, delivery: string, from: string, to: string) {
-  return rpc("transition_delivery_status_v1", [org, delivery, from, to, f.actor, null]);
+  // Since migration 054 only a packed order's delivery may become 'ready'; these
+  // money/stock tests are not about packing, so the '→ ready' step is the one
+  // Mark Packed makes (tagged with the reserved packed marker).
+  const reason = to === "ready" ? "pack_order_packed" : null;
+  return rpc("transition_delivery_status_v1", [org, delivery, from, to, f.actor, reason]);
 }
 async function money(order: string) {
   return (

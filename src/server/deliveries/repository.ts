@@ -70,6 +70,57 @@ export async function transitionDelivery(
   return data as TransitionDeliveryRpcResult;
 }
 
+/** Envelope of ready_packed_delivery_v1. */
+export interface ReadyPackedDeliveryRpcResult {
+  status:
+    | "success"
+    | "already_ready"
+    | "not_packed"
+    | "invalid_order"
+    | "invalid_transition"
+    | "not_found";
+  current?: string;
+}
+
+/**
+ * Move a packed order's delivery to 'ready' (Arrange Delivery auto-ready and
+ * Retry delivery ready). With the delivery and order locked, the RPC verifies
+ * in the same transaction that the order is currently packed — no newer reopen
+ * — before it writes anything (migration 054, ready_packed_delivery_v1).
+ */
+export async function readyPackedDelivery(
+  organizationId: string,
+  orderId: string,
+  deliveryId: string,
+  changedBy: string | null,
+): Promise<ReadyPackedDeliveryRpcResult> {
+  const { data, error } = await db.rpc("ready_packed_delivery_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_delivery_id: deliveryId,
+    p_changed_by: changedBy,
+  });
+  if (error) throw new Error(`readyPackedDelivery: ${message(error)}`);
+  return data as ReadyPackedDeliveryRpcResult;
+}
+
+/**
+ * Whether the order is currently packed by Pack Order — the ONE packed rule
+ * (order_currently_packed_v1, migration 054), the same function every '→ ready'
+ * write checks under its locks. Read-only.
+ */
+export async function isOrderCurrentlyPacked(
+  organizationId: string,
+  orderId: string,
+): Promise<boolean> {
+  const { data, error } = await db.rpc("order_currently_packed_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+  });
+  if (error) throw new Error(`isOrderCurrentlyPacked: ${message(error)}`);
+  return data === true;
+}
+
 export async function findDeliveryById(
   organizationId: string,
   deliveryId: string,

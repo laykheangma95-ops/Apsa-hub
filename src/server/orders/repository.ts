@@ -188,6 +188,48 @@ export async function transitionStatus(
   return data as TransitionRpcResult;
 }
 
+/**
+ * Record Pack Order's packed marker on the order (no active delivery) — the
+ * locked, lock-ordered-timestamp write (migration 054, record_order_packed_v1).
+ * Never through transitionStatus: that stamps the transaction-start time.
+ */
+export async function recordOrderPacked(
+  organizationId: string,
+  orderId: string,
+  changedBy: string | null,
+): Promise<TransitionRpcResult> {
+  const { data, error } = await db.rpc("record_order_packed_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_changed_by: changedBy,
+  });
+
+  if (error) throw new Error(`recordOrderPacked: ${errMessage(error)}`);
+  return data as TransitionRpcResult;
+}
+
+/**
+ * Reopen fulfillment (processing → unfulfilled) in ONE transaction with
+ * cancelling the order's 'ready' delivery, so delivery readiness never
+ * survives a reopen (migration 054, reopen_order_fulfillment_v1).
+ */
+export async function reopenFulfillment(
+  organizationId: string,
+  orderId: string,
+  changedBy: string | null,
+  reason: string | null,
+): Promise<TransitionRpcResult> {
+  const { data, error } = await db.rpc("reopen_order_fulfillment_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_changed_by: changedBy,
+    p_reason: reason,
+  });
+
+  if (error) throw new Error(`reopenFulfillment: ${errMessage(error)}`);
+  return data as TransitionRpcResult;
+}
+
 // ── Reads (all org-scoped) ────────────────────────────────────────────────────
 
 /**
