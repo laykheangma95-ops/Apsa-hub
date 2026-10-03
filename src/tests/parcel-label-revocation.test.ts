@@ -60,6 +60,13 @@ describe("the browser suite drives the shipped dialog, not a copy", () => {
       "J. native browser print after shipment replacement prints only refreshed data",
       "K. a failed pre-print refresh prints nothing",
       "L. closing the dialog destroys a print target",
+      "M. asynchronous print completion",
+      "N. a browser-menu Print DURING an asynchronous print cannot reuse its target",
+      "O. a window.print() that begins no print leaves no target behind",
+      "P. permission revoked after the first print",
+      "Q. shipment replaced after the first print",
+      "R. payment / COD changed after the first print",
+      "S. Ctrl+P immediately repeated",
     ]) {
       expect(suite).toContain(proof);
     }
@@ -120,6 +127,23 @@ describe("capability revalidation source rules", () => {
     expect(sheet).toContain('window.addEventListener("afterprint", onAfterPrint);');
     expect(sheet).toContain('window.addEventListener("keydown", onPrintShortcut, true);');
     expect(sheet).toContain("e.preventDefault();");
+    // One target, one print: its own beforeprint consumes it, any other print
+    // beginning destroys it, afterprint always destroys it, and a call that
+    // began no print leaves nothing behind.
+    expect(sheet).toContain('if (phaseRef.current === "armed") phaseRef.current = "printing";');
+    expect(sheet).toContain("else endPrintSession(true);");
+    expect(sheet).toContain("const onAfterPrint = () => endPrintSession(true);");
+    expect(sheet).toContain('if (phaseRef.current === "armed") endPrintSession(true);');
+    // Cleanup never waits for interaction, focus, visibility or a timer.
+    for (const forbidden of [
+      "pointerdown",
+      "visibilitychange",
+      "setTimeout",
+      '"focus"',
+      "touchstart",
+    ]) {
+      expect(sheet).not.toContain(forbidden);
+    }
     // Both guarded dialogs build the target from FRESH data, not the preview.
     expect(dialog).toContain(
       "return fresh.map((d) => <ParcelLabel key={d.order.id} vm={buildParcelLabel(d)} />);",

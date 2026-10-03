@@ -35,7 +35,7 @@ export async function getParcelLabelData(orderId: string): Promise<ParcelLabelIn
       : { ...PII, addressConfirmed: true },
     order: { id: orderId, orderNumber: "APSA-2026-001048", itemCount: 1, items: [] },
     reprint: false,
-    payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
+    payment: { ...server.payment },
     // A shipping label exists only for a carrier shipment (CORRECTION-003).
     delivery: {
       id: server.shipment.id,

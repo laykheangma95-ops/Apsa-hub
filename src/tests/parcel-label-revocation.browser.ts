@@ -83,6 +83,11 @@ interface Session {
    * text that was laid out for the printer and the PDF's page count.
    */
   nativePrint(): Promise<{ text: string; pages: number; events: string[] }>;
+  /**
+   * The text laid out under print media right now, WITHOUT starting a print
+   * (no beforeprint / afterprint): what a print already in progress renders.
+   */
+  printMediaText(): Promise<string>;
 }
 
 function tailDrain(stream: ReadableStream<Uint8Array> | null, maxChars: number): () => string {
@@ -396,12 +401,22 @@ async function startSessionOnce(browser: string): Promise<Session> {
     return { text: seen.text.trim(), pages, events: seen.events };
   }
 
+  async function printMediaText(): Promise<string> {
+    await send("Emulation.setEmulatedMedia", { media: "print" });
+    try {
+      return (await evaluate<string>("document.body.innerText")).trim();
+    } finally {
+      await send("Emulation.setEmulatedMedia", { media: "" });
+    }
+  }
+
   return {
     evaluate,
     waitFor,
     key,
     printShortcut,
     nativePrint,
+    printMediaText,
     async reload() {
       await send("Page.navigate", { url: server.url.origin });
       await send("Page.bringToFront");
@@ -770,36 +785,11 @@ describeBrowser("parcel label dialog, real Chromium", () => {
       await page.waitFor(`!${PRINT_ROOT}`, "print target destroyed after printing");
       await expectNativePrintIsEmpty();
 
-      // The same through the browser's REAL print pipeline, on a browser whose
-      // print UI outlives window.print(): the validated target is what is laid
-      // out for the printer — one page, refreshed data only — including when
-      // the print UI renders again (e.g. a settings change).
-      await page.evaluate("window.apsaServer.asyncPrint = true");
-      await page.evaluate(clickByText(T.print));
-      await page.waitFor(
-        `window.apsaServer.printCalls === ${before.prints + 2}`,
-        "validated print with an asynchronous print UI",
-      );
-      await page.waitFor(PRINT_ROOT, "temporary print target");
-      for (let render = 0; render < 2; render++) {
-        const printed = await page.nativePrint();
-        expect(printed.pages).toBe(1);
-        expect(printed.text).toContain(TRACKING("2"));
-        expect(printed.text).not.toContain(TRACKING("1"));
-        for (const value of PII) expect(printed.text).toContain(value);
-      }
-
-      // Back on the page: the target is destroyed. A replacement after that
-      // print can never come out of a stale target.
-      await page.evaluate(
-        "(() => { document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); return true; })()",
-      );
-      await page.waitFor(`!${PRINT_ROOT}`, "print target destroyed on return to the page");
+      // A replacement after that print can never come out of a stale target.
       await page.evaluate(
         "window.apsaServer.shipment = { id: 'shipment-3', trackingNumber: 'VET-3' }",
       );
       await expectNativePrintIsEmpty();
-      await page.evaluate("window.apsaServer.asyncPrint = false");
       await page.evaluate(
         "window.apsaServer.shipment = { id: 'shipment-1', trackingNumber: 'VET-1' }",
       );
@@ -829,7 +819,7 @@ describeBrowser("parcel label dialog, real Chromium", () => {
   test60("L. closing the dialog destroys a print target that was never printed", async () => {
     await openFreshLabel();
     const before = await counts();
-    // A print UI that outlives window.print(): the target is still waiting.
+    // A print still in progress when the dialog is closed (never completed).
     await page.evaluate("window.apsaServer.asyncPrint = true");
     await page.evaluate(clickByText(T.print));
     await page.waitFor(`window.apsaServer.printCalls === ${before.prints + 1}`, "guarded print");
@@ -847,6 +837,226 @@ describeBrowser("parcel label dialog, real Chromium", () => {
     const dump = await page.evaluate<string>(VISIBLE_PII_DUMP);
     for (const value of PII) expect(dump).not.toContain(value);
   });
+
+  // ── Print target lifecycle: one target, one print ───────────────────────────
+  //
+  // A target never survives the print it was generated for — synchronous or
+  // asynchronous — and cleanup needs no pointer, focus, key or timer. These
+  // tests never touch the page between prints except to start one.
+
+  const PRINTED = "window.apsaServer.printed";
+  const printedCount = () => page.evaluate<number>(`${PRINTED}.length`);
+  const SET_SHIPMENT = (n: string) =>
+    `window.apsaServer.shipment = { id: 'shipment-${n}', trackingNumber: 'VET-${n}' }`;
+  const RESET_SERVER = `(() => {
+    const s = window.apsaServer;
+    s.asyncPrint = false;
+    s.shipment = { id: 'shipment-1', trackingNumber: 'VET-1' };
+    s.payment = { state: 'paid', paid: true, collect: null, partial: false, checkReason: null };
+    s.grant();
+    return true;
+  })()`;
+
+  /** One guarded, completed (synchronous) print of the label on screen. */
+  async function printOnce(label: string) {
+    const before = await counts();
+    await page.evaluate(clickByText(T.print));
+    await page.waitFor(`window.apsaServer.printCalls === ${before.prints + 1}`, label);
+    await page.waitFor(`!${PRINT_ROOT}`, `${label}: target destroyed with its print`);
+    return before;
+  }
+
+  test90(
+    "M. asynchronous print completion: the target dies with the print, with no page interaction",
+    async () => {
+      await openFreshLabel();
+      await page.evaluate("window.apsaServer.asyncPrint = true");
+      const before = await counts();
+      await page.evaluate(clickByText(T.print));
+      await page.waitFor(`window.apsaServer.printCalls === ${before.prints + 1}`, "async print");
+
+      // window.print() has returned; the print is still in progress and renders
+      // the validated target — exactly the label, nothing else.
+      expect(await page.evaluate<boolean>(`!!${PRINT_ROOT}`)).toBe(true);
+      const inProgress = await page.printMediaText();
+      for (const value of [...PII, TRACKING("1")]) expect(inProgress).toContain(value);
+      expect(inProgress).not.toContain(T.print);
+
+      // The print completes on its own. No pointer, focus, key or timer.
+      await page.evaluate("window.apsaServer.completePrint()");
+      expect(await page.evaluate<boolean>(`!${PRINT_ROOT}`)).toBe(true);
+      expect(await page.printMediaText()).toBe("");
+
+      // A browser-menu Print right after: nothing, and again: nothing.
+      await expectNativePrintIsEmpty();
+      await expectNativePrintIsEmpty();
+      expect((await counts()).prints).toBe(before.prints + 1);
+      await page.evaluate(RESET_SERVER);
+    },
+  );
+
+  test90(
+    "N. a browser-menu Print DURING an asynchronous print cannot reuse its target",
+    async () => {
+      await openFreshLabel();
+      await page.evaluate("window.apsaServer.asyncPrint = true");
+      const before = await counts();
+      await page.evaluate(clickByText(T.print));
+      await page.waitFor(`window.apsaServer.printCalls === ${before.prints + 1}`, "async print");
+      expect(await page.evaluate<boolean>(`!!${PRINT_ROOT}`)).toBe(true);
+
+      // The first print has not completed. A second, native print begins: the
+      // target is destroyed before layout, so it outputs nothing.
+      await expectNativePrintIsEmpty();
+      await expectNativePrintIsEmpty();
+      await page.evaluate("window.apsaServer.completePrint()");
+      await expectNativePrintIsEmpty();
+      expect((await counts()).prints).toBe(before.prints + 1);
+      await page.evaluate(RESET_SERVER);
+    },
+  );
+
+  test90("O. a window.print() that begins no print leaves no target behind", async () => {
+    await openFreshLabel();
+    const before = await counts();
+    // The browser ignores the call entirely: no beforeprint, no afterprint.
+    await page.evaluate(
+      "(() => { window.__realStubPrint = window.print; window.print = () => { window.apsaServer.printCalls += 1; }; return true; })()",
+    );
+    await page.evaluate(clickByText(T.print));
+    await page.waitFor(`window.apsaServer.printCalls === ${before.prints + 1}`, "ignored print");
+    expect(await page.evaluate<boolean>(`!${PRINT_ROOT}`)).toBe(true);
+    await expectNativePrintIsEmpty();
+    await page.evaluate("(() => { window.print = window.__realStubPrint; return true; })()");
+  });
+
+  test90(
+    "P. permission revoked after the first print: a repeat print outputs nothing",
+    async () => {
+      await openFreshLabel();
+      const before = await printOnce("first print");
+      expect(await page.evaluate<string>(`${PRINTED}.at(-1)`)).toContain(PII[0]!);
+      const printedBefore = await printedCount();
+
+      await page.evaluate(REVOKE);
+      // Browser-menu Print at once, twice, with no interaction in between.
+      await expectNativePrintIsEmpty();
+      await expectNativePrintIsEmpty();
+      // Ctrl+P: a new authorization is required — and refused.
+      await page.printShortcut();
+      await page.waitFor(`!${hasButton(T.print)}`, "denied after re-authorization");
+      await Bun.sleep(300);
+      expect((await counts()).prints).toBe(before.prints + 1);
+      expect(await printedCount()).toBe(printedBefore);
+      await expectNativePrintIsEmpty();
+      await page.evaluate(RESET_SERVER);
+    },
+  );
+
+  test90(
+    "Q. shipment replaced after the first print: a repeat print never outputs the old shipment",
+    async () => {
+      await openFreshLabel();
+      const before = await printOnce("first print");
+      expect(await page.evaluate<string>(`${PRINTED}.at(-1)`)).toContain(TRACKING("1"));
+      const printedBefore = await printedCount();
+
+      await page.evaluate(SET_SHIPMENT("2"));
+      await expectNativePrintIsEmpty();
+      await expectNativePrintIsEmpty();
+      // Ctrl+P: fresh validation sees the replacement → review, nothing printed.
+      await page.printShortcut();
+      await page.waitFor(hasText(NOTICE.changed), "changed notice");
+      expect((await counts()).prints).toBe(before.prints + 1);
+      expect(await printedCount()).toBe(printedBefore);
+      await expectNativePrintIsEmpty();
+
+      // After review, a NEW authorization prints only the replacement.
+      await printOnce("print of the replacement");
+      const reprinted = await page.evaluate<string>(`${PRINTED}.at(-1)`);
+      expect(reprinted).toContain(TRACKING("2"));
+      expect(reprinted).not.toContain(TRACKING("1"));
+      await expectNativePrintIsEmpty();
+      await page.evaluate(RESET_SERVER);
+    },
+  );
+
+  test90(
+    "R. payment / COD changed after the first print: a repeat print never outputs the old payment",
+    async () => {
+      await openFreshLabel();
+      const before = await printOnce("first print (PAID)");
+      const firstPrint = await page.evaluate<string>(`${PRINTED}.at(-1)`);
+      const printedBefore = await printedCount();
+
+      // PAID → COD on the server.
+      await page.evaluate(
+        "window.apsaServer.payment = { state: 'cod', paid: false, collect: { amount: 1500, currency: 'USD' }, partial: false, checkReason: null }",
+      );
+      await expectNativePrintIsEmpty();
+      await expectNativePrintIsEmpty();
+      await page.evaluate(clickByText(T.print));
+      await page.waitFor(hasText(NOTICE.changed), "changed notice (payment)");
+      expect((await counts()).prints).toBe(before.prints + 1);
+      expect(await printedCount()).toBe(printedBefore);
+      await expectNativePrintIsEmpty();
+
+      // The COD amount changes again before the reviewed print: refused again.
+      await page.evaluate(
+        "window.apsaServer.payment = { state: 'cod', paid: false, collect: { amount: 1999, currency: 'USD' }, partial: false, checkReason: null }",
+      );
+      await page.evaluate(clickByText(T.print));
+      await Bun.sleep(400);
+      expect((await counts()).prints).toBe(before.prints + 1);
+      await expectNativePrintIsEmpty();
+
+      // A NEW authorization prints the current payment, not the first print's.
+      await printOnce("print of the current payment");
+      expect(await page.evaluate<string>(`${PRINTED}.at(-1)`)).not.toBe(firstPrint);
+      await expectNativePrintIsEmpty();
+      await page.evaluate(RESET_SERVER);
+    },
+  );
+
+  test90(
+    "S. Ctrl+P immediately repeated: every print is a new authorization and a fresh read",
+    async () => {
+      await openFreshLabel();
+      const before = await counts();
+      const printedBefore = await printedCount();
+
+      for (let n = 1; n <= 3; n++) {
+        const start = await counts();
+        await page.printShortcut();
+        await page.waitFor(
+          `window.apsaServer.printCalls === ${before.prints + n}`,
+          `guarded print ${n} from Ctrl+P`,
+        );
+        const end = await counts();
+        // Its own fresh server read and its own re-authorization, every time.
+        expect(end.fetches).toBeGreaterThan(start.fetches);
+        expect(end.checks).toBeGreaterThan(start.checks);
+        // Its own target, generated for this print and destroyed with it.
+        expect(await printedCount()).toBe(printedBefore + n);
+        expect(await page.evaluate<string>(`${PRINTED}.at(-1)`)).toContain(TRACKING("1"));
+        expect(await page.evaluate<boolean>(`!${PRINT_ROOT}`)).toBe(true);
+      }
+
+      // A second Ctrl+P while the first is still validating starts no second
+      // print and reuses nothing: exactly one print results.
+      const start = await counts();
+      await page.evaluate(
+        "(() => { for (let i = 0; i < 2; i++) document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true })); return true; })()",
+      );
+      await page.waitFor(`window.apsaServer.printCalls === ${start.prints + 1}`, "one print");
+      await Bun.sleep(400);
+      expect((await counts()).prints).toBe(start.prints + 1);
+      expect(await page.evaluate<boolean>(`!${PRINT_ROOT}`)).toBe(true);
+      await expectNativePrintIsEmpty();
+      await page.key("Escape");
+      await page.waitFor(`${DIALOGS} === 0`, "label dialog closed");
+    },
+  );
 
   test60("C. only ONE focus trap is live: Tab / Shift+Tab / Escape / focus return", async () => {
     await page.reload();

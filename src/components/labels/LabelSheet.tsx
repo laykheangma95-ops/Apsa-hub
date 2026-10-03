@@ -24,12 +24,25 @@ import { collectTrapFocusables, resolveTrapFocus } from "@/design-system/focus-t
  *   lifecycle revalidation, identity guard) → target generated from the
  *   VALIDATED pages → window.print() → target destroyed.
  *
- * Ctrl/Cmd+P is routed into that same guarded path. A print the sheet did not
- * start (browser menu) finds no target: with none it prints nothing, and any
- * leftover is destroyed before the browser lays the page out. The target is
- * destroyed when its print ends (afterprint); where the browser's print UI
- * outlives window.print(), when the merchant is back on the page, bounded by
- * a time limit. It also goes when the sheet closes or stops being printable.
+ * Ctrl/Cmd+P is routed into that same guarded path.
+ *
+ * ── ONE TARGET, ONE PRINT ─────────────────────────────────────────────────────
+ * A target is laid out for exactly one print — the one that generated it —
+ * and never survives it, whether the browser's window.print() is synchronous
+ * or returns while its print UI is still open:
+ *
+ *   - the print's own `beforeprint` consumes the target;
+ *   - `afterprint` (the print is complete) destroys it;
+ *   - any OTHER print beginning (`beforeprint` with no unconsumed target —
+ *     the browser's Print menu, repeated at once or later) destroys whatever
+ *     is there before the browser lays the page out, so it prints nothing;
+ *   - if window.print() returns without a print having begun, it is destroyed.
+ *
+ * Cleanup depends only on those print events — never on a later pointer,
+ * focus or key event, a timer, or any other interaction with the page. Every
+ * further print therefore needs a new authorization and a fresh server
+ * validation. The target also goes when the sheet closes or stops being
+ * printable.
  *
  * In print, each label is its own physical page at the exact millimetre size,
  * so the barcode/QR are not clipped or rescaled (§27).
@@ -86,12 +99,6 @@ export interface LabelSheetProps {
 /** The id of the temporary print target — the only printable element. */
 const PRINT_ROOT_ID = "apsa-print-root";
 
-/**
- * How long a target may wait for a print UI that outlives window.print()
- * (asynchronous print dialogs). Past this, it is destroyed unprinted.
- */
-const PRINT_SESSION_MAX_MS = 5 * 60 * 1000;
-
 const MM_PER_PX = 96 / 25.4; // on-screen preview scale (CSS px per mm at 96dpi)
 
 export function LabelSheet({
@@ -114,14 +121,11 @@ export function LabelSheet({
   const [checking, setChecking] = useState(false);
   // The temporary print target's pages; null whenever nothing may print.
   const [printPages, setPrintPages] = useState<React.ReactNode[] | null>(null);
-  // Where the one print a target was generated for stands:
-  //   idle     — no print of ours is under way: nothing is printable;
-  //   printing — inside our window.print() call;
-  //   pending  — window.print() returned before the print finished (a browser
-  //              whose print UI is asynchronous, e.g. mobile): the target
-  //              stays until the merchant is back on the page.
-  const phaseRef = useRef<"idle" | "printing" | "pending">("idle");
-  const sessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Where the ONE print a target was generated for stands:
+  //   idle     — no target (or it has been destroyed): nothing is printable;
+  //   armed    — the target exists and its print has not begun;
+  //   printing — its print has begun (beforeprint) and is not yet complete.
+  const phaseRef = useRef<"idle" | "armed" | "printing">("idle");
   const openRef = useRef(open);
   openRef.current = open;
   const childrenRef = useRef(children);
@@ -130,8 +134,6 @@ export function LabelSheet({
   /** Destroy the temporary print target and end the print it was made for. */
   const endPrintSession = useCallback((sync = false) => {
     phaseRef.current = "idle";
-    if (sessionTimerRef.current !== null) clearTimeout(sessionTimerRef.current);
-    sessionTimerRef.current = null;
     if (sync) flushSync(() => setPrintPages(null));
     else setPrintPages(null);
   }, []);
@@ -155,15 +157,13 @@ export function LabelSheet({
     // Fail closed: a refusal, nothing to print, or a sheet closed meanwhile.
     if (!pages || pages.length === 0 || !openRef.current) return;
     flushSync(() => setPrintPages(pages));
-    phaseRef.current = "printing";
+    phaseRef.current = "armed";
     window.print();
-    // A synchronous print (desktop) already fired afterprint and destroyed the
-    // target. Otherwise the browser's print UI is still up: keep the target
-    // for it, bounded, until the merchant returns to the page.
-    if (phaseRef.current === "printing") {
-      phaseRef.current = "pending";
-      sessionTimerRef.current = setTimeout(() => endPrintSession(), PRINT_SESSION_MAX_MS);
-    }
+    // The print begins inside window.print() (beforeprint). If none began —
+    // the browser refused or ignored the call — the target must not wait for
+    // some later print: destroy it now. A print that did begin destroys the
+    // target itself when it completes (afterprint), synchronously or not.
+    if (phaseRef.current === "armed") endPrintSession(true);
   }
   const handlePrintRef = useRef(handlePrint);
   handlePrintRef.current = handlePrint;
@@ -179,23 +179,16 @@ export function LabelSheet({
   // Every browser print goes through the guard, or prints nothing.
   useEffect(() => {
     if (!open) return;
-    // A print this sheet did not start (the browser's own menu) never finds a
-    // target: it is destroyed before the browser lays the page out.
+    // The print a target was generated for consumes it. Any other print
+    // beginning — the browser's own menu, at any moment, including while or
+    // right after that print — finds the target destroyed before the browser
+    // lays the page out: a target is never printed twice.
     const onBeforeNativePrint = () => {
-      if (phaseRef.current === "idle") endPrintSession(true);
+      if (phaseRef.current === "armed") phaseRef.current = "printing";
+      else endPrintSession(true);
     };
-    // The print this sheet started is over: destroy its target. (While a print
-    // UI is pending the browser may render again, e.g. on a settings change;
-    // that session ends when the merchant is back on the page instead.)
-    const onAfterPrint = () => {
-      if (phaseRef.current !== "pending") endPrintSession(true);
-    };
-    const onReturnToPage = () => {
-      if (phaseRef.current === "pending") endPrintSession();
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") onReturnToPage();
-    };
+    // The print is complete: the target does not survive it.
+    const onAfterPrint = () => endPrintSession(true);
     // Ctrl/Cmd+P: never the browser's print of this page — the guarded path.
     const onPrintShortcut = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== "p") return;
@@ -206,18 +199,10 @@ export function LabelSheet({
     window.addEventListener("beforeprint", onBeforeNativePrint);
     window.addEventListener("afterprint", onAfterPrint);
     window.addEventListener("keydown", onPrintShortcut, true);
-    window.addEventListener("focus", onReturnToPage);
-    window.addEventListener("pointerdown", onReturnToPage, true);
-    window.addEventListener("keydown", onReturnToPage, true);
-    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("beforeprint", onBeforeNativePrint);
       window.removeEventListener("afterprint", onAfterPrint);
       window.removeEventListener("keydown", onPrintShortcut, true);
-      window.removeEventListener("focus", onReturnToPage);
-      window.removeEventListener("pointerdown", onReturnToPage, true);
-      window.removeEventListener("keydown", onReturnToPage, true);
-      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [open, endPrintSession]);
 

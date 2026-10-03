@@ -41,10 +41,21 @@ interface FakeServer {
    */
   printed: string[];
   /**
-   * Model a browser whose print UI outlives window.print() (mobile): the call
-   * returns at once and the print pipeline runs later.
+   * Model a browser whose print UI outlives window.print(): the print begins
+   * inside the call (beforeprint) but the call returns while it is still in
+   * progress; it completes later, on its own, via completePrint().
    */
   asyncPrint: boolean;
+  /** Complete an asynchronous print: the browser fires afterprint. */
+  completePrint(): void;
+  /** The order's payment as the server currently has it. */
+  payment: {
+    state: "paid" | "cod";
+    paid: boolean;
+    collect: { amount: number; currency: "USD" | "KHR" } | null;
+    partial: boolean;
+    checkReason: null;
+  };
   revoke(): void;
   grant(): void;
 }
@@ -67,6 +78,10 @@ const server: FakeServer = {
   printCalls: 0,
   printed: [],
   asyncPrint: false,
+  completePrint() {
+    window.dispatchEvent(new Event("afterprint"));
+  },
+  payment: { state: "paid", paid: true, collect: null, partial: false, checkReason: null },
   revoke() {
     server.permissions = server.permissions.filter((p) => p !== "fulfillment.print_label");
   },
@@ -80,8 +95,8 @@ window.apsaServer = server;
 // afterprint, all before it returns.
 window.print = () => {
   server.printCalls += 1;
-  if (server.asyncPrint) return;
   window.dispatchEvent(new Event("beforeprint"));
+  if (server.asyncPrint) return;
   server.printed.push(document.getElementById("apsa-print-root")?.textContent ?? "");
   window.dispatchEvent(new Event("afterprint"));
 };
