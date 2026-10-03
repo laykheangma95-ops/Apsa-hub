@@ -149,6 +149,7 @@ function makeDb(tables: Tables) {
       const q: Record<string, unknown> = {
         select: () => q,
         eq: () => q,
+        neq: () => q,
         in: () => q,
         order: () => q,
         limit: () => q,
@@ -209,13 +210,16 @@ function totalsRow(overrides: Record<string, unknown> = {}) {
 async function withDb<T>(tables: Tables, fn: () => Promise<T>): Promise<T> {
   const orders = await import("../server/orders/repository");
   const fulfil = await import("../server/fulfillment/repository");
-  // No payment rows and no location unless a test says otherwise.
-  const withDefaults: Tables = { payments: [], locations: [], ...tables };
+  const parcels = await import("../server/parcels/repository");
+  // No payment rows, location or parcel identity unless a test says otherwise.
+  const withDefaults: Tables = { payments: [], locations: [], parcels: [], ...tables };
   const restoreOrders = orders.setOrderRepositoryDbForTests(makeDb(withDefaults));
   const restoreFulfil = fulfil.setFulfillmentRepositoryDbForTests(makeDb(withDefaults));
+  const restoreParcels = parcels.setParcelRepositoryDbForTests(makeDb(withDefaults));
   try {
     return await fn();
   } finally {
+    restoreParcels();
     restoreFulfil();
     restoreOrders();
   }

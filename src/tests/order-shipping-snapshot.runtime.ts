@@ -231,6 +231,11 @@ function sqlTransport() {
         where.push(`${identifier(key)} = $${values.length}`);
         return chain;
       },
+      neq(key: string, value: unknown) {
+        values.push(value);
+        where.push(`${identifier(key)} <> $${values.length}`);
+        return chain;
+      },
       order(key: string, options: { ascending: boolean }) {
         ordering.push(`${identifier(key)} ${options.ascending ? "asc" : "desc"}`);
         return chain;

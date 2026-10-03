@@ -71,6 +71,7 @@ import {
 } from "@/lib/orders";
 import { canPackOrder, fulfillmentActions, packHistoryReasonMessage } from "@/lib/pack";
 import { packingKeys } from "@/lib/packing-query";
+import { fulfillmentKeys } from "@/lib/fulfillment-query";
 import { RetryDeliveryReadyBoundary } from "@/components/fulfillment/RetryDeliveryReadyAction";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
@@ -109,6 +110,13 @@ export const Route = createFileRoute("/app/orders/$id")({
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
+  /*
+   * `?arrange=delivery` is the "Arrange delivery now" hand-off from the
+   * order-created screens: the order opens with the delivery sheet up. Intent
+   * only — the server still decides whether a delivery may be created.
+   */
+  validateSearch: (search: Record<string, unknown>): { arrange?: "delivery" } =>
+    search["arrange"] === "delivery" ? { arrange: "delivery" } : {},
   component: OrderDetailRoute,
 });
 
@@ -344,6 +352,28 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     }
   }, [query.isError, query.error, navigate]);
 
+  /*
+   * "Arrange delivery now" from an order-created screen: open the delivery
+   * sheet once the order and its deliveries are known, then drop the intent
+   * from the URL so a refresh or Back never reopens it. Offered only while the
+   * order can take a delivery — the server re-checks on submit.
+   */
+  const { arrange } = Route.useSearch();
+  const arrangeEligible =
+    query.isSuccess &&
+    deliveriesQuery.isSuccess &&
+    !deliveriesQuery.data.some((d) => isActiveDeliveryStatus(d.status)) &&
+    canCreateDeliveryForOrder({
+      lifecycleStatus: query.data.order.lifecycleStatus,
+      fulfillmentStatus: query.data.order.fulfillmentStatus,
+    });
+  const arrangeSettled = query.isError || deliveriesQuery.isError || deliveriesQuery.isSuccess;
+  useEffect(() => {
+    if (arrange !== "delivery" || !arrangeSettled) return;
+    if (arrangeEligible) setCreateDeliveryOpen(true);
+    void navigate({ to: "/app/orders/$id", params: { id }, search: {}, replace: true });
+  }, [arrange, arrangeSettled, arrangeEligible, navigate, id]);
+
   /**
    * A lifecycle move changes this order's row in the list and the work Home
    * counts as outstanding, so both are refreshed alongside the detail. The
@@ -493,6 +523,13 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       fulfillmentStatus: order.fulfillmentStatus,
     });
   const isReplacementDelivery = canCreateDelivery && latestDelivery !== null;
+  // Same rule the label service applies (latest delivery active or delivered).
+  // A failed deliveries read leaves the button enabled: the label dialog then
+  // shows the server's own verdict instead of this screen guessing.
+  const labelDeliveryArranged =
+    !deliveriesQuery.isSuccess ||
+    (latestDelivery !== null &&
+      (isActiveDeliveryStatus(latestDelivery.status) || latestDelivery.status === "delivered"));
 
   /*
    * V1 fulfillment actions, in workflow order: Print parcel label → Pack order
@@ -864,17 +901,32 @@ function RealOrderDetailScreen({ id }: { id: string }) {
               {actions.map((action) => {
                 switch (action.key) {
                   case "print_label":
+                    // The parcel identity is generated when delivery is
+                    // arranged, so the label waits for it — and says why.
                     return (
-                      <Button
-                        key={action.key}
-                        type="button"
-                        variant="outline"
-                        className="tap-target h-11 w-full gap-2 rounded-xl"
-                        onClick={() => setParcelLabelOpen(true)}
-                      >
-                        <Printer className="size-4" aria-hidden />
-                        {t("order.printParcelLabel")}
-                      </Button>
+                      <div key={action.key} className="space-y-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="tap-target h-11 w-full gap-2 rounded-xl"
+                          disabled={!labelDeliveryArranged}
+                          aria-describedby={
+                            labelDeliveryArranged ? undefined : "print-label-needs-delivery"
+                          }
+                          onClick={() => setParcelLabelOpen(true)}
+                        >
+                          <Printer className="size-4" aria-hidden />
+                          {t("order.printParcelLabel")}
+                        </Button>
+                        {labelDeliveryArranged ? null : (
+                          <p
+                            id="print-label-needs-delivery"
+                            className="text-caption text-center text-text-muted"
+                          >
+                            {t("order.printLabelNeedsDelivery")}
+                          </p>
+                        )}
+                      </div>
                     );
                   case "pack":
                     return (
@@ -1004,7 +1056,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         onOpenChange={setCreateDeliveryOpen}
         orderId={order.id}
         orderTotal={order.total}
-        onCreated={(detail) => {
+        onCreated={() => {
           void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
           void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
           /*
@@ -1016,7 +1068,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
            */
           void queryClient.invalidateQueries({ queryKey });
           invalidateAfterLifecycleChange();
-          void navigate({ to: "/app/deliveries/$id", params: { id: detail.id } });
+          /*
+           * Arranging delivery generated the order's parcel identity
+           * server-side. Every label payload cached before it shows "not
+           * assigned yet", so evict it, then open the label: it loads fresh
+           * with the parcel code, QR, Code 128, carrier and tracking — print
+           * ready. The delivery stays one tap away in the Delivery section.
+           */
+          queryClient.removeQueries({
+            queryKey: fulfillmentKeys.parcelLabelsPrefix(userId, routeOrganizationId),
+          });
+          void queryClient.invalidateQueries({
+            queryKey: fulfillmentKeys.readyToPack(userId, routeOrganizationId),
+          });
+          setParcelLabelOpen(true);
         }}
       />
       <RecordOrderPaymentSheet

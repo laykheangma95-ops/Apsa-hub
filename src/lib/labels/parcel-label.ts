@@ -157,6 +157,12 @@ export interface ParcelLabelInput {
     status: string;
     serviceName?: string | null;
   } | null;
+  /**
+   * Whether a delivery is arranged for the order. The parcel identity is
+   * generated when delivery is arranged, so a label prints only after that.
+   * Optional for callers that predate it; absent falls back to `delivery`.
+   */
+  deliveryArranged?: boolean;
   /** The order's permanent parcel code (APSA:PCL:v1:<token>), or null if not yet assigned. */
   parcelCode?: string | null;
 }
@@ -210,6 +216,11 @@ export interface ParcelLabelViewModel {
     trackingNumber: string | null;
     serviceName: string | null;
   } | null;
+  /**
+   * Whether delivery is arranged. Without it the label explains "Arrange
+   * delivery first"; with it a missing code is only ever "being assigned".
+   */
+  deliveryArranged: boolean;
   /** QR of the parcel identity; null until a parcel code exists. */
   qr: { payload: string; svg: string } | null;
   /** Code 128 of the SAME parcel identity; null until a parcel code exists. */
@@ -220,6 +231,17 @@ export interface ParcelLabelViewModel {
   printTimestamp: string;
   /** "2026-10-01 17:30" in Phnom Penh time, for the printed footer. */
   printedAt: string;
+}
+
+/**
+ * Whether the label's order has a delivery arranged — the gate for its parcel
+ * identity and for printing. The server's flag wins; older payloads without it
+ * fall back to the presence of delivery details.
+ */
+export function isDeliveryArranged(
+  input: Pick<ParcelLabelInput, "deliveryArranged" | "delivery">,
+): boolean {
+  return input.deliveryArranged ?? input.delivery !== null;
 }
 
 function formatItemLine(item: ParcelLabelItemInput): string {
@@ -435,6 +457,7 @@ export function buildParcelLabel(
           serviceName: input.delivery.serviceName?.trim() || null,
         }
       : null,
+    deliveryArranged: isDeliveryArranged(input),
     qr,
     code128,
     parcelCode,

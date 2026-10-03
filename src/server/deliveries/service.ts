@@ -44,6 +44,16 @@ export interface DeliveryDetail extends DeliverySummary {
   history: DeliveryHistoryEntry[];
 }
 
+/**
+ * What createDelivery returns: the delivery plus the order's ONE permanent
+ * parcel identity, generated as part of arranging the delivery. Null only when
+ * identity creation failed after the delivery committed — the label screen
+ * then creates it (idempotently) before anything can print.
+ */
+export interface CreatedDelivery extends DeliveryDetail {
+  parcelCode: string | null;
+}
+
 export interface CreateDeliveryServiceInput {
   orderId: string;
   locationId?: string | null;
@@ -135,7 +145,7 @@ function createFailure(status: string): Error {
 export async function createDelivery(
   ctx: AuthorizationContext,
   input: CreateDeliveryServiceInput,
-): Promise<DeliveryDetail> {
+): Promise<CreatedDelivery> {
   ctx.require("delivery.create");
 
   const order = await repo.findOrderForOrg(ctx.organizationId, input.orderId);
@@ -183,7 +193,17 @@ export async function createDelivery(
     cod_amount_minor: codAmountMinor,
   });
   if (result.status !== "success" || !result.delivery_id) throw createFailure(result.status);
-  const detail = await requireDetail(ctx.organizationId, result.delivery_id);
+  const deliveryId = result.delivery_id;
+  const detail = await requireDetail(ctx.organizationId, deliveryId);
+
+  /*
+   * Arranging delivery is the moment the parcel gets its ONE permanent identity
+   * (parcel code → QR + Code 128 on the label). Idempotent: an order that
+   * already has an active parcel — printed earlier, or kept from a cancelled
+   * delivery — reuses it, so a recreated delivery never mints a second code.
+   * Authorized by delivery.create above; the order was verified in this org.
+   */
+  const parcelCode = await ensureParcelCode(ctx, input.orderId);
 
   /*
    * V1 fulfillment: an order may be packed before its delivery is arranged.
@@ -194,11 +214,33 @@ export async function createDelivery(
   try {
     const { readyPackedOrderDelivery } = await import("@/server/packing/service");
     const readied = await readyPackedOrderDelivery(ctx.organizationId, ctx.userId, input.orderId);
-    if (readied === "ready") return requireDetail(ctx.organizationId, result.delivery_id);
+    if (readied === "ready") {
+      return { ...(await requireDetail(ctx.organizationId, deliveryId)), parcelCode };
+    }
   } catch {
     // Intentionally ignored; see above.
   }
-  return detail;
+  return { ...detail, parcelCode };
+}
+
+/**
+ * The delivery is already committed, so an identity failure must not turn a
+ * successful arrangement into an error. One retry covers a transient blip;
+ * after that the label screen's idempotent create is the recovery path.
+ */
+async function ensureParcelCode(
+  ctx: AuthorizationContext,
+  orderId: string,
+): Promise<string | null> {
+  const { ensureParcelForOrder } = await import("@/server/parcels/service");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return (await ensureParcelForOrder(ctx.organizationId, ctx.userId, orderId)).parcelCode;
+    } catch {
+      // Retried once, then reported as null; see above.
+    }
+  }
+  return null;
 }
 
 function transitionFailure(status: string, current?: string): Error {

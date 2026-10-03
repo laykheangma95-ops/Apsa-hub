@@ -18,6 +18,7 @@ import {
   type RecordOrderPaymentSubmit,
 } from "@/components/orders/RecordOrderPaymentSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { DeliveryArrangementChoice } from "@/components/delivery/DeliveryArrangementChoice";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { ordersKeys } from "@/lib/orders-query";
@@ -504,6 +505,11 @@ export function PosCheckoutSheet({
               <Button className="tap-target mt-4 w-full" onClick={() => setRecordPaymentOpen(true)}>
                 {t("pos.success.recordPayment")}
               </Button>
+            ) : null}
+
+            {/* Next step for a confirmed sale: arrange delivery now or later. */}
+            {realConfirmed ? (
+              <DeliveryArrangementChoice orderId={realDetail.order.id} className="mt-4" />
             ) : null}
 
             {!realConfirmed ? (
