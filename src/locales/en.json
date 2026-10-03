@@ -557,7 +557,8 @@
     "in_delivery": "In delivery",
     "archived": "Archived",
     "paused": "Paused",
-    "reversed": "Reversed"
+    "reversed": "Reversed",
+    "unknown": "Unknown status"
   },
   "channel": {
     "facebook": "Facebook",

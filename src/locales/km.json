@@ -557,7 +557,8 @@
     "in_delivery": "កំពុងដឹកជញ្ជូន",
     "archived": "បានរក្សាទុក",
     "paused": "បានផ្អាក",
-    "reversed": "បានដកវិញ"
+    "reversed": "បានដកវិញ",
+    "unknown": "ស្ថានភាពមិនស្គាល់"
   },
   "channel": {
     "facebook": "ហ្វេសប៊ុក",

@@ -28,6 +28,7 @@ import { resolveParcelIdentityFn } from "@/api/parcel-resolution";
 import { findCustomerConversationFn } from "@/api/customer-conversation";
 import { isProductionId } from "@/lib/api";
 import { fullTimestamp } from "@/lib/format";
+import { parcelStatusChipKey } from "@/lib/parcel-status";
 import { cn } from "@/lib/utils";
 import type { StatusKey } from "@/types";
 
@@ -166,7 +167,12 @@ function ParcelInvestigationScreen() {
             />
             <SectionRow
               label={t("parcelInvestigation.parcelStatus")}
-              value={<StatusChip status={result.parcel.status as StatusKey} />}
+              value={
+                // Parcel status is its own domain (created | void), not a
+                // StatusKey. Anything outside it — even a string that happens
+                // to be another domain's StatusKey — renders "unknown status".
+                <StatusChip status={parcelStatusChipKey(result.parcel.status)} />
+              }
             />
             <SectionRow
               label={t("parcelInvestigation.created")}
