@@ -32,7 +32,8 @@ export type IdentityProvider =
 export type CategoryStatus = "ACTIVE" | "ARCHIVED";
 export type ProductStatus = "DRAFT" | "ACTIVE" | "ARCHIVED";
 export type VariantStatus = "ACTIVE" | "ARCHIVED";
-export type InventoryMovementType = "initial" | "sale" | "return" | "manual_adjustment" | "restock";
+export type InventoryMovementType =
+  "initial" | "sale" | "return" | "manual_adjustment" | "restock" | "damage";
 export type OrderLifecycleStatus = "draft" | "confirmed" | "completed" | "cancelled";
 export type OrderPaymentStatus = "unpaid" | "pending" | "paid" | "failed";
 export type OrderFulfillmentStatus = "unfulfilled" | "processing" | "fulfilled" | "cancelled";

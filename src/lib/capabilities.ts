@@ -39,6 +39,11 @@ export const UI_PERMISSION_KEYS = [
   // migration 047) and is the same grant the fulfillment-status transitions
   // already enforce. Seeded to OWNER/MANAGER/CASHIER by migration 003.
   "orders.update",
+  // orders.return gates the Customer Returns screens (request, receive,
+  // inspect, complete). Every returns call requires it —
+  // src/server/returns/service.ts — and migration 056 seeds it to
+  // OWNER/MANAGER (PERMISSIONS_MATRIX.md §14).
+  "orders.return",
   // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
   // action: refundPayment requires payments.refund. The historical
   // orders.refund key no longer authorizes anything, so the UI must not gate

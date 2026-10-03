@@ -1,12 +1,19 @@
 /**
  * Raw DB row types for the Inventory domain.
- * These match the columns in migration 021 exactly.
+ * These match the columns in migration 021 exactly, plus migration 055's
+ * `damage` movement type.
  * Never used in UI — mapped to domain types by the service layer.
  */
 
 export type InventoryMovementTypeDb =
-  "initial" | "sale" | "return" | "manual_adjustment" | "restock";
+  "initial" | "sale" | "return" | "manual_adjustment" | "restock" | "damage";
 
+/**
+ * Movement types recordMovement accepts. `damage` is deliberately absent: in
+ * V1 only a completed customer return writes it, inside
+ * complete_customer_return_v1 (migration 056), whose ledger CHECK refuses any
+ * other damage movement.
+ */
 export const INVENTORY_MOVEMENT_TYPES: readonly InventoryMovementTypeDb[] = [
   "initial",
   "sale",

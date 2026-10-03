@@ -156,6 +156,7 @@ function requiredPermissionFor(movementType: InventoryMovementTypeDb): string {
       return "inventory.adjust";
     case "sale":
     case "return":
+    case "damage":
       return "inventory.adjust";
   }
 }
