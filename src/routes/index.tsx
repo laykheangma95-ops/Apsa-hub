@@ -21,21 +21,24 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Apsi, ChannelBadge, LanguageToggle, StatusChip } from "@/design-system";
-import i18n from "@/lib/i18n";
+import { headTranslator } from "@/lib/i18n";
 
 export const Route = createFileRoute("/")({
-  head: () => ({
-    meta: [
-      { title: i18n.t("landing.head.title") },
-      { name: "description", content: i18n.t("landing.head.description") },
-      { property: "og:title", content: i18n.t("landing.head.ogTitle") },
-      { property: "og:description", content: i18n.t("landing.head.ogDescription") },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:title", content: i18n.t("landing.head.twitterTitle") },
-      { name: "twitter:description", content: i18n.t("landing.head.twitterDescription") },
-    ],
-  }),
+  head: ({ match }) => {
+    const t = headTranslator(match.context.language);
+    return {
+      meta: [
+        { title: t("landing.head.title") },
+        { name: "description", content: t("landing.head.description") },
+        { property: "og:title", content: t("landing.head.ogTitle") },
+        { property: "og:description", content: t("landing.head.ogDescription") },
+        { property: "og:type", content: "website" },
+        { name: "twitter:card", content: "summary_large_image" },
+        { name: "twitter:title", content: t("landing.head.twitterTitle") },
+        { name: "twitter:description", content: t("landing.head.twitterDescription") },
+      ],
+    };
+  },
   component: Landing,
 });
 

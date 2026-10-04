@@ -26,7 +26,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { CheckCircle2, MailCheck } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
-import i18n, { useTranslation } from "@/lib/i18n";
+import { headTranslator, useTranslation } from "@/lib/i18n";
 import {
   getPendingVerificationFn,
   resendVerificationFn,
@@ -48,10 +48,11 @@ const verifyEmailSearchSchema = z.object({
 });
 
 export const Route = createFileRoute("/verify-email")({
-  head: () => ({
-    meta: [{ title: i18n.t("verifyEmail.head.title") }],
-  }),
   validateSearch: (search) => verifyEmailSearchSchema.parse(search),
+  // After validateSearch, so the route's search type is inferred first.
+  head: ({ match }) => ({
+    meta: [{ title: headTranslator(match.context.language)("verifyEmail.head.title") }],
+  }),
   component: VerifyEmailPage,
 });
 

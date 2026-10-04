@@ -26,11 +26,11 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
 import { Spinner } from "@/design-system";
-import i18n from "@/lib/i18n";
+import { headTranslator } from "@/lib/i18n";
 
 export const Route = createFileRoute("/invite/$token")({
-  head: () => ({
-    meta: [{ title: i18n.t("inviteAccept.head.title") }],
+  head: ({ match }) => ({
+    meta: [{ title: headTranslator(match.context.language)("inviteAccept.head.title") }],
   }),
   component: InviteAcceptPage,
 });

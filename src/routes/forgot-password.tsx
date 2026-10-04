@@ -19,11 +19,11 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/design-system";
 import { useCooldown } from "@/hooks/use-cooldown";
 import { AUTH_EMAIL_COOLDOWN_SECONDS } from "@/lib/auth-recovery";
-import i18n, { useTranslation } from "@/lib/i18n";
+import { headTranslator, useTranslation } from "@/lib/i18n";
 
 export const Route = createFileRoute("/forgot-password")({
-  head: () => ({
-    meta: [{ title: i18n.t("auth.forgotPassword.head.title") }],
+  head: ({ match }) => ({
+    meta: [{ title: headTranslator(match.context.language)("auth.forgotPassword.head.title") }],
   }),
   component: ForgotPasswordPage,
 });

@@ -32,7 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/design-system";
 import { PASSWORD_MIN_LENGTH, validateNewPassword } from "@/lib/auth-recovery";
-import i18n, { useTranslation } from "@/lib/i18n";
+import { headTranslator, useTranslation } from "@/lib/i18n";
 
 const resetPasswordSearchSchema = z.object({
   token_hash: z.string().optional(),
@@ -45,10 +45,11 @@ const resetPasswordSearchSchema = z.object({
 });
 
 export const Route = createFileRoute("/reset-password")({
-  head: () => ({
-    meta: [{ title: i18n.t("auth.resetPassword.head.title") }],
-  }),
   validateSearch: (search) => resetPasswordSearchSchema.parse(search),
+  // After validateSearch, so the route's search type is inferred first.
+  head: ({ match }) => ({
+    meta: [{ title: headTranslator(match.context.language)("auth.resetPassword.head.title") }],
+  }),
   component: ResetPasswordPage,
 });
 
