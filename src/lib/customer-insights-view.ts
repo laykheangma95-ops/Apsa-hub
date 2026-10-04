@@ -15,9 +15,81 @@ import type {
   CustomerMoney,
   CustomerTopProduct,
 } from "@/server/customers/insights";
+import type { CapabilityView } from "@/lib/capabilities";
 import type { Money } from "@/types";
 
 export type { CustomerInsights, CustomerInsightsResult, CustomerMoney, CustomerTopProduct };
+
+// ── Display authority: the CURRENT grants, never the cached payload ──────────
+
+/**
+ * What this member may see of Customer Intelligence RIGHT NOW. Every section
+ * the server withheld is still withheld; this narrows further, so a payload
+ * fetched under broader grants never shows a section whose grant has since
+ * been revoked. The server's `available` statuses are never display authority
+ * on their own.
+ *
+ *   base     customers.read AND orders.read — without both, nothing at all.
+ *   money    base AND customers.view_sensitive AND payments.reconcile, both
+ *            through `canSensitive` (fail-closed on a snapshot whose refresh
+ *            failed: money's mere display is the disclosure). Mirrors the
+ *            server's gate (canReadFinancials AND customers.view_sensitive).
+ *   payments base AND payments.read
+ *   delivery base AND delivery.read
+ *   returns  base AND orders.return
+ */
+export interface CustomerInsightGrants {
+  base: boolean;
+  money: boolean;
+  payments: boolean;
+  delivery: boolean;
+  returns: boolean;
+}
+
+export function customerInsightGrants(capabilities: CapabilityView): CustomerInsightGrants {
+  const base = capabilities.can("customers.read") && capabilities.can("orders.read");
+  return {
+    base,
+    money:
+      base &&
+      capabilities.canSensitive("customers.view_sensitive") &&
+      capabilities.canSensitive("payments.reconcile"),
+    payments: base && capabilities.can("payments.read"),
+    delivery: base && capabilities.can("delivery.read"),
+    returns: base && capabilities.can("orders.return"),
+  };
+}
+
+/**
+ * The grant set as a cache-key segment. A response is cached under the grants
+ * it was REQUESTED with, so a late response that left under the old grants can
+ * only ever land in the old entry — never in the one the screen now reads.
+ */
+export function customerInsightGrantsTag(grants: CustomerInsightGrants): string {
+  return (["base", "money", "payments", "delivery", "returns"] as const)
+    .map((key) => (grants[key] ? "1" : "0"))
+    .join("");
+}
+
+/**
+ * A cached payload as the CURRENT grants allow it to be shown: `null` without
+ * the base grants; otherwise every section whose grant does not hold right now
+ * becomes `permission_denied`, whatever the payload says.
+ */
+export function redactCustomerInsights(
+  insights: CustomerInsights,
+  grants: CustomerInsightGrants,
+): CustomerInsights | null {
+  if (!grants.base) return null;
+  const denied = { status: "permission_denied" } as const;
+  return {
+    ...insights,
+    money: grants.money ? insights.money : denied,
+    payments: grants.payments ? insights.payments : denied,
+    delivery: grants.delivery ? insights.delivery : denied,
+    returns: grants.returns ? insights.returns : denied,
+  };
+}
 
 /** Display order for current delivery states: outcome first, then in-flight. */
 const DELIVERY_ORDER = [

@@ -155,7 +155,7 @@ export function CustomerInsightsSection({
         ) : null}
         {payments ? (
           <SectionRow
-            label={t("customerInsights.paidWith")}
+            label={t("customerInsights.paymentMethods")}
             value={joinParts(payments, (key) => t(`payments.method.${key}`))}
           />
         ) : null}

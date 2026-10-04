@@ -1378,7 +1378,7 @@
     "failedAttempts_other": "{{count}} failed attempts",
     "returns": "Returns",
     "returnsValue": "{{count}} · {{completed}} completed",
-    "paidWith": "Paid with",
+    "paymentMethods": "Payment methods",
     "orderedVia": "Ordered via",
     "part": "{{label}} {{count}}",
     "none": "None",

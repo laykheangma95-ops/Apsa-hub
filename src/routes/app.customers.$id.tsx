@@ -29,13 +29,8 @@ import {
 import { CustomerOrderStatuses } from "@/components/customers/CustomerOrderStatuses";
 import { EditCustomerSheet } from "@/components/customers/EditCustomerSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import {
-  addCustomerNote,
-  getCustomer360,
-  getCustomerInsights,
-  getCustomerOrders,
-  isProductionId,
-} from "@/lib/api";
+import { useCustomerInsights } from "@/hooks/use-customer-insights";
+import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
 import { insightMoney, moneyLines, type InsightMoney } from "@/lib/customer-insights-view";
 import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
 import { classifyCustomerError } from "@/lib/customers-view";
@@ -76,7 +71,8 @@ const COMPANION_VAR: Record<CompanionColor, string> = {
 const TABS = ["overview", "orders", "timeline", "notes"] as const;
 type Tab = (typeof TABS)[number];
 
-function Customer360Screen() {
+/** Exported for the mounted capability-revocation regressions only. */
+export function Customer360Screen() {
   const { id } = Route.useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -139,13 +135,17 @@ function Customer360Screen() {
   /*
    * Customer Intelligence (migration 060): the server derives this customer's
    * order count, spend per currency, products, delivery and return history
-   * from the authoritative records. Same orders.read gate as the history
-   * above; each further section is gated server-side on its own grant.
+   * from the authoritative records. The hook re-decides display authority
+   * from the CURRENT capabilities on every render (customers.read + orders.read
+   * for anything; each section on its own grant) — a cached response's own
+   * section statuses are never enough — and keys and evicts the cache by the
+   * grants it was fetched under, so a revoked grant hides its figures at once.
    */
-  const insightsQuery = useQuery({
-    queryKey: customerKeys.insights(userId, routeOrganizationId, id),
-    queryFn: () => getCustomerInsights(id),
-    enabled: isRealCustomer && canReadOrders,
+  const { display: insightsDisplay, refetch: refetchInsights } = useCustomerInsights({
+    userId,
+    organizationId: routeOrganizationId,
+    customerId: id,
+    enabled: isRealCustomer,
   });
 
   const noteMutation = useMutation({
@@ -265,10 +265,8 @@ function Customer360Screen() {
    * from every committed order (not from the capped history page), per
    * currency. Until it has answered — or when it cannot — these show "—".
    */
-  const insights =
-    isRealCustomer && insightsQuery.data?.status === "available"
-      ? insightsQuery.data.data
-      : undefined;
+  // Already redacted to the current grants; null unless they allow it.
+  const insights = isRealCustomer ? (insightsDisplay.insights ?? undefined) : undefined;
   const money: InsightMoney | null = insights ? insightMoney(insights, sensitiveVisible) : null;
   const average =
     customer.orderCount > 0
@@ -437,26 +435,27 @@ function Customer360Screen() {
         ) : null}
 
         {/*
-         * Customer insights: only for a real customer and a member who may read
-         * orders. Loading shows nothing extra (the figures above read "—"); a
-         * failure says so, and never reads as "no purchases".
+         * Customer insights: only for a real customer and a member who CURRENTLY
+         * holds customers.read and orders.read ("hidden" otherwise). Loading
+         * shows nothing extra (the figures above read "—"); a failure says so,
+         * and never reads as "no purchases".
          */}
-        {tab === "overview" && isRealCustomer && canReadOrders ? (
-          insightsQuery.isError ? (
+        {tab === "overview" && isRealCustomer ? (
+          insightsDisplay.status === "error" ? (
             <OperationalState
               tone="danger"
               title={t("customerInsights.loadError")}
               body={t("customerInsights.loadErrorBody")}
-              onRetry={() => void insightsQuery.refetch()}
+              onRetry={refetchInsights}
             />
-          ) : insightsQuery.data?.status === "unavailable" ? (
+          ) : insightsDisplay.status === "unavailable" ? (
             <OperationalState
               title={t("customerInsights.unavailable")}
               body={t("customerInsights.unavailableBody")}
             />
-          ) : insightsQuery.data ? (
+          ) : insightsDisplay.status === "ready" ? (
             <CustomerInsightsSection
-              insights={insightsQuery.data.data}
+              insights={insightsDisplay.insights}
               sensitiveVisible={sensitiveVisible}
             />
           ) : null

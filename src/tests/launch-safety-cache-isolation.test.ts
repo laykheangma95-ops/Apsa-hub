@@ -1198,7 +1198,10 @@ describe("H. Customer 360 order history is honest", () => {
      * server has answered.
      */
     const src = source();
-    expect(src).toContain("getCustomerInsights(id)");
+    expect(src).toContain("useCustomerInsights({");
+    expect(fs.readFileSync("src/hooks/use-customer-insights.ts", "utf8")).toContain(
+      "queryFn: () => getCustomerInsights(customerId)",
+    );
     expect(src).toMatch(
       /const orderCountValue = !isRealCustomer\s+\? customer\.orderCount\s+: insights\s+\? insights\.activity\.orderCount\s+: "—";/,
     );

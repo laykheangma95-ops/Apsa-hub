@@ -14,6 +14,9 @@ import { readFileSync } from "node:fs";
 import { CustomerInsightsSection } from "@/components/customers/CustomerInsightsSection";
 import { customerKeys } from "@/lib/customers-query";
 import {
+  customerInsightGrants,
+  customerInsightGrantsTag,
+  redactCustomerInsights,
   deliveryParts,
   insightMoney,
   outstandingLines,
@@ -21,6 +24,13 @@ import {
   type CustomerInsights,
 } from "@/lib/customer-insights-view";
 import i18n from "@/lib/i18n";
+import { QueryClient } from "@tanstack/react-query";
+import {
+  createCapabilityView,
+  createFixtureCapabilityView,
+  type UiPermissionKey,
+} from "@/lib/capabilities";
+import { enforceCustomerInsightsGrants } from "@/lib/customers-query";
 
 function base(): CustomerInsights {
   return {
@@ -180,7 +190,8 @@ describe("a customer with history", () => {
     expect(text).toContain("Delivered 1, In transit 1");
     expect(text).toContain("1 failed attempt");
     expect(text).toContain("2 · 1 completed");
-    expect(text).toContain("Cash 1, KHQR 1, Cash on delivery 1");
+    expect(text).toContain("Payment methods Cash 1, KHQR 1, Cash on delivery 1");
+    expect(text).not.toContain("Paid with");
     expect(text).toContain("Facebook 1, Instagram 1, Entered by hand 1");
     expect(text).toContain("Last bought Product A");
   });
@@ -209,7 +220,7 @@ describe("a customer with history", () => {
       returns: { status: "permission_denied" },
     };
     const { text } = await render(denied);
-    for (const label of ["Deliveries", "Returns", "Paid with", "Still to collect", "$"]) {
+    for (const label of ["Deliveries", "Returns", "Payment methods", "Still to collect", "$"]) {
       expect(text).not.toContain(label);
     }
   });
@@ -250,6 +261,108 @@ describe("view rules", () => {
   });
 });
 
+describe("display authority comes from the CURRENT grants", () => {
+  const view = (keys: string[]) => createFixtureCapabilityView(keys as UiPermissionKey[]);
+  const FULL = [
+    "customers.read",
+    "orders.read",
+    "customers.view_sensitive",
+    "payments.reconcile",
+    "payments.read",
+    "delivery.read",
+    "orders.return",
+  ];
+
+  it("base needs customers.read AND orders.read; every section needs base", () => {
+    for (const missing of ["customers.read", "orders.read"]) {
+      expect(customerInsightGrants(view(FULL.filter((k) => k !== missing)))).toEqual({
+        base: false,
+        money: false,
+        payments: false,
+        delivery: false,
+        returns: false,
+      });
+    }
+    expect(customerInsightGrants(view(FULL))).toEqual({
+      base: true,
+      money: true,
+      payments: true,
+      delivery: true,
+      returns: true,
+    });
+  });
+
+  it("money needs BOTH customers.view_sensitive and payments.reconcile", () => {
+    for (const missing of ["customers.view_sensitive", "payments.reconcile"]) {
+      expect(customerInsightGrants(view(FULL.filter((k) => k !== missing))).money).toBe(false);
+    }
+  });
+
+  it("money refuses a stale snapshot even while it still lists the grants", () => {
+    const stale = createCapabilityView({
+      result: {
+        status: "active",
+        userId: "u",
+        organizationId: "o",
+        role: "OWNER",
+        permissions: FULL as UiPermissionKey[],
+      },
+      isPending: false,
+      isError: true,
+      expectedUserId: "u",
+      expectedOrganizationId: "o",
+    });
+    const grants = customerInsightGrants(stale);
+    expect(grants.base).toBe(true);
+    expect(grants.money).toBe(false);
+  });
+
+  it("a cached payload's own 'available' sections are withheld when the grant is gone", () => {
+    const grants = customerInsightGrants(view(["customers.read", "orders.read", "payments.read"]));
+    const shown = redactCustomerInsights(base(), grants)!;
+    expect(shown.money).toEqual({ status: "permission_denied" });
+    expect(shown.delivery).toEqual({ status: "permission_denied" });
+    expect(shown.returns).toEqual({ status: "permission_denied" });
+    expect(shown.payments.status).toBe("available");
+    expect(redactCustomerInsights(base(), customerInsightGrants(view(["orders.read"])))).toBeNull();
+  });
+
+  it("the grant tag differs for every grant set, so responses never share an entry", () => {
+    const tags = new Set<string>();
+    for (let mask = 0; mask < 32; mask++) {
+      const keys = ["base", "money", "payments", "delivery", "returns"] as const;
+      tags.add(
+        customerInsightGrantsTag(
+          Object.fromEntries(keys.map((k, i) => [k, Boolean(mask & (1 << i))])) as never,
+        ),
+      );
+    }
+    expect(tags.size).toBe(32);
+  });
+
+  it("eviction removes this principal's entries under any other grant set — and nothing else", () => {
+    const queryClient = new QueryClient();
+    const keep = customerKeys.insights("u", "o", "c1", "11111");
+    const old1 = customerKeys.insights("u", "o", "c1", "11110");
+    const old2 = customerKeys.insights("u", "o", "c2", "01111");
+    const otherPrincipal = customerKeys.insights("u2", "o", "c1", "10000");
+    const profile = customerKeys.detail("u", "o", "c1");
+    for (const key of [keep, old1, old2, otherPrincipal, profile])
+      queryClient.setQueryData(key, { marker: true });
+
+    enforceCustomerInsightsGrants(queryClient, "u", "o", "11111");
+    expect(queryClient.getQueryData(keep)).toBeDefined();
+    expect(queryClient.getQueryData(old1)).toBeUndefined();
+    expect(queryClient.getQueryData(old2)).toBeUndefined();
+    expect(queryClient.getQueryData(otherPrincipal)).toBeDefined();
+    expect(queryClient.getQueryData(profile)).toBeDefined();
+
+    // Revocation: the entry under the previous grants goes too.
+    enforceCustomerInsightsGrants(queryClient, "u", "o", "10111");
+    expect(queryClient.getQueryData(keep)).toBeUndefined();
+  });
+});
+
 describe("wiring", () => {
   const route = readFileSync("src/routes/app.customers.$id.tsx", "utf8");
   const component = readFileSync("src/components/customers/CustomerInsightsSection.tsx", "utf8");
@@ -257,14 +370,23 @@ describe("wiring", () => {
   it("the insights cache entry sits under the customer's detail key, so purges and sensitive eviction take it", () => {
     const detail = customerKeys.detail("u", "o", "c");
     const principal = customerKeys.principal("u", "o");
-    const insights = customerKeys.insights("u", "o", "c");
+    const insights = customerKeys.insights("u", "o", "c", "11111");
     expect(insights.slice(0, detail.length)).toEqual([...detail]);
     expect(insights.slice(0, principal.length)).toEqual([...principal]);
   });
 
-  it("Customer Detail reads insights only for a real customer and an orders.read member", () => {
-    expect(route).toMatch(
-      /queryKey: customerKeys\.insights\(userId, routeOrganizationId, id\),\s+queryFn: \(\) => getCustomerInsights\(id\),\s+enabled: isRealCustomer && canReadOrders,/,
+  it("Customer Detail reads insights only through the grant-checking hook", () => {
+    expect(route).toContain("useCustomerInsights({");
+    // No direct read of the raw query payload anywhere on the screen.
+    expect(route).not.toContain("getCustomerInsights(");
+    expect(route).not.toMatch(/insightsQuery/);
+    const hook = readFileSync("src/hooks/use-customer-insights.ts", "utf8");
+    expect(hook).toContain("redactCustomerInsights(query.data.data, grants)");
+    expect(hook).toContain(
+      "enforceCustomerInsightsGrants(queryClient, userId, organizationId, grantsTag);",
+    );
+    expect(hook).toContain(
+      "queryKey: customerKeys.insights(userId, organizationId, customerId, grantsTag)",
     );
     // A failure is reported as a failure, never as "no purchases".
     expect(route).toContain('title={t("customerInsights.loadError")}');

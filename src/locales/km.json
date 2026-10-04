@@ -1378,7 +1378,7 @@
     "failedAttempts_other": "ដឹកមិនបាន {{count}} ដង",
     "returns": "ការប្រគល់ទំនិញត្រឡប់",
     "returnsValue": "{{count}} · បានបញ្ចប់ {{completed}}",
-    "paidWith": "បង់ប្រាក់ដោយ",
+    "paymentMethods": "វិធីសាស្ត្រទូទាត់",
     "orderedVia": "បញ្ជាទិញតាម",
     "part": "{{label}} {{count}}",
     "none": "គ្មាន",
