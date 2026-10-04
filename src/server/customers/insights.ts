@@ -158,6 +158,14 @@ export interface CustomerInsights {
   }>;
 }
 
+/**
+ * `unavailable` means only that migration 060 is not applied in this
+ * environment yet (the app can deploy before it). It is not "no purchases" and
+ * not an error about the customer; every other failure throws.
+ */
+export type CustomerInsightsResult =
+  { status: "available"; data: CustomerInsights } | { status: "unavailable" };
+
 export interface CustomerInsightsDependencies {
   getCustomerPurchaseProfile: typeof repo.getCustomerPurchaseProfile;
 }
@@ -180,7 +188,7 @@ export async function getCustomerInsights(
   ctx: AuthorizationContext,
   customerId: string,
   dependencies: CustomerInsightsDependencies = defaultDependencies,
-): Promise<CustomerInsights> {
+): Promise<CustomerInsightsResult> {
   ctx.require("customers.read");
   ctx.require("orders.read");
 
@@ -191,8 +199,9 @@ export async function getCustomerInsights(
     sections,
     CUSTOMER_TOP_PRODUCTS_LIMIT,
   );
+  if (row === null) return { status: "unavailable" };
   if (!row.customer_found) throw publicError("Customer not found", 404);
-  return toCustomerInsights(customerId, row, sections);
+  return { status: "available", data: toCustomerInsights(customerId, row, sections) };
 }
 
 // ── Pure mapping ──────────────────────────────────────────────────────────────

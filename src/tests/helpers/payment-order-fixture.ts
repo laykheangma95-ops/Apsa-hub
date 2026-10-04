@@ -122,9 +122,7 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
       await db.exec(
         readFileSync("supabase/migrations/043_payment_referenceless_duplicate.sql", "utf8"),
       );
-      await db.exec(
-        readFileSync("supabase/migrations/060_customer_purchase_profile.sql", "utf8"),
-      );
+      await db.exec(readFileSync("supabase/migrations/060_customer_purchase_profile.sql", "utf8"));
     },
   };
 }

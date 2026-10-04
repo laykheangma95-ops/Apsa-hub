@@ -265,7 +265,10 @@ function Customer360Screen() {
    * from every committed order (not from the capped history page), per
    * currency. Until it has answered — or when it cannot — these show "—".
    */
-  const insights = isRealCustomer ? insightsQuery.data : undefined;
+  const insights =
+    isRealCustomer && insightsQuery.data?.status === "available"
+      ? insightsQuery.data.data
+      : undefined;
   const money: InsightMoney | null = insights ? insightMoney(insights, sensitiveVisible) : null;
   const average =
     customer.orderCount > 0
@@ -446,9 +449,14 @@ function Customer360Screen() {
               body={t("customerInsights.loadErrorBody")}
               onRetry={() => void insightsQuery.refetch()}
             />
+          ) : insightsQuery.data?.status === "unavailable" ? (
+            <OperationalState
+              title={t("customerInsights.unavailable")}
+              body={t("customerInsights.unavailableBody")}
+            />
           ) : insightsQuery.data ? (
             <CustomerInsightsSection
-              insights={insightsQuery.data}
+              insights={insightsQuery.data.data}
               sensitiveVisible={sensitiveVisible}
             />
           ) : null

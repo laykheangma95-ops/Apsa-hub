@@ -1360,6 +1360,8 @@
     "noPurchasesBody": "Insights appear after this customer's first confirmed order.",
     "loadError": "Could not load customer insights",
     "loadErrorBody": "This says nothing about whether this customer has bought anything.",
+    "unavailable": "Customer insights are not available yet",
+    "unavailableBody": "This workspace has not been updated for customer insights. Order history is unaffected.",
     "orders": "Orders",
     "ordersValue": "{{count}} · {{completed}} completed · {{open}} in progress",
     "firstOrder": "First order",

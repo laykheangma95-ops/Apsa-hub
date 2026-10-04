@@ -11,12 +11,13 @@
  */
 import type {
   CustomerInsights,
+  CustomerInsightsResult,
   CustomerMoney,
   CustomerTopProduct,
 } from "@/server/customers/insights";
 import type { Money } from "@/types";
 
-export type { CustomerInsights, CustomerMoney, CustomerTopProduct };
+export type { CustomerInsights, CustomerInsightsResult, CustomerMoney, CustomerTopProduct };
 
 /** Display order for current delivery states: outcome first, then in-flight. */
 const DELIVERY_ORDER = [

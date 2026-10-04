@@ -20,6 +20,12 @@ import {
   toCustomerInsights,
 } from "@/server/customers/insights";
 import type { PurchaseProfileRow } from "@/server/customers/types";
+import {
+  CUSTOMER_PURCHASE_PROFILE_RPC,
+  getCustomerPurchaseProfile,
+  isMissingPurchaseProfileRpc,
+  setCustomerRepositoryDbForTests,
+} from "@/server/customers/repository";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 
 it("migration 060 + Customer Intelligence service execute correctly against every migration in PGlite", () => {
@@ -219,6 +225,87 @@ describe("sections are withheld by the service, not only by the database", () =>
       }),
     ).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  it("migration 060 not deployed yet → 'unavailable', never an empty or zero profile", async () => {
+    expect(
+      await getCustomerInsights(fakeCtx(["customers.read", "orders.read"]), "cust", {
+        getCustomerPurchaseProfile: async () => null,
+      }),
+    ).toEqual({ status: "unavailable" });
+  });
+});
+
+describe("repository — only a missing 060 is 'unavailable'; every other failure surfaces", () => {
+  const ALL_FLAGS = { money: true, payments: true, delivery: true, returns: true };
+  async function call(result: { data: unknown; error: unknown }) {
+    const calls: unknown[] = [];
+    const restore = setCustomerRepositoryDbForTests({
+      rpc: async (name: string, params: unknown) => {
+        calls.push([name, params]);
+        return result;
+      },
+    });
+    try {
+      return { value: await getCustomerPurchaseProfile("org", "cust", ALL_FLAGS, 5), calls };
+    } finally {
+      restore();
+    }
+  }
+
+  it("calls 060 with the server's organization and the decided sections", async () => {
+    const { value, calls } = await call({ data: { customer_found: false }, error: null });
+    expect(value).toEqual({ customer_found: false });
+    expect(calls).toEqual([
+      [
+        CUSTOMER_PURCHASE_PROFILE_RPC,
+        {
+          p_organization_id: "org",
+          p_customer_id: "cust",
+          p_include_money: true,
+          p_include_payments: true,
+          p_include_delivery: true,
+          p_include_returns: true,
+          p_top_products: 5,
+        },
+      ],
+    ]);
+  });
+
+  it("returns null only when THIS function is missing", async () => {
+    for (const error of [
+      {
+        code: "PGRST202",
+        message: `Could not find the function public.${CUSTOMER_PURCHASE_PROFILE_RPC}(p_customer_id, p_include_delivery, …) in the schema cache`,
+      },
+      {
+        code: "42883",
+        message: `function public.${CUSTOMER_PURCHASE_PROFILE_RPC}(uuid, uuid, boolean, boolean, boolean, boolean, integer) does not exist`,
+      },
+    ]) {
+      expect(isMissingPurchaseProfileRpc(error)).toBe(true);
+      expect((await call({ data: null, error })).value).toBeNull();
+    }
+  });
+
+  it("a timeout, a permission error or another missing function is a failure, not 'unavailable'", async () => {
+    for (const error of [
+      { code: "42883", message: "function public.some_other_fn(uuid) does not exist" },
+      { code: "42883", message: "operator does not exist: uuid = text" },
+      {
+        code: "PGRST202",
+        message: "Could not find the function public.other_fn in the schema cache",
+      },
+      { code: "57014", message: "canceling statement due to statement timeout" },
+      { code: "42501", message: `permission denied for function ${CUSTOMER_PURCHASE_PROFILE_RPC}` },
+    ]) {
+      expect(isMissingPurchaseProfileRpc(error)).toBe(false);
+      await expect(call({ data: null, error })).rejects.toThrow(/getCustomerPurchaseProfile/);
+    }
+  });
+
+  it("an empty success is a failure, not a profile", async () => {
+    await expect(call({ data: null, error: null })).rejects.toThrow(/no data/);
+  });
 });
 
 describe("unknown enum values never reach the browser", () => {
@@ -269,6 +356,11 @@ describe("migration 060 — static shape", () => {
 
   it("creates no table, view or materialized view — nothing to drift from authority", () => {
     expect(code).not.toMatch(/CREATE\s+(TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX)/i);
+  });
+
+  it("adds no column anywhere — no stored lifetime spend, order count or product list", () => {
+    expect(code).not.toMatch(/ALTER\s+TABLE/i);
+    expect(code).not.toMatch(/(INSERT\s+INTO|UPDATE\s+public\.|DELETE\s+FROM)/i);
   });
 
   it("is SECURITY INVOKER, never SECURITY DEFINER, with a pinned search_path", () => {

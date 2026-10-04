@@ -77,9 +77,16 @@ async function asRole<T>(role: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** The production read path, as the server runs it. */
+/** The production read path, as the server runs it — expected to be available. */
+async function available(result: Promise<Awaited<ReturnType<typeof getCustomerInsights>>>) {
+  const r = await result;
+  if (r.status !== "available") throw new Error(`expected available, got ${r.status}`);
+  return r.data;
+}
 const insights = (organizationId: string, customerId: string, permissions: string[] = ALL) =>
-  asRole("service_role", () => getCustomerInsights(ctx(organizationId, permissions), customerId));
+  available(
+    asRole("service_role", () => getCustomerInsights(ctx(organizationId, permissions), customerId)),
+  );
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function one(sql: string, args: unknown[] = []): Promise<any> {
@@ -708,12 +715,12 @@ describe("13–15 — tenant isolation", () => {
   });
 
   it("14 — one user in two organizations: each context sees only its own organization", async () => {
-    const asA = await asRole("service_role", () =>
-      getCustomerInsights(ctx(orgA, ALL, actor), ids.cMulti),
+    const asA = await available(
+      asRole("service_role", () => getCustomerInsights(ctx(orgA, ALL, actor), ids.cMulti)),
     );
     expect(asA.activity.orderCount).toBe(3);
-    const asB = await asRole("service_role", () =>
-      getCustomerInsights(ctx(orgB, ALL, actor), ids.cB),
+    const asB = await available(
+      asRole("service_role", () => getCustomerInsights(ctx(orgB, ALL, actor), ids.cB)),
     );
     expect(asB.activity.orderCount).toBe(1);
     expect(asB.topProducts.map((p) => p.label)).toEqual(["Org B product"]);
@@ -834,5 +841,18 @@ describe("authorization — sections the caller may not see are withheld, never 
 
   it("without customers.read the read is refused", async () => {
     await expect(insights(orgA, ids.cMulti, ["orders.read"])).rejects.toThrow(/customers\.read/);
+  });
+});
+
+describe("deploy ordering — the app may ship before 060 is applied", () => {
+  it("without the function the service answers 'unavailable', never zeros; with it, data again", async () => {
+    await db.exec(`DROP FUNCTION ${SIGNATURE}`);
+    try {
+      const r = await asRole("service_role", () => getCustomerInsights(ctx(orgA), ids.cMulti));
+      expect(r).toEqual({ status: "unavailable" });
+    } finally {
+      await db.exec(MIGRATION_060);
+    }
+    expect((await insights(orgA, ids.cMulti)).activity.orderCount).toBe(3);
   });
 });

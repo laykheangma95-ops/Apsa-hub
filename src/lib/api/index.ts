@@ -28,7 +28,7 @@ import {
   type UiPaymentReconciliation,
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
-import type { CustomerInsights } from "@/lib/customer-insights-view";
+import type { CustomerInsightsResult } from "@/lib/customer-insights-view";
 import type { ParcelLabelInput } from "@/lib/labels/parcel-label";
 import type { InternalParcelLabelInput } from "@/lib/labels/internal-parcel-label";
 import type { BusinessSummary, CustomerSummary, TopSellersPage } from "@/lib/analytics-view";
@@ -354,10 +354,10 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
  * derived server-side from orders, payments, deliveries and returns. Mock ids
  * have no such history and never reach the server function.
  */
-export async function getCustomerInsights(customerId: string): Promise<CustomerInsights> {
+export async function getCustomerInsights(customerId: string): Promise<CustomerInsightsResult> {
   if (!isProductionId(customerId)) throw new Error("invalid_reference");
   const { getCustomerInsightsFn } = await import("@/api/customers");
-  return (await getCustomerInsightsFn({ data: { id: customerId } })) as CustomerInsights;
+  return (await getCustomerInsightsFn({ data: { id: customerId } })) as CustomerInsightsResult;
 }
 
 /** Server product shape returned by listProductsFn / getProductDetailFn. */
