@@ -84,3 +84,58 @@ export interface CustomerTagRow {
   color: string | null;
   created_at: string;
 }
+
+/**
+ * Raw JSON returned by public.customer_purchase_profile_v1 (migration 060).
+ * Counts arrive as JSON numbers; bigint sums are minor units. A section the
+ * caller may not see is `null` (it was never read), never zero-filled.
+ */
+export interface PurchaseProfileRow {
+  customer_found: boolean;
+  activity?: {
+    qualifying_order_count: number;
+    confirmed_order_count: number;
+    completed_order_count: number;
+    cancelled_order_count: number;
+    refunded_order_count: number;
+    first_order_at: string | null;
+    last_order_at: string | null;
+    last_order_id: string | null;
+    last_order_source: string | null;
+    distinct_product_count: number;
+    total_units: number;
+    conversation_linked_order_count: number;
+    source_counts: Record<string, number>;
+  };
+  top_products?: Array<{
+    product_id: string;
+    product_label: string;
+    top_variant_label: string | null;
+    units: number;
+    order_count: number;
+    variant_count: number;
+    last_purchased_at: string;
+  }>;
+  last_order_products?: string[];
+  money?: Array<{
+    currency: string;
+    order_count: number;
+    ordered_minor: number;
+    received_minor: number;
+    refunded_minor: number;
+    net_minor: number;
+    outstanding_minor: number;
+  }> | null;
+  payments?: { method_order_counts: Record<string, number> } | null;
+  delivery?: {
+    orders_with_delivery: number;
+    failed_attempt_count: number;
+    current_status_counts: Record<string, number>;
+  } | null;
+  returns?: {
+    return_count: number;
+    returned_order_count: number;
+    completed_return_count: number;
+    completed_returned_units: number;
+  } | null;
+}

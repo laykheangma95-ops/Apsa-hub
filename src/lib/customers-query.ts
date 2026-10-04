@@ -58,6 +58,28 @@ export const customerKeys = {
   orders: (userId: string, organizationId: string, customerId: string) =>
     [CUSTOMERS_QUERY_ROOT, userId, organizationId, "detail", customerId, "orders"] as const,
   /**
+   * One customer's derived purchase profile (Customer Intelligence, migration
+   * 060), as fetched under one set of grants (`grantsTag`, from
+   * customerInsightGrantsTag). Under that customer's `detail` key on purpose:
+   * it carries lifetime spend, so the same principal purge and
+   * `customers.view_sensitive` eviction that remove the profile remove it too.
+   *
+   * The grants are part of the identity because the server decides which
+   * sections to read from them: a response requested under broader grants is
+   * a different answer, and a late one must never land where the screen reads
+   * under narrower grants. enforceCustomerInsightsGrants evicts the others.
+   */
+  insights: (userId: string, organizationId: string, customerId: string, grantsTag: string) =>
+    [
+      CUSTOMERS_QUERY_ROOT,
+      userId,
+      organizationId,
+      "detail",
+      customerId,
+      "insights",
+      grantsTag,
+    ] as const,
+  /**
    * The lightweight customer-picker list (`listRealCustomers` ->
    * `OrderCustomerOption[]`), as the manual order-create sheet loads it.
    *
@@ -181,6 +203,61 @@ export function enforceCustomerSensitiveCache(
     }
   } catch {
     // Never block a render. Render-time masking still hides the value.
+  }
+}
+
+// ── Customer Intelligence grant eviction ─────────────────────────────────────
+
+/** The last insights grant tag each principal's cache was read under, per QueryClient. */
+const LAST_INSIGHT_GRANTS = new WeakMap<QueryClient, Map<string, string>>();
+
+function isInsightsEntryOutside(queryKey: readonly unknown[], grantsTag: string): boolean {
+  return queryKey[3] === "detail" && queryKey[5] === "insights" && queryKey[6] !== grantsTag;
+}
+
+/**
+ * Evict every Customer Intelligence entry this principal holds under a grant
+ * set other than the current one — on the first observation and on every
+ * change, in either direction.
+ *
+ * Revocation: the payload fetched under the old grants may carry money,
+ * payment, delivery or return figures the member may no longer see. It is
+ * removed, not merely hidden, and any fetch still in flight under the old
+ * grants is cancelled first; were it to resolve anyway, it can only write to
+ * its own old-grants key, which nothing reads.
+ *
+ * Restoration: nothing fetched under narrower grants is reused; the screen's
+ * key changes, so the next read is a fresh request the server authorizes from
+ * the restored grants.
+ *
+ * Call during render, before the insights query reads (like
+ * enforceCustomerSensitiveCache). Scoped to this principal. Never throws.
+ */
+export function enforceCustomerInsightsGrants(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  grantsTag: string,
+): void {
+  try {
+    let record = LAST_INSIGHT_GRANTS.get(queryClient);
+    if (!record) {
+      record = new Map();
+      LAST_INSIGHT_GRANTS.set(queryClient, record);
+    }
+    const tag = principalTag(userId, organizationId);
+    if (record.get(tag) === grantsTag) return;
+    record.set(tag, grantsTag);
+
+    const filters = {
+      queryKey: customerKeys.principal(userId, organizationId),
+      predicate: (query: { queryKey: readonly unknown[] }) =>
+        isInsightsEntryOutside(query.queryKey, grantsTag),
+    };
+    void queryClient.cancelQueries(filters).catch(() => undefined);
+    queryClient.removeQueries(filters);
+  } catch {
+    // Never block a render. Render-time redaction still hides the values.
   }
 }
 

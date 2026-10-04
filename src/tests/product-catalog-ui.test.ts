@@ -1933,8 +1933,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 054 (Pack Order readiness guards) belongs to the V1 fulfillment phase;
     // 055–056 (damage movement type + customer returns) belong to the returns phase;
     // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase;
-    // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair.
-    expect(migrations.at(-1)).toBe("059_recover_order_parcel.sql");
+    // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair;
+    // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase.
+    expect(migrations.at(-1)).toBe("060_customer_purchase_profile.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

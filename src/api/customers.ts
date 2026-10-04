@@ -53,6 +53,25 @@ export const getCustomer360Fn = createServerFn()
     return getCustomer360(authCtx, data.id);
   });
 
+// ── getCustomerInsightsFn ─────────────────────────────────────────────────────
+
+/**
+ * Customer Intelligence V1 (migration 060): one customer's purchase profile.
+ *
+ * Accepts the customer id and nothing else. The organization is resolved from
+ * the caller's active membership, and the sections the caller may see are
+ * decided by the service from the caller's own grants — neither is input.
+ */
+export const getCustomerInsightsFn = createServerFn()
+  .validator((data: unknown) =>
+    z.object({ id: z.string().uuid("Invalid customer ID") }).parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { getCustomerInsights } = await import("@/server/customers/insights");
+    return getCustomerInsights(authCtx, data.id);
+  });
+
 // ── addCustomerNoteFn ──────────────────────────────────────────────────────────
 
 export const addCustomerNoteFn = createServerFn({ method: "POST" })

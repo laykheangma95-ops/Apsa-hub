@@ -21,6 +21,10 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
     // before 040 has, so skipping 040 also skips 043 until applyAuthority()
     // catches both up together.
     if ((skipAuthority || skipReferencelessDuplicate) && name.startsWith("043_")) continue;
+    // 060's SQL function reads 040's order_payment_totals view, and a SQL
+    // function body is validated when it is created — so it, too, waits for
+    // applyAuthority() when 040 is skipped.
+    if (skipAuthority && name.startsWith("060_")) continue;
     try {
       await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
     } catch (error) {
@@ -118,6 +122,7 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
       await db.exec(
         readFileSync("supabase/migrations/043_payment_referenceless_duplicate.sql", "utf8"),
       );
+      await db.exec(readFileSync("supabase/migrations/060_customer_purchase_profile.sql", "utf8"));
     },
   };
 }

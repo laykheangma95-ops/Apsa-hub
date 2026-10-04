@@ -5,7 +5,7 @@ import type { PGlite } from "@electric-sql/pglite";
 export function conversationPostgrest(db: PGlite) {
   const requests: string[] = [];
   const identifier = (value: string) => {
-    if (!/^[a-z_]+$/.test(value)) throw new Error(`Invalid test identifier: ${value}`);
+    if (!/^[a-z_][a-z0-9_]*$/.test(value)) throw new Error(`Invalid test identifier: ${value}`);
     return value;
   };
   function query(source: string, initial: unknown[] = [], rpcName?: string) {
@@ -123,6 +123,15 @@ export function conversationPostgrest(db: PGlite) {
           }
           if (rpcName === "conversation_counts")
             return { data: rows[0].conversation_counts, error: null };
+          // A function returning one scalar (e.g. jsonb): PostgREST returns the
+          // value itself, not a one-row, one-column table.
+          if (
+            rpcName &&
+            rows.length === 1 &&
+            Object.keys(rows[0]).length === 1 &&
+            rpcName in rows[0]
+          )
+            return { data: rows[0][rpcName], error: null };
           return { data: rows, error: null };
         } catch (error) {
           return { data: null, error };

@@ -22,10 +22,16 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
+import {
+  CustomerInsightsSection,
+  MoneyStack,
+} from "@/components/customers/CustomerInsightsSection";
 import { CustomerOrderStatuses } from "@/components/customers/CustomerOrderStatuses";
 import { EditCustomerSheet } from "@/components/customers/EditCustomerSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { useCustomerInsights } from "@/hooks/use-customer-insights";
 import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
+import { insightMoney, moneyLines, type InsightMoney } from "@/lib/customer-insights-view";
 import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
 import { classifyCustomerError } from "@/lib/customers-view";
 import { fullTimestamp, initials, localName } from "@/lib/format";
@@ -65,7 +71,8 @@ const COMPANION_VAR: Record<CompanionColor, string> = {
 const TABS = ["overview", "orders", "timeline", "notes"] as const;
 type Tab = (typeof TABS)[number];
 
-function Customer360Screen() {
+/** Exported for the mounted capability-revocation regressions only. */
+export function Customer360Screen() {
   const { id } = Route.useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -123,6 +130,22 @@ function Customer360Screen() {
     queryKey: customerKeys.orders(userId, routeOrganizationId, id),
     queryFn: () => getCustomerOrders(id),
     enabled: isRealCustomer && canReadOrders,
+  });
+
+  /*
+   * Customer Intelligence (migration 060): the server derives this customer's
+   * order count, spend per currency, products, delivery and return history
+   * from the authoritative records. The hook re-decides display authority
+   * from the CURRENT capabilities on every render (customers.read + orders.read
+   * for anything; each section on its own grant) — a cached response's own
+   * section statuses are never enough — and keys and evicts the cache by the
+   * grants it was fetched under, so a revoked grant hides its figures at once.
+   */
+  const { display: insightsDisplay, refetch: refetchInsights } = useCustomerInsights({
+    userId,
+    organizationId: routeOrganizationId,
+    customerId: id,
+    enabled: isRealCustomer,
   });
 
   const noteMutation = useMutation({
@@ -235,23 +258,47 @@ function Customer360Screen() {
   const ordersUnavailable = isRealCustomer && !canReadOrders;
 
   /*
-   * `orderCount` and `lifetimeSpend` are hardcoded to zero by the server for
-   * every production customer, alongside the structural `orders: []`. They are
-   * placeholders, not measurements, so this screen must not print them as
-   * figures — "Orders 0" and "Spend $0.00" above a non-empty order list is the
-   * same false claim in a different place.
-   *
-   * They are also not derivable here: the history above is capped at
-   * CUSTOMER_ORDER_HISTORY_LIMIT rows, so counting or summing it would invent
-   * a lifetime total out of one page. Deriving a wrong number is not an
-   * improvement on withholding one, so these show an explicit "—" until the
-   * server computes them.
+   * `orderCount` and `lifetimeSpend` on the profile are still hardcoded to zero
+   * by the server for every production customer. They are placeholders, not
+   * measurements, and are never printed for a real customer. The real figures
+   * come from the Customer Intelligence read above, which the server derives
+   * from every committed order (not from the capped history page), per
+   * currency. Until it has answered — or when it cannot — these show "—".
    */
-  const metricsAuthoritative = !isRealCustomer;
+  // Already redacted to the current grants; null unless they allow it.
+  const insights = isRealCustomer ? (insightsDisplay.insights ?? undefined) : undefined;
+  const money: InsightMoney | null = insights ? insightMoney(insights, sensitiveVisible) : null;
   const average =
     customer.orderCount > 0
       ? usd(Math.round(customer.lifetimeSpend.amount / customer.orderCount))
       : usd(0);
+
+  const renderMoney = (field: "netPaid" | "averageOrder", block = false) => {
+    if (!isRealCustomer) {
+      if (!sensitiveVisible) return t("customer360.hidden");
+      return formatMoney(field === "netPaid" ? customer.lifetimeSpend : average);
+    }
+    if (!sensitiveVisible || money?.kind === "hidden") return t("customer360.hidden");
+    if (money?.kind !== "values" || money.byCurrency.length === 0) return "—";
+    const lines = moneyLines(money.byCurrency, field);
+    return block ? (
+      lines.map((m) => (
+        <span key={m.currency} className="block">
+          {formatMoney(m)}
+        </span>
+      ))
+    ) : (
+      <MoneyStack lines={lines} />
+    );
+  };
+  const orderCountValue = !isRealCustomer
+    ? customer.orderCount
+    : insights
+      ? insights.activity.orderCount
+      : "—";
+  const lastPurchaseAt = isRealCustomer
+    ? (insights?.activity.lastOrderAt ?? undefined)
+    : customer.lastPurchaseAt;
 
   const tabSegments: Segment<Tab>[] = TABS.map((key) => ({
     value: key,
@@ -325,18 +372,12 @@ function Customer360Screen() {
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
               <dd className="text-h2 tnum truncate text-text-primary">
-                {!metricsAuthoritative
-                  ? "—"
-                  : sensitiveVisible
-                    ? formatMoney(customer.lifetimeSpend)
-                    : t("customer360.hidden")}
+                {renderMoney("netPaid", true)}
               </dd>
             </div>
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.orders")}</dt>
-              <dd className="text-h2 tnum truncate text-text-primary">
-                {metricsAuthoritative ? customer.orderCount : "—"}
-              </dd>
+              <dd className="text-h2 tnum truncate text-text-primary">{orderCountValue}</dd>
             </div>
           </dl>
         </section>
@@ -354,17 +395,11 @@ function Customer360Screen() {
             <SectionRows>
               <SectionRow
                 label={t("customer360.averageOrder")}
-                value={
-                  !metricsAuthoritative
-                    ? "—"
-                    : sensitiveVisible
-                      ? formatMoney(average)
-                      : t("customer360.hidden")
-                }
+                value={renderMoney("averageOrder")}
               />
               <SectionRow
                 label={t("customer.lastPurchase")}
-                value={customer.lastPurchaseAt ? fullTimestamp(customer.lastPurchaseAt) : "—"}
+                value={lastPurchaseAt ? fullTimestamp(lastPurchaseAt) : "—"}
               />
               <SectionRow
                 label={t("delivery.address")}
@@ -397,6 +432,33 @@ function Customer360Screen() {
               </div>
             ) : null}
           </Section>
+        ) : null}
+
+        {/*
+         * Customer insights: only for a real customer and a member who CURRENTLY
+         * holds customers.read and orders.read ("hidden" otherwise). Loading
+         * shows nothing extra (the figures above read "—"); a failure says so,
+         * and never reads as "no purchases".
+         */}
+        {tab === "overview" && isRealCustomer ? (
+          insightsDisplay.status === "error" ? (
+            <OperationalState
+              tone="danger"
+              title={t("customerInsights.loadError")}
+              body={t("customerInsights.loadErrorBody")}
+              onRetry={refetchInsights}
+            />
+          ) : insightsDisplay.status === "unavailable" ? (
+            <OperationalState
+              title={t("customerInsights.unavailable")}
+              body={t("customerInsights.unavailableBody")}
+            />
+          ) : insightsDisplay.status === "ready" ? (
+            <CustomerInsightsSection
+              insights={insightsDisplay.insights}
+              sensitiveVisible={sensitiveVisible}
+            />
+          ) : null
         ) : null}
 
         {/*

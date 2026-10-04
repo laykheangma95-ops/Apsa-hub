@@ -21,6 +21,7 @@ import type {
   CustomerNoteRow,
   CustomerAddressRow,
   CustomerTagRow,
+  PurchaseProfileRow,
 } from "./types";
 
 // Typed alias for new tables not yet in the generated schema.
@@ -435,4 +436,66 @@ export async function removeTagFromCustomer(customerId: string, tagId: string): 
     .eq("tag_id", tagId);
 
   if (error) throw new Error(`removeTagFromCustomer: ${(error as { message: string }).message}`);
+}
+
+// ── Customer Intelligence (migration 060) ─────────────────────────────────────
+
+export const CUSTOMER_PURCHASE_PROFILE_RPC = "customer_purchase_profile_v1";
+
+/** Which sections the database may read. Decided by the service from the caller's grants. */
+export interface PurchaseProfileSections {
+  money: boolean;
+  payments: boolean;
+  delivery: boolean;
+  returns: boolean;
+}
+
+/**
+ * True only when the error says THIS function does not exist — migration 060
+ * not applied yet (PostgREST schema cache miss, or Postgres "function does not
+ * exist" naming it). Every other failure — a timeout, a permission error, a
+ * different missing function or operator — is a real failure and must surface.
+ */
+export function isMissingPurchaseProfileRpc(error: unknown): boolean {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code !== "PGRST202" && code !== "42883") return false;
+  if (typeof message !== "string") return false;
+  return code === "PGRST202"
+    ? message.includes(CUSTOMER_PURCHASE_PROFILE_RPC)
+    : /function (public\.)?customer_purchase_profile_v1\(.*\) does not exist/.test(message);
+}
+
+/**
+ * One customer's derived purchase profile, in one round trip. The organization
+ * is a parameter of the SQL itself — every relation the function reads is
+ * filtered on it — and a customer outside it comes back `customer_found:false`.
+ * Sections whose flag is false are not read by the database at all.
+ *
+ * `null` means only "migration 060 is not deployed here yet" (the app can ship
+ * before the migration is applied). Any other error throws.
+ */
+export async function getCustomerPurchaseProfile(
+  organizationId: string,
+  customerId: string,
+  sections: PurchaseProfileSections,
+  topProducts: number,
+): Promise<PurchaseProfileRow | null> {
+  const { data, error } = await db.rpc(CUSTOMER_PURCHASE_PROFILE_RPC, {
+    p_organization_id: organizationId,
+    p_customer_id: customerId,
+    p_include_money: sections.money,
+    p_include_payments: sections.payments,
+    p_include_delivery: sections.delivery,
+    p_include_returns: sections.returns,
+    p_top_products: topProducts,
+  });
+
+  if (error) {
+    if (isMissingPurchaseProfileRpc(error)) return null;
+    throw new Error(
+      `getCustomerPurchaseProfile: ${(error as { message?: string }).message ?? "unknown error"}`,
+    );
+  }
+  if (!data) throw new Error("getCustomerPurchaseProfile: no data");
+  return data as PurchaseProfileRow;
 }
