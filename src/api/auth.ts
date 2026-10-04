@@ -118,9 +118,11 @@ async function clearRecoveryCookies(): Promise<void> {
   deleteCookie(COOKIE_RECOVERY_REFRESH_TOKEN, { path: "/" });
 }
 
-export const clearAuthCookieFn = createServerFn().handler(async (): Promise<void> => {
-  await clearSessionCookies();
-});
+export const clearAuthCookieFn = createServerFn({ method: "POST" }).handler(
+  async (): Promise<void> => {
+    await clearSessionCookies();
+  },
+);
 
 function buildSessionResult(user: AuthUserLike, accessToken: string): Exclude<SessionResult, null> {
   const baseSession = {
@@ -281,7 +283,7 @@ export type SignInError =
   | { ok: false; code: "rate_limited" }
   | { ok: false; code: "unexpected_error"; reference?: string };
 
-export const signInFn = createServerFn()
+export const signInFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => SignInInput.parse(data))
   .handler(async ({ data }): Promise<SignInResult | SignInError> => {
     // Counted for EVERY attempt, before Supabase is asked anything, so a full
@@ -362,7 +364,7 @@ export type SignUpError =
   | { ok: false; code: "rate_limited" }
   | { ok: false; code: "unexpected_error"; reference?: string };
 
-export const signUpFn = createServerFn()
+export const signUpFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => SignUpInput.parse(data))
   .handler(async ({ data }): Promise<SignUpResult | SignUpError> => {
     const { allowSignUpAttempt } = await import("@/server/rate-limit/auth-limits");
@@ -456,7 +458,7 @@ async function auditSignOutBestEffort(userId: string): Promise<void> {
   }
 }
 
-export const signOutFn = createServerFn().handler(async (): Promise<void> => {
+export const signOutFn = createServerFn({ method: "POST" }).handler(async (): Promise<void> => {
   const { getCookie } = await import("@tanstack/react-start/server");
   const accessToken = getCookie(COOKIE_ACCESS_TOKEN);
 
@@ -562,7 +564,7 @@ export type VerifyEmailError =
   | { ok: false; code: "rate_limited" }
   | { ok: false; code: "unexpected_error"; reference?: string };
 
-export const verifyEmailFn = createServerFn()
+export const verifyEmailFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => VerifyEmailInput.parse(data))
   .handler(async ({ data }): Promise<VerifyEmailResult | VerifyEmailError> => {
     if (!isVerifyEmailOtpType(data.type)) return { ok: false, code: "invalid_token" };
@@ -692,7 +694,7 @@ const RequestPasswordResetInput = z.object({
 
 export type RequestPasswordResetResult = { ok: true } | { ok: false; code: "service_unavailable" };
 
-export const requestPasswordResetFn = createServerFn()
+export const requestPasswordResetFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => RequestPasswordResetInput.parse(data))
   .handler(async ({ data }): Promise<RequestPasswordResetResult> => {
     // Account-independent configuration failure: reported before any send.
@@ -735,7 +737,7 @@ const BeginPasswordRecoveryInput = z.union([
 export type BeginPasswordRecoveryResult =
   { ok: true } | { ok: false; code: "invalid_link" | "service_unavailable" | "rate_limited" };
 
-export const beginPasswordRecoveryFn = createServerFn()
+export const beginPasswordRecoveryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => BeginPasswordRecoveryInput.parse(data))
   .handler(async ({ data }): Promise<BeginPasswordRecoveryResult> => {
     // A new link attempt replaces any earlier recovery BEFORE the token is
@@ -827,7 +829,7 @@ const CompletePasswordRecoveryInput = z
 export type CompletePasswordRecoveryResult =
   { ok: true; otherSessionsRevoked: boolean } | { ok: false; code: PasswordUpdateIssue };
 
-export const completePasswordRecoveryFn = createServerFn()
+export const completePasswordRecoveryFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => CompletePasswordRecoveryInput.parse(data))
   .handler(async ({ data }): Promise<CompletePasswordRecoveryResult> => {
     const recovery = await readRecoveryCookies();
@@ -911,7 +913,7 @@ export type ResendVerificationResult =
       code: "rate_limited" | "service_unavailable" | "already_verified" | "email_required";
     };
 
-export const resendVerificationFn = createServerFn()
+export const resendVerificationFn = createServerFn({ method: "POST" })
   .validator((data: unknown) => ResendVerificationInput.parse(data))
   .handler(async ({ data }): Promise<ResendVerificationResult> => {
     // A signed-in member can only resend to their own address — the typed

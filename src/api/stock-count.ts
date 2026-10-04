@@ -116,7 +116,7 @@ export const previewStockCountFn = createServerFn()
 
 // ── recordStockCountFn ───────────────────────────────────────────────────────
 
-export const recordStockCountFn = createServerFn()
+export const recordStockCountFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({

@@ -34,7 +34,7 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
 
 // ── createParcelFn ────────────────────────────────────────────────────────────
 
-export const createParcelFn = createServerFn()
+export const createParcelFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
   )

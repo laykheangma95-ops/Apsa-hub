@@ -49,7 +49,7 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
 
 // ── recordMovementFn ─────────────────────────────────────────────────────────
 
-export const recordMovementFn = createServerFn()
+export const recordMovementFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
     z
       .object({
