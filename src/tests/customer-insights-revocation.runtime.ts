@@ -23,6 +23,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { QueryClient as QueryClientType } from "@tanstack/react-query";
 import * as actualRouter from "@tanstack/react-router";
 import { capabilityQueryKey, type CapabilityResult } from "@/lib/capabilities";
+import { fullTimestamp } from "@/lib/format";
 import i18n from "@/lib/i18n";
 
 const USER_A = "user-A";
@@ -53,6 +54,8 @@ const server = {
   hold: false,
   pending: [] as Pending[],
   insightCalls: 0,
+  /** When true, the capability endpoint errors — a failed refresh. */
+  capabilityRefreshFails: false,
   /** Bumped to prove a refetch returned NEW authoritative data. */
   delivered: 7,
 };
@@ -156,7 +159,10 @@ function insightsFor(organizationId: string, grants: string[]) {
 }
 
 mock.module("@/api/capabilities", () => ({
-  getActiveMemberCapabilitiesFn: async () => capabilityResult(),
+  getActiveMemberCapabilitiesFn: async () => {
+    if (server.capabilityRefreshFails) throw new Error("network: capability refresh failed");
+    return capabilityResult();
+  },
 }));
 
 mock.module("@/api/customers", () => ({
@@ -269,6 +275,7 @@ beforeEach(() => {
   server.pending = [];
   server.insightCalls = 0;
   server.delivered = 7;
+  server.capabilityRefreshFails = false;
 });
 
 afterEach(async () => {
@@ -290,7 +297,8 @@ function tree(queryClient: QueryClientType) {
         key: principal(identity.userId, identity.organizationId),
         userId: identity.userId,
         organizationId: identity.organizationId,
-        initialResult: capabilityResult(),
+        // A principal whose capabilities cannot be fetched has no seed either.
+        ...(server.capabilityRefreshFails ? {} : { initialResult: capabilityResult() }),
       },
       createElement(Customer360Screen),
     ),
@@ -316,6 +324,29 @@ function text(): string {
 }
 
 /** Change this principal's grants and let the REAL capability query observe it. */
+/** Make the capability endpoint fail (or recover) and let the REAL query observe it. */
+async function refreshCapabilities(queryClient: QueryClientType, fails: boolean) {
+  server.capabilityRefreshFails = fails;
+  await act(async () => {
+    await queryClient
+      .refetchQueries({
+        queryKey: capabilityQueryKey(identity.userId, identity.organizationId),
+      })
+      .catch(() => undefined);
+  });
+  await settle();
+}
+
+const ALL_GROUPS = ["base", "money", "payments", "delivery", "returns"] as const;
+
+/** No protected value, and no fabricated zero standing in for one. */
+function expectNothingProtected() {
+  expectGone(...ALL_GROUPS);
+  const t = text();
+  expect(t).not.toContain("$0.00");
+  expect(t).not.toContain("No purchase history yet");
+}
+
 async function setGrants(queryClient: QueryClientType, grants: string[]) {
   server.grants.set(principal(identity.userId, identity.organizationId), grants);
   await act(async () => {
@@ -339,7 +370,15 @@ const without = (...keys: string[]) => FULL.filter((k) => !keys.includes(k));
 
 /** Every protected value the fully-granted screen shows, by what gates it. */
 const SHOWN = {
-  base: ["Customer insights", "ORGA-TOP-PRODUCT", "ORGA-LAST-PRODUCT", '"41"'],
+  // Section + hero: Orders 41, Last purchase, First order.
+  base: [
+    "Customer insights",
+    "ORGA-TOP-PRODUCT",
+    "ORGA-LAST-PRODUCT",
+    '"41"',
+    fullTimestamp("2026-09-10T00:00:00.000Z"),
+    fullTimestamp("2026-01-01T00:00:00.000Z"),
+  ],
   money: ["$987.65", "$24.39", "$12.35", "Still to collect"],
   payments: ["Payment methods", "KHQR 5"],
   delivery: ["Deliveries", "Delivered 7"],
@@ -530,5 +569,93 @@ describe("restoring a grant refetches authoritative data", () => {
     await setGrants(queryClient, [...FULL]);
     expect(server.insightCalls).toBe(callsBefore + 1);
     expectShown("money");
+  });
+});
+
+describe("capability refresh FAILS — every insight fails closed", () => {
+  it("A/B/E: cached insights and insight-derived hero figures disappear; nothing is requested; the cache is evicted", async () => {
+    const queryClient = await cachedFullyGranted(); // previous grants: ALL permissions
+    server.hold = true;
+    await refreshCapabilities(queryClient, true);
+
+    expectNothingProtected();
+    // The screen itself is still there (the profile is not Customer Intelligence).
+    expect(text()).toContain("Sophea");
+    expect(server.pending).toHaveLength(0);
+    expect(insightEntries(queryClient)).toHaveLength(0);
+  });
+
+  for (const group of ALL_GROUPS) {
+    it(`C/D: a ${group} response requested while authorized, landing after the refresh failed, never renders`, async () => {
+      const queryClient = client();
+      server.hold = true;
+      await render(queryClient);
+      expect(server.pending).toHaveLength(1); // requested under confirmed FULL grants
+      const old = server.pending.shift()!;
+
+      const callsBefore = server.insightCalls;
+      await refreshCapabilities(queryClient, true);
+      // Unconfirmed grants issue no replacement request at all.
+      expect(server.insightCalls).toBe(callsBefore);
+      await act(async () => old.resolve(old.build()));
+      await settle();
+
+      expectGone(group);
+      expectNothingProtected();
+      // Not readable through the active cache either.
+      expect(insightEntries(queryClient)).toHaveLength(0);
+
+      // Even if anything else were still held, answering it shows nothing.
+      await releaseHeld();
+      expectNothingProtected();
+      expect(insightEntries(queryClient)).toHaveLength(0);
+    });
+  }
+
+  it("F: when the refresh succeeds again, stale values do NOT return; a fresh request answers", async () => {
+    const queryClient = await cachedFullyGranted();
+    await refreshCapabilities(queryClient, true);
+    expectNothingProtected();
+    const callsBefore = server.insightCalls;
+
+    server.delivered = 8; // authoritative data moved meanwhile
+    server.hold = true;
+    await refreshCapabilities(queryClient, false);
+
+    // Confirmed again, but nothing from before the failure is reused.
+    expect(server.insightCalls).toBe(callsBefore + 1);
+    expectNothingProtected();
+    expect(text()).not.toContain("Delivered 7");
+
+    const fresh = server.pending.shift()!;
+    await act(async () => fresh.resolve(fresh.build()));
+    await settle();
+    expectShown("base", "money", "payments", "returns");
+    expect(text()).toContain("Delivered 8");
+    expect(text()).not.toContain("Delivered 7");
+  });
+
+  it("G: switching user/organization while the refresh is failing shows no previous identity's data", async () => {
+    const queryClient = await cachedFullyGranted();
+    await refreshCapabilities(queryClient, true);
+
+    server.hold = true;
+    identity.userId = USER_B;
+    identity.organizationId = ORG_B;
+    await render(queryClient);
+    // Org B's capabilities cannot be confirmed either: nothing at all.
+    expect(text()).not.toContain("ORGA-");
+    expect(text()).not.toContain("ORGB-");
+    expectNothingProtected();
+    expect(server.pending).toHaveLength(0);
+
+    // Org B's capabilities recover: only Org B's fresh answer renders.
+    await refreshCapabilities(queryClient, false);
+    expect(server.pending).toHaveLength(1);
+    const b = server.pending.shift()!;
+    await act(async () => b.resolve(b.build()));
+    await settle();
+    expect(text()).toContain("ORGB-TOP-PRODUCT");
+    expect(text()).not.toContain("ORGA-");
   });
 });

@@ -3,8 +3,10 @@
  *
  * The one read path Customer Detail uses. Three layers, in order:
  *
- *   1. Current grants (customerInsightGrants) — from the live capability view,
- *      never from booleans or section statuses inside a cached response.
+ *   1. Current grants (customerInsightGrants) — from the live capability view
+ *      and only while it is CONFIRMED (canSensitive): a failed capability
+ *      refresh turns every grant off. Never from booleans or section statuses
+ *      inside a cached response.
  *   2. Cache identity — the query key carries the grant set it was requested
  *      under, and every entry under any other grant set is cancelled and
  *      removed (enforceCustomerInsightsGrants) before this render reads. A late

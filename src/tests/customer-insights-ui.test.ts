@@ -298,7 +298,7 @@ describe("display authority comes from the CURRENT grants", () => {
     }
   });
 
-  it("money refuses a stale snapshot even while it still lists the grants", () => {
+  it("a snapshot whose latest refresh FAILED grants nothing — base and every section included", () => {
     const stale = createCapabilityView({
       result: {
         status: "active",
@@ -312,9 +312,26 @@ describe("display authority comes from the CURRENT grants", () => {
       expectedUserId: "u",
       expectedOrganizationId: "o",
     });
-    const grants = customerInsightGrants(stale);
-    expect(grants.base).toBe(true);
-    expect(grants.money).toBe(false);
+    // can() still says yes for navigation; Customer Intelligence must not.
+    expect(stale.can("customers.read")).toBe(true);
+    expect(customerInsightGrants(stale)).toEqual({
+      base: false,
+      money: false,
+      payments: false,
+      delivery: false,
+      returns: false,
+    });
+  });
+
+  it("a snapshot that has not resolved yet grants nothing", () => {
+    const pending = createCapabilityView({
+      result: undefined,
+      isPending: true,
+      isError: false,
+      expectedUserId: "u",
+      expectedOrganizationId: "o",
+    });
+    expect(customerInsightGrants(pending).base).toBe(false);
   });
 
   it("a cached payload's own 'available' sections are withheld when the grant is gone", () => {
