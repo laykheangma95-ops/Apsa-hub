@@ -1191,11 +1191,27 @@ describe("H. Customer 360 order history is honest", () => {
      * order list is the same false claim in a different place — and the values
      * are not derivable here either, because the history is capped at one
      * page. So they are withheld, not guessed.
+     *
+     * Since Customer Intelligence (migration 060) the real figures come from
+     * the server's derived purchase profile; the placeholders are still only
+     * ever read on the mock (non-UUID) branch, and "—" stands in until the
+     * server has answered.
      */
     const src = source();
-    expect(src).toContain("const metricsAuthoritative = !isRealCustomer");
-    expect(src).toContain("metricsAuthoritative ? customer.orderCount");
-    expect(src).toContain("!metricsAuthoritative");
+    expect(src).toContain("getCustomerInsights(id)");
+    expect(src).toMatch(
+      /const orderCountValue = !isRealCustomer\s+\? customer\.orderCount\s+: insights\s+\? insights\.activity\.orderCount\s+: "—";/,
+    );
+    // lifetimeSpend is read only inside the mock branch of renderMoney.
+    const render = src.slice(
+      src.indexOf("const renderMoney"),
+      src.indexOf("const orderCountValue"),
+    );
+    const mockBranch = render.slice(0, render.indexOf("if (!sensitiveVisible || money?.kind"));
+    expect(mockBranch).toContain("if (!isRealCustomer) {");
+    expect(mockBranch).toContain("customer.lifetimeSpend");
+    expect(render.slice(mockBranch.length)).not.toContain("customer.lifetimeSpend");
+    expect(src.match(/customer\.lifetimeSpend/g)).toHaveLength(2); // mock average + mock spend only
     // No client-side reconstruction of a lifetime total from the loaded page.
     expect(src).not.toContain("orders.reduce(");
   });

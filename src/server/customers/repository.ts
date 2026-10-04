@@ -21,6 +21,7 @@ import type {
   CustomerNoteRow,
   CustomerAddressRow,
   CustomerTagRow,
+  PurchaseProfileRow,
 } from "./types";
 
 // Typed alias for new tables not yet in the generated schema.
@@ -435,4 +436,46 @@ export async function removeTagFromCustomer(customerId: string, tagId: string): 
     .eq("tag_id", tagId);
 
   if (error) throw new Error(`removeTagFromCustomer: ${(error as { message: string }).message}`);
+}
+
+// ── Customer Intelligence (migration 060) ─────────────────────────────────────
+
+export const CUSTOMER_PURCHASE_PROFILE_RPC = "customer_purchase_profile_v1";
+
+/** Which sections the database may read. Decided by the service from the caller's grants. */
+export interface PurchaseProfileSections {
+  money: boolean;
+  payments: boolean;
+  delivery: boolean;
+  returns: boolean;
+}
+
+/**
+ * One customer's derived purchase profile, in one round trip. The organization
+ * is a parameter of the SQL itself — every relation the function reads is
+ * filtered on it — and a customer outside it comes back `customer_found:false`.
+ * Sections whose flag is false are not read by the database at all.
+ */
+export async function getCustomerPurchaseProfile(
+  organizationId: string,
+  customerId: string,
+  sections: PurchaseProfileSections,
+  topProducts: number,
+): Promise<PurchaseProfileRow> {
+  const { data, error } = await db.rpc(CUSTOMER_PURCHASE_PROFILE_RPC, {
+    p_organization_id: organizationId,
+    p_customer_id: customerId,
+    p_include_money: sections.money,
+    p_include_payments: sections.payments,
+    p_include_delivery: sections.delivery,
+    p_include_returns: sections.returns,
+    p_top_products: topProducts,
+  });
+
+  if (error || !data) {
+    throw new Error(
+      `getCustomerPurchaseProfile: ${(error as { message?: string } | null)?.message ?? "no data"}`,
+    );
+  }
+  return data as PurchaseProfileRow;
 }

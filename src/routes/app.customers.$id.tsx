@@ -22,10 +22,21 @@ import {
 } from "@/design-system";
 
 import { OperationalState } from "@/components/common/OperationalState";
+import {
+  CustomerInsightsSection,
+  MoneyStack,
+} from "@/components/customers/CustomerInsightsSection";
 import { CustomerOrderStatuses } from "@/components/customers/CustomerOrderStatuses";
 import { EditCustomerSheet } from "@/components/customers/EditCustomerSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { addCustomerNote, getCustomer360, getCustomerOrders, isProductionId } from "@/lib/api";
+import {
+  addCustomerNote,
+  getCustomer360,
+  getCustomerInsights,
+  getCustomerOrders,
+  isProductionId,
+} from "@/lib/api";
+import { insightMoney, moneyLines, type InsightMoney } from "@/lib/customer-insights-view";
 import { customerKeys, customerSensitiveVisible } from "@/lib/customers-query";
 import { classifyCustomerError } from "@/lib/customers-view";
 import { fullTimestamp, initials, localName } from "@/lib/format";
@@ -122,6 +133,18 @@ function Customer360Screen() {
   const ordersQuery = useQuery({
     queryKey: customerKeys.orders(userId, routeOrganizationId, id),
     queryFn: () => getCustomerOrders(id),
+    enabled: isRealCustomer && canReadOrders,
+  });
+
+  /*
+   * Customer Intelligence (migration 060): the server derives this customer's
+   * order count, spend per currency, products, delivery and return history
+   * from the authoritative records. Same orders.read gate as the history
+   * above; each further section is gated server-side on its own grant.
+   */
+  const insightsQuery = useQuery({
+    queryKey: customerKeys.insights(userId, routeOrganizationId, id),
+    queryFn: () => getCustomerInsights(id),
     enabled: isRealCustomer && canReadOrders,
   });
 
@@ -235,23 +258,46 @@ function Customer360Screen() {
   const ordersUnavailable = isRealCustomer && !canReadOrders;
 
   /*
-   * `orderCount` and `lifetimeSpend` are hardcoded to zero by the server for
-   * every production customer, alongside the structural `orders: []`. They are
-   * placeholders, not measurements, so this screen must not print them as
-   * figures — "Orders 0" and "Spend $0.00" above a non-empty order list is the
-   * same false claim in a different place.
-   *
-   * They are also not derivable here: the history above is capped at
-   * CUSTOMER_ORDER_HISTORY_LIMIT rows, so counting or summing it would invent
-   * a lifetime total out of one page. Deriving a wrong number is not an
-   * improvement on withholding one, so these show an explicit "—" until the
-   * server computes them.
+   * `orderCount` and `lifetimeSpend` on the profile are still hardcoded to zero
+   * by the server for every production customer. They are placeholders, not
+   * measurements, and are never printed for a real customer. The real figures
+   * come from the Customer Intelligence read above, which the server derives
+   * from every committed order (not from the capped history page), per
+   * currency. Until it has answered — or when it cannot — these show "—".
    */
-  const metricsAuthoritative = !isRealCustomer;
+  const insights = isRealCustomer ? insightsQuery.data : undefined;
+  const money: InsightMoney | null = insights ? insightMoney(insights, sensitiveVisible) : null;
   const average =
     customer.orderCount > 0
       ? usd(Math.round(customer.lifetimeSpend.amount / customer.orderCount))
       : usd(0);
+
+  const renderMoney = (field: "netPaid" | "averageOrder", block = false) => {
+    if (!isRealCustomer) {
+      if (!sensitiveVisible) return t("customer360.hidden");
+      return formatMoney(field === "netPaid" ? customer.lifetimeSpend : average);
+    }
+    if (!sensitiveVisible || money?.kind === "hidden") return t("customer360.hidden");
+    if (money?.kind !== "values" || money.byCurrency.length === 0) return "—";
+    const lines = moneyLines(money.byCurrency, field);
+    return block ? (
+      lines.map((m) => (
+        <span key={m.currency} className="block">
+          {formatMoney(m)}
+        </span>
+      ))
+    ) : (
+      <MoneyStack lines={lines} />
+    );
+  };
+  const orderCountValue = !isRealCustomer
+    ? customer.orderCount
+    : insights
+      ? insights.activity.orderCount
+      : "—";
+  const lastPurchaseAt = isRealCustomer
+    ? (insights?.activity.lastOrderAt ?? undefined)
+    : customer.lastPurchaseAt;
 
   const tabSegments: Segment<Tab>[] = TABS.map((key) => ({
     value: key,
@@ -325,18 +371,12 @@ function Customer360Screen() {
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.spend")}</dt>
               <dd className="text-h2 tnum truncate text-text-primary">
-                {!metricsAuthoritative
-                  ? "—"
-                  : sensitiveVisible
-                    ? formatMoney(customer.lifetimeSpend)
-                    : t("customer360.hidden")}
+                {renderMoney("netPaid", true)}
               </dd>
             </div>
             <div className="min-w-0">
               <dt className="text-caption text-text-muted">{t("customer.orders")}</dt>
-              <dd className="text-h2 tnum truncate text-text-primary">
-                {metricsAuthoritative ? customer.orderCount : "—"}
-              </dd>
+              <dd className="text-h2 tnum truncate text-text-primary">{orderCountValue}</dd>
             </div>
           </dl>
         </section>
@@ -354,17 +394,11 @@ function Customer360Screen() {
             <SectionRows>
               <SectionRow
                 label={t("customer360.averageOrder")}
-                value={
-                  !metricsAuthoritative
-                    ? "—"
-                    : sensitiveVisible
-                      ? formatMoney(average)
-                      : t("customer360.hidden")
-                }
+                value={renderMoney("averageOrder")}
               />
               <SectionRow
                 label={t("customer.lastPurchase")}
-                value={customer.lastPurchaseAt ? fullTimestamp(customer.lastPurchaseAt) : "—"}
+                value={lastPurchaseAt ? fullTimestamp(lastPurchaseAt) : "—"}
               />
               <SectionRow
                 label={t("delivery.address")}
@@ -397,6 +431,27 @@ function Customer360Screen() {
               </div>
             ) : null}
           </Section>
+        ) : null}
+
+        {/*
+         * Customer insights: only for a real customer and a member who may read
+         * orders. Loading shows nothing extra (the figures above read "—"); a
+         * failure says so, and never reads as "no purchases".
+         */}
+        {tab === "overview" && isRealCustomer && canReadOrders ? (
+          insightsQuery.isError ? (
+            <OperationalState
+              tone="danger"
+              title={t("customerInsights.loadError")}
+              body={t("customerInsights.loadErrorBody")}
+              onRetry={() => void insightsQuery.refetch()}
+            />
+          ) : insightsQuery.data ? (
+            <CustomerInsightsSection
+              insights={insightsQuery.data}
+              sensitiveVisible={sensitiveVisible}
+            />
+          ) : null
         ) : null}
 
         {/*

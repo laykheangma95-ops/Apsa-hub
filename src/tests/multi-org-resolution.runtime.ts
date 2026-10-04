@@ -24,6 +24,7 @@ const USER = "11111111-1111-4111-8111-111111111111";
 const ORG_A = "aaaaaaaa-0000-4000-8000-00000000000a"; // joined first — OWNER
 const ORG_B = "bbbbbbbb-0000-4000-8000-00000000000b"; // joined later — CASHIER
 const ORG_C = "cccccccc-0000-4000-8000-00000000000c"; // joined last — suspended
+const CUSTOMER = "dddddddd-0000-4000-8000-00000000000d";
 
 interface Row {
   user_id: string;
@@ -171,6 +172,9 @@ mock.module("@/server/customers/service", () => ({
   listCustomers: async (ctx: Ctx) => ({ organizationId: ctx.organizationId }),
   searchCustomers: async (ctx: Ctx) => ({ organizationId: ctx.organizationId }),
 }));
+mock.module("@/server/customers/insights", () => ({
+  getCustomerInsights: async (ctx: Ctx) => ({ organizationId: ctx.organizationId }),
+}));
 
 process.env["VITE_SUPABASE_URL"] = "https://apsa.test.supabase.co";
 process.env["VITE_SUPABASE_ANON_KEY"] = "anon-test-key";
@@ -180,7 +184,8 @@ const { getActiveMemberCapabilitiesFn } = await import("@/api/capabilities");
 const { getHomeSummaryFn } = await import("@/api/home");
 const { getBusinessSummaryFn, getTopSellingItemsFn, getCustomerSummaryFn } =
   await import("@/api/analytics");
-const { listCustomersFn, searchCustomersFn } = await import("@/api/customers");
+const { listCustomersFn, searchCustomersFn, getCustomerInsightsFn } =
+  await import("@/api/customers");
 const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
 const { pickCanonicalActiveMembership } = await import("@/lib/active-organization");
 const { createCapabilityView, capabilityQueryKey } = await import("@/lib/capabilities");
@@ -207,6 +212,7 @@ async function resolveEveryPath() {
   const cohort = (await getCustomerSummaryFn(range)) as unknown as Ctx;
   const customers = (await listCustomersFn({ data: {} })) as unknown as Ctx;
   const search = (await searchCustomersFn({ data: { query: "so" } })) as unknown as Ctx;
+  const insights = (await getCustomerInsightsFn({ data: { id: CUSTOMER } })) as unknown as Ctx;
   const resolver = await resolveActiveOrganizationId(USER);
 
   return {
@@ -218,6 +224,7 @@ async function resolveEveryPath() {
     analyticsCustomers: cohort.organizationId,
     customersList: customers.organizationId,
     customersSearch: search.organizationId,
+    customerInsights: insights.organizationId,
     resolver,
     capabilitiesSnapshot: capabilities,
   };
@@ -290,6 +297,28 @@ describe("canonical organization — one pick across every principal-scoped path
     expect(capabilitiesSnapshot.role).toBe("CASHIER");
     expect(capabilitiesSnapshot.permissions).not.toContain("customers.view_sensitive");
     expect(capabilitiesSnapshot.permissions).not.toContain("analytics.read");
+  });
+});
+
+describe("customer insights — the organization is never client input", () => {
+  it("an organizationId smuggled into the payload is ignored; the membership decides", async () => {
+    membershipTable = [
+      row(ORG_A, "2025-01-01T00:00:00.000Z"),
+      row(ORG_B, "2026-03-01T00:00:00.000Z"),
+    ];
+    forRequestCalls.length = 0;
+    const result = (await getCustomerInsightsFn({
+      data: { id: CUSTOMER, organizationId: ORG_A, organization_id: ORG_A },
+    })) as unknown as Ctx;
+    expect(result.organizationId).toBe(ORG_B);
+    expect(forRequestCalls).toEqual([ORG_B]);
+  });
+
+  it("rejects a non-UUID customer id before any organization is resolved", async () => {
+    membershipTable = [row(ORG_B, "2026-03-01T00:00:00.000Z")];
+    forRequestCalls.length = 0;
+    await expect(getCustomerInsightsFn({ data: { id: "cus-1" } })).rejects.toThrow();
+    expect(forRequestCalls).toEqual([]);
   });
 });
 

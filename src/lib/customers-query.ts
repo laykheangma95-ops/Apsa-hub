@@ -58,6 +58,14 @@ export const customerKeys = {
   orders: (userId: string, organizationId: string, customerId: string) =>
     [CUSTOMERS_QUERY_ROOT, userId, organizationId, "detail", customerId, "orders"] as const,
   /**
+   * One customer's derived purchase profile (Customer Intelligence, migration
+   * 060). Under that customer's `detail` key on purpose: it carries lifetime
+   * spend, so the same principal purge and `customers.view_sensitive`
+   * eviction that remove the profile remove it too.
+   */
+  insights: (userId: string, organizationId: string, customerId: string) =>
+    [CUSTOMERS_QUERY_ROOT, userId, organizationId, "detail", customerId, "insights"] as const,
+  /**
    * The lightweight customer-picker list (`listRealCustomers` ->
    * `OrderCustomerOption[]`), as the manual order-create sheet loads it.
    *
