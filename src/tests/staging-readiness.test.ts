@@ -411,11 +411,33 @@ describe("classifyRlsObservation (H1)", () => {
   });
 
   it("PASSES on an explicit authorization denial regardless of emptiness", () => {
-    for (const code of ["42501", "PGRST301", "PGRST302"]) {
+    for (const code of ["PGRST301", "PGRST302"]) {
       const r = classifyRlsObservation({ errorCode: code, anonRowCount: 0, adminRowCount: 0 });
       expect(r.verdict).toBe("PASS");
       expect(r.reason).toBe("authorization_denial");
     }
+  });
+
+  it("PASSES a 42501 as a table-privilege denial — never as RLS proof (migration 061)", () => {
+    for (const adminRowCount of [0, 7, null]) {
+      const r = classifyRlsObservation({ errorCode: "42501", anonRowCount: 0, adminRowCount });
+      expect(r).toEqual({ verdict: "PASS", reason: "privilege_denial" });
+    }
+  });
+
+  it("verify-staging reports privilege denials apart from RLS-proven and isolation-proven totals", () => {
+    const src = fs.readFileSync(path.join(ROOT, "scripts/verify-staging.ts"), "utf8");
+    // Both callers branch on privilege_denial BEFORE the generic PASS branch.
+    const branches = [...src.matchAll(/verdict\.reason === "privilege_denial"/g)].map(
+      (m) => m.index!,
+    );
+    expect(branches).toHaveLength(2);
+    const genericPass = [
+      ...src.matchAll(/verdict\.verdict === "PASS"\) \{\r?\n\s+(rlsProven|proven)\+\+/g),
+    ].map((m) => m.index!);
+    expect(genericPass).toHaveLength(2);
+    expect(branches[0]!).toBeLessThan(genericPass[0]!);
+    expect(branches[1]!).toBeLessThan(genericPass[1]!);
   });
 
   it("is INCONCLUSIVE when the refusal is not an authorization refusal", () => {

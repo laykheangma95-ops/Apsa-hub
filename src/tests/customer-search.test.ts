@@ -759,8 +759,9 @@ describe("No migration was required, and the schema says why", () => {
     // 057–058 (atomic APSA Parcel on confirm + parcel backfill — parcel/shipment
     // phase), and 059 (APSA Parcel recovery under the order lock — parcel
     // post-merge repair), and 060 (Customer Intelligence purchase profile — a
-    // read-only derived function, customer intelligence phase); anything from
-    // 061 up would be new.
-    expect(migrations.filter((f) => /^06[1-9]|^0[7-9]\d/.test(f))).toEqual([]);
+    // read-only derived function, customer intelligence phase), and 061 (browser
+    // table authority hardening — a GRANT/REVOKE-only security fix); anything
+    // from 062 up would be new.
+    expect(migrations.filter((f) => /^06[2-9]|^0[7-9]\d/.test(f))).toEqual([]);
   });
 });

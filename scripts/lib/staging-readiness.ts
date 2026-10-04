@@ -648,11 +648,19 @@ export interface VerdictResult {
  * INCONCLUSIVE and must never be counted toward an RLS-proven total. Only a
  * table the service role can see rows in, which the anonymous client reads zero
  * of, proves that RLS is doing the work.
+ *
+ * A 42501 is a PASS (the read was refused) but NOT an RLS observation: since
+ * migration 061 browser roles hold no table privilege, so PostgreSQL refuses
+ * the read before RLS is ever evaluated. It carries its own reason,
+ * `privilege_denial`, so callers never report it as RLS proof.
  */
 export function classifyRlsObservation(observation: RlsObservation): VerdictResult {
   const { errorCode, anonRowCount, adminRowCount } = observation;
 
   if (typeof errorCode === "string" && errorCode.length > 0) {
+    if (errorCode === "42501") {
+      return { verdict: "PASS", reason: "privilege_denial" };
+    }
     if (isAuthorizationDenial(errorCode)) {
       return { verdict: "PASS", reason: "authorization_denial" };
     }

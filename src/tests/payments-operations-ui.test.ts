@@ -926,8 +926,9 @@ describe("production boundary", () => {
       // 055–056 (damage movement type + customer returns) belong to the returns phase;
       // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase;
       // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair;
-      // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase.
-      return Number.isFinite(prefix) && prefix > 60;
+      // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase;
+      // 061 (browser table authority hardening) is an unrelated security fix.
+      return Number.isFinite(prefix) && prefix > 61;
     });
     expect(beyond047).toEqual([]);
   });

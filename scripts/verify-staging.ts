@@ -321,6 +321,7 @@ if (absentTables.length === 0 && presentTables.length === expectedTables.length)
 section("2. Row Level Security — anonymous client");
 
 let rlsProven = 0;
+let rlsPrivilegeDenied = 0;
 let rlsEmpty = 0;
 let rlsUnclear = 0;
 
@@ -339,7 +340,9 @@ for (const table of presentTables) {
     adminRowCount: adminCount,
   });
 
-  if (verdict.verdict === "PASS") {
+  if (verdict.reason === "privilege_denial") {
+    rlsPrivilegeDenied++;
+  } else if (verdict.verdict === "PASS") {
     rlsProven++;
   } else if (verdict.verdict === "FAIL") {
     fail(
@@ -370,6 +373,14 @@ if (presentTables.length === 0) {
         `sees rows there and the anonymous client saw none (or was refused by authorization).`,
     );
   }
+  if (rlsPrivilegeDenied > 0) {
+    // 42501 is a refusal by TABLE PRIVILEGE (the migration 061 boundary): the
+    // read never reached RLS, so it is reported apart from RLS proof.
+    pass(
+      `Anonymous read refused by table privilege (42501) on ${rlsPrivilegeDenied} of ` +
+        `${presentTables.length} table(s) — RLS was not reached on these, so they are not counted as RLS-proven.`,
+    );
+  }
   if (rlsEmpty > 0) {
     unclear(
       `${rlsEmpty} of ${presentTables.length} table(s) are EMPTY on staging. An anonymous read of an ` +
@@ -378,7 +389,7 @@ if (presentTables.length === 0) {
         `and re-run; this tool will not insert canary rows into a hosted project.`,
     );
   }
-  if (rlsProven === 0 && rlsEmpty === 0 && rlsUnclear === 0) {
+  if (rlsProven === 0 && rlsPrivilegeDenied === 0 && rlsEmpty === 0 && rlsUnclear === 0) {
     unclear("No table produced a usable RLS observation.");
   }
 }
@@ -572,6 +583,7 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
     let leaks = 0;
     let proven = 0;
     let noOrgBRows = 0;
+    let privilegeDenied = 0;
     let checked = 0;
     for (const table of tenantScoped) {
       checked++;
@@ -604,6 +616,8 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         fail(
           `TENANT ISOLATION BREACH: Org A member read ${(data ?? []).length} row(s) from ${table} belonging to Org B.`,
         );
+      } else if (verdict.reason === "privilege_denial") {
+        privilegeDenied++;
       } else if (verdict.verdict === "PASS") {
         proven++;
       } else if (verdict.reason === "table_empty") {
@@ -626,6 +640,12 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         pass(
           `Tenant isolation positively proven on ${proven} of ${checked} tenant-scoped table(s): ` +
             `Org B holds rows there and the Org A member read none of them.`,
+        );
+      }
+      if (leaks === 0 && privilegeDenied > 0) {
+        pass(
+          `Org A member refused by table privilege (42501) on ${privilegeDenied} of ${checked} ` +
+            `tenant-scoped table(s) — no direct table access at all; RLS was not reached on these.`,
         );
       }
       if (noOrgBRows > 0) {

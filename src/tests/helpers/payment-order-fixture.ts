@@ -25,6 +25,9 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
     // function body is validated when it is created — so it, too, waits for
     // applyAuthority() when 040 is skipped.
     if (skipAuthority && name.startsWith("060_")) continue;
+    // 061 revokes browser authority on every relation by name, including 040's
+    // order_payment_totals view — so it waits for applyAuthority() as well.
+    if (skipAuthority && name.startsWith("061_")) continue;
     try {
       await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
     } catch (error) {
@@ -123,6 +126,9 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
         readFileSync("supabase/migrations/043_payment_referenceless_duplicate.sql", "utf8"),
       );
       await db.exec(readFileSync("supabase/migrations/060_customer_purchase_profile.sql", "utf8"));
+      await db.exec(
+        readFileSync("supabase/migrations/061_browser_table_authority_hardening.sql", "utf8"),
+      );
     },
   };
 }
