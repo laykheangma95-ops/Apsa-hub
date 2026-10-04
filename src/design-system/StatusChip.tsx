@@ -3,6 +3,7 @@ import {
   Ban,
   Check,
   CheckCheck,
+  CircleHelp,
   Clock,
   CornerUpLeft,
   Mail,
@@ -74,8 +75,24 @@ const MAP: Record<StatusKey, { tone: Tone; icon: LucideIcon }> = {
   reversed: { tone: "neutral", icon: Undo2 },
 };
 
+/*
+ * Statuses often arrive from the server as plain strings and are cast to
+ * StatusKey at the call site. A value outside MAP (a new server status, a
+ * domain this chip does not know) must not take the whole screen down: it
+ * renders a neutral "unknown status" chip instead of throwing on an undefined
+ * MAP entry.
+ */
+const UNKNOWN: { tone: Tone; icon: LucideIcon } = { tone: "neutral", icon: CircleHelp };
+
+function lookup(status: string | null) {
+  return status !== null && Object.prototype.hasOwnProperty.call(MAP, status)
+    ? MAP[status as StatusKey]
+    : null;
+}
+
 interface StatusChipProps {
-  status: StatusKey;
+  /** null — a status the caller could not place in its domain — renders "unknown". */
+  status: StatusKey | null;
   className?: string;
   size?: "sm" | "md";
 }
@@ -83,7 +100,8 @@ interface StatusChipProps {
 /** Status is never colour alone — every chip carries an icon and a label. */
 export function StatusChip({ status, className, size = "sm" }: StatusChipProps) {
   const { t } = useTranslation();
-  const { tone, icon: Icon } = MAP[status];
+  const known = lookup(status);
+  const { tone, icon: Icon } = known ?? UNKNOWN;
 
   return (
     <span
@@ -95,7 +113,7 @@ export function StatusChip({ status, className, size = "sm" }: StatusChipProps) 
       )}
     >
       <Icon className="size-3.5 shrink-0" aria-hidden />
-      <span className="chip-text">{t(`status.${status}`)}</span>
+      <span className="chip-text">{known ? t(`status.${status}`) : t("status.unknown")}</span>
     </span>
   );
 }
