@@ -1,9 +1,10 @@
 -- 061_browser_table_authority_hardening.sql
 --
--- Browser / Database Authority Hardening. Browser roles hold NO direct
--- authority over any APSA relation in `public`. Every business read and write
--- goes through the APSA server (service_role), and the only user-token entry
--- points are the two reviewed SECURITY DEFINER RPCs below.
+-- Browser / Database Authority Hardening. Browser roles hold NO authority over
+-- any APSA relation in `public` — not directly, not through PUBLIC, and not
+-- through membership in another role. Every business read and write goes
+-- through the APSA server (service_role), and the only user-token entry points
+-- are the two reviewed SECURITY DEFINER RPCs below.
 --
 -- WHO IS WHO
 --   PUBLIC         every role, including any role created later. No table
@@ -14,12 +15,19 @@
 --                  EXECUTE on accept_invitation(text) and
 --                  create_organization_for_founder(text,text,text,text,text)
 --                  (migrations 041 and 009) is deliberately kept.
---   service_role   the APSA server. UNCHANGED: this file never names it in a
---                  REVOKE, and section 4 aborts the migration if its effective
---                  table privileges differ in any way from before.
+--   browser-reachable roles
+--                  anon, authenticated, and every role either is a member of,
+--                  at any depth (pg_auth_members, followed from member to
+--                  role). Any membership edge counts — whatever its INHERIT or
+--                  SET option — because a member that cannot inherit a role's
+--                  privileges may still SET ROLE to it. Conservative on purpose.
+--   service_role   the APSA server. This file never names it in a REVOKE, and
+--                  step 5 aborts the migration if it would lose any working
+--                  table, column or sequence authority.
 --   postgres       owner of every APSA relation and the role APSA migrations
---                  run as. UNCHANGED (an owner's privileges are not affected by
---                  revoking from other grantees).
+--                  run as (`supabase db push`; docs/RELEASE_CHECKLIST.md).
+--                  UNCHANGED (revoking from other grantees never touches an
+--                  owner's privileges).
 --
 -- WHY
 --   * Supabase's older project default granted ALL on every new `public` table
@@ -35,6 +43,9 @@
 --     the grants therefore changes no APSA behavior; it removes a bypass.
 --
 -- WHAT THIS MIGRATION DOES
+--   0. Records the browser-reachable roles and service_role's effective
+--      authority (table SELECT/INSERT/UPDATE/DELETE, column SELECT/INSERT/
+--      UPDATE, sequence USAGE/SELECT/UPDATE) before anything changes.
 --   1. REVOKE ALL on each of the 44 relations that migrations 001–060 create
 --      in `public` (41 tables, 3 views; there are no sequences, materialized
 --      views or foreign tables) FROM PUBLIC, anon, authenticated. The list is
@@ -47,26 +58,40 @@
 --      therefore starts with no browser authority at all; service_role's own
 --      default (if the project has one) is untouched, so later migrations keep
 --      stating their service_role grants explicitly, as 037/045/048 do.
---   3. Asserts the result: no relation in `public` holds any table- or
---      column-level privilege for PUBLIC, anon or authenticated, and
---      postgres's default ACLs grant them nothing on tables or sequences. A
---      relation this file did not list but that still carries a browser grant
---      (environment drift) ABORTS the migration with its name — it is never
---      silently left open, and never silently revoked without review.
---   4. Asserts service_role keeps every SELECT / INSERT / UPDATE / DELETE it
---      effectively held on a `public` relation before step 1 — so DML the
---      server held only through PUBLIC, or through membership in anon /
---      authenticated, aborts the migration instead of vanishing. The one
---      exception is the payment ledger's INSERT / UPDATE / DELETE: migration
---      040 revoked those from service_role on purpose, so if an environment
---      handed them back through PUBLIC, removing them restores 040. TRUNCATE,
---      REFERENCES and TRIGGER are not server authority (048 grants none).
+--   3. Creator boundary: aborts unless it runs as postgres and postgres owns
+--      every relation in `public` — otherwise some other role is creating
+--      APSA relations, and step 2 hardened the wrong role's defaults.
+--   4. Asserts EFFECTIVE browser authority is gone: for every browser-
+--      reachable role, has_table_privilege / has_column_privilege /
+--      has_sequence_privilege (which include PUBLIC and inheritance) must be
+--      false for every privilege the server knows, on every relation in
+--      `public`, listed or not; and no postgres default ACL (global or public)
+--      may grant tables/sequences to PUBLIC or to a browser-reachable role.
+--      061 removes only DIRECT grants to PUBLIC/anon/authenticated. Authority
+--      that remains — on an unlisted relation, or through another role's
+--      grant or membership — ABORTS the migration with the role, privilege and
+--      relation named. 061 never revokes from an arbitrary role and never
+--      pretends such authority was repaired.
+--   5. Asserts service_role keeps every piece of authority recorded in step 0
+--      — so authority the server held only through PUBLIC, column grants or
+--      membership in a browser role aborts the migration instead of
+--      vanishing. The one exception is the payment ledger's INSERT / UPDATE /
+--      DELETE: migration 040 revoked those from service_role on purpose, so if
+--      an environment handed them back through PUBLIC, removing them restores
+--      040. TRUNCATE, REFERENCES and TRIGGER are not server authority (048
+--      grants none).
+--   Default ACLs of OTHER creator roles (e.g. Supabase's supabase_admin) that
+--   reach browser roles are reported with RAISE WARNING, not revoked: postgres
+--   cannot alter them, and step 3 guarantees no APSA relation is created by
+--   such a role. They are part of the production preflight.
 --
 -- POSTGRESQL VERSIONS
---   Only REVOKE ALL is used — never a privilege keyword. On PostgreSQL 15
---   (no MAINTAIN) and 17+ (MAINTAIN) alike, ALL means every table privilege
---   that server knows. Verified on PostgreSQL 17 (PGlite) by the runtime test.
---   aclexplode() and has_table_privilege() exist in every supported version.
+--   Only REVOKE ALL is used — never a privilege keyword in DDL. On PostgreSQL
+--   15 (no MAINTAIN) and 17+ (MAINTAIN) alike, ALL means every table privilege
+--   that server knows. The step-4 check asks about 'MAINTAIN' only when
+--   server_version_num >= 170000. Verified on PostgreSQL 17 (PGlite) by the
+--   runtime test; aclexplode() and the has_*_privilege() functions with oid
+--   arguments exist in every supported version.
 --
 -- NOT CHANGED, on purpose
 --   * Function EXECUTE. Table privileges and EXECUTE are independent. Every
@@ -79,9 +104,8 @@
 --   * RLS. No policy is created, changed or dropped; RLS stays enabled as
 --     defense in depth.
 --   * Schema USAGE on public (PostgREST needs it to resolve the two RPCs).
---   * Default privileges of roles other than postgres (e.g. supabase_admin):
---     APSA migrations do not create objects as those roles, and postgres cannot
---     alter them.
+--   * Role memberships and grants to roles other than PUBLIC/anon/
+--     authenticated: reported (step 4 aborts), never altered.
 --
 -- ROLLBACK
 --   There is deliberately no generic rollback. Re-granting browser authority
@@ -93,26 +117,56 @@
 --
 -- PRODUCTION
 --   Do not apply to production without a live read-only privilege snapshot
---   first (relacl, attacl and pg_default_acl for public, plus service_role's
---   effective privileges). Steps 3 and 4 make an unexpected environment abort
---   the transaction instead of half-applying, but they are a backstop for the
+--   first (relacl, attacl and pg_default_acl for public, pg_auth_members
+--   reachable from anon/authenticated, relation owners, plus service_role's
+--   effective privileges). Steps 3–5 make an unexpected environment abort the
+--   transaction instead of half-applying, but they are a backstop for the
 --   preflight, not a replacement for it.
 
--- ── 0. Record service_role's effective DML before any REVOKE ─────────────────
+-- ── 0a. Browser-reachable roles: anon, authenticated, and every role they are
+--        members of, at any depth ────────────────────────────────────────────
+DROP TABLE IF EXISTS pg_temp.apsa_061_browser_roles;
+CREATE TEMP TABLE apsa_061_browser_roles AS
+WITH RECURSIVE reach(roleid) AS (
+  SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated')
+  UNION
+  SELECT m.roleid FROM pg_auth_members m JOIN reach r ON m.member = r.roleid
+)
+SELECT roleid FROM reach;
+
+-- ── 0b. service_role's effective authority before any REVOKE ─────────────────
+--        (attnum 0 = the table / sequence itself)
 DROP TABLE IF EXISTS pg_temp.apsa_061_service_role_before;
 CREATE TEMP TABLE apsa_061_service_role_before AS
-SELECT c.oid AS relid, p.privilege
+SELECT c.oid AS relid, 0::smallint AS attnum, p.privilege
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) AS p(privilege)
 WHERE n.nspname = 'public'
-  AND c.relkind IN ('r','p','v','m','f','S')
-  AND CASE WHEN c.relkind = 'S'
-           THEN p.privilege = 'SELECT' AND has_sequence_privilege('service_role', c.oid, 'SELECT')
-           ELSE has_table_privilege('service_role', c.oid, p.privilege) END
+  AND c.relkind IN ('r','p','v','m','f')
+  AND has_table_privilege('service_role', c.oid, p.privilege)
   -- 040: payment ledger writes are RPC-only, never service_role authority
   AND NOT (c.relname IN ('payments','payment_events','payment_evidence')
-           AND p.privilege IN ('INSERT','UPDATE','DELETE'));
+           AND p.privilege IN ('INSERT','UPDATE','DELETE'))
+UNION ALL
+SELECT c.oid, a.attnum, p.privilege
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE']) AS p(privilege)
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r','p','v','m','f')
+  AND has_column_privilege('service_role', c.oid, a.attnum, p.privilege)
+  AND NOT (c.relname IN ('payments','payment_events','payment_evidence')
+           AND p.privilege IN ('INSERT','UPDATE'))
+UNION ALL
+SELECT c.oid, 0::smallint, p.privilege
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) AS p(privilege)
+WHERE n.nspname = 'public'
+  AND c.relkind = 'S'
+  AND has_sequence_privilege('service_role', c.oid, p.privilege);
 
 -- ── 1. Every APSA relation: no browser authority ─────────────────────────────
 
@@ -190,64 +244,129 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres
   REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
 
--- ── 3 + 4. Post-conditions — abort rather than leave a half-hardened state ───
+
+-- ── 3–5. Post-conditions — abort rather than leave a half-hardened state ─────
 DO $$
 DECLARE
-  browser oid[] := ARRAY[
-    0::oid,                                           -- PUBLIC
-    (SELECT oid FROM pg_roles WHERE rolname = 'anon'),
-    (SELECT oid FROM pg_roles WHERE rolname = 'authenticated')
-  ];
+  postgres_oid CONSTANT oid := (SELECT oid FROM pg_roles WHERE rolname = 'postgres');
+  table_privs CONSTANT text[] :=
+    ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']
+    || CASE WHEN current_setting('server_version_num')::int >= 170000
+            THEN ARRAY['MAINTAIN'] ELSE ARRAY[]::text[] END;
   offenders text;
 BEGIN
-  -- 3a. no table-level browser privilege on any relation in public
-  SELECT string_agg(DISTINCT c.relname, ', ' ORDER BY c.relname) INTO offenders
+  -- 3. creator boundary: postgres runs this and owns every relation in public
+  IF current_user <> 'postgres' THEN
+    RAISE EXCEPTION '061: must run as postgres, the role that creates APSA relations (running as %)', current_user;
+  END IF;
+  SELECT string_agg(format('%s (owner %s)', c.oid::regclass, c.relowner::regrole), ', ' ORDER BY c.relname)
+    INTO offenders
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  CROSS JOIN LATERAL aclexplode(c.relacl) a
   WHERE n.nspname = 'public'
     AND c.relkind IN ('r','p','v','m','f','S')
-    AND a.grantee = ANY (browser);
+    AND c.relowner <> postgres_oid;
   IF offenders IS NOT NULL THEN
-    RAISE EXCEPTION '061: browser roles still hold table privileges on: % (unreviewed relation — add it to 061 or explain it)', offenders;
+    RAISE EXCEPTION '061: relations in public not owned by postgres — their creator''s default privileges are not hardened by 061: %', offenders;
   END IF;
 
-  -- 3b. no column-level browser privilege either
-  SELECT string_agg(DISTINCT c.relname || '.' || att.attname, ', ') INTO offenders
-  FROM pg_attribute att
-  JOIN pg_class c ON c.oid = att.attrelid
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  CROSS JOIN LATERAL aclexplode(att.attacl) a
-  WHERE n.nspname = 'public'
-    AND a.grantee = ANY (browser);
+  -- 4a. EFFECTIVE browser authority on every relation, column and sequence in
+  --     public, for every browser-reachable role (has_*_privilege includes
+  --     PUBLIC and inherited grants; membership depth is covered by 0a)
+  SELECT string_agg(x, '; ') INTO offenders
+  FROM (
+    SELECT x FROM (
+      SELECT format('%s %s on %s', b.roleid::regrole, p.priv, c.oid::regclass) AS x
+      FROM apsa_061_browser_roles b
+      CROSS JOIN pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN unnest(table_privs) AS p(priv)
+      WHERE n.nspname = 'public'
+        AND c.relkind IN ('r','p','v','m','f')
+        AND has_table_privilege(b.roleid, c.oid, p.priv)
+      UNION
+      SELECT format('%s %s on %s.%s', b.roleid::regrole, p.priv, c.oid::regclass, a.attname)
+      FROM apsa_061_browser_roles b
+      CROSS JOIN pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+      CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) AS p(priv)
+      WHERE n.nspname = 'public'
+        AND c.relkind IN ('r','p','v','m','f')
+        AND has_column_privilege(b.roleid, c.oid, a.attnum, p.priv)
+      UNION
+      SELECT format('%s %s on sequence %s', b.roleid::regrole, p.priv, c.oid::regclass)
+      FROM apsa_061_browser_roles b
+      CROSS JOIN pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) AS p(priv)
+      WHERE n.nspname = 'public'
+        AND c.relkind = 'S'
+        AND has_sequence_privilege(b.roleid, c.oid, p.priv)
+    ) all_offenders
+    ORDER BY x
+    LIMIT 40
+  ) shown;
   IF offenders IS NOT NULL THEN
-    RAISE EXCEPTION '061: browser roles still hold column privileges on: %', offenders;
+    RAISE EXCEPTION '061: browser authority remains (direct, through PUBLIC, or through role membership): %. 061 revokes only direct PUBLIC/anon/authenticated grants on the listed relations; remove this grant or membership after review, then re-run.', offenders;
   END IF;
 
-  -- 3c. postgres's default ACLs give future tables/sequences nothing for browser roles
-  IF EXISTS (
-    SELECT 1
-    FROM pg_default_acl d
-    CROSS JOIN LATERAL aclexplode(d.defaclacl) a
-    WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = 'postgres')
-      AND d.defaclobjtype IN ('r','S')
-      AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
-      AND a.grantee = ANY (browser)
-  ) THEN
-    RAISE EXCEPTION '061: default privileges for postgres still grant browser roles table/sequence authority';
+  -- 4b. postgres's default ACLs give future tables/sequences nothing that a
+  --     browser role can reach
+  SELECT string_agg(DISTINCT format('%s/%s: %s %s',
+           CASE d.defaclnamespace WHEN 0 THEN 'global' ELSE 'public' END,
+           d.defaclobjtype::text,
+           CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+           a.privilege_type), '; ')
+    INTO offenders
+  FROM pg_default_acl d
+  CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+  WHERE d.defaclrole = postgres_oid
+    AND d.defaclobjtype IN ('r','S')
+    AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
+    AND (a.grantee = 0 OR a.grantee IN (SELECT roleid FROM apsa_061_browser_roles));
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION '061: default privileges for postgres still give future tables/sequences to browser-reachable roles: %', offenders;
   END IF;
 
-  -- 4. service_role keeps every piece of DML it held before step 1
-  SELECT string_agg(format('%s %s', b.privilege, b.relid::regclass), ', ') INTO offenders
-  FROM apsa_061_service_role_before b
-  JOIN pg_class c ON c.oid = b.relid
-  WHERE NOT CASE WHEN c.relkind = 'S'
-                 THEN has_sequence_privilege('service_role', b.relid, 'SELECT')
-                 ELSE has_table_privilege('service_role', b.relid, b.privilege) END;
+  -- 4c. other creators' defaults: reported, not revoked (see header)
+  SELECT string_agg(DISTINCT format('%s %s/%s: %s %s', d.defaclrole::regrole,
+           CASE d.defaclnamespace WHEN 0 THEN 'global' ELSE 'public' END,
+           d.defaclobjtype::text,
+           CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+           a.privilege_type), '; ')
+    INTO offenders
+  FROM pg_default_acl d
+  CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+  WHERE d.defaclrole <> postgres_oid
+    AND d.defaclobjtype IN ('r','S')
+    AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
+    AND (a.grantee = 0 OR a.grantee IN (SELECT roleid FROM apsa_061_browser_roles));
   IF offenders IS NOT NULL THEN
-    RAISE EXCEPTION '061: service_role lost authority it held before 061 (it held it through PUBLIC, anon or authenticated — grant it to service_role explicitly first): %', offenders;
+    RAISE WARNING '061: roles other than postgres have default privileges reaching browser roles (objects THEY create are not covered by 061; no APSA relation is owned by them): %', offenders;
+  END IF;
+
+  -- 5. service_role keeps every piece of authority recorded in 0b
+  SELECT string_agg(x, ', ') INTO offenders
+  FROM (
+    SELECT CASE WHEN b.attnum = 0 THEN format('%s %s', b.privilege, b.relid::regclass)
+                ELSE format('%s %s.%s', b.privilege, b.relid::regclass, a.attname) END AS x
+    FROM apsa_061_service_role_before b
+    JOIN pg_class c ON c.oid = b.relid
+    LEFT JOIN pg_attribute a ON a.attrelid = b.relid AND a.attnum = b.attnum AND b.attnum > 0
+    WHERE NOT CASE
+      WHEN c.relkind = 'S' THEN has_sequence_privilege('service_role', b.relid, b.privilege)
+      WHEN b.attnum = 0 THEN has_table_privilege('service_role', b.relid, b.privilege)
+      ELSE has_column_privilege('service_role', b.relid, b.attnum, b.privilege)
+    END
+    ORDER BY b.relid::regclass::text, b.attnum, b.privilege
+    LIMIT 40
+  ) lost;
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION '061: service_role lost authority it held before 061 (it held it through PUBLIC, a column grant, or a browser role — grant it to service_role explicitly first): %', offenders;
   END IF;
 END
 $$;
 
+DROP TABLE pg_temp.apsa_061_browser_roles;
 DROP TABLE pg_temp.apsa_061_service_role_before;

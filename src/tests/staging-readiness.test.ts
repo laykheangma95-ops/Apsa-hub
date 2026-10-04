@@ -36,6 +36,7 @@ import {
   classifyWriteProbe,
   classifyRpcProbe,
   isAuthorizationDenial,
+  isPrivilegeDenial,
   collectRpcSignatures,
   rpcDummyArgs,
   dummyValueForType,
@@ -431,13 +432,33 @@ describe("classifyRlsObservation (H1)", () => {
     const branches = [...src.matchAll(/verdict\.reason === "privilege_denial"/g)].map(
       (m) => m.index!,
     );
-    expect(branches).toHaveLength(2);
+    expect(branches).toHaveLength(3);
     const genericPass = [
       ...src.matchAll(/verdict\.verdict === "PASS"\) \{\r?\n\s+(rlsProven|proven)\+\+/g),
     ].map((m) => m.index!);
     expect(genericPass).toHaveLength(2);
     expect(branches[0]!).toBeLessThan(genericPass[0]!);
     expect(branches[1]!).toBeLessThan(genericPass[1]!);
+    // The cross-tenant WRITE probe handles privilege_denial before its generic PASS
+    // and never calls that an isolation proof.
+    const write = src.indexOf("classifyWriteProbe(result.error");
+    const writePass = src.indexOf('verdict.verdict === "PASS"', write);
+    expect(branches[2]!).toBeGreaterThan(write);
+    expect(branches[2]!).toBeLessThan(writePass);
+    expect(src.slice(branches[2]!, writePass)).toContain(
+      "RLS tenant isolation on writes was NOT exercised",
+    );
+  });
+
+  it("the staff audit probe reports a 42501 as blanket denial, never as staff-specific proof", () => {
+    const src = fs.readFileSync(path.join(ROOT, "scripts/verify-staging.ts"), "utf8");
+    const privilege = src.indexOf("isPrivilegeDenial(error?.code)");
+    const authorization = src.indexOf("isAuthorizationDenial(error?.code)");
+    expect(privilege).toBeGreaterThan(0);
+    expect(privilege).toBeLessThan(authorization);
+    expect(src.slice(privilege, authorization)).toContain(
+      "NOT proof of staff-specific authorization",
+    );
   });
 
   it("is INCONCLUSIVE when the refusal is not an authorization refusal", () => {
@@ -677,10 +698,21 @@ describe("isAuthorizationDenial / classifyWriteProbe (M2)", () => {
   });
 
   it("PASSES only on an explicit authorization refusal", () => {
-    for (const code of ["42501", "PGRST301", "PGRST302"]) {
+    for (const code of ["PGRST301", "PGRST302"]) {
       const r = classifyWriteProbe({ code });
       expect(r.verdict).toBe("PASS");
       expect(r.reason).toBe("authorization_denial");
+    }
+  });
+
+  it("classifies a 42501 write refusal as a table-privilege denial, not tenant-isolation proof", () => {
+    expect(classifyWriteProbe({ code: "42501" })).toEqual({
+      verdict: "PASS",
+      reason: "privilege_denial",
+    });
+    expect(isPrivilegeDenial("42501")).toBe(true);
+    for (const code of ["PGRST301", "PGRST302", "22P02", "P0001", "PGRST202", "57014", "", null]) {
+      expect(isPrivilegeDenial(code)).toBe(false);
     }
   });
 

@@ -35,14 +35,19 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import {
+  effectiveBrowserAuthority,
+  migratedThrough060,
+  MIGRATION_061,
+  pgVersion,
+} from "./helpers/browser-authority-pg";
 import {
   ANON_EXECUTABLE,
   APSA_PUBLIC_RELATIONS,
   AUTHENTICATED_EXECUTABLE,
 } from "./helpers/browser-authority-matrix";
 
-const MIGRATION_061 = "061_browser_table_authority_hardening.sql";
 const SQL_061 = readFileSync(`supabase/migrations/${MIGRATION_061}`, "utf8");
 const TABLE_PRIVS = [
   "SELECT",
@@ -54,72 +59,6 @@ const TABLE_PRIVS = [
   "TRIGGER",
 ] as const;
 const BROWSER = ["anon", "authenticated"] as const;
-
-type Baseline = "restricted" | "permissive";
-
-// ── Environment ──────────────────────────────────────────────────────────────
-
-async function migratedThrough060(baseline: Baseline): Promise<PGlite> {
-  const db = new PGlite();
-  await db.exec(`
-    CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN BYPASSRLS;
-    CREATE SCHEMA auth;
-    CREATE TABLE auth.users(id uuid primary key,email text,raw_user_meta_data jsonb default '{}');
-    CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS $$
-      SELECT nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
-    GRANT USAGE ON SCHEMA public,auth TO anon,authenticated,service_role;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
-      GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
-  `);
-  if (baseline === "restricted") {
-    await db.exec(`
-      ALTER DEFAULT PRIVILEGES IN SCHEMA public
-        GRANT TRUNCATE, REFERENCES, TRIGGER, MAINTAIN ON TABLES TO anon, authenticated, service_role;
-      ALTER DEFAULT PRIVILEGES IN SCHEMA public
-        GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
-    `);
-  } else {
-    await db.exec(`
-      ALTER DEFAULT PRIVILEGES IN SCHEMA public
-        GRANT ALL ON TABLES TO PUBLIC, anon, authenticated, service_role;
-      ALTER DEFAULT PRIVILEGES IN SCHEMA public
-        GRANT ALL ON SEQUENCES TO PUBLIC, anon, authenticated, service_role;
-      ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO anon;
-    `);
-  }
-  for (const name of readdirSync("supabase/migrations")
-    .filter((n) => /^\d{3}_.*\.sql$/.test(n))
-    .sort()) {
-    if (name >= MIGRATION_061) continue; // 061 (and anything later) is applied by the test
-    try {
-      await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
-    } catch (error) {
-      await db.close();
-      throw new Error(`Migration ${name}: ${String(error)}`);
-    }
-  }
-  if (baseline === "permissive") {
-    // Whatever earlier migrations revoked, assume the live project re-opened it.
-    await db.exec(`
-      GRANT ALL ON ALL TABLES IN SCHEMA public TO PUBLIC, anon, authenticated;
-      GRANT UPDATE (organization_id) ON public.customers TO authenticated;
-      GRANT SELECT (cost_amount) ON public.product_variants TO anon;
-    `);
-  }
-  // Scratch schema a browser role could create objects in — the only way to
-  // exercise REFERENCES and TRIGGER from the role itself.
-  await db.exec(`
-    CREATE SCHEMA scratch;
-    GRANT USAGE, CREATE ON SCHEMA scratch TO anon, authenticated;
-    CREATE FUNCTION scratch.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
-    GRANT EXECUTE ON FUNCTION scratch.noop() TO anon, authenticated;
-  `);
-  return db;
-}
-
-const pgVersion = async (db: PGlite) =>
-  (await db.query<{ v: number }>("SELECT current_setting('server_version_num')::int AS v")).rows[0]!
-    .v;
 
 // ── Catalog snapshots ────────────────────────────────────────────────────────
 
@@ -507,6 +446,7 @@ describe("PERMISSIVE baseline — 061 removes the dangerous browser authority", 
 
   it("AFTER 061: no table, column or default privilege for PUBLIC, anon or authenticated anywhere", async () => {
     expect(await browserGrants(post)).toEqual([]);
+    expect(await effectiveBrowserAuthority(post)).toEqual([]);
     const eff = await effective(post, BROWSER);
     for (const role of BROWSER) {
       for (const [rel, privs] of Object.entries(eff[role]!)) {
@@ -603,6 +543,7 @@ describe("RESTRICTED baseline — 061 is safe and never broadens authority", () 
 
   it("AFTER 061: no browser privilege anywhere, and every attack fails with 42501", async () => {
     expect(await browserGrants(post)).toEqual([]);
+    expect(await effectiveBrowserAuthority(post)).toEqual([]);
     for (const role of BROWSER) {
       const result = await attackOutcomes(post, s, role);
       for (const [label, code] of Object.entries(result)) {
@@ -1078,7 +1019,7 @@ describe("service_role server workflows after 061 (RESTRICTED: service_role hold
 
 // ── Negative proof: weakened 061 variants are caught ─────────────────────────
 
-const POSTCONDITIONS = /\n-- ── 3 \+ 4\. Post-conditions[\s\S]*?\n\$\$;\n/;
+const POSTCONDITIONS = /\n-- ── 3–5\. Post-conditions[\s\S]*?\n\$\$;\n/;
 const withoutPostconditions = (sql: string) => {
   const stripped = sql.replace(/\r\n/g, "\n").replace(POSTCONDITIONS, "\n");
   if (stripped === sql.replace(/\r\n/g, "\n")) throw new Error("post-condition block not found");
@@ -1195,7 +1136,7 @@ describe("negative proof — the detectors fail when 061 is weakened", () => {
         "CREATE TABLE public.zz_drift (id int); GRANT SELECT ON public.zz_drift TO anon;",
       );
       await expect(db.exec(SQL_061)).rejects.toThrow(
-        /061: browser roles still hold table privileges on: zz_drift/,
+        /061: browser authority remains[^\n]*anon SELECT on zz_drift/,
       );
     } finally {
       await db.close();

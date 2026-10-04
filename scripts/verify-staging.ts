@@ -86,6 +86,7 @@ import {
   classifyWriteProbe,
   classifyRpcProbe,
   isAuthorizationDenial,
+  isPrivilegeDenial,
   describeKeyRole,
   createDeadline,
   readTimeoutMs,
@@ -685,7 +686,15 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
           unclear(`Cross-tenant write against ${target}: request did not complete.`);
         } else {
           const verdict = classifyWriteProbe(result.error ?? null);
-          if (verdict.verdict === "PASS") {
+          if (verdict.reason === "privilege_denial") {
+            // 42501: no browser role may write this table at all (migration
+            // 061). The write is blocked, but RLS tenant isolation on writes
+            // was never reached, so it is not reported as isolation proof.
+            pass(
+              `Org A member's UPDATE against ${target} was refused by table privilege (42501) — ` +
+                `no direct browser write authority. RLS tenant isolation on writes was NOT exercised.`,
+            );
+          } else if (verdict.verdict === "PASS") {
             pass(
               `Org A member's cross-tenant UPDATE against ${target} was refused by AUTHORIZATION ` +
                 `(code ${safeCode(result.error)}).`,
@@ -789,6 +798,17 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         if (!error && rows > 0) {
           fail(
             "Staff account read audit_logs — audit access must be restricted to privileged roles.",
+          );
+        } else if (isPrivilegeDenial(error?.code)) {
+          // 42501 is the same blanket refusal every browser role gets since
+          // migration 061 — it says nothing about the staff role in particular.
+          pass(
+            "Staff account has no direct table access to audit_logs (42501 — table privilege, " +
+              "identical for every browser role).",
+          );
+          info(
+            "That refusal is NOT proof of staff-specific authorization: role-scoped audit access is " +
+              "enforced by the APSA server and is not exercised by a direct-table probe.",
           );
         } else if (isAuthorizationDenial(error?.code)) {
           pass(`Staff account is refused audit_logs by authorization (code ${safeCode(error)}).`);
