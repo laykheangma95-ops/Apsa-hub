@@ -1019,7 +1019,7 @@ describe("service_role server workflows after 061 (RESTRICTED: service_role hold
 
 // ── Negative proof: weakened 061 variants are caught ─────────────────────────
 
-const POSTCONDITIONS = /\n-- ── 3–5\. Post-conditions[\s\S]*?\n\$\$;\n/;
+const POSTCONDITIONS = /\n-- ── 3–6\. Post-conditions[\s\S]*?\n\$\$;\n/;
 const withoutPostconditions = (sql: string) => {
   const stripped = sql.replace(/\r\n/g, "\n").replace(POSTCONDITIONS, "\n");
   if (stripped === sql.replace(/\r\n/g, "\n")) throw new Error("post-condition block not found");

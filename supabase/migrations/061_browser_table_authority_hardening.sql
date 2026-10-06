@@ -80,10 +80,32 @@
 --      an environment handed them back through PUBLIC, removing them restores
 --      040. TRUNCATE, REFERENCES and TRIGGER are not server authority (048
 --      grants none).
---   Default ACLs of OTHER creator roles (e.g. Supabase's supabase_admin) that
---   reach browser roles are reported with RAISE WARNING, not revoked: postgres
---   cannot alter them, and step 3 guarantees no APSA relation is created by
---   such a role. They are part of the production preflight.
+--   6. Asserts no OTHER role can create the next relation in `public` with
+--      browser authority attached. A creator is every role for which
+--      has_schema_privilege(role, 'public', 'CREATE') is true — the server's
+--      own answer, which counts a direct grant, PUBLIC, schema ownership,
+--      superuser, and CREATE inherited through membership at any depth. No
+--      role is assumed harmless by name or because it owns nothing today.
+--      A new relation's ACL is its creator's global default (or the built-in
+--      owner-only default) plus its creator's `public` default, so both are
+--      read for every creator; any table or sequence privilege they give to
+--      PUBLIC or a browser-reachable role ABORTS the migration, naming the
+--      creator, scope, grantee and privilege. A browser-reachable role that
+--      can itself create in `public` (e.g. through CREATE granted to PUBLIC)
+--      aborts too: it would own — and hold every privilege on — what it
+--      creates. 061 never alters another role's defaults or schema
+--      privileges (postgres usually cannot); the operator removes them after
+--      review and re-runs.
+--      A member that can only SET ROLE to a creator (no INHERIT) is not itself
+--      a creator: what it creates after SET ROLE is owned by, and receives the
+--      defaults of, the role it switched to — which is checked in its own
+--      right. PostgreSQL has no column-level default privileges, so a future
+--      column's authority comes only from its table's defaults (covered) or an
+--      explicit later GRANT (a reviewed migration; 4a on any re-run).
+--      On Supabase the platform superuser (supabase_admin) is a creator by
+--      this definition; if its stock `public` defaults still grant tables or
+--      sequences to anon/authenticated, 061 aborts there by design — the live
+--      preflight must establish this before 061 is scheduled.
 --
 -- POSTGRESQL VERSIONS
 --   Only REVOKE ALL is used — never a privilege keyword in DDL. On PostgreSQL
@@ -119,9 +141,10 @@
 --   Do not apply to production without a live read-only privilege snapshot
 --   first (relacl, attacl and pg_default_acl for public, pg_auth_members
 --   reachable from anon/authenticated, relation owners, plus service_role's
---   effective privileges). Steps 3–5 make an unexpected environment abort the
---   transaction instead of half-applying, but they are a backstop for the
---   preflight, not a replacement for it.
+--   effective privileges, every role that can create in public, and each such
+--   creator's global and public default ACLs). Steps 3–6 make an unexpected
+--   environment abort the transaction instead of half-applying, but they are
+--   a backstop for the preflight, not a replacement for it.
 
 -- ── 0a. Browser-reachable roles: anon, authenticated, and every role they are
 --        members of, at any depth ────────────────────────────────────────────
@@ -245,7 +268,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres
   REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
 
 
--- ── 3–5. Post-conditions — abort rather than leave a half-hardened state ─────
+-- ── 3–6. Post-conditions — abort rather than leave a half-hardened state ─────
 DO $$
 DECLARE
   postgres_oid CONSTANT oid := (SELECT oid FROM pg_roles WHERE rolname = 'postgres');
@@ -329,23 +352,6 @@ BEGIN
     RAISE EXCEPTION '061: default privileges for postgres still give future tables/sequences to browser-reachable roles: %', offenders;
   END IF;
 
-  -- 4c. other creators' defaults: reported, not revoked (see header)
-  SELECT string_agg(DISTINCT format('%s %s/%s: %s %s', d.defaclrole::regrole,
-           CASE d.defaclnamespace WHEN 0 THEN 'global' ELSE 'public' END,
-           d.defaclobjtype::text,
-           CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
-           a.privilege_type), '; ')
-    INTO offenders
-  FROM pg_default_acl d
-  CROSS JOIN LATERAL aclexplode(d.defaclacl) a
-  WHERE d.defaclrole <> postgres_oid
-    AND d.defaclobjtype IN ('r','S')
-    AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
-    AND (a.grantee = 0 OR a.grantee IN (SELECT roleid FROM apsa_061_browser_roles));
-  IF offenders IS NOT NULL THEN
-    RAISE WARNING '061: roles other than postgres have default privileges reaching browser roles (objects THEY create are not covered by 061; no APSA relation is owned by them): %', offenders;
-  END IF;
-
   -- 5. service_role keeps every piece of authority recorded in 0b
   SELECT string_agg(x, ', ') INTO offenders
   FROM (
@@ -364,6 +370,40 @@ BEGIN
   ) lost;
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION '061: service_role lost authority it held before 061 (it held it through PUBLIC, a column grant, or a browser role — grant it to service_role explicitly first): %', offenders;
+  END IF;
+
+  -- 6a. every role that can create the next relation in public (effective
+  --     CREATE: direct, PUBLIC, ownership, superuser, inherited membership)
+  --     gives future tables/sequences nothing a browser role can reach —
+  --     global defaults and public defaults alike (see header)
+  SELECT string_agg(x, '; ') INTO offenders
+  FROM (
+    SELECT DISTINCT format('%s (%s %s): %s %s', d.defaclrole::regrole,
+             CASE d.defaclnamespace WHEN 0 THEN 'global' ELSE 'public' END,
+             CASE d.defaclobjtype WHEN 'r' THEN 'tables' ELSE 'sequences' END,
+             CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+             a.privilege_type) AS x
+    FROM pg_default_acl d
+    CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+    WHERE d.defaclobjtype IN ('r','S')
+      AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
+      AND has_schema_privilege(d.defaclrole, 'public', 'CREATE')
+      AND (a.grantee = 0 OR a.grantee IN (SELECT roleid FROM apsa_061_browser_roles))
+    ORDER BY x
+    LIMIT 40
+  ) shown;
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION '061: a role that can create relations in public has default privileges giving future tables/sequences to browser-reachable roles: %. 061 does not alter another role''s defaults; after review revoke that creator''s default privilege, or its CREATE on public, then re-run.', offenders;
+  END IF;
+
+  -- 6b. no browser-reachable role can create in public itself (it would own,
+  --     and hold every privilege on, what it creates)
+  SELECT string_agg(b.roleid::regrole::text, ', ' ORDER BY b.roleid::regrole::text)
+    INTO offenders
+  FROM apsa_061_browser_roles b
+  WHERE has_schema_privilege(b.roleid, 'public', 'CREATE');
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION '061: browser-reachable roles can create relations in public (directly, through PUBLIC, or through membership): %. Remove that CREATE after review, then re-run.', offenders;
   END IF;
 END
 $$;

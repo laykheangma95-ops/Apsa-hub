@@ -140,7 +140,18 @@ describe("061 static shape", () => {
     expect(sql).toContain("RAISE EXCEPTION '061: browser authority remains");
     expect(sql).toContain("RAISE EXCEPTION '061: default privileges for postgres");
     expect(sql).toContain("RAISE EXCEPTION '061: service_role lost authority");
-    expect(sql).toContain("RAISE WARNING '061: roles other than postgres have default privileges");
+    expect(sql).toContain("RAISE EXCEPTION '061: a role that can create relations in public");
+    expect(sql).toContain("RAISE EXCEPTION '061: browser-reachable roles can create relations");
+    // another creator's browser-reaching defaults are refused, never merely reported
+    expect(sql).not.toMatch(/RAISE WARNING/);
+  });
+
+  it("finds creators by EFFECTIVE CREATE on public, for every role, not by name or ACL text", () => {
+    const sql = strip(read(FILE));
+    expect(sql).toContain("has_schema_privilege(d.defaclrole, 'public', 'CREATE')");
+    expect(sql).toContain("has_schema_privilege(b.roleid, 'public', 'CREATE')");
+    expect(sql).not.toMatch(/d\.defaclrole\s*<>\s*postgres_oid/);
+    expect(sql).not.toMatch(/supabase_admin/);
   });
 
   it("checks EFFECTIVE authority of every browser-reachable role, not literal ACL grantees", () => {

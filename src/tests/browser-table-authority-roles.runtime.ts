@@ -19,6 +19,11 @@
  *      repository listLocationsForOrg() runs as service_role over a local SQL
  *      transport to prove the workflow worked before and still works after an
  *      abort.
+ * P2 (review of 0983cf1) — another role that can create the next relation in
+ *      public (effective CREATE: direct, PUBLIC, inherited membership) whose
+ *      default privileges reach a browser role: the next table/sequence it
+ *      creates is proven browser-reachable, 061 must abort atomically, and
+ *      creators that cannot reopen the boundary are left untouched.
  */
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import type { PGlite } from "@electric-sql/pglite";
@@ -28,6 +33,7 @@ import {
   effectiveBrowserAuthority,
   migratedThrough060,
   MIGRATION_061,
+  pgVersion,
   serviceRoleAuthority,
 } from "./helpers/browser-authority-pg";
 
@@ -119,6 +125,42 @@ async function outcome(db: PGlite, sql: string): Promise<string> {
   } catch (error) {
     return String((error as { code?: string }).code ?? error);
   }
+}
+
+/** `outcome` for a multi-statement script. */
+async function execOutcome(db: PGlite, sql: string): Promise<string> {
+  try {
+    await db.exec(sql);
+    return "ok";
+  } catch (error) {
+    return String((error as { code?: string }).code ?? error);
+  }
+}
+
+/**
+ * Every ACL 061 could touch — relation and column ACLs in public, public's
+ * schema ACL, and every default ACL. An aborted 061 must leave it unchanged.
+ */
+async function catalogSnapshot(db: PGlite): Promise<string[]> {
+  const rows = (
+    await db.query<{ x: string }>(
+      `SELECT 'rel ' || c.relname || ' ' || coalesce(c.relacl::text, '-') AS x
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f','S')
+       UNION ALL
+       SELECT 'col ' || c.relname || '.' || a.attname || ' ' || a.attacl::text
+       FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public' AND a.attacl IS NOT NULL
+       UNION ALL
+       SELECT 'schema public ' || coalesce(nspacl::text, '-') FROM pg_namespace WHERE nspname = 'public'
+       UNION ALL
+       SELECT 'default ' || defaclrole::regrole::text || ' ' || defaclnamespace::text || ' '
+              || defaclobjtype::text || ' ' || defaclacl::text
+       FROM pg_default_acl`,
+    )
+  ).rows;
+  return rows.map((r) => r.x).sort();
 }
 
 /** An unlisted relation stripped of the restricted-default Dxtm, so only what the test grants remains. */
@@ -388,17 +430,19 @@ describe("P1 — default privileges and the creator boundary", () => {
     );
   });
 
-  it("another creator's defaults reaching browser roles are WARNED about, not revoked or hidden", async () => {
+  it("another creator's defaults reaching browser roles ABORT 061 — not revoked, not merely warned", async () => {
     await scenario(
       `CREATE ROLE platform_admin NOLOGIN;
        GRANT CREATE ON SCHEMA public TO platform_admin;
        ALTER DEFAULT PRIVILEGES FOR ROLE platform_admin IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;`,
       async (db) => {
+        const before = await catalogSnapshot(db);
         const r = await apply061(db);
-        expect(r.ok).toBe(true);
-        expect(r.notices.join("\n")).toMatch(
-          /061: roles other than postgres have default privileges[^\n]*platform_admin public\/r: anon SELECT/,
+        expect(r.ok).toBe(false);
+        expect(r.message).toMatch(
+          /061: a role that can create relations in public has default privileges[^\n]*platform_admin \(public tables\): anon SELECT/,
         );
+        expect(await catalogSnapshot(db)).toEqual(before);
       },
     );
   });
@@ -537,4 +581,479 @@ describe("P2 — service_role authority held only through PUBLIC or column grant
       },
     );
   });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// P2 (independent review of 0983cf1) — another role that can create the NEXT
+// relation in public, whose default privileges hand it to a browser role. On
+// 0983cf1 this was only a WARNING: 061 succeeded and the next table/sequence
+// that role created was readable/usable by authenticated/anon.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** 061 with the step-6 creator guard removed — the unrepaired behavior. */
+function withoutCreatorGuard(): string {
+  const lf = SQL_061.replace(/\r\n/g, "\n");
+  const weakened = lf.replace(/\n {2}-- 6a\.[\s\S]*?(?=\nEND\n\$\$;)/, "");
+  if (weakened === lf) throw new Error("step-6 creator guard not found");
+  return weakened;
+}
+
+let nextObject = 0;
+/**
+ * `creator` creates the next table (with one row) and sequence in public, as
+ * itself. Returns whether that worked, and whether `reader` can SELECT the
+ * table and `seqUser` can nextval the sequence ("ok" or the SQLSTATE).
+ */
+async function nextObjectsBy(
+  db: PGlite,
+  creator: string,
+  reader = "authenticated",
+  seqUser = "anon",
+): Promise<{ created: string; read: string; nextval: string }> {
+  const n = ++nextObject;
+  const created = await as(db, creator, () =>
+    execOutcome(
+      db,
+      `CREATE TABLE public.zz_next_${n} (id int, secret text);
+       INSERT INTO public.zz_next_${n} VALUES (1, 'next-object secret');
+       CREATE SEQUENCE public.zz_next_seq_${n};`,
+    ),
+  );
+  const read = await as(db, reader, () => outcome(db, `SELECT secret FROM public.zz_next_${n}`));
+  const nextval = await as(db, seqUser, () =>
+    outcome(db, `SELECT nextval('public.zz_next_seq_${n}')`),
+  );
+  return { created, read, nextval };
+}
+
+/** Applies 061 and expects an atomic abort whose message matches every pattern. */
+async function expectCreatorAbort(db: PGlite, ...patterns: RegExp[]) {
+  const before = await catalogSnapshot(db);
+  const r = await apply061(db);
+  expect(r.ok).toBe(false);
+  for (const p of patterns) expect(r.message).toMatch(p);
+  expect(await catalogSnapshot(db)).toEqual(before);
+  await expectRolledBack(db);
+}
+
+const CREATOR_ABORT = /061: a role that can create relations in public has default privileges/;
+
+/** The five hostile states the independent review requires to abort 061. */
+const HOSTILE_CREATORS: Array<{ name: string; setup: string; creator: string; expect: RegExp[] }> =
+  [
+    {
+      name: "1. active creator + direct authenticated table default",
+      setup: `CREATE ROLE reporting_creator NOLOGIN;
+         GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+         ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;`,
+      creator: "reporting_creator",
+      expect: [CREATOR_ABORT, /reporting_creator \(public tables\): authenticated SELECT/],
+    },
+    {
+      name: "2. active creator + anon sequence default",
+      setup: `CREATE ROLE reporting_creator NOLOGIN;
+         GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+         ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT USAGE ON SEQUENCES TO anon;`,
+      creator: "reporting_creator",
+      expect: [CREATOR_ABORT, /reporting_creator \(public sequences\): anon USAGE/],
+    },
+    {
+      name: "3. active creator + browser-reachable intermediate default (authenticated → business_readers)",
+      setup: `CREATE ROLE reporting_creator NOLOGIN; CREATE ROLE business_readers NOLOGIN;
+         GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+         GRANT business_readers TO authenticated;
+         ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT SELECT ON TABLES TO business_readers;`,
+      creator: "reporting_creator",
+      expect: [CREATOR_ABORT, /reporting_creator \(public tables\): business_readers SELECT/],
+    },
+    {
+      name: "4. active creator + nested browser-reachable default (authenticated → mid_role → business_readers)",
+      setup: `CREATE ROLE reporting_creator NOLOGIN; CREATE ROLE business_readers NOLOGIN; CREATE ROLE mid_role NOLOGIN;
+         GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+         GRANT business_readers TO mid_role; GRANT mid_role TO authenticated;
+         ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator GRANT SELECT ON TABLES TO business_readers;`,
+      creator: "reporting_creator",
+      expect: [CREATOR_ABORT, /reporting_creator \(global tables\): business_readers SELECT/],
+    },
+    {
+      name: "5. CREATE obtained only through membership (etl → mid → schema_creators)",
+      setup: `CREATE ROLE schema_creators NOLOGIN; CREATE ROLE mid NOLOGIN; CREATE ROLE etl NOLOGIN;
+         GRANT USAGE, CREATE ON SCHEMA public TO schema_creators;
+         GRANT schema_creators TO mid; GRANT mid TO etl;
+         ALTER DEFAULT PRIVILEGES FOR ROLE etl IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;
+         ALTER DEFAULT PRIVILEGES FOR ROLE etl IN SCHEMA public GRANT USAGE ON SEQUENCES TO anon;`,
+      creator: "etl",
+      expect: [
+        CREATOR_ABORT,
+        /etl \(public sequences\): anon USAGE; etl \(public tables\): authenticated SELECT/,
+      ],
+    },
+  ];
+
+describe("P2 — other creators' default privileges reopen browser authority on the next object", () => {
+  it("the independent review's exploit: works before 061, and 061 aborts atomically instead of claiming success", async () => {
+    const setup = `CREATE ROLE reporting_creator NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT USAGE ON SEQUENCES TO anon;`;
+    // The defaults are real: the creator's next table/sequence is browser-reachable.
+    await scenario(setup, async (db) => {
+      expect(await nextObjectsBy(db, "reporting_creator")).toEqual({
+        created: "ok",
+        read: "ok",
+        nextval: "ok",
+      });
+    });
+    // Unrepaired 061 (0983cf1 behavior): succeeds, then the boundary reopens.
+    await scenario(setup, async (db) => {
+      await db.exec(withoutCreatorGuard());
+      expect(await effectiveBrowserAuthority(db)).toEqual([]); // "hardened" …
+      expect(await nextObjectsBy(db, "reporting_creator")).toEqual({
+        created: "ok",
+        read: "ok", // … yet authenticated reads the creator's new table
+        nextval: "ok", // … and anon uses its new sequence
+      });
+    });
+    // Repaired 061: aborts, names both defaults, and changes nothing.
+    await scenario(setup, async (db) => {
+      await expectCreatorAbort(
+        db,
+        CREATOR_ABORT,
+        /reporting_creator \(public sequences\): anon USAGE/,
+        /reporting_creator \(public tables\): authenticated SELECT/,
+      );
+    });
+  });
+
+  for (const h of HOSTILE_CREATORS) {
+    it(`${h.name}: the next object IS browser-reachable, and 061 aborts`, async () => {
+      await scenario(h.setup, async (db) => {
+        const r = await nextObjectsBy(db, h.creator);
+        expect(r.created).toBe("ok");
+        expect(r.read === "ok" || r.nextval === "ok").toBe(true);
+      });
+      await scenario(h.setup, async (db) => {
+        await expectCreatorAbort(db, ...h.expect);
+      });
+    });
+  }
+
+  it("a PUBLIC grantee in another creator's default (tables or sequences) aborts", async () => {
+    await scenario(
+      `CREATE ROLE reporting_creator NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT SELECT ON SEQUENCES TO PUBLIC;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator GRANT TRUNCATE ON TABLES TO PUBLIC;`,
+      async (db) => {
+        await expectCreatorAbort(
+          db,
+          /reporting_creator \(global tables\): PUBLIC TRUNCATE/,
+          /reporting_creator \(public sequences\): PUBLIC SELECT/,
+        );
+      },
+    );
+  });
+
+  it("every unsafe table and sequence privilege is named (the whole ALL set, MAINTAIN on PG17)", async () => {
+    await scenario(
+      `CREATE ROLE reporting_creator NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT ALL ON TABLES TO authenticated;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT ALL ON SEQUENCES TO authenticated;`,
+      async (db) => {
+        const r = await apply061(db);
+        expect(r.ok).toBe(false);
+        const tablePrivs = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES"];
+        tablePrivs.push("TRIGGER");
+        if ((await pgVersion(db)) >= 170000) tablePrivs.push("MAINTAIN");
+        for (const p of tablePrivs)
+          expect(r.message).toContain(`reporting_creator (public tables): authenticated ${p}`);
+        for (const p of ["USAGE", "SELECT", "UPDATE"])
+          expect(r.message).toContain(`reporting_creator (public sequences): authenticated ${p}`);
+      },
+    );
+  });
+
+  it("CREATE through membership is effective authority (no ACL entry names the creator) — 061 aborts", async () => {
+    await scenario(
+      `CREATE ROLE schema_creators NOLOGIN; CREATE ROLE etl NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO schema_creators;
+       GRANT schema_creators TO etl;
+       ALTER DEFAULT PRIVILEGES FOR ROLE etl IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;`,
+      async (db) => {
+        const acl = await db.query<{ acl: string; can: boolean }>(
+          `SELECT nspacl::text AS acl, has_schema_privilege('etl', 'public', 'CREATE') AS can
+           FROM pg_namespace WHERE nspname = 'public'`,
+        );
+        expect(acl.rows[0]!.acl).not.toMatch(/\betl=/); // ACL text alone would miss it …
+        expect(acl.rows[0]!.can).toBe(true); // … PostgreSQL says etl can create
+        await expectCreatorAbort(db, /etl \(public tables\): authenticated SELECT/);
+      },
+    );
+  });
+
+  it("reverse membership grants no CREATE: the role a creator belongs to is not a creator — 061 succeeds", async () => {
+    await scenario(
+      `CREATE ROLE defaults_holder NOLOGIN; CREATE ROLE schema_creator NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO schema_creator;
+       GRANT defaults_holder TO schema_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE defaults_holder IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;`,
+      async (db) => {
+        const holderDefaults = async () =>
+          (
+            await db.query<{ acl: string }>(
+              "SELECT defaclacl::text AS acl FROM pg_default_acl WHERE defaclrole = 'defaults_holder'::regrole",
+            )
+          ).rows;
+        const before = await holderDefaults();
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        // defaults_holder cannot create in public, so its defaults never apply there …
+        expect(
+          await as(db, "defaults_holder", () =>
+            outcome(db, "CREATE TABLE public.zz_holder (id int)"),
+          ),
+        ).toBe("42501");
+        // … and what its member creates carries the MEMBER's (empty) defaults.
+        expect(await nextObjectsBy(db, "schema_creator")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+        expect(await holderDefaults()).toEqual(before); // left exactly as it was
+      },
+    );
+  });
+
+  it("SET-only membership (no INHERIT) in a creator is not creator authority for the member itself — 061 succeeds", async () => {
+    await scenario(
+      `CREATE ROLE schema_creator NOLOGIN; CREATE ROLE switcher NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO schema_creator;
+       GRANT schema_creator TO switcher WITH INHERIT FALSE, SET TRUE;
+       ALTER DEFAULT PRIVILEGES FOR ROLE switcher IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;`,
+      async (db) => {
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        // As itself, switcher cannot create in public …
+        expect(
+          await as(db, "switcher", () => outcome(db, "CREATE TABLE public.zz_switch (id int)")),
+        ).toBe("42501");
+        // … after SET ROLE the creator owns the object, and ITS defaults (none) apply.
+        expect(await nextObjectsBy(db, "schema_creator")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+      },
+    );
+  });
+});
+
+describe("P2 — CREATE ON SCHEMA public through PUBLIC or a browser role", () => {
+  it("PUBLIC CREATE turns a role with no CREATE grant into a creator — its browser defaults abort 061", async () => {
+    const defaults = `CREATE ROLE analyst NOLOGIN;
+       ALTER DEFAULT PRIVILEGES FOR ROLE analyst IN SCHEMA public GRANT SELECT ON TABLES TO authenticated;`;
+    // Without PUBLIC CREATE, analyst cannot create in public: harmless, 061 succeeds.
+    await scenario(defaults, async (db) => {
+      expect(await apply061(db)).toMatchObject({ ok: true });
+    });
+    // With it, analyst's next table is authenticated-readable, and 061 must abort.
+    const setup = `${defaults} GRANT CREATE ON SCHEMA public TO PUBLIC;`;
+    await scenario(setup, async (db) => {
+      expect((await nextObjectsBy(db, "analyst")).read).toBe("ok");
+    });
+    await scenario(setup, async (db) => {
+      await expectCreatorAbort(
+        db,
+        CREATOR_ABORT,
+        /analyst \(public tables\): authenticated SELECT/,
+      );
+    });
+  });
+
+  it("PUBLIC CREATE makes the browser roles creators themselves — 061 aborts even with no unsafe defaults", async () => {
+    await scenario("GRANT CREATE ON SCHEMA public TO PUBLIC;", async (db) => {
+      expect(
+        await as(db, "anon", () => outcome(db, "CREATE TABLE public.zz_anon_owned (id int)")),
+      ).toBe("ok");
+    });
+    await scenario("GRANT CREATE ON SCHEMA public TO PUBLIC;", async (db) => {
+      await expectCreatorAbort(
+        db,
+        /061: browser-reachable roles can create relations in public[^\n]*: anon, authenticated\./,
+      );
+    });
+  });
+
+  it("CREATE reaching a browser role through membership (authenticated → business_creators) aborts 061", async () => {
+    await scenario(
+      `CREATE ROLE business_creators NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO business_creators;
+       GRANT business_creators TO authenticated;`,
+      async (db) => {
+        await expectCreatorAbort(
+          db,
+          /061: browser-reachable roles can create relations in public[^\n]*authenticated, business_creators/,
+        );
+      },
+    );
+  });
+});
+
+describe("P2 — creators 061 must NOT refuse (and must not touch)", () => {
+  /** Default ACL rows of every role except postgres — 061 must never change them. */
+  const otherDefaults = async (db: PGlite) =>
+    (
+      await db.query<{ x: string }>(
+        `SELECT defaclrole::regrole::text || ' ' || defaclnamespace::text || ' '
+                || defaclobjtype::text || ' ' || defaclacl::text AS x
+         FROM pg_default_acl WHERE defaclrole <> 'postgres'::regrole ORDER BY 1`,
+      )
+    ).rows.map((r) => r.x);
+
+  it("A. a role with browser defaults that cannot create in public", async () => {
+    await scenario(
+      `CREATE ROLE dormant NOLOGIN;
+       ALTER DEFAULT PRIVILEGES FOR ROLE dormant IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
+       ALTER DEFAULT PRIVILEGES FOR ROLE dormant GRANT ALL ON SEQUENCES TO PUBLIC;`,
+      async (db) => {
+        const before = await otherDefaults(db);
+        expect(before.length).toBe(2);
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await otherDefaults(db)).toEqual(before);
+        expect(
+          await as(db, "dormant", () => outcome(db, "CREATE TABLE public.zz_dormant (id int)")),
+        ).toBe("42501");
+        expect(await effectiveBrowserAuthority(db)).toEqual([]);
+      },
+    );
+  });
+
+  it("B. a creator with no browser-reaching defaults (server-only defaults)", async () => {
+    await scenario(
+      `CREATE ROLE etl_server NOLOGIN;
+       GRANT USAGE, CREATE ON SCHEMA public TO etl_server;
+       ALTER DEFAULT PRIVILEGES FOR ROLE etl_server IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO service_role;`,
+      async (db) => {
+        const before = await otherDefaults(db);
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await otherDefaults(db)).toEqual(before);
+        expect(await nextObjectsBy(db, "etl_server")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+        expect((await nextObjectsBy(db, "etl_server", "service_role", "authenticated")).read).toBe(
+          "ok",
+        );
+      },
+    );
+  });
+
+  it("C. a creator whose defaults reach only an unreachable reporting role", async () => {
+    await scenario(
+      `CREATE ROLE reporting_creator NOLOGIN; CREATE ROLE reporting NOLOGIN;
+       CREATE ROLE authenticator_like NOLOGIN;
+       GRANT authenticated TO authenticator_like; GRANT reporting TO authenticator_like;
+       GRANT USAGE, CREATE ON SCHEMA public TO reporting_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA public GRANT SELECT ON TABLES TO reporting;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator GRANT USAGE ON SEQUENCES TO reporting;`,
+      async (db) => {
+        const before = await otherDefaults(db);
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await otherDefaults(db)).toEqual(before);
+        expect(await nextObjectsBy(db, "reporting_creator")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+        expect(await nextObjectsBy(db, "reporting_creator", "reporting", "reporting")).toEqual({
+          created: "ok",
+          read: "ok",
+          nextval: "ok",
+        });
+      },
+    );
+  });
+
+  it("D. a creator's browser defaults scoped to ANOTHER schema cannot affect public", async () => {
+    await scenario(
+      `CREATE ROLE reporting_creator NOLOGIN;
+       CREATE SCHEMA reports; GRANT USAGE ON SCHEMA reports TO anon, authenticated;
+       GRANT USAGE, CREATE ON SCHEMA reports, public TO reporting_creator;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA reports GRANT SELECT ON TABLES TO authenticated;
+       ALTER DEFAULT PRIVILEGES FOR ROLE reporting_creator IN SCHEMA reports GRANT USAGE ON SEQUENCES TO anon;`,
+      async (db) => {
+        const before = await otherDefaults(db);
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await otherDefaults(db)).toEqual(before);
+        expect(await nextObjectsBy(db, "reporting_creator")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+        // The defaults are real — just not in public.
+        expect(
+          await as(db, "reporting_creator", () =>
+            execOutcome(
+              db,
+              "CREATE TABLE reports.zz_report (id int); CREATE SEQUENCE reports.zz_rseq",
+            ),
+          ),
+        ).toBe("ok");
+        expect(
+          await as(db, "authenticated", () => outcome(db, "SELECT * FROM reports.zz_report")),
+        ).toBe("ok");
+        expect(await as(db, "anon", () => outcome(db, "SELECT nextval('reports.zz_rseq')"))).toBe(
+          "ok",
+        );
+      },
+    );
+  });
+
+  it("postgres default hardening still closes postgres-created future tables/sequences, alongside a safe creator", async () => {
+    await scenario(
+      "CREATE ROLE etl_server NOLOGIN; GRANT USAGE, CREATE ON SCHEMA public TO etl_server;",
+      async (db) => {
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await nextObjectsBy(db, "postgres")).toEqual({
+          created: "ok",
+          read: "42501",
+          nextval: "42501",
+        });
+        expect(await effectiveBrowserAuthority(db)).toEqual([]);
+        const d = await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+           WHERE d.defaclrole = 'postgres'::regrole AND d.defaclobjtype IN ('r','S')
+             AND (a.grantee = 0 OR a.grantee IN ('anon'::regrole, 'authenticated'::regrole))`,
+        );
+        expect(d.rows[0]!.n).toBe(0);
+      },
+    );
+  });
+
+  it("service_role table/column/sequence authority is unchanged when other creators are present", async () => {
+    await scenario(
+      `CREATE ROLE etl_server NOLOGIN; GRANT USAGE, CREATE ON SCHEMA public TO etl_server;
+       ALTER DEFAULT PRIVILEGES FOR ROLE etl_server IN SCHEMA public GRANT SELECT ON TABLES TO service_role;`,
+      async (db) => {
+        const before = await serviceRoleAuthority(db);
+        expect(await apply061(db)).toMatchObject({ ok: true });
+        expect(await serviceRoleAuthority(db)).toEqual(before);
+        expect((await as(db, "service_role", () => listLocationsForOrg(org))).length).toBe(1);
+      },
+    );
+  });
+});
+
+describe("negative proof — without the step-6 creator guard every hostile creator slips through", () => {
+  for (const h of HOSTILE_CREATORS) {
+    it(`${h.name}: guard removed → 061 succeeds and the next object is browser-reachable`, async () => {
+      await scenario(h.setup, async (db) => {
+        await db.exec(withoutCreatorGuard());
+        expect(await effectiveBrowserAuthority(db)).toEqual([]);
+        const r = await nextObjectsBy(db, h.creator);
+        expect(r.created).toBe("ok");
+        expect(r.read === "ok" || r.nextval === "ok").toBe(true);
+      });
+    });
+  }
 });
