@@ -873,7 +873,22 @@
       "label": "Discount",
       "amount": "Amount",
       "percent": "Percent",
-      "approval": "This discount is above the cashier limit and needs manager approval."
+      "amountIn": "Discount amount in {{currency}}",
+      "invalidUsd": "Enter a dollar amount, like 2 or 2.50.",
+      "invalidKhr": "Enter a whole riel amount, like 1000.",
+      "invalidPercent": "Enter a whole percent from 0 to 100.",
+      "exceedsSubtotal": "The discount can't be more than the subtotal.",
+      "blockedTitle": "Check the discount",
+      "fixShort": "Fix the discount to continue."
+    },
+    "currency": {
+      "mixedTitle": "This cart mixes USD and KHR prices",
+      "mixedBody": "A sale can only use one currency. Remove the items priced in the other currency to continue. APSA never converts prices for you.",
+      "mixedShort": "Cart mixes USD and KHR — remove one currency's items.",
+      "serverMismatch": {
+        "title": "Price currency doesn't match your business",
+        "body": "These items are priced in a currency your business doesn't sell in, so the sale wasn't created. Update the product prices, then try again."
+      }
     },
     "customer": {
       "title": "Customer",

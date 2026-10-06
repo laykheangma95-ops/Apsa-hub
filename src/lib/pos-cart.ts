@@ -2,8 +2,8 @@
  * Pure POS cart arithmetic. No React, no formatting, no i18n.
  * Components render the result; they never compute money themselves.
  */
-import { multiplyMoney, subtractMoney, usd } from "@/lib/money";
-import type { Money, Product } from "@/types";
+import { multiplyMoney, parseMinorUnits } from "@/lib/money";
+import type { Currency, Money, Product } from "@/types";
 import type { DiscountMode } from "@/lib/order-draft";
 
 export interface CartLine {
@@ -22,16 +22,38 @@ export interface CartLine {
   stock: number;
 }
 
-export interface CartTotals {
+/** Why a typed discount is not applied. Checkout stays blocked while one is set. */
+export type DiscountProblem = "malformed" | "percent_out_of_range" | "exceeds_subtotal";
+
+/**
+ * A cart whose lines all share one currency. Every Money here is in that
+ * currency — the line prices' own currency, never a relabelled sum.
+ */
+export interface PricedCartTotals {
+  kind: "priced";
+  currency: Currency;
   subtotal: Money;
   discount: Money;
   total: Money;
   itemCount: number;
+  /** Set when the typed discount is not valid; `discount` is then zero. */
+  discountProblem: DiscountProblem | null;
 }
 
-/** Mock cashier permission envelope. Never a production rule. */
-export const DISCOUNT_LIMIT_PERCENT = 20;
-export const DISCOUNT_LIMIT_CENTS = 1_000;
+/**
+ * A cart holding lines priced in more than one currency. There is no honest
+ * subtotal for it: adding riel to cents is meaningless, and converting at an
+ * exchange rate would invent an order value the merchant never set. So this
+ * shape carries no Money at all — nothing can render or submit a fake total —
+ * and checkout is refused until the merchant removes one currency's lines.
+ */
+export interface MixedCurrencyCart {
+  kind: "mixed_currency";
+  currencies: Currency[];
+  itemCount: number;
+}
+
+export type CartTotals = PricedCartTotals | MixedCurrencyCart;
 
 export function lineKey(productId: string, variant?: string): string {
   return variant ? `${productId}::${variant}` : productId;
@@ -78,40 +100,142 @@ export function removeLine(lines: CartLine[], key: string): CartLine[] {
 export interface CartDiscountInput {
   enabled: boolean;
   mode: DiscountMode;
-  /** integer cents for "amount", whole percent for "percent" */
-  value: number;
+  /**
+   * What the merchant typed, kept as text so a half-typed "2." survives a
+   * re-render. It is parsed against the cart's currency on every calculation
+   * (dollars-and-cents for USD, whole riel for KHR) — never stored as cents
+   * and reinterpreted later.
+   */
+  text: string;
+  /**
+   * The cart currency the amount was typed in. An "amount" discount typed for
+   * a USD cart is never applied to a KHR cart (or the reverse): "5" means $5
+   * or ៛5, and silently switching between them would move real money.
+   */
+  currency: Currency | null;
 }
 
+export const NO_DISCOUNT: CartDiscountInput = {
+  enabled: false,
+  mode: "amount",
+  text: "",
+  currency: null,
+};
+
+/** The distinct currencies of a cart's lines, in first-seen order. */
+export function cartCurrencies(lines: CartLine[]): Currency[] {
+  const seen: Currency[] = [];
+  for (const line of lines) {
+    if (!seen.includes(line.unitPrice.currency)) seen.push(line.unitPrice.currency);
+  }
+  return seen;
+}
+
+const WHOLE_PERCENT = /^\d{1,3}$/;
+
+/**
+ * Percent of a minor-unit amount, rounded half-up to the currency's own minor
+ * unit (a cent for USD, a riel for KHR). Integer arithmetic only: the product
+ * is an exact integer, and floor((x + 50) / 100) cannot be pushed across an
+ * integer boundary by floating-point division.
+ */
+function percentOf(amountMinor: number, percent: number): number {
+  return Math.floor((amountMinor * percent + 50) / 100);
+}
+
+function resolveDiscount(
+  input: CartDiscountInput,
+  currency: Currency,
+  subtotalMinor: number,
+): { amount: number; problem: DiscountProblem | null } {
+  if (!input.enabled) return { amount: 0, problem: null };
+  const text = input.text.trim();
+  if (text === "") return { amount: 0, problem: null };
+
+  if (input.mode === "percent") {
+    const cleaned = text.replace(/%$/, "").trim();
+    if (!WHOLE_PERCENT.test(cleaned)) return { amount: 0, problem: "malformed" };
+    const percent = Number.parseInt(cleaned, 10);
+    if (percent > 100) return { amount: 0, problem: "percent_out_of_range" };
+    return { amount: percentOf(subtotalMinor, percent), problem: null };
+  }
+
+  // A fixed amount typed for another currency is not this cart's discount.
+  if (input.currency !== currency) return { amount: 0, problem: null };
+  const amount = parseMinorUnits(text, currency);
+  if (amount === null) return { amount: 0, problem: "malformed" };
+  // Never clamped down to the subtotal: a merchant who typed $50 off a $30
+  // cart meant something else, and quietly ringing it up as $30 off would be
+  // a different sale than the one they entered. The server refuses it too
+  // (discount_exceeds_subtotal), so it is caught here, with a reason.
+  if (amount > subtotalMinor) return { amount: 0, problem: "exceeds_subtotal" };
+  return { amount, problem: null };
+}
+
+/**
+ * Cart arithmetic in the lines' own currency.
+ *
+ * This is a PREVIEW. The server prices every line from the catalog and derives
+ * subtotal/total itself (create_order_v2); the only money POS sends is the
+ * discount, as integer minor units in that same currency, which the server
+ * bounds to 0 ≤ discount ≤ subtotal.
+ */
 export function calculateCartTotals(
   lines: CartLine[],
   discountInput: CartDiscountInput,
 ): CartTotals {
-  const subtotalCents = lines.reduce((sum, l) => sum + lineTotal(l).amount, 0);
-  const subtotal = usd(subtotalCents);
-
-  let discount = usd(0);
-  if (discountInput.enabled && discountInput.value > 0) {
-    discount =
-      discountInput.mode === "percent"
-        ? multiplyMoney(subtotal, Math.min(100, discountInput.value) / 100)
-        : usd(Math.min(discountInput.value, subtotalCents));
-  }
-
-  // Totals can never go negative.
-  const total = usd(Math.max(0, subtractMoney(subtotal, discount).amount));
   const itemCount = lines.reduce((sum, l) => sum + l.quantity, 0);
+  const currencies = cartCurrencies(lines);
+  if (currencies.length > 1) return { kind: "mixed_currency", currencies, itemCount };
 
-  return { subtotal, discount, total, itemCount };
+  // An empty cart has no currency of its own; its zero is never submitted
+  // (checkout needs at least one line) and never shown (the cart renders its
+  // empty state instead).
+  const currency: Currency = currencies[0] ?? "USD";
+  const subtotalMinor = lines.reduce((sum, l) => sum + lineTotal(l).amount, 0);
+  const { amount: discountMinor, problem } = resolveDiscount(
+    discountInput,
+    currency,
+    subtotalMinor,
+  );
+
+  return {
+    kind: "priced",
+    currency,
+    subtotal: { amount: subtotalMinor, currency },
+    discount: { amount: discountMinor, currency },
+    // resolveDiscount never returns more than the subtotal, so this is ≥ 0.
+    total: { amount: subtotalMinor - discountMinor, currency },
+    itemCount,
+    discountProblem: problem,
+  };
 }
 
-/** True when the mock cashier limit is exceeded and a manager must approve. */
-export function needsManagerApproval(
-  discountInput: CartDiscountInput,
-  totals: CartTotals,
-): boolean {
-  if (!discountInput.enabled || discountInput.value <= 0) return false;
-  if (discountInput.mode === "percent") return discountInput.value > DISCOUNT_LIMIT_PERCENT;
-  return totals.discount.amount > DISCOUNT_LIMIT_CENTS;
+/**
+ * Why checkout is refused for this cart, or null when it may proceed. The one
+ * rule every checkout button and the checkout sheet itself share.
+ */
+export type CheckoutBlock = "empty" | "mixed_currency" | "discount";
+
+export function checkoutBlock(totals: CartTotals): CheckoutBlock | null {
+  if (totals.itemCount === 0) return "empty";
+  if (totals.kind === "mixed_currency") return "mixed_currency";
+  if (totals.discountProblem) return "discount";
+  return null;
+}
+
+/**
+ * The translation key explaining a refused discount. A whole percent and a
+ * currency amount are typed differently, so they are explained differently.
+ */
+export function discountProblemKey(
+  problem: DiscountProblem,
+  mode: DiscountMode,
+  currency: Currency,
+): string {
+  if (problem === "exceeds_subtotal") return "pos.discount.exceedsSubtotal";
+  if (mode === "percent") return "pos.discount.invalidPercent";
+  return currency === "USD" ? "pos.discount.invalidUsd" : "pos.discount.invalidKhr";
 }
 
 export type StockState = "available" | "low_stock" | "out_of_stock";

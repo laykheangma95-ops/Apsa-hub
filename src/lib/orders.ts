@@ -268,6 +268,18 @@ export function classifyOrderError(err: unknown): OrderErrorKind {
   return "server_error";
 }
 
+/**
+ * True when createOrder refused the order because an item is priced in a
+ * currency other than the organization's (create_order_v2's
+ * `currency_mismatch`, a 409). Matched on the service's own crafted message
+ * (src/server/orders/service.ts createFailureToError) — the same convention
+ * classifyOrderError's fallback uses — so the merchant can be told WHY,
+ * rather than shown a generic "didn't go through".
+ */
+export function isOrderCurrencyMismatch(err: unknown): boolean {
+  return /priced in the organization's currency/i.test(messageOf(err));
+}
+
 // ── Prepare-Order checkout routing ────────────────────────────────────────────
 
 /** A real, DB-backed id — the only thing a real order line or customer accepts. */

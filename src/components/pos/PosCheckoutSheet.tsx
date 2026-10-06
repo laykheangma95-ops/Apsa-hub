@@ -24,10 +24,17 @@ import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { calculateChange, formatMoney, usdToKhr } from "@/lib/money";
-import { classifyOrderError, type RealOrderDetail } from "@/lib/orders";
+import { approximateCounterpart, calculateChange, formatMoney } from "@/lib/money";
+import { classifyOrderError, isOrderCurrencyMismatch, type RealOrderDetail } from "@/lib/orders";
 import { classifyPaymentError, paymentErrorKey } from "@/lib/payments";
-import { classifyCheckout, lineTotal, type CartLine, type CartTotals } from "@/lib/pos-cart";
+import { MixedCurrencyNotice } from "@/components/pos/PosCart";
+import {
+  checkoutBlock,
+  classifyCheckout,
+  lineTotal,
+  type CartLine,
+  type CartTotals,
+} from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Customer, PaymentMethod, Sale } from "@/types";
 
@@ -94,6 +101,15 @@ export function PosCheckoutSheet({
    */
   const checkoutKind = classifyCheckout(lines);
   const isRealCheckout = checkoutKind === "production";
+  /*
+   * The cart's own refusal (mixed currencies, an invalid discount), applied
+   * here as well as on every checkout button: this sheet is the last step
+   * before createRealOrder, so it never relies on its opener having checked.
+   * `priced` is null for a mixed-currency cart — there is no total to show or
+   * send, so nothing below can render or submit one.
+   */
+  const block = checkoutBlock(totals);
+  const priced = totals.kind === "priced" ? totals : null;
 
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [received, setReceived] = useState(0);
@@ -107,7 +123,9 @@ export function PosCheckoutSheet({
   // twice for the same cart (see complete()'s own comment).
   const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
   const [realDetail, setRealDetail] = useState<RealOrderDetail | null>(null);
-  const [realFailure, setRealFailure] = useState<"permission" | "generic" | null>(null);
+  const [realFailure, setRealFailure] = useState<"permission" | "currency" | "generic" | null>(
+    null,
+  );
   const submittingRef = useRef(false);
   /*
    * createdOrderId only protects a retry whose create RESPONSE arrived. When
@@ -188,7 +206,8 @@ export function PosCheckoutSheet({
 
   // COD is only sensible when the sale is attached to a customer to deliver to.
   const methods = METHODS.filter((m) => m !== "cod" || customer !== null);
-  const shortfall = method === "cash" && received < totals.total.amount;
+  // The prototype cash path only (createSale, the /design mock catalog).
+  const shortfall = method === "cash" && priced !== null && received < priced.total.amount;
 
   function reset() {
     setMethod("cash");
@@ -217,6 +236,7 @@ export function PosCheckoutSheet({
   }
 
   async function complete() {
+    if (!priced || block) return;
     setSubmitting(true);
     setFailed(false);
     try {
@@ -229,9 +249,9 @@ export function PosCheckoutSheet({
           quantity: l.quantity,
           unitPrice: l.unitPrice,
         })),
-        subtotal: totals.subtotal,
-        discount: totals.discount,
-        total: totals.total,
+        subtotal: priced.subtotal,
+        discount: priced.discount,
+        total: priced.total,
         paymentMethod: method,
         ...(customer ? { customerId: customer.id } : {}),
       });
@@ -276,6 +296,11 @@ export function PosCheckoutSheet({
       // same function run.
       let lifecycleStatus = realDetail?.order.lifecycleStatus;
       if (!orderId) {
+        // No order exists yet, so nothing may be created from a cart the cart
+        // itself refuses: a mixed-currency cart or an invalid discount never
+        // reaches the server. (Once an order exists the cart is already
+        // cleared, and a retry only confirms that order — see below.)
+        if (!priced || block) return;
         const created = await createRealOrder({
           source: "POS",
           items: lines.map((l) => ({
@@ -285,7 +310,10 @@ export function PosCheckoutSheet({
             productId: l.productId,
           })),
           customerId: customer && isProductionId(customer.id) ? customer.id : null,
-          ...(totals.discount.amount > 0 ? { discountMinor: totals.discount.amount } : {}),
+          // Integer minor units in the cart's one currency — the only money
+          // POS sends. The server prices every line itself, derives the
+          // totals, and bounds this to 0 ≤ discount ≤ subtotal.
+          ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
           idempotency: idempotencyKeys.current,
         });
         orderId = created.order.id;
@@ -308,7 +336,13 @@ export function PosCheckoutSheet({
         invalidateAfterSale();
       }
     } catch (error) {
-      setRealFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
+      setRealFailure(
+        classifyOrderError(error) === "forbidden"
+          ? "permission"
+          : isOrderCurrencyMismatch(error)
+            ? "currency"
+            : "generic",
+      );
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -316,6 +350,12 @@ export function PosCheckoutSheet({
   }
 
   const realConfirmed = realDetail?.order.lifecycleStatus === "confirmed";
+  const failureKey =
+    realFailure === "permission"
+      ? "pos.permission"
+      : realFailure === "currency"
+        ? "pos.currency.serverMismatch"
+        : "pos.orderError";
 
   return (
     <>
@@ -351,7 +391,7 @@ export function PosCheckoutSheet({
         // push "Complete Sale" off a 320/360px screen with the keyboard open.
         // Same fix as CreateRealOrderSheet/PrepareOrderSheet/PosVariantSheet.
         footer={
-          !sale && !realDetail && checkoutKind !== "unsellable" ? (
+          !sale && !realDetail && checkoutKind !== "unsellable" && block === null ? (
             isRealCheckout ? (
               <Button
                 className="tap-target w-full"
@@ -396,7 +436,7 @@ export function PosCheckoutSheet({
             <p className="text-body mt-1 text-text-secondary">{sale.code}</p>
             <p className="text-financial-lg mt-2 text-text-primary">{formatMoney(sale.total)}</p>
             <p className="text-data text-text-muted">
-              {t("money.approx", { value: formatMoney(usdToKhr(sale.total)) })}
+              {t("money.approx", { value: formatMoney(approximateCounterpart(sale.total)) })}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <StatusChip status={sale.paymentStatus} />
@@ -475,7 +515,9 @@ export function PosCheckoutSheet({
               {formatMoney(realDetail.order.total)}
             </p>
             <p className="text-data text-text-muted">
-              {t("money.approx", { value: formatMoney(usdToKhr(realDetail.order.total)) })}
+              {t("money.approx", {
+                value: formatMoney(approximateCounterpart(realDetail.order.total)),
+              })}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <StatusChip status={realDetail.order.lifecycleStatus ?? "draft"} />
@@ -512,14 +554,8 @@ export function PosCheckoutSheet({
                 {realFailure ? (
                   <OperationalState
                     tone="danger"
-                    title={t(
-                      realFailure === "permission"
-                        ? "pos.permission.title"
-                        : "pos.orderError.title",
-                    )}
-                    body={t(
-                      realFailure === "permission" ? "pos.permission.body" : "pos.orderError.body",
-                    )}
+                    title={t(`${failureKey}.title`)}
+                    body={t(`${failureKey}.body`)}
                     onRetry={() => void completeReal()}
                     className="py-2"
                   />
@@ -591,6 +627,35 @@ export function PosCheckoutSheet({
               {t("pos.unsellable.back")}
             </Button>
           </div>
+        ) : !priced || block === "discount" ? (
+          /*
+           * The cart refuses this sale before any server call: lines in more
+           * than one currency (no honest total exists, and APSA never converts
+           * one for the merchant), or a discount that is not valid for this
+           * cart. Nothing is submitted; the cart is left exactly as it was.
+           */
+          <div className="space-y-5">
+            {priced ? (
+              <OperationalState
+                tone="danger"
+                title={t("pos.discount.blockedTitle")}
+                body={t(
+                  priced.discountProblem === "exceeds_subtotal"
+                    ? "pos.discount.exceedsSubtotal"
+                    : "pos.discount.fixShort",
+                )}
+              />
+            ) : (
+              <MixedCurrencyNotice />
+            )}
+            <Button
+              variant="outline"
+              className="tap-target w-full"
+              onClick={() => handleOpenChange(false)}
+            >
+              {t("pos.unsellable.back")}
+            </Button>
+          </div>
         ) : isRealCheckout ? (
           <div className="space-y-5">
             <ul className="space-y-1">
@@ -610,13 +675,13 @@ export function PosCheckoutSheet({
             <div className="space-y-1 border-t border-border-default pt-3">
               <div className="flex justify-between">
                 <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
-                <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
+                <span className="text-body text-text-primary">{formatMoney(priced.subtotal)}</span>
               </div>
-              {totals.discount.amount > 0 ? (
+              {priced.discount.amount > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
                   <span className="text-body text-text-primary">
-                    -{formatMoney(totals.discount)}
+                    -{formatMoney(priced.discount)}
                   </span>
                 </div>
               ) : null}
@@ -624,10 +689,12 @@ export function PosCheckoutSheet({
                 <span className="text-label text-text-secondary">{t("pos.total")}</span>
                 <span className="flex flex-col items-end">
                   <span className="text-financial-lg text-text-primary">
-                    {formatMoney(totals.total)}
+                    {formatMoney(priced.total)}
                   </span>
                   <span className="text-data text-text-muted">
-                    {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
+                    {t("money.approx", {
+                      value: formatMoney(approximateCounterpart(priced.total)),
+                    })}
                   </span>
                 </span>
               </div>
@@ -651,13 +718,10 @@ export function PosCheckoutSheet({
             {realFailure ? (
               <OperationalState
                 tone="danger"
-                title={t(
-                  realFailure === "permission" ? "pos.permission.title" : "pos.orderError.title",
-                )}
-                body={t(
-                  realFailure === "permission" ? "pos.permission.body" : "pos.orderError.body",
-                )}
-                onRetry={() => void completeReal()}
+                title={t(`${failureKey}.title`)}
+                body={t(`${failureKey}.body`)}
+                // Retrying cannot change a price currency; the catalog has to.
+                {...(realFailure === "currency" ? {} : { onRetry: () => void completeReal() })}
               />
             ) : null}
           </div>
@@ -680,13 +744,13 @@ export function PosCheckoutSheet({
             <div className="space-y-1 border-t border-border-default pt-3">
               <div className="flex justify-between">
                 <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
-                <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
+                <span className="text-body text-text-primary">{formatMoney(priced.subtotal)}</span>
               </div>
-              {totals.discount.amount > 0 ? (
+              {priced.discount.amount > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
                   <span className="text-body text-text-primary">
-                    -{formatMoney(totals.discount)}
+                    -{formatMoney(priced.discount)}
                   </span>
                 </div>
               ) : null}
@@ -694,10 +758,12 @@ export function PosCheckoutSheet({
                 <span className="text-label text-text-secondary">{t("pos.total")}</span>
                 <span className="flex flex-col items-end">
                   <span className="text-financial-lg text-text-primary">
-                    {formatMoney(totals.total)}
+                    {formatMoney(priced.total)}
                   </span>
                   <span className="text-data text-text-muted">
-                    {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
+                    {t("money.approx", {
+                      value: formatMoney(approximateCounterpart(priced.total)),
+                    })}
                   </span>
                 </span>
               </div>
@@ -745,7 +811,7 @@ export function PosCheckoutSheet({
                     {shortfall
                       ? "—"
                       : formatMoney(
-                          calculateChange({ amount: received, currency: "USD" }, totals.total),
+                          calculateChange({ amount: received, currency: "USD" }, priced.total),
                         )}
                   </span>
                 </div>

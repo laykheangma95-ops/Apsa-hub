@@ -32,9 +32,10 @@ import {
   addToCart,
   availableStock,
   calculateCartTotals,
+  checkoutBlock,
   isSellable,
   lineKey,
-  needsManagerApproval,
+  NO_DISCOUNT,
   removeLine,
   setQuantity,
   type CartDiscountInput,
@@ -98,16 +99,20 @@ function PosScreen() {
    * cart the server will refuse at checkout. So the whole entry point closes.
    */
   const canSell = capabilities.can("orders.create");
+  /*
+   * Discounting is its own server-side authority: createOrder requires
+   * orders.apply_discount for any non-zero discount. Without it the control is
+   * not offered and no discount enters the totals, so the cart never previews
+   * a total the server would refuse. (This replaced a browser-only "cashier
+   * limit" with no server counterpart, which blocked even an Owner's sale.)
+   */
+  const canDiscount = capabilities.can("orders.apply_discount");
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<ProductCategory | "all">("all");
   const [view, setView] = useState<"list" | "grid">("list");
   const [lines, setLines] = useState<CartLine[]>([]);
-  const [discount, setDiscount] = useState<CartDiscountInput>({
-    enabled: false,
-    mode: "amount",
-    value: 0,
-  });
+  const [discount, setDiscount] = useState<CartDiscountInput>(NO_DISCOUNT);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [variantProduct, setVariantProduct] = useState<Product | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
@@ -155,8 +160,8 @@ function PosScreen() {
     });
   }, [catalog, category, query]);
 
-  const totals = calculateCartTotals(lines, discount);
-  const approvalRequired = needsManagerApproval(discount, totals);
+  const totals = calculateCartTotals(lines, canDiscount ? discount : NO_DISCOUNT);
+  const block = checkoutBlock(totals);
 
   function addProduct(
     product: Product,
@@ -260,7 +265,7 @@ function PosScreen() {
 
   function resetSale() {
     setLines([]);
-    setDiscount({ enabled: false, mode: "amount", value: 0 });
+    setDiscount(NO_DISCOUNT);
     setCustomer(null);
     setCartOpen(false);
     // A sold-out variant's stock is server-authoritative at order time either
@@ -278,7 +283,7 @@ function PosScreen() {
     totals,
     discount,
     onDiscountChange: setDiscount,
-    approvalRequired,
+    canDiscount,
     customer,
     onPickCustomer: () => setCustomerOpen(true),
     onClearCustomer: () => setCustomer(null),
@@ -479,24 +484,29 @@ function PosScreen() {
                     {t("pos.itemCount", { count: totals.itemCount })}
                   </span>
                   <span className="text-h2 tnum block truncate text-text-primary">
-                    {formatMoney(totals.total)}
+                    {/* A mixed-currency cart has no total — never a summed or converted one. */}
+                    {totals.kind === "priced" ? formatMoney(totals.total) : "—"}
                   </span>
                 </span>
               </button>
               <Button
                 className="press-tactile tap-target elevation-action h-12 shrink-0 rounded-2xl px-5"
-                disabled={approvalRequired || offline}
+                disabled={block !== null || offline}
                 onClick={() => setCheckoutOpen(true)}
               >
                 {t("pos.checkout")}
               </Button>
             </div>
-            {approvalRequired || offline ? (
+            {offline || block === "mixed_currency" || block === "discount" ? (
               <p
                 role="status"
                 className="text-caption mx-auto mt-1.5 max-w-[var(--screen-max)] text-status-warning-text"
               >
-                {offline ? t("pos.offline") : t("pos.discount.approval")}
+                {offline
+                  ? t("pos.offline")
+                  : block === "mixed_currency"
+                    ? t("pos.currency.mixedShort")
+                    : t("pos.discount.fixShort")}
               </p>
             ) : null}
           </motion.div>

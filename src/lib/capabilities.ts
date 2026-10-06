@@ -44,6 +44,12 @@ export const UI_PERMISSION_KEYS = [
   // src/server/returns/service.ts — and migration 056 seeds it to
   // OWNER/MANAGER (PERMISSIONS_MATRIX.md §14).
   "orders.return",
+  // orders.apply_discount gates the POS discount control. createOrder requires
+  // it for any non-zero discount (src/server/orders/service.ts) and migration
+  // 025 seeds it to OWNER/MANAGER only (PERMISSIONS_MATRIX.md §14). It is the
+  // real discount authority — it replaced a browser-only "cashier limit" that
+  // had no server counterpart.
+  "orders.apply_discount",
   // Payments — src/server/payments/service.ts. Refunds are a Payment-domain
   // action: refundPayment requires payments.refund. The historical
   // orders.refund key no longer authorizes anything, so the UI must not gate

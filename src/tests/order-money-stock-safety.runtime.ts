@@ -15,6 +15,16 @@
  */
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import type { AuthorizationContext } from "../server/auth/authorization";
+import { khr, usd } from "../lib/money";
+import { isOrderCurrencyMismatch } from "../lib/orders";
+import {
+  calculateCartTotals,
+  checkoutBlock,
+  lineKey,
+  type CartDiscountInput,
+  type CartLine,
+} from "../lib/pos-cart";
+import type { Money } from "../types";
 import { financialFixture } from "./helpers/payment-order-fixture";
 
 type Fixture = Awaited<ReturnType<typeof financialFixture>>;
@@ -1251,5 +1261,216 @@ describe("Order service through the real database", () => {
       }),
     ).rejects.toMatchObject({ statusCode: 403 });
     expect(await orderCount(f.org)).toBe(before);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POS MONEY — the cart preview agrees with the order the server persists
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// POS shows a total computed in the browser (calculateCartTotals) and sends the
+// server exactly one money value: the discount, in the cart's own currency's
+// minor units. The server prices the lines from the catalog and derives every
+// total itself. These tests drive both halves through the real migrated SQL and
+// require them to agree to the minor unit — and require the currency to
+// survive end-to-end (a riel cart is never relabelled or converted to dollars).
+
+describe("POS money: cart preview agrees with the persisted order", () => {
+  const perms = ["orders.create", "orders.read", "orders.apply_discount"];
+  let kFive: string; // KHR 5,000 in the riel organization
+  let kUsdPriced: string; // a USD-priced variant inside the riel organization
+
+  beforeAll(async () => {
+    const product = crypto.randomUUID();
+    kFive = crypto.randomUUID();
+    kUsdPriced = crypto.randomUUID();
+    await f.db.query(`insert into products(id,organization_id,name_km) values($1,$2,'ទឹក')`, [
+      product,
+      orgK,
+    ]);
+    await f.db.query(
+      `insert into product_variants(id,organization_id,product_id,name,price_amount,price_currency)
+       values($1,$3,$4,'Bottle',5000,'KHR'),($2,$3,$4,'Imported',300,'USD')`,
+      [kFive, kUsdPriced, orgK, product],
+    );
+  });
+
+  function line(variantId: string, unitPrice: Money, quantity: number): CartLine {
+    return {
+      key: lineKey(variantId),
+      productId: variantId,
+      variantId,
+      nameKm: "ផលិតផល",
+      nameEn: "Product",
+      sku: "SKU",
+      quantity,
+      unitPrice,
+      stock: 0,
+    };
+  }
+
+  function discount(
+    mode: "amount" | "percent",
+    text: string,
+    currency: "USD" | "KHR",
+  ): CartDiscountInput {
+    return { enabled: true, mode, text, currency };
+  }
+
+  /** What PosCheckoutSheet.completeReal sends, built from the cart exactly as it does. */
+  async function checkout(org: string, lines: CartLine[], input: CartDiscountInput, key: string) {
+    const service = await import("../server/orders/service");
+    const totals = calculateCartTotals(lines, input);
+    if (totals.kind !== "priced" || checkoutBlock(totals)) throw new Error("cart refused");
+    const detail = await service.createOrder(context(org, f.actor, perms), {
+      source: "POS",
+      items: lines.map((l) => ({ variantId: l.variantId!, quantity: l.quantity })),
+      ...(totals.discount.amount > 0 ? { discountMinor: totals.discount.amount } : {}),
+      idempotencyKey: key,
+    });
+    return { totals, detail };
+  }
+
+  it("L/USD: a percentage discount persists exactly the cents the cart showed", async () => {
+    const lines = [line(A.variant1, usd(1500), 2), line(A.variant2, usd(2500), 1)];
+    const { totals, detail } = await checkout(
+      f.org,
+      lines,
+      discount("percent", "15", "USD"),
+      crypto.randomUUID(),
+    );
+    // 15% of $55.00 = $8.25.
+    expect(totals).toMatchObject({ subtotal: usd(5500), discount: usd(825), total: usd(4675) });
+    expect(detail.currency).toBe("USD");
+    expect(detail.subtotal).toEqual(usd(5500));
+    expect(detail.discount).toEqual(usd(825));
+    expect(detail.total).toEqual(usd(4675));
+    expect(await orderRow(detail.id)).toMatchObject({
+      currency: "USD",
+      subtotal_minor: 5500,
+      discount_minor: 825,
+      total_minor: 4675,
+    });
+  });
+
+  it("L/USD: a fixed dollars-and-cents discount persists as the same cents", async () => {
+    const lines = [line(A.variant2, usd(2500), 2)];
+    const { detail } = await checkout(
+      f.org,
+      lines,
+      discount("amount", "5.25", "USD"),
+      crypto.randomUUID(),
+    );
+    expect(await orderRow(detail.id)).toMatchObject({
+      currency: "USD",
+      subtotal_minor: 5000,
+      discount_minor: 525,
+      total_minor: 4475,
+    });
+  });
+
+  it("L/KHR: 2 × ៛5,000 persists as KHR 10,000 — never relabelled as $100.00", async () => {
+    const lines = [line(kFive, khr(5000), 2)];
+    const { totals, detail } = await checkout(
+      orgK,
+      lines,
+      discount("percent", "0", "KHR"),
+      crypto.randomUUID(),
+    );
+    expect(totals).toMatchObject({ currency: "KHR", subtotal: khr(10000), total: khr(10000) });
+    expect(detail.currency).toBe("KHR");
+    expect(detail.subtotal).toEqual(khr(10000));
+    expect(detail.total).toEqual(khr(10000));
+    expect(detail.items[0]!.unitPrice).toEqual(khr(5000));
+    expect(await orderRow(detail.id)).toMatchObject({
+      currency: "KHR",
+      subtotal_minor: 10000,
+      discount_minor: 0,
+      total_minor: 10000,
+    });
+  });
+
+  it("L/KHR: percentage and fixed riel discounts persist as the riel the cart showed", async () => {
+    const lines = [line(kFive, khr(5000), 2)];
+    const pct = await checkout(orgK, lines, discount("percent", "15", "KHR"), crypto.randomUUID());
+    expect(await orderRow(pct.detail.id)).toMatchObject({
+      currency: "KHR",
+      subtotal_minor: 10000,
+      discount_minor: 1500,
+      total_minor: 8500,
+    });
+    const fixed = await checkout(
+      orgK,
+      lines,
+      discount("amount", "2,000", "KHR"),
+      crypto.randomUUID(),
+    );
+    expect(fixed.totals).toMatchObject({ discount: khr(2000), total: khr(8000) });
+    expect(await orderRow(fixed.detail.id)).toMatchObject({
+      currency: "KHR",
+      discount_minor: 2000,
+      total_minor: 8000,
+    });
+  });
+
+  it("H/I: a mixed-currency cart is refused by the cart, and the server refuses it too", async () => {
+    const lines = [line(kFive, khr(5000), 1), line(kUsdPriced, usd(300), 1)];
+    const totals = calculateCartTotals(lines, discount("percent", "", "KHR"));
+    expect(totals.kind).toBe("mixed_currency");
+    expect(checkoutBlock(totals)).toBe("mixed_currency");
+
+    // Defence in depth: even a client that ignored the cart is refused, with
+    // the message POS recognises — and no order row is written.
+    const service = await import("../server/orders/service");
+    const before = await orderCount(orgK);
+    let caught: unknown;
+    try {
+      await service.createOrder(context(orgK, f.actor, perms), {
+        source: "POS",
+        items: lines.map((l) => ({ variantId: l.variantId!, quantity: l.quantity })),
+        idempotencyKey: crypto.randomUUID(),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ statusCode: 409 });
+    expect(isOrderCurrencyMismatch(caught)).toBe(true);
+    expect(await orderCount(orgK)).toBe(before);
+  });
+
+  it("J: a discount above the subtotal is refused by the cart, and by the server", async () => {
+    const lines = [line(A.variant1, usd(1500), 1)];
+    const totals = calculateCartTotals(lines, discount("amount", "15.01", "USD"));
+    expect(totals).toMatchObject({ kind: "priced", discountProblem: "exceeds_subtotal" });
+    expect(checkoutBlock(totals)).toBe("discount");
+
+    const service = await import("../server/orders/service");
+    const before = await orderCount(f.org);
+    await expect(
+      service.createOrder(context(f.org, f.actor, perms), {
+        source: "POS",
+        items: [{ variantId: A.variant1, quantity: 1 }],
+        discountMinor: 1501,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(await orderCount(f.org)).toBe(before);
+  });
+
+  it("M: a retried POS checkout returns the same order and money; a changed discount under the same key is a conflict", async () => {
+    const lines = [line(kFive, khr(5000), 2)];
+    const key = crypto.randomUUID();
+    const before = await orderCount(orgK);
+    const first = await checkout(orgK, lines, discount("percent", "10", "KHR"), key);
+    const replay = await checkout(orgK, lines, discount("percent", "10", "KHR"), key);
+    expect(replay.detail.id).toBe(first.detail.id);
+    expect(replay.detail.total).toEqual(first.detail.total);
+    expect(first.detail.total).toEqual(khr(9000));
+    expect(await orderCount(orgK)).toBe(before + 1);
+
+    await expect(
+      checkout(orgK, lines, discount("percent", "20", "KHR"), key),
+    ).rejects.toMatchObject({ statusCode: 409, code: "idempotency_conflict" });
+    expect(await orderCount(orgK)).toBe(before + 1);
   });
 });

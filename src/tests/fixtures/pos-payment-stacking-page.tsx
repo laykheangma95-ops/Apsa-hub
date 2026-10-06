@@ -28,7 +28,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
 import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
-import { calculateCartTotals, type CartLine } from "@/lib/pos-cart";
+import { calculateCartTotals, NO_DISCOUNT, type CartLine } from "@/lib/pos-cart";
 import "@/lib/i18n";
 
 const PRODUCT_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
@@ -73,7 +73,7 @@ export function Fixture() {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   );
-  const totals = calculateCartTotals(LINES, { enabled: false, mode: "amount", value: 0 });
+  const totals = calculateCartTotals(LINES, NO_DISCOUNT);
 
   window.apsaCheckoutOpen = open;
 
