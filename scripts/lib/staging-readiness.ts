@@ -620,6 +620,17 @@ export function isAuthorizationDenial(code: string | undefined | null): boolean 
   return (AUTHORIZATION_DENIAL_CODES as readonly string[]).includes(code);
 }
 
+/**
+ * True only for 42501 — PostgreSQL refused the request on PRIVILEGES (no table,
+ * column or function grant). Since migration 061 every direct browser read or
+ * write of a table ends here, before RLS or any role-specific rule is reached,
+ * so it proves the browser has no direct authority — never RLS tenant
+ * isolation, staff-specific authorization or capability enforcement.
+ */
+export function isPrivilegeDenial(code: string | undefined | null): boolean {
+  return code === "42501";
+}
+
 export interface RlsObservation {
   /** Error code returned to the anonymous client, if it was refused. */
   errorCode?: string | null;
@@ -648,11 +659,19 @@ export interface VerdictResult {
  * INCONCLUSIVE and must never be counted toward an RLS-proven total. Only a
  * table the service role can see rows in, which the anonymous client reads zero
  * of, proves that RLS is doing the work.
+ *
+ * A 42501 is a PASS (the read was refused) but NOT an RLS observation: since
+ * migration 061 browser roles hold no table privilege, so PostgreSQL refuses
+ * the read before RLS is ever evaluated. It carries its own reason,
+ * `privilege_denial`, so callers never report it as RLS proof.
  */
 export function classifyRlsObservation(observation: RlsObservation): VerdictResult {
   const { errorCode, anonRowCount, adminRowCount } = observation;
 
   if (typeof errorCode === "string" && errorCode.length > 0) {
+    if (isPrivilegeDenial(errorCode)) {
+      return { verdict: "PASS", reason: "privilege_denial" };
+    }
     if (isAuthorizationDenial(errorCode)) {
       return { verdict: "PASS", reason: "authorization_denial" };
     }
@@ -679,11 +698,16 @@ export function classifyRlsObservation(observation: RlsObservation): VerdictResu
  * with an authorization code is the only successful proof. Everything else —
  * a malformed uuid, a trigger raising, a check constraint, a not-null
  * violation — means the request never reached the authorization decision, so it
- * proves nothing and must not be recorded as a refusal.
+ * proves nothing and must not be recorded as a refusal. A 42501 is a refusal on
+ * table privilege (`privilege_denial`): the write is blocked for every browser
+ * role alike, so callers must not report it as tenant-isolation proof.
  */
 export function classifyWriteProbe(error: { code?: string | null } | null): VerdictResult {
   if (error === null || error === undefined) {
     return { verdict: "FAIL", reason: "write_accepted" };
+  }
+  if (isPrivilegeDenial(error.code)) {
+    return { verdict: "PASS", reason: "privilege_denial" };
   }
   if (isAuthorizationDenial(error.code)) {
     return { verdict: "PASS", reason: "authorization_denial" };

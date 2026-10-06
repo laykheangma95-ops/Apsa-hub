@@ -86,6 +86,7 @@ import {
   classifyWriteProbe,
   classifyRpcProbe,
   isAuthorizationDenial,
+  isPrivilegeDenial,
   describeKeyRole,
   createDeadline,
   readTimeoutMs,
@@ -321,6 +322,7 @@ if (absentTables.length === 0 && presentTables.length === expectedTables.length)
 section("2. Row Level Security — anonymous client");
 
 let rlsProven = 0;
+let rlsPrivilegeDenied = 0;
 let rlsEmpty = 0;
 let rlsUnclear = 0;
 
@@ -339,7 +341,9 @@ for (const table of presentTables) {
     adminRowCount: adminCount,
   });
 
-  if (verdict.verdict === "PASS") {
+  if (verdict.reason === "privilege_denial") {
+    rlsPrivilegeDenied++;
+  } else if (verdict.verdict === "PASS") {
     rlsProven++;
   } else if (verdict.verdict === "FAIL") {
     fail(
@@ -370,6 +374,14 @@ if (presentTables.length === 0) {
         `sees rows there and the anonymous client saw none (or was refused by authorization).`,
     );
   }
+  if (rlsPrivilegeDenied > 0) {
+    // 42501 is a refusal by TABLE PRIVILEGE (the migration 061 boundary): the
+    // read never reached RLS, so it is reported apart from RLS proof.
+    pass(
+      `Anonymous read refused by table privilege (42501) on ${rlsPrivilegeDenied} of ` +
+        `${presentTables.length} table(s) — RLS was not reached on these, so they are not counted as RLS-proven.`,
+    );
+  }
   if (rlsEmpty > 0) {
     unclear(
       `${rlsEmpty} of ${presentTables.length} table(s) are EMPTY on staging. An anonymous read of an ` +
@@ -378,7 +390,7 @@ if (presentTables.length === 0) {
         `and re-run; this tool will not insert canary rows into a hosted project.`,
     );
   }
-  if (rlsProven === 0 && rlsEmpty === 0 && rlsUnclear === 0) {
+  if (rlsProven === 0 && rlsPrivilegeDenied === 0 && rlsEmpty === 0 && rlsUnclear === 0) {
     unclear("No table produced a usable RLS observation.");
   }
 }
@@ -572,6 +584,7 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
     let leaks = 0;
     let proven = 0;
     let noOrgBRows = 0;
+    let privilegeDenied = 0;
     let checked = 0;
     for (const table of tenantScoped) {
       checked++;
@@ -604,6 +617,8 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         fail(
           `TENANT ISOLATION BREACH: Org A member read ${(data ?? []).length} row(s) from ${table} belonging to Org B.`,
         );
+      } else if (verdict.reason === "privilege_denial") {
+        privilegeDenied++;
       } else if (verdict.verdict === "PASS") {
         proven++;
       } else if (verdict.reason === "table_empty") {
@@ -626,6 +641,12 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         pass(
           `Tenant isolation positively proven on ${proven} of ${checked} tenant-scoped table(s): ` +
             `Org B holds rows there and the Org A member read none of them.`,
+        );
+      }
+      if (leaks === 0 && privilegeDenied > 0) {
+        pass(
+          `Org A member refused by table privilege (42501) on ${privilegeDenied} of ${checked} ` +
+            `tenant-scoped table(s) — no direct table access at all; RLS was not reached on these.`,
         );
       }
       if (noOrgBRows > 0) {
@@ -665,7 +686,15 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
           unclear(`Cross-tenant write against ${target}: request did not complete.`);
         } else {
           const verdict = classifyWriteProbe(result.error ?? null);
-          if (verdict.verdict === "PASS") {
+          if (verdict.reason === "privilege_denial") {
+            // 42501: no browser role may write this table at all (migration
+            // 061). The write is blocked, but RLS tenant isolation on writes
+            // was never reached, so it is not reported as isolation proof.
+            pass(
+              `Org A member's UPDATE against ${target} was refused by table privilege (42501) — ` +
+                `no direct browser write authority. RLS tenant isolation on writes was NOT exercised.`,
+            );
+          } else if (verdict.verdict === "PASS") {
             pass(
               `Org A member's cross-tenant UPDATE against ${target} was refused by AUTHORIZATION ` +
                 `(code ${safeCode(result.error)}).`,
@@ -769,6 +798,17 @@ if (!ownerA || !ownerB || ORG_A.length === 0 || ORG_B.length === 0) {
         if (!error && rows > 0) {
           fail(
             "Staff account read audit_logs — audit access must be restricted to privileged roles.",
+          );
+        } else if (isPrivilegeDenial(error?.code)) {
+          // 42501 is the same blanket refusal every browser role gets since
+          // migration 061 — it says nothing about the staff role in particular.
+          pass(
+            "Staff account has no direct table access to audit_logs (42501 — table privilege, " +
+              "identical for every browser role).",
+          );
+          info(
+            "That refusal is NOT proof of staff-specific authorization: role-scoped audit access is " +
+              "enforced by the APSA server and is not exercised by a direct-table probe.",
           );
         } else if (isAuthorizationDenial(error?.code)) {
           pass(`Staff account is refused audit_logs by authorization (code ${safeCode(error)}).`);
