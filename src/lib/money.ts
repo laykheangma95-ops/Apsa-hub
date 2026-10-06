@@ -42,6 +42,16 @@ export function khrToUsd(value: Money): Money {
   return usd(Math.round((value.amount / KHR_PER_USD) * MINOR_UNITS.USD));
 }
 
+/**
+ * The "≈" hint shown under a total: a USD amount's riel equivalent, or a KHR
+ * amount's dollar equivalent. DISPLAY ONLY — the result is never stored,
+ * submitted or used to compute anything. The authoritative value is always
+ * the input, in its own currency.
+ */
+export function approximateCounterpart(value: Money): Money {
+  return value.currency === "USD" ? usdToKhr(value) : khrToUsd(value);
+}
+
 export function addMoney(a: Money, b: Money): Money {
   if (a.currency !== b.currency) throw new Error("Cannot add different currencies");
   return { amount: a.amount + b.amount, currency: a.currency };

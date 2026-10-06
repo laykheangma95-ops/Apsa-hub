@@ -1,6 +1,6 @@
 import { motion, useReducedMotion } from "motion/react";
 import { Check } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -24,10 +24,17 @@ import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { calculateChange, formatMoney, usdToKhr } from "@/lib/money";
-import { classifyOrderError, type RealOrderDetail } from "@/lib/orders";
+import { approximateCounterpart, calculateChange, formatMoney } from "@/lib/money";
+import { classifyOrderError, isOrderCurrencyMismatch, type RealOrderDetail } from "@/lib/orders";
 import { classifyPaymentError, paymentErrorKey } from "@/lib/payments";
-import { classifyCheckout, lineTotal, type CartLine, type CartTotals } from "@/lib/pos-cart";
+import { UnpricedCartNotice } from "@/components/pos/PosCart";
+import {
+  checkoutBlock,
+  classifyCheckout,
+  lineTotal,
+  type CartLine,
+  type CartTotals,
+} from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Customer, PaymentMethod, Sale } from "@/types";
 
@@ -94,6 +101,15 @@ export function PosCheckoutSheet({
    */
   const checkoutKind = classifyCheckout(lines);
   const isRealCheckout = checkoutKind === "production";
+  /*
+   * The cart's own refusal (mixed currencies, an invalid discount), applied
+   * here as well as on every checkout button: this sheet is the last step
+   * before createRealOrder, so it never relies on its opener having checked.
+   * `priced` is null for a mixed-currency cart — there is no total to show or
+   * send, so nothing below can render or submit one.
+   */
+  const block = checkoutBlock(totals);
+  const priced = totals.kind === "priced" ? totals : null;
 
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [received, setReceived] = useState(0);
@@ -107,19 +123,176 @@ export function PosCheckoutSheet({
   // twice for the same cart (see complete()'s own comment).
   const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
   const [realDetail, setRealDetail] = useState<RealOrderDetail | null>(null);
-  const [realFailure, setRealFailure] = useState<"permission" | "generic" | null>(null);
+  const [realFailure, setRealFailure] = useState<"permission" | "currency" | "generic" | null>(
+    null,
+  );
   const submittingRef = useRef(false);
+
+  /*
+   * ── Checkout attempt identity ───────────────────────────────────────────
+   *
+   * A checkout's server calls outlive the state they were made for: the
+   * merchant can close the sheet, change or replace the cart, start another
+   * sale, or the session can switch member/organization while a create or
+   * confirm is still in flight. Before this, every `await` resumed and wrote
+   * unconditionally — a late USD create cleared a newer KHR cart (via
+   * onCompleted) and painted the abandoned order's "Sale complete" over it.
+   *
+   * Every attempt now carries a token: which sheet session it belongs to,
+   * which attempt it is, which principal/organization started it, and — until
+   * an order exists — which cart it was built from. After EVERY await the
+   * token is checked against the live values, and a stale response returns
+   * without touching state, the cart, onCompleted or any cache. The server
+   * may still have completed it (a draft order then exists, visible in
+   * Orders); it just never mutates a newer browser state.
+   *
+   * sessionRef is bumped whenever the sheet's state is discarded (close,
+   * cancel, principal/organization switch, unmount); attemptRef per attempt.
+   */
+  const sessionRef = useRef(0);
+  const attemptRef = useRef(0);
+  const discountMinor = priced?.discount.amount ?? 0;
+  const shownOrderId = realDetail?.order.id ?? null;
+  const liveRef = useRef({ userId, organizationId, lines, discountMinor, shownOrderId });
+  useEffect(() => {
+    liveRef.current = { userId, organizationId, lines, discountMinor, shownOrderId };
+  });
+
+  interface AttemptToken {
+    session: number;
+    attempt: number;
+    userId: string;
+    organizationId: string;
+    /** The cart (lines + discount) the create was built from; null once an order exists. */
+    cart: { lines: CartLine[]; discountMinor: number } | null;
+  }
+
+  function beginAttempt(boundToCart: boolean): AttemptToken {
+    attemptRef.current += 1;
+    return {
+      session: sessionRef.current,
+      attempt: attemptRef.current,
+      userId,
+      organizationId,
+      cart: boundToCart ? { lines, discountMinor } : null,
+    };
+  }
+
+  function isCurrent(token: AttemptToken): boolean {
+    const live = liveRef.current;
+    return (
+      token.session === sessionRef.current &&
+      token.attempt === attemptRef.current &&
+      token.userId === live.userId &&
+      token.organizationId === live.organizationId &&
+      (token.cart === null ||
+        (token.cart.lines === live.lines && token.cart.discountMinor === live.discountMinor))
+    );
+  }
+
+  /*
+   * A different member or organization is a different till: nothing the sheet
+   * holds (an order, a failure, an in-flight attempt) belongs to it.
+   */
+  const principalKey = `${userId}\u0000${organizationId}`;
+  const principalRef = useRef(principalKey);
+  // The latest reset(), so the effect below depends on the principal alone.
+  const resetRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    resetRef.current = reset;
+  });
+  useEffect(() => {
+    if (principalRef.current === principalKey) return;
+    principalRef.current = principalKey;
+    resetRef.current();
+    // Replay protection is the old principal's too: a new holder, so neither
+    // a key nor a stale claim on it crosses into the new member/organization.
+    idempotencyKeys.current = createIdempotencyKeyHolder();
+  }, [principalKey]);
+  useEffect(
+    () => () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      sessionRef.current += 1;
+    },
+    [],
+  );
   /*
    * createdOrderId only protects a retry whose create RESPONSE arrived. When
    * the request reached the server but the response was lost, createdOrderId
    * is still null and a retry calls createRealOrder again — so the create
    * itself carries an idempotency key (src/lib/idempotency.ts): the same cart
    * re-sends the same key and the server returns the order it already made.
-   * Held across a sheet close (reset() leaves it alone) for the same reason;
-   * released once the order exists, so the next sale is always a new order.
+   * Held across a sheet close (reset() leaves it alone) for the same reason.
+   *
+   * Each create attempt takes its own CLAIM on the key, and the key is retired
+   * only by the attempt this sheet ACCEPTS (after isCurrent) — never by
+   * createRealOrder on arrival. An abandoned attempt A whose identical
+   * successor B reuses the same key therefore cannot drop B's replay
+   * protection when it resolves late; and A's late success leaves the key
+   * held, so B (same cart) is answered with A's order rather than a second one.
+   * Once an attempt is accepted the key is retired, so the next sale is always
+   * a new order.
    */
   const idempotencyKeys = useRef(createIdempotencyKeyHolder());
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
+
+  /*
+   * ── Payment entry identity ──────────────────────────────────────────────
+   *
+   * Payment entry has its own session, separate from the checkout attempt:
+   * closing and reopening the payment form discards the old one's in-flight
+   * request just as closing checkout does. Before this, the payment token was
+   * the checkout's, which a payment close/reopen never changed — so a pending
+   * payment that resolved after a reopen passed the check and closed the NEW
+   * form, throwing away what the merchant had just typed.
+   *
+   * paymentSessionRef is bumped on every open and close of the payment form;
+   * paymentAttemptRef on every submit. Every await in the payment path checks
+   * the token (and the checkout session, principal and order) before touching
+   * the form, the order shown, or any cache. reset() and unmount bump the
+   * checkout session, which invalidates every payment token too.
+   */
+  const paymentSessionRef = useRef(0);
+  const paymentAttemptRef = useRef(0);
+
+  interface PaymentToken {
+    checkoutSession: number;
+    paymentSession: number;
+    paymentAttempt: number;
+    userId: string;
+    organizationId: string;
+    orderId: string;
+  }
+
+  function beginPaymentAttempt(forOrderId: string): PaymentToken {
+    paymentAttemptRef.current += 1;
+    return {
+      checkoutSession: sessionRef.current,
+      paymentSession: paymentSessionRef.current,
+      paymentAttempt: paymentAttemptRef.current,
+      userId,
+      organizationId,
+      orderId: forOrderId,
+    };
+  }
+
+  function isPaymentCurrent(token: PaymentToken): boolean {
+    const live = liveRef.current;
+    return (
+      token.checkoutSession === sessionRef.current &&
+      token.paymentSession === paymentSessionRef.current &&
+      token.paymentAttempt === paymentAttemptRef.current &&
+      token.userId === live.userId &&
+      token.organizationId === live.organizationId &&
+      token.orderId === live.shownOrderId
+    );
+  }
+
+  /** Open or close payment entry — either way a new payment session. */
+  function setPaymentEntryOpen(next: boolean) {
+    paymentSessionRef.current += 1;
+    setRecordPaymentOpen(next);
+  }
 
   /*
    * A sale that is confirmed but unpaid is unfinished work, so POS offers the
@@ -159,15 +332,23 @@ export function PosCheckoutSheet({
   }
 
   const recordPaymentMutation = useMutation({
-    mutationFn: (submit: RecordOrderPaymentSubmit) =>
+    mutationFn: (submit: RecordOrderPaymentSubmit & { orderId: string }) =>
       recordRealPayment({
-        orderId: realDetail!.order.id,
+        orderId: submit.orderId,
         method: submit.method,
         amountMinor: submit.amountMinor,
         ...(submit.reference ? { reference: submit.reference } : {}),
         idempotencyKey: submit.idempotencyKey,
       }),
-    onSuccess: async () => {
+    // The payment session this was submitted from — see "Payment entry
+    // identity". A response for a form the merchant has since closed (and
+    // perhaps reopened and typed into), or for an order/sheet/principal they
+    // have since left, must not close, repaint or re-read anything.
+    onMutate: (submit) => ({ token: beginPaymentAttempt(submit.orderId) }),
+    onSuccess: async (_data, submit, context) => {
+      if (!context || !isPaymentCurrent(context.token)) return;
+      // Closed without starting a new payment session: the re-read below is
+      // still this payment's own. (A reopen meanwhile bumps the session.)
       setRecordPaymentOpen(false);
       invalidateAfterSale();
       /*
@@ -178,7 +359,9 @@ export function PosCheckoutSheet({
        */
       try {
         const { getRealOrderDetail } = await import("@/lib/api");
-        setRealDetail(await getRealOrderDetail(realDetail!.order.id));
+        const refreshed = await getRealOrderDetail(submit.orderId);
+        if (!isPaymentCurrent(context.token)) return;
+        setRealDetail(refreshed);
       } catch {
         // The payment is recorded; only this optimistic re-read failed. The
         // caches are already invalidated, so Order detail will show the truth.
@@ -188,7 +371,8 @@ export function PosCheckoutSheet({
 
   // COD is only sensible when the sale is attached to a customer to deliver to.
   const methods = METHODS.filter((m) => m !== "cod" || customer !== null);
-  const shortfall = method === "cash" && received < totals.total.amount;
+  // The prototype cash path only (createSale, the /design mock catalog).
+  const shortfall = method === "cash" && priced !== null && received < priced.total.amount;
 
   function reset() {
     setMethod("cash");
@@ -201,8 +385,11 @@ export function PosCheckoutSheet({
     setRealDetail(null);
     setRealFailure(null);
     setRecordPaymentOpen(false);
+    paymentSessionRef.current += 1;
     recordPaymentMutation.reset();
     submittingRef.current = false;
+    // Everything in flight now belongs to a discarded sheet state.
+    sessionRef.current += 1;
   }
 
   function handleOpenChange(next: boolean) {
@@ -217,6 +404,8 @@ export function PosCheckoutSheet({
   }
 
   async function complete() {
+    if (!priced || block) return;
+    const token = beginAttempt(true);
     setSubmitting(true);
     setFailed(false);
     try {
@@ -229,17 +418,22 @@ export function PosCheckoutSheet({
           quantity: l.quantity,
           unitPrice: l.unitPrice,
         })),
-        subtotal: totals.subtotal,
-        discount: totals.discount,
-        total: totals.total,
+        subtotal: priced.subtotal,
+        discount: priced.discount,
+        total: priced.total,
         paymentMethod: method,
         ...(customer ? { customerId: customer.id } : {}),
       });
+      if (!isCurrent(token)) return;
       setSale(created);
     } catch {
+      if (!isCurrent(token)) return;
       setFailed(true);
+    } finally {
+      if (token.session === sessionRef.current && token.attempt === attemptRef.current) {
+        setSubmitting(false);
+      }
     }
-    setSubmitting(false);
   }
 
   /**
@@ -266,16 +460,27 @@ export function PosCheckoutSheet({
    */
   async function completeReal() {
     if (submittingRef.current) return;
+    let orderId = createdOrderId;
+    // No order exists yet, so nothing may be created from a cart the cart
+    // itself refuses: a mixed-currency cart or an invalid discount never
+    // reaches the server. (Once an order exists the cart is already cleared,
+    // and a retry only confirms that order — see below.)
+    if (!orderId && (!priced || block)) return;
+    // This attempt's own claim on the replay key (see idempotencyKeys).
+    const claim = idempotencyKeys.current.claim();
     submittingRef.current = true;
     setSubmitting(true);
     setRealFailure(null);
+    // Bound to the cart only until an order exists; after that it is bound to
+    // the order (this sheet session), and the cleared cart no longer matters.
+    const token = beginAttempt(!orderId);
     try {
-      let orderId = createdOrderId;
       // Tracked locally, not read back from state: the setRealDetail() calls
       // below are async/batched and would not be visible yet within this
       // same function run.
       let lifecycleStatus = realDetail?.order.lifecycleStatus;
       if (!orderId) {
+        if (!priced) return; // unreachable: refused before the attempt began
         const created = await createRealOrder({
           source: "POS",
           items: lines.map((l) => ({
@@ -285,9 +490,22 @@ export function PosCheckoutSheet({
             productId: l.productId,
           })),
           customerId: customer && isProductionId(customer.id) ? customer.id : null,
-          ...(totals.discount.amount > 0 ? { discountMinor: totals.discount.amount } : {}),
-          idempotency: idempotencyKeys.current,
+          // Integer minor units in the cart's one currency — the only money
+          // POS sends. The server prices every line itself, derives the
+          // totals, and bounds this to 0 ≤ discount ≤ subtotal.
+          ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
+          idempotency: claim,
         });
+        // Abandoned (sheet closed, cart changed, another attempt began, or a
+        // different member/organization): the order may exist server-side,
+        // but this browser state is no longer the one that asked for it. Its
+        // key is NOT retired — a newer identical attempt may own it now, and
+        // if not, an identical retry should be answered with this same order.
+        if (!isCurrent(token)) return;
+        // Accepted: this sheet now holds the order itself, so the key has done
+        // its job and the next sale gets a new one.
+        claim.retire();
+        token.cart = null;
         orderId = created.order.id;
         lifecycleStatus = created.order.lifecycleStatus;
         setCreatedOrderId(orderId);
@@ -302,20 +520,41 @@ export function PosCheckoutSheet({
       }
       if (lifecycleStatus !== "confirmed") {
         const confirmed = await confirmRealOrder(orderId);
+        if (!isCurrent(token)) return;
         setRealDetail(confirmed);
         // Confirmation commits stock and moves the order's lifecycle, which
         // Orders, Inventory-facing reads and Home attention all reflect.
         invalidateAfterSale();
       }
     } catch (error) {
-      setRealFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
+      if (!isCurrent(token)) return;
+      setRealFailure(
+        classifyOrderError(error) === "forbidden"
+          ? "permission"
+          : isOrderCurrencyMismatch(error)
+            ? "currency"
+            : "generic",
+      );
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      // Only the latest attempt of the live sheet session releases the guard.
+      // A stale one must not release a guard a NEWER attempt holds (that would
+      // re-open double submission); reset() already released it when the
+      // stale attempt was abandoned. (A cart changed under the latest attempt
+      // still releases it, so the merchant can check out the new cart.)
+      if (token.session === sessionRef.current && token.attempt === attemptRef.current) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   }
 
   const realConfirmed = realDetail?.order.lifecycleStatus === "confirmed";
+  const failureKey =
+    realFailure === "permission"
+      ? "pos.permission"
+      : realFailure === "currency"
+        ? "pos.currency.serverMismatch"
+        : "pos.orderError";
 
   return (
     <>
@@ -351,7 +590,7 @@ export function PosCheckoutSheet({
         // push "Complete Sale" off a 320/360px screen with the keyboard open.
         // Same fix as CreateRealOrderSheet/PrepareOrderSheet/PosVariantSheet.
         footer={
-          !sale && !realDetail && checkoutKind !== "unsellable" ? (
+          !sale && !realDetail && checkoutKind !== "unsellable" && block === null ? (
             isRealCheckout ? (
               <Button
                 className="tap-target w-full"
@@ -396,7 +635,7 @@ export function PosCheckoutSheet({
             <p className="text-body mt-1 text-text-secondary">{sale.code}</p>
             <p className="text-financial-lg mt-2 text-text-primary">{formatMoney(sale.total)}</p>
             <p className="text-data text-text-muted">
-              {t("money.approx", { value: formatMoney(usdToKhr(sale.total)) })}
+              {t("money.approx", { value: formatMoney(approximateCounterpart(sale.total)) })}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <StatusChip status={sale.paymentStatus} />
@@ -475,7 +714,9 @@ export function PosCheckoutSheet({
               {formatMoney(realDetail.order.total)}
             </p>
             <p className="text-data text-text-muted">
-              {t("money.approx", { value: formatMoney(usdToKhr(realDetail.order.total)) })}
+              {t("money.approx", {
+                value: formatMoney(approximateCounterpart(realDetail.order.total)),
+              })}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
               <StatusChip status={realDetail.order.lifecycleStatus ?? "draft"} />
@@ -501,7 +742,7 @@ export function PosCheckoutSheet({
              * button disappears on its own once the server says otherwise.
              */}
             {realConfirmed && realDetail.order.paymentStatus === "unpaid" && canRecordPayment ? (
-              <Button className="tap-target mt-4 w-full" onClick={() => setRecordPaymentOpen(true)}>
+              <Button className="tap-target mt-4 w-full" onClick={() => setPaymentEntryOpen(true)}>
                 {t("pos.success.recordPayment")}
               </Button>
             ) : null}
@@ -512,14 +753,8 @@ export function PosCheckoutSheet({
                 {realFailure ? (
                   <OperationalState
                     tone="danger"
-                    title={t(
-                      realFailure === "permission"
-                        ? "pos.permission.title"
-                        : "pos.orderError.title",
-                    )}
-                    body={t(
-                      realFailure === "permission" ? "pos.permission.body" : "pos.orderError.body",
-                    )}
+                    title={t(`${failureKey}.title`)}
+                    body={t(`${failureKey}.body`)}
                     onRetry={() => void completeReal()}
                     className="py-2"
                   />
@@ -591,6 +826,35 @@ export function PosCheckoutSheet({
               {t("pos.unsellable.back")}
             </Button>
           </div>
+        ) : !priced || block === "discount" ? (
+          /*
+           * The cart refuses this sale before any server call: lines in more
+           * than one currency (no honest total exists, and APSA never converts
+           * one for the merchant), or a discount that is not valid for this
+           * cart. Nothing is submitted; the cart is left exactly as it was.
+           */
+          <div className="space-y-5">
+            {priced ? (
+              <OperationalState
+                tone="danger"
+                title={t("pos.discount.blockedTitle")}
+                body={t(
+                  priced.discountProblem === "exceeds_subtotal"
+                    ? "pos.discount.exceedsSubtotal"
+                    : "pos.discount.fixShort",
+                )}
+              />
+            ) : (
+              <UnpricedCartNotice kind={totals.kind} />
+            )}
+            <Button
+              variant="outline"
+              className="tap-target w-full"
+              onClick={() => handleOpenChange(false)}
+            >
+              {t("pos.unsellable.back")}
+            </Button>
+          </div>
         ) : isRealCheckout ? (
           <div className="space-y-5">
             <ul className="space-y-1">
@@ -610,13 +874,13 @@ export function PosCheckoutSheet({
             <div className="space-y-1 border-t border-border-default pt-3">
               <div className="flex justify-between">
                 <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
-                <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
+                <span className="text-body text-text-primary">{formatMoney(priced.subtotal)}</span>
               </div>
-              {totals.discount.amount > 0 ? (
+              {priced.discount.amount > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
                   <span className="text-body text-text-primary">
-                    -{formatMoney(totals.discount)}
+                    -{formatMoney(priced.discount)}
                   </span>
                 </div>
               ) : null}
@@ -624,10 +888,12 @@ export function PosCheckoutSheet({
                 <span className="text-label text-text-secondary">{t("pos.total")}</span>
                 <span className="flex flex-col items-end">
                   <span className="text-financial-lg text-text-primary">
-                    {formatMoney(totals.total)}
+                    {formatMoney(priced.total)}
                   </span>
                   <span className="text-data text-text-muted">
-                    {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
+                    {t("money.approx", {
+                      value: formatMoney(approximateCounterpart(priced.total)),
+                    })}
                   </span>
                 </span>
               </div>
@@ -651,13 +917,10 @@ export function PosCheckoutSheet({
             {realFailure ? (
               <OperationalState
                 tone="danger"
-                title={t(
-                  realFailure === "permission" ? "pos.permission.title" : "pos.orderError.title",
-                )}
-                body={t(
-                  realFailure === "permission" ? "pos.permission.body" : "pos.orderError.body",
-                )}
-                onRetry={() => void completeReal()}
+                title={t(`${failureKey}.title`)}
+                body={t(`${failureKey}.body`)}
+                // Retrying cannot change a price currency; the catalog has to.
+                {...(realFailure === "currency" ? {} : { onRetry: () => void completeReal() })}
               />
             ) : null}
           </div>
@@ -680,13 +943,13 @@ export function PosCheckoutSheet({
             <div className="space-y-1 border-t border-border-default pt-3">
               <div className="flex justify-between">
                 <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
-                <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
+                <span className="text-body text-text-primary">{formatMoney(priced.subtotal)}</span>
               </div>
-              {totals.discount.amount > 0 ? (
+              {priced.discount.amount > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
                   <span className="text-body text-text-primary">
-                    -{formatMoney(totals.discount)}
+                    -{formatMoney(priced.discount)}
                   </span>
                 </div>
               ) : null}
@@ -694,10 +957,12 @@ export function PosCheckoutSheet({
                 <span className="text-label text-text-secondary">{t("pos.total")}</span>
                 <span className="flex flex-col items-end">
                   <span className="text-financial-lg text-text-primary">
-                    {formatMoney(totals.total)}
+                    {formatMoney(priced.total)}
                   </span>
                   <span className="text-data text-text-muted">
-                    {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
+                    {t("money.approx", {
+                      value: formatMoney(approximateCounterpart(priced.total)),
+                    })}
                   </span>
                 </span>
               </div>
@@ -745,7 +1010,7 @@ export function PosCheckoutSheet({
                     {shortfall
                       ? "—"
                       : formatMoney(
-                          calculateChange({ amount: received, currency: "USD" }, totals.total),
+                          calculateChange({ amount: received, currency: "USD" }, priced.total),
                         )}
                   </span>
                 </div>
@@ -797,7 +1062,7 @@ export function PosCheckoutSheet({
         <RecordOrderPaymentSheet
           open={recordPaymentOpen}
           onOpenChange={(next) => {
-            setRecordPaymentOpen(next);
+            setPaymentEntryOpen(next);
             // A failure belongs to the attempt that produced it — reopening for
             // a fresh attempt must not show the last one's error over an empty
             // form (same reset Order detail's own usage does).
@@ -812,7 +1077,9 @@ export function PosCheckoutSheet({
               ? t(paymentErrorKey(classifyPaymentError(recordPaymentMutation.error)))
               : null
           }
-          onConfirm={(submit) => recordPaymentMutation.mutate(submit)}
+          onConfirm={(submit) =>
+            recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })
+          }
         />
       ) : null}
     </>

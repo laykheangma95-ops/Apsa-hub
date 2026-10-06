@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,16 +29,15 @@ import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { formatMoney } from "@/lib/money";
 import {
-  addToCart,
   availableStock,
   calculateCartTotals,
+  checkoutBlock,
+  EMPTY_POS_CART,
   isSellable,
   lineKey,
-  needsManagerApproval,
-  removeLine,
-  setQuantity,
+  NO_DISCOUNT,
+  posCartReducer,
   type CartDiscountInput,
-  type CartLine,
 } from "@/lib/pos-cart";
 import type { Customer, Product, ProductCategory } from "@/types";
 
@@ -98,16 +97,24 @@ function PosScreen() {
    * cart the server will refuse at checkout. So the whole entry point closes.
    */
   const canSell = capabilities.can("orders.create");
+  /*
+   * Discounting is its own server-side authority: createOrder requires
+   * orders.apply_discount for any non-zero discount. Without it the control is
+   * not offered and no discount enters the totals, so the cart never previews
+   * a total the server would refuse. (This replaced a browser-only "cashier
+   * limit" with no server counterpart, which blocked even an Owner's sale.)
+   */
+  const canDiscount = capabilities.can("orders.apply_discount");
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<ProductCategory | "all">("all");
   const [view, setView] = useState<"list" | "grid">("list");
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [discount, setDiscount] = useState<CartDiscountInput>({
-    enabled: false,
-    mode: "amount",
-    value: 0,
-  });
+  /*
+   * Lines and discount are ONE state behind posCartReducer, so every cart
+   * change — tap, scan, quantity, remove, clear — passes the same rule: a
+   * change of the cart's currency context clears the discount (src/lib/pos-cart.ts).
+   */
+  const [{ lines, discount }, dispatchCart] = useReducer(posCartReducer, EMPTY_POS_CART);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [variantProduct, setVariantProduct] = useState<Product | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
@@ -155,8 +162,8 @@ function PosScreen() {
     });
   }, [catalog, category, query]);
 
-  const totals = calculateCartTotals(lines, discount);
-  const approvalRequired = needsManagerApproval(discount, totals);
+  const totals = calculateCartTotals(lines, canDiscount ? discount : NO_DISCOUNT);
+  const block = checkoutBlock(totals);
 
   function addProduct(
     product: Product,
@@ -170,8 +177,9 @@ function PosScreen() {
     // which variant is actually being added — see PosVariantSheet.
     const chosenVariant = product.productionVariants?.find((v) => v.variantId === variantId);
     const unitPrice = chosenVariant?.price ?? product.price;
-    setLines((current) =>
-      addToCart(current, {
+    dispatchCart({
+      type: "add",
+      line: {
         key: lineKey(product.id, variantId ?? variant),
         productId: product.id,
         ...(variantId ? { variantId } : {}),
@@ -182,8 +190,8 @@ function PosScreen() {
         quantity,
         unitPrice,
         stock: Math.max(1, availableStock(product)),
-      }),
-    );
+      },
+    });
     setVariantProduct(null);
   }
 
@@ -224,8 +232,9 @@ function PosScreen() {
         return;
       }
       const { product, variant } = result;
-      setLines((current) =>
-        addToCart(current, {
+      dispatchCart({
+        type: "add",
+        line: {
           key: lineKey(product.id, variant.id),
           productId: product.id,
           variantId: variant.id,
@@ -236,8 +245,8 @@ function PosScreen() {
           quantity: 1,
           unitPrice: variant.price,
           stock: Math.max(1, availableStock(product)),
-        }),
-      );
+        },
+      });
       setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });
     } catch {
       setScanNotice({ kind: "error" });
@@ -259,8 +268,7 @@ function PosScreen() {
   }, [scanNotice]);
 
   function resetSale() {
-    setLines([]);
-    setDiscount({ enabled: false, mode: "amount", value: 0 });
+    dispatchCart({ type: "reset" });
     setCustomer(null);
     setCartOpen(false);
     // A sold-out variant's stock is server-authoritative at order time either
@@ -277,14 +285,15 @@ function PosScreen() {
     lines,
     totals,
     discount,
-    onDiscountChange: setDiscount,
-    approvalRequired,
+    onDiscountChange: (next: CartDiscountInput) =>
+      dispatchCart({ type: "discount", discount: next }),
+    canDiscount,
     customer,
     onPickCustomer: () => setCustomerOpen(true),
     onClearCustomer: () => setCustomer(null),
     onQuantity: (key: string, quantity: number) =>
-      setLines((current) => setQuantity(current, key, quantity)),
-    onRemove: (key: string) => setLines((current) => removeLine(current, key)),
+      dispatchCart({ type: "quantity", key, quantity }),
+    onRemove: (key: string) => dispatchCart({ type: "remove", key }),
     onClear: resetSale,
     onCheckout: () => {
       setCartOpen(false);
@@ -479,24 +488,31 @@ function PosScreen() {
                     {t("pos.itemCount", { count: totals.itemCount })}
                   </span>
                   <span className="text-h2 tnum block truncate text-text-primary">
-                    {formatMoney(totals.total)}
+                    {/* A mixed-currency cart has no total — never a summed or converted one. */}
+                    {totals.kind === "priced" ? formatMoney(totals.total) : "—"}
                   </span>
                 </span>
               </button>
               <Button
                 className="press-tactile tap-target elevation-action h-12 shrink-0 rounded-2xl px-5"
-                disabled={approvalRequired || offline}
+                disabled={block !== null || offline}
                 onClick={() => setCheckoutOpen(true)}
               >
                 {t("pos.checkout")}
               </Button>
             </div>
-            {approvalRequired || offline ? (
+            {offline || (block !== null && block !== "empty") ? (
               <p
                 role="status"
                 className="text-caption mx-auto mt-1.5 max-w-[var(--screen-max)] text-status-warning-text"
               >
-                {offline ? t("pos.offline") : t("pos.discount.approval")}
+                {offline
+                  ? t("pos.offline")
+                  : block === "mixed_currency"
+                    ? t("pos.currency.mixedShort")
+                    : block === "out_of_range"
+                      ? t("pos.currency.tooLargeShort")
+                      : t("pos.discount.fixShort")}
               </p>
             ) : null}
           </motion.div>

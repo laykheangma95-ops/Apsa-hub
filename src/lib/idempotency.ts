@@ -23,6 +23,34 @@ export function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
 
+/**
+ * One logical attempt's claim on the holder's key.
+ *
+ * Release by key equality is not enough to protect replay. Attempt A takes
+ * key-1 and is still pending; the merchant closes and reopens checkout, and an
+ * identical Attempt B takes key-1 too (same request, same key — exactly what
+ * replay needs). If A's late response could then release "key-1", it would
+ * drop the key B is relying on: B's lost-response retry would mint key-2, and
+ * the server would create a second order.
+ *
+ * So the key is OWNED by the most recent claim that took it, and only that
+ * owner can retire it. A claim that was superseded — even by an identical
+ * request holding the same key — retires nothing.
+ */
+export interface IdempotencyClaim {
+  /**
+   * This attempt's key for the request described by `requestFingerprint`: the
+   * held key when the fingerprint matches (a retry of the same request), else
+   * a new one. Either way this claim becomes the key's owner.
+   */
+  keyFor(requestFingerprint: string): string;
+  /**
+   * Retire the key — call only once the caller has ACCEPTED this attempt's
+   * result as the current one. A no-op unless this claim still owns the key.
+   */
+  retire(): void;
+}
+
 export interface IdempotencyKeyHolder {
   /**
    * The key for an attempt whose request is described by `requestFingerprint`.
@@ -30,24 +58,55 @@ export interface IdempotencyKeyHolder {
    * issued for; otherwise issues and holds a new one.
    */
   keyFor(requestFingerprint: string): string;
-  /** Forget the held key — call once the order has been created. */
-  release(): void;
+  /**
+   * Forget the held key — call once the result has been recorded.
+   *
+   * Pass the key the finished request used to release ONLY that key; with no
+   * argument, releases whatever is held. Flows with overlapping attempts use
+   * claim() instead, whose retire() is ownership-checked.
+   */
+  release(key?: string): void;
+  /** A new attempt's claim on this holder's key (see IdempotencyClaim). */
+  claim(): IdempotencyClaim;
 }
 
 export function createIdempotencyKeyHolder(
   generate: () => string = newIdempotencyKey,
 ): IdempotencyKeyHolder {
-  let held: { key: string; fingerprint: string } | null = null;
+  // `owner` is the claim that last took the key; null for a plain keyFor().
+  let held: { key: string; fingerprint: string; owner: object | null } | null = null;
+  function take(requestFingerprint: string, owner: object | null): string {
+    if (held && held.fingerprint === requestFingerprint) {
+      held.owner = owner;
+      return held.key;
+    }
+    held = { key: generate(), fingerprint: requestFingerprint, owner };
+    return held.key;
+  }
   return {
     keyFor(requestFingerprint) {
-      if (held && held.fingerprint === requestFingerprint) return held.key;
-      held = { key: generate(), fingerprint: requestFingerprint };
-      return held.key;
+      return take(requestFingerprint, null);
     },
-    release() {
+    release(key) {
+      if (key !== undefined && held?.key !== key) return;
       held = null;
     },
+    claim() {
+      const claim: IdempotencyClaim = {
+        keyFor: (requestFingerprint) => take(requestFingerprint, claim),
+        retire() {
+          if (held?.owner === claim) held = null;
+        },
+      };
+      return claim;
+    },
   };
+}
+
+export function isIdempotencyKeyHolder(
+  value: IdempotencyKeyHolder | IdempotencyClaim,
+): value is IdempotencyKeyHolder {
+  return typeof (value as Partial<IdempotencyKeyHolder>).claim === "function";
 }
 
 /**

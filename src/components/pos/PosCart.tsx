@@ -7,9 +7,16 @@ import { QuantityStepper } from "@/design-system";
 import { PosNotice } from "@/components/pos/PosNotice";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { formatMoney, usdToKhr } from "@/lib/money";
+import { approximateCounterpart, formatMoney } from "@/lib/money";
 import type { DiscountMode } from "@/lib/order-draft";
-import { lineTotal, type CartDiscountInput, type CartLine, type CartTotals } from "@/lib/pos-cart";
+import {
+  checkoutBlock,
+  lineTotal,
+  type CartDiscountInput,
+  type CartLine,
+  type CartTotals,
+  discountProblemKey,
+} from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Customer } from "@/types";
 
@@ -18,7 +25,13 @@ interface PosCartProps {
   totals: CartTotals;
   discount: CartDiscountInput;
   onDiscountChange: (value: CartDiscountInput) => void;
-  approvalRequired: boolean;
+  /**
+   * The member holds orders.apply_discount — the permission createOrder itself
+   * requires for any non-zero discount. Without it the control is not offered
+   * (the server would refuse the sale); this decides what is SHOWN, never what
+   * is ALLOWED.
+   */
+  canDiscount: boolean;
   customer: Customer | null;
   onPickCustomer: () => void;
   onClearCustomer: () => void;
@@ -35,7 +48,7 @@ export function PosCart({
   totals,
   discount,
   onDiscountChange,
-  approvalRequired,
+  canDiscount,
   customer,
   onPickCustomer,
   onClearCustomer,
@@ -49,6 +62,13 @@ export function PosCart({
   const { t } = useTranslation();
   const { language } = useLanguage();
   const [confirmClear, setConfirmClear] = useState(false);
+  const block = checkoutBlock(totals);
+  // A fixed amount is typed in the cart's own currency; a mixed cart has none,
+  // so the discount control waits until the cart is one currency again.
+  const priced = totals.kind === "priced" ? totals : null;
+  const amountCurrency = priced?.currency ?? null;
+  const discountText =
+    discount.mode === "amount" && discount.currency !== amountCurrency ? "" : discount.text;
 
   if (lines.length === 0) {
     return (
@@ -168,105 +188,184 @@ export function PosCart({
             </button>
           )}
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={discount.enabled}
-              aria-label={t("pos.discount.label")}
-              onClick={() => onDiscountChange({ ...discount, enabled: !discount.enabled })}
-              className={cn(
-                "tap-target flex w-14 items-center rounded-full px-1",
-                discount.enabled ? "bg-action-primary" : "bg-surface-secondary",
-              )}
-            >
-              <span
-                aria-hidden
-                className={cn(
-                  "size-6 rounded-full bg-surface-primary shadow-sm transition-transform",
-                  discount.enabled ? "translate-x-6" : "translate-x-0",
-                )}
-              />
-            </button>
-          </div>
-
-          {discount.enabled ? (
-            <div className="space-y-2">
-              <div className="flex gap-2" role="group" aria-label={t("pos.discount.label")}>
-                {(["amount", "percent"] as DiscountMode[]).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={discount.mode === mode}
-                    onClick={() => onDiscountChange({ ...discount, mode, value: 0 })}
+          {canDiscount && priced ? (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={discount.enabled}
+                  aria-label={t("pos.discount.label")}
+                  onClick={() => onDiscountChange({ ...discount, enabled: !discount.enabled })}
+                  className={cn(
+                    "tap-target flex w-14 items-center rounded-full px-1",
+                    discount.enabled ? "bg-action-primary" : "bg-surface-secondary",
+                  )}
+                >
+                  <span
+                    aria-hidden
                     className={cn(
-                      "press tap-target flex-1 rounded-full border text-label transition-colors",
-                      discount.mode === mode
-                        ? "border-action-primary bg-action-primary text-text-on-action"
-                        : "border-border-strong bg-surface-primary text-text-primary",
+                      "size-6 rounded-full bg-surface-primary shadow-sm transition-transform",
+                      discount.enabled ? "translate-x-6" : "translate-x-0",
                     )}
-                  >
-                    <span className="chip-text">{t(`pos.discount.${mode}`)}</span>
-                  </button>
-                ))}
+                  />
+                </button>
               </div>
-              <Input
-                inputMode="decimal"
-                aria-label={t(`pos.discount.${discount.mode}`)}
-                className="text-financial h-12"
-                value={
-                  discount.mode === "percent"
-                    ? String(discount.value)
-                    : (discount.value / 100).toFixed(2)
-                }
-                onChange={(e) => {
-                  const parsed = Number.parseFloat(e.target.value.replace(/[^0-9.]/g, ""));
-                  const safe = Number.isFinite(parsed) ? parsed : 0;
-                  onDiscountChange({
-                    ...discount,
-                    value: discount.mode === "percent" ? Math.round(safe) : Math.round(safe * 100),
-                  });
-                }}
-              />
-              {approvalRequired ? (
-                <p role="status" className="text-body-sm text-status-danger-text">
-                  {t("pos.discount.approval")}
-                </p>
+
+              {discount.enabled ? (
+                <div className="space-y-2">
+                  <div className="flex gap-2" role="group" aria-label={t("pos.discount.label")}>
+                    {(["amount", "percent"] as DiscountMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        aria-pressed={discount.mode === mode}
+                        onClick={() =>
+                          onDiscountChange({
+                            ...discount,
+                            mode,
+                            text: "",
+                            currency: amountCurrency,
+                          })
+                        }
+                        className={cn(
+                          "press tap-target flex-1 rounded-full border text-label transition-colors",
+                          discount.mode === mode
+                            ? "border-action-primary bg-action-primary text-text-on-action"
+                            : "border-border-strong bg-surface-primary text-text-primary",
+                        )}
+                      >
+                        <span className="chip-text">{t(`pos.discount.${mode}`)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="relative">
+                    <span
+                      aria-hidden
+                      className="text-financial pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-text-secondary"
+                    >
+                      {discount.mode === "percent" ? "%" : priced.currency === "USD" ? "$" : "៛"}
+                    </span>
+                    <Input
+                      // Riel has no decimals and a percent is whole, so only a
+                      // USD amount gets the decimal keypad.
+                      inputMode={
+                        discount.mode === "amount" && priced.currency === "USD"
+                          ? "decimal"
+                          : "numeric"
+                      }
+                      enterKeyHint="done"
+                      autoComplete="off"
+                      aria-label={
+                        discount.mode === "percent"
+                          ? t("pos.discount.percent")
+                          : t("pos.discount.amountIn", { currency: priced.currency })
+                      }
+                      aria-invalid={priced.discountProblem ? true : undefined}
+                      aria-describedby={priced.discountProblem ? "pos-discount-problem" : undefined}
+                      placeholder={
+                        discount.mode === "percent"
+                          ? "10"
+                          : priced.currency === "USD"
+                            ? "0.00"
+                            : "0"
+                      }
+                      className="text-financial h-12 pl-8"
+                      value={discountText}
+                      onChange={(e) =>
+                        onDiscountChange({
+                          ...discount,
+                          text: e.target.value,
+                          currency: amountCurrency,
+                        })
+                      }
+                    />
+                  </div>
+                  {priced.discountProblem ? (
+                    <p
+                      id="pos-discount-problem"
+                      role="alert"
+                      className="text-body-sm text-status-danger-text"
+                    >
+                      {t(
+                        discountProblemKey(priced.discountProblem, discount.mode, priced.currency),
+                      )}
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
-            </div>
+            </>
           ) : null}
         </div>
       </div>
 
       <div className="sticky bottom-0 space-y-1.5 border-t border-border-default bg-surface-primary pt-3">
-        <div className="flex items-center justify-between">
-          <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
-          <span className="text-body text-text-primary">{formatMoney(totals.subtotal)}</span>
-        </div>
-        {totals.discount.amount > 0 ? (
-          <div className="flex items-center justify-between">
-            <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
-            <span className="text-body text-text-primary">-{formatMoney(totals.discount)}</span>
-          </div>
-        ) : null}
-        <div className="flex items-end justify-between">
-          <span className="text-label text-text-secondary">{t("pos.total")}</span>
-          <span className="flex flex-col items-end">
-            <span className="text-financial-lg text-text-primary">{formatMoney(totals.total)}</span>
-            <span className="text-data text-text-muted">
-              {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
-            </span>
-          </span>
-        </div>
+        {priced ? (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-label text-text-secondary">{t("pos.subtotal")}</span>
+              <span className="text-body tnum min-w-0 text-right break-all text-text-primary">
+                {formatMoney(priced.subtotal)}
+              </span>
+            </div>
+            {priced.discount.amount > 0 ? (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-label text-text-secondary">{t("pos.discount.label")}</span>
+                <span className="text-body tnum min-w-0 text-right break-all text-text-primary">
+                  -{formatMoney(priced.discount)}
+                </span>
+              </div>
+            ) : null}
+            <div className="flex items-end justify-between gap-3">
+              <span className="text-label text-text-secondary">{t("pos.total")}</span>
+              <span className="flex min-w-0 flex-col items-end text-right">
+                <span className="text-financial-lg tnum break-all text-text-primary">
+                  {formatMoney(priced.total)}
+                </span>
+                <span className="text-data tnum text-text-muted">
+                  {t("money.approx", { value: formatMoney(approximateCounterpart(priced.total)) })}
+                </span>
+              </span>
+            </div>
+          </>
+        ) : (
+          <UnpricedCartNotice kind={totals.kind} />
+        )}
         <Button
           className="press tap-target elevation-action mt-1 h-12 w-full"
-          disabled={approvalRequired || offline || totals.itemCount === 0}
+          disabled={block !== null || offline}
           onClick={onCheckout}
         >
           {t("pos.checkout")}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Shown wherever a total would be when the cart cannot be priced: lines in
+ * more than one currency (nothing is summed or converted — the merchant
+ * removes one currency's items), or a total beyond the amounts POS can
+ * represent exactly. Either way there is no total, and no checkout.
+ */
+export function UnpricedCartNotice({
+  kind,
+  className,
+}: {
+  kind: "mixed_currency" | "out_of_range" | "priced";
+  className?: string;
+}) {
+  const { t } = useTranslation();
+  const copy = kind === "out_of_range" ? "pos.currency.tooLarge" : "pos.currency.mixed";
+  return (
+    <div
+      role="alert"
+      className={cn("rounded-xl border border-border-default bg-status-danger-soft p-3", className)}
+    >
+      <p className="text-label text-status-danger-text">{t(`${copy}Title`)}</p>
+      <p className="text-body-sm mt-1 text-text-primary">{t(`${copy}Body`)}</p>
     </div>
   );
 }
