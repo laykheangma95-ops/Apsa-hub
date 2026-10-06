@@ -496,10 +496,14 @@ describe("Failure never renders as success", () => {
   });
 
   it("a permission denial is reported as a permission problem, not a server failure", () => {
-    expect(source).toContain(
-      'classifyOrderError(error) === "forbidden" ? "permission" : "generic"',
+    // forbidden → "permission" first; a currency mismatch has its own copy;
+    // everything else stays "generic".
+    expect(source).toMatch(
+      /classifyOrderError\(error\) === "forbidden"\s*\?\s*"permission"\s*:\s*isOrderCurrencyMismatch\(error\)\s*\?\s*"currency"\s*:\s*"generic"/,
     );
-    expect(source).toContain("pos.permission.title");
+    // …and "permission" renders the pos.permission.{title,body} copy.
+    expect(source).toMatch(/realFailure === "permission"\s*\?\s*"pos\.permission"/);
+    expect(source).toContain("t(`${failureKey}.title`)");
   });
 
   it("the record-payment error is classified, not shown as a generic crash", () => {
