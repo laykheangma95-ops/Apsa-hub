@@ -1219,8 +1219,10 @@ export async function createRealOrder(input: CreateRealOrderInput): Promise<Real
   const idempotencyKey = idempotency.keyFor(orderRequestFingerprint(request));
   const { createOrderFn } = await import("@/api/orders");
   const detail = await createOrderFn({ data: { ...request, idempotencyKey } });
-  // The order exists now; the next order must never reuse this key.
-  idempotency.release();
+  // The order exists now; the next order must never reuse this key. Only THIS
+  // key is released — if a newer attempt already holds a different one, a
+  // late response from this request must leave it alone.
+  idempotency.release(idempotencyKey);
   return mapOrderDetailToUi(detail);
 }
 

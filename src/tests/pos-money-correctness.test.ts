@@ -57,8 +57,8 @@ function amount(text: string, currency: "USD" | "KHR"): CartDiscountInput {
   return { enabled: true, mode: "amount", text, currency };
 }
 
-function percent(text: string): CartDiscountInput {
-  return { enabled: true, mode: "percent", text, currency: null };
+function percent(text: string, currency: "USD" | "KHR" = "USD"): CartDiscountInput {
+  return { enabled: true, mode: "percent", text, currency };
 }
 
 function priced(totals: CartTotals): PricedCartTotals {
@@ -146,14 +146,14 @@ describe("D. USD percentage discount", () => {
 
 describe("E. KHR percentage discount", () => {
   it("is computed in riel, not cents", () => {
-    const t = priced(calculateCartTotals([line("a", khr(5000), 2)], percent("15")));
+    const t = priced(calculateCartTotals([line("a", khr(5000), 2)], percent("15", "KHR")));
     expect(t.discount).toEqual(khr(1500));
     expect(t.total).toEqual(khr(8500));
   });
 
   it("rounds half-up to the riel", () => {
     // 15% of ៛10,010 = ៛1,501.5 → ៛1,502.
-    const t = priced(calculateCartTotals([line("a", khr(10010))], percent("15")));
+    const t = priced(calculateCartTotals([line("a", khr(10010))], percent("15", "KHR")));
     expect(t.discount).toEqual(khr(1502));
   });
 });
@@ -329,13 +329,14 @@ describe("I. a refused cart never reaches createRealOrder", () => {
   );
 
   it("completeReal returns before createRealOrder when the cart refuses checkout", () => {
-    const guard = completeReal.indexOf("if (!priced || block) return;");
+    // Only while no order exists — a confirm retry for an order that already
+    // exists is never blocked by the (now cleared) cart.
+    const guard = completeReal.indexOf("if (!orderId && (!priced || block)) return;");
     const create = completeReal.indexOf("await createRealOrder(");
     expect(guard).toBeGreaterThan(-1);
     expect(create).toBeGreaterThan(guard);
-    // …and inside the `!orderId` branch, so a confirm retry for an order that
-    // already exists is never blocked by the (now cleared) cart.
-    expect(completeReal.indexOf("if (!orderId)")).toBeLessThan(guard);
+    // …and it is checked before the double-submit guard is taken.
+    expect(completeReal.indexOf("submittingRef.current = true")).toBeGreaterThan(guard);
   });
 
   it("the prototype checkout refuses the same carts", () => {
@@ -350,7 +351,7 @@ describe("I. a refused cart never reaches createRealOrder", () => {
 
   it("the sheet's confirm footer is only offered for an unblocked cart", () => {
     expect(sheet).toMatch(/checkoutKind !== "unsellable" && block === null \?/);
-    expect(sheet).toMatch(/<MixedCurrencyNotice \/>/);
+    expect(sheet).toContain("<UnpricedCartNotice kind={totals.kind} />");
   });
 
   it("the discount sent is the cart's own minor units — no conversion on the way", () => {
@@ -485,11 +486,15 @@ describe("POS money copy exists in English and Khmer", () => {
     for (const key of used) {
       for (const locale of [en, km]) {
         const value = key.split(".").reduce<unknown>((o, k) => (o as never)?.[k], locale);
-        // A failure-copy prefix (`${failureKey}.title` / `.body`) resolves to both.
+        // A failure-copy prefix (`${failureKey}.title` / `.body`) resolves to
+        // both; a notice prefix (`${copy}Title` / `${copy}Body`) likewise.
+        const lookup = (k: string) =>
+          k.split(".").reduce<unknown>((o, part) => (o as never)?.[part], locale);
         const resolved =
           typeof value === "string" ||
           (typeof (value as { title?: unknown })?.title === "string" &&
-            typeof (value as { body?: unknown })?.body === "string");
+            typeof (value as { body?: unknown })?.body === "string") ||
+          (typeof lookup(`${key}Title`) === "string" && typeof lookup(`${key}Body`) === "string");
         expect({ key, resolved }).toEqual({ key, resolved: true });
       }
     }

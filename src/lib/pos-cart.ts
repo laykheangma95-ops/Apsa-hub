@@ -2,7 +2,7 @@
  * Pure POS cart arithmetic. No React, no formatting, no i18n.
  * Components render the result; they never compute money themselves.
  */
-import { multiplyMoney, parseMinorUnits } from "@/lib/money";
+import { parseMinorUnits } from "@/lib/money";
 import type { Currency, Money, Product } from "@/types";
 import type { DiscountMode } from "@/lib/order-draft";
 
@@ -53,14 +53,27 @@ export interface MixedCurrencyCart {
   itemCount: number;
 }
 
-export type CartTotals = PricedCartTotals | MixedCurrencyCart;
+/**
+ * A single-currency cart whose subtotal exceeds MAX_CART_MINOR — beyond the
+ * integers a JS number represents exactly. Like a mixed cart it carries no
+ * Money, so no inexact total can be shown or submitted, and it cannot check
+ * out.
+ */
+export interface OutOfRangeCart {
+  kind: "out_of_range";
+  currency: Currency;
+  itemCount: number;
+}
+
+export type CartTotals = PricedCartTotals | MixedCurrencyCart | OutOfRangeCart;
 
 export function lineKey(productId: string, variant?: string): string {
   return variant ? `${productId}::${variant}` : productId;
 }
 
+/** A line's own total, exact (BigInt) — see "Exact money arithmetic" below. */
 export function lineTotal(line: CartLine): Money {
-  return multiplyMoney(line.unitPrice, line.quantity);
+  return { amount: Number(lineTotalMinor(line)), currency: line.unitPrice.currency };
 }
 
 export function addToCart(lines: CartLine[], line: CartLine): CartLine[] {
@@ -108,9 +121,10 @@ export interface CartDiscountInput {
    */
   text: string;
   /**
-   * The cart currency the amount was typed in. An "amount" discount typed for
-   * a USD cart is never applied to a KHR cart (or the reverse): "5" means $5
-   * or ៛5, and silently switching between them would move real money.
+   * The single cart currency this discount was entered for — stamped by
+   * posCartReducer, for BOTH modes. A discount is never applied to a cart of
+   * another currency: "5" means $5 or ៛5, and "10%" of a riel basket is not
+   * the decision the merchant made about a dollar one.
    */
   currency: Currency | null;
 }
@@ -131,45 +145,155 @@ export function cartCurrencies(lines: CartLine[]): Currency[] {
   return seen;
 }
 
-const WHOLE_PERCENT = /^\d{1,3}$/;
+/* ── Cart state ────────────────────────────────────────────────────────────
+ *
+ * Lines and discount live in ONE state, changed only through this reducer, so
+ * the rule below cannot be skipped by any one code path (tap, scan, quantity,
+ * remove, clear).
+ *
+ * The rule: a discount belongs to the currency context it was entered for.
+ * Whenever the set of currencies in the cart changes — USD → KHR, single →
+ * mixed, mixed → single, anything → empty — the discount is CLEARED, not kept
+ * dormant. The previous version only hid a mismatched discount, so the same
+ * "$5" silently came back when the cart returned to USD, and a percentage
+ * carried from a dollar basket onto a replacement riel one.
+ */
+
+export interface PosCartState {
+  lines: CartLine[];
+  discount: CartDiscountInput;
+}
+
+export const EMPTY_POS_CART: PosCartState = { lines: [], discount: NO_DISCOUNT };
+
+export type PosCartAction =
+  | { type: "add"; line: CartLine }
+  | { type: "quantity"; key: string; quantity: number }
+  | { type: "remove"; key: string }
+  | { type: "discount"; discount: CartDiscountInput }
+  | { type: "reset" };
+
+/** The cart's currency context: "" (empty), "USD", "KHR" or "KHR+USD" (mixed). */
+export function cartCurrencyContext(lines: CartLine[]): string {
+  return [...cartCurrencies(lines)].sort().join("+");
+}
+
+export function posCartReducer(state: PosCartState, action: PosCartAction): PosCartState {
+  switch (action.type) {
+    case "reset":
+      return EMPTY_POS_CART;
+    case "discount": {
+      // Only a single-currency cart can carry a discount, and it is stamped
+      // with that currency whatever the caller passed.
+      const currencies = cartCurrencies(state.lines);
+      if (currencies.length !== 1) return { ...state, discount: NO_DISCOUNT };
+      return { ...state, discount: { ...action.discount, currency: currencies[0]! } };
+    }
+    default: {
+      const lines =
+        action.type === "add"
+          ? addToCart(state.lines, action.line)
+          : action.type === "quantity"
+            ? setQuantity(state.lines, action.key, action.quantity)
+            : removeLine(state.lines, action.key);
+      if (cartCurrencyContext(lines) !== cartCurrencyContext(state.lines)) {
+        return { lines, discount: NO_DISCOUNT };
+      }
+      return { lines, discount: state.discount };
+    }
+  }
+}
+
+/* ── Exact money arithmetic ────────────────────────────────────────────────
+ *
+ * Every cart amount is an integer number of minor units. Above
+ * Number.MAX_SAFE_INTEGER a JS number can no longer represent every integer,
+ * so `subtotal * percent` (or even `price * quantity`) silently rounds — the
+ * independently reproduced case was a 100% discount on 9,006,988,797,149,282
+ * coming out ONE minor unit larger than the subtotal, a -1 payable total.
+ *
+ * So: arithmetic runs in BigInt, and a result is turned back into a number
+ * only when it is ≤ MAX_CART_MINOR. A cart past that bound is not priced at
+ * all (kind "out_of_range") and cannot check out.
+ */
+
+/** The largest minor-unit amount POS prices, discounts or submits. */
+export const MAX_CART_MINOR = Number.MAX_SAFE_INTEGER;
+const MAX_CART_MINOR_BIG = BigInt(MAX_CART_MINOR);
+
+function lineTotalMinor(line: CartLine): bigint {
+  return BigInt(line.unitPrice.amount) * BigInt(line.quantity);
+}
 
 /**
  * Percent of a minor-unit amount, rounded half-up to the currency's own minor
- * unit (a cent for USD, a riel for KHR). Integer arithmetic only: the product
- * is an exact integer, and floor((x + 50) / 100) cannot be pushed across an
- * integer boundary by floating-point division.
+ * unit (a cent for USD, a riel for KHR). Exact: BigInt division truncates,
+ * which for these non-negative values is floor, and with 0 ≤ percent ≤ 100 the
+ * result can never exceed the amount.
  */
-function percentOf(amountMinor: number, percent: number): number {
-  return Math.floor((amountMinor * percent + 50) / 100);
+function percentOf(amountMinor: bigint, percent: number): bigint {
+  return (amountMinor * BigInt(percent) + 50n) / 100n;
+}
+
+/*
+ * The discount-amount grammar POS accepts. Deliberately POS-local and strict,
+ * checked BEFORE the shared parseMinorUnits (which strips every comma and so
+ * read "1,5" or ",15" as 15): a comma is accepted only as a thousands
+ * separator in correct three-digit groups, so the amount applied is always
+ * the amount the merchant sees.
+ *
+ *   USD: 15 · 15.5 · 15.50 · 15. · 2,000 · 2,000.50
+ *   KHR: 15000 · 15,000 · 2,000            (riel has no fractional unit)
+ *
+ * Refused: 1,5 · 1,,5 · ,15 · 15, · 1,00 · 2,00,0 · 2,000,00 · 1.2.3 · -5 ·
+ * 5$ · 1e3 · any fraction of a riel · anything above MAX_CART_MINOR.
+ */
+const GROUPED_WHOLE = String.raw`(?:\d+|[1-9]\d{0,2}(?:,\d{3})+)`;
+const DISCOUNT_AMOUNT_GRAMMAR: Record<Currency, RegExp> = {
+  USD: new RegExp(String.raw`^${GROUPED_WHOLE}(?:\.\d{0,2})?$`),
+  KHR: new RegExp(String.raw`^${GROUPED_WHOLE}$`),
+};
+const WHOLE_PERCENT = /^\d{1,3}$/;
+
+/** Minor units for a typed discount amount, or null when the text is not one. */
+export function parseDiscountAmount(text: string, currency: Currency): number | null {
+  const trimmed = text.trim();
+  if (!DISCOUNT_AMOUNT_GRAMMAR[currency].test(trimmed)) return null;
+  // Every comma left is a validated thousands separator, so removing them
+  // (which parseMinorUnits does) cannot change the amount.
+  const minor = parseMinorUnits(trimmed, currency);
+  if (minor === null || minor > MAX_CART_MINOR) return null;
+  return minor;
 }
 
 function resolveDiscount(
   input: CartDiscountInput,
   currency: Currency,
-  subtotalMinor: number,
-): { amount: number; problem: DiscountProblem | null } {
-  if (!input.enabled) return { amount: 0, problem: null };
+  subtotalMinor: bigint,
+): { amount: bigint; problem: DiscountProblem | null } {
+  if (!input.enabled) return { amount: 0n, problem: null };
+  // Entered for another currency context: not this cart's discount, in either
+  // mode. (posCartReducer clears it on the transition; this is the backstop.)
+  if (input.currency !== currency) return { amount: 0n, problem: null };
   const text = input.text.trim();
-  if (text === "") return { amount: 0, problem: null };
+  if (text === "") return { amount: 0n, problem: null };
 
   if (input.mode === "percent") {
     const cleaned = text.replace(/%$/, "").trim();
-    if (!WHOLE_PERCENT.test(cleaned)) return { amount: 0, problem: "malformed" };
+    if (!WHOLE_PERCENT.test(cleaned)) return { amount: 0n, problem: "malformed" };
     const percent = Number.parseInt(cleaned, 10);
-    if (percent > 100) return { amount: 0, problem: "percent_out_of_range" };
+    if (percent > 100) return { amount: 0n, problem: "percent_out_of_range" };
     return { amount: percentOf(subtotalMinor, percent), problem: null };
   }
 
-  // A fixed amount typed for another currency is not this cart's discount.
-  if (input.currency !== currency) return { amount: 0, problem: null };
-  const amount = parseMinorUnits(text, currency);
-  if (amount === null) return { amount: 0, problem: "malformed" };
+  const amount = parseDiscountAmount(text, currency);
+  if (amount === null) return { amount: 0n, problem: "malformed" };
   // Never clamped down to the subtotal: a merchant who typed $50 off a $30
   // cart meant something else, and quietly ringing it up as $30 off would be
   // a different sale than the one they entered. The server refuses it too
   // (discount_exceeds_subtotal), so it is caught here, with a reason.
-  if (amount > subtotalMinor) return { amount: 0, problem: "exceeds_subtotal" };
-  return { amount, problem: null };
+  if (BigInt(amount) > subtotalMinor) return { amount: 0n, problem: "exceeds_subtotal" };
+  return { amount: BigInt(amount), problem: null };
 }
 
 /**
@@ -179,6 +303,9 @@ function resolveDiscount(
  * subtotal/total itself (create_order_v2); the only money POS sends is the
  * discount, as integer minor units in that same currency, which the server
  * bounds to 0 ≤ discount ≤ subtotal.
+ *
+ * Invariant for every priced result: 0 ≤ discount ≤ subtotal ≤ MAX_CART_MINOR
+ * and total = subtotal − discount ≥ 0, all exact integers.
  */
 export function calculateCartTotals(
   lines: CartLine[],
@@ -192,20 +319,16 @@ export function calculateCartTotals(
   // (checkout needs at least one line) and never shown (the cart renders its
   // empty state instead).
   const currency: Currency = currencies[0] ?? "USD";
-  const subtotalMinor = lines.reduce((sum, l) => sum + lineTotal(l).amount, 0);
-  const { amount: discountMinor, problem } = resolveDiscount(
-    discountInput,
-    currency,
-    subtotalMinor,
-  );
+  const subtotal = lines.reduce((sum, l) => sum + lineTotalMinor(l), 0n);
+  if (subtotal > MAX_CART_MINOR_BIG) return { kind: "out_of_range", currency, itemCount };
 
+  const { amount: discount, problem } = resolveDiscount(discountInput, currency, subtotal);
   return {
     kind: "priced",
     currency,
-    subtotal: { amount: subtotalMinor, currency },
-    discount: { amount: discountMinor, currency },
-    // resolveDiscount never returns more than the subtotal, so this is ≥ 0.
-    total: { amount: subtotalMinor - discountMinor, currency },
+    subtotal: { amount: Number(subtotal), currency },
+    discount: { amount: Number(discount), currency },
+    total: { amount: Number(subtotal - discount), currency },
     itemCount,
     discountProblem: problem,
   };
@@ -215,11 +338,12 @@ export function calculateCartTotals(
  * Why checkout is refused for this cart, or null when it may proceed. The one
  * rule every checkout button and the checkout sheet itself share.
  */
-export type CheckoutBlock = "empty" | "mixed_currency" | "discount";
+export type CheckoutBlock = "empty" | "mixed_currency" | "out_of_range" | "discount";
 
 export function checkoutBlock(totals: CartTotals): CheckoutBlock | null {
   if (totals.itemCount === 0) return "empty";
   if (totals.kind === "mixed_currency") return "mixed_currency";
+  if (totals.kind === "out_of_range") return "out_of_range";
   if (totals.discountProblem) return "discount";
   return null;
 }

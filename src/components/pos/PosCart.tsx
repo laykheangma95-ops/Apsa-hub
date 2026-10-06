@@ -330,7 +330,7 @@ export function PosCart({
             </div>
           </>
         ) : (
-          <MixedCurrencyNotice />
+          <UnpricedCartNotice kind={totals.kind} />
         )}
         <Button
           className="press tap-target elevation-action mt-1 h-12 w-full"
@@ -345,18 +345,27 @@ export function PosCart({
 }
 
 /**
- * Shown wherever a total would be when the cart holds more than one currency.
- * Nothing is summed or converted: the merchant removes one currency's items.
+ * Shown wherever a total would be when the cart cannot be priced: lines in
+ * more than one currency (nothing is summed or converted — the merchant
+ * removes one currency's items), or a total beyond the amounts POS can
+ * represent exactly. Either way there is no total, and no checkout.
  */
-export function MixedCurrencyNotice({ className }: { className?: string }) {
+export function UnpricedCartNotice({
+  kind,
+  className,
+}: {
+  kind: "mixed_currency" | "out_of_range" | "priced";
+  className?: string;
+}) {
   const { t } = useTranslation();
+  const copy = kind === "out_of_range" ? "pos.currency.tooLarge" : "pos.currency.mixed";
   return (
     <div
       role="alert"
       className={cn("rounded-xl border border-border-default bg-status-danger-soft p-3", className)}
     >
-      <p className="text-label text-status-danger-text">{t("pos.currency.mixedTitle")}</p>
-      <p className="text-body-sm mt-1 text-text-primary">{t("pos.currency.mixedBody")}</p>
+      <p className="text-label text-status-danger-text">{t(`${copy}Title`)}</p>
+      <p className="text-body-sm mt-1 text-text-primary">{t(`${copy}Body`)}</p>
     </div>
   );
 }

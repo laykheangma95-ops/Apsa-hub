@@ -30,8 +30,16 @@ export interface IdempotencyKeyHolder {
    * issued for; otherwise issues and holds a new one.
    */
   keyFor(requestFingerprint: string): string;
-  /** Forget the held key — call once the order has been created. */
-  release(): void;
+  /**
+   * Forget the held key — call once the order has been created.
+   *
+   * Pass the key the finished request used to release ONLY that key: a late
+   * response from an abandoned attempt must not drop the key a newer attempt
+   * is still relying on (its own lost-response retry would then mint a fresh
+   * key and could create a second order). With no argument, releases
+   * whatever is held, as before.
+   */
+  release(key?: string): void;
 }
 
 export function createIdempotencyKeyHolder(
@@ -44,7 +52,8 @@ export function createIdempotencyKeyHolder(
       held = { key: generate(), fingerprint: requestFingerprint };
       return held.key;
     },
-    release() {
+    release(key) {
+      if (key !== undefined && held?.key !== key) return;
       held = null;
     },
   };

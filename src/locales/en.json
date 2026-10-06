@@ -885,6 +885,9 @@
       "mixedTitle": "This cart mixes USD and KHR prices",
       "mixedBody": "A sale can only use one currency. Remove the items priced in the other currency to continue. APSA never converts prices for you.",
       "mixedShort": "Cart mixes USD and KHR — remove one currency's items.",
+      "tooLargeTitle": "This total is too large",
+      "tooLargeBody": "APSA can't price a cart this large exactly. Lower the quantities and try again.",
+      "tooLargeShort": "Total too large — lower the quantities.",
       "serverMismatch": {
         "title": "Price currency doesn't match your business",
         "body": "These items are priced in a currency your business doesn't sell in, so the sale wasn't created. Update the product prices, then try again."

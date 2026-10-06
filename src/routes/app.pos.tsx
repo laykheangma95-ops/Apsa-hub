@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,17 +29,15 @@ import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { formatMoney } from "@/lib/money";
 import {
-  addToCart,
   availableStock,
   calculateCartTotals,
   checkoutBlock,
+  EMPTY_POS_CART,
   isSellable,
   lineKey,
   NO_DISCOUNT,
-  removeLine,
-  setQuantity,
+  posCartReducer,
   type CartDiscountInput,
-  type CartLine,
 } from "@/lib/pos-cart";
 import type { Customer, Product, ProductCategory } from "@/types";
 
@@ -111,8 +109,12 @@ function PosScreen() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<ProductCategory | "all">("all");
   const [view, setView] = useState<"list" | "grid">("list");
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [discount, setDiscount] = useState<CartDiscountInput>(NO_DISCOUNT);
+  /*
+   * Lines and discount are ONE state behind posCartReducer, so every cart
+   * change — tap, scan, quantity, remove, clear — passes the same rule: a
+   * change of the cart's currency context clears the discount (src/lib/pos-cart.ts).
+   */
+  const [{ lines, discount }, dispatchCart] = useReducer(posCartReducer, EMPTY_POS_CART);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [variantProduct, setVariantProduct] = useState<Product | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
@@ -175,8 +177,9 @@ function PosScreen() {
     // which variant is actually being added — see PosVariantSheet.
     const chosenVariant = product.productionVariants?.find((v) => v.variantId === variantId);
     const unitPrice = chosenVariant?.price ?? product.price;
-    setLines((current) =>
-      addToCart(current, {
+    dispatchCart({
+      type: "add",
+      line: {
         key: lineKey(product.id, variantId ?? variant),
         productId: product.id,
         ...(variantId ? { variantId } : {}),
@@ -187,8 +190,8 @@ function PosScreen() {
         quantity,
         unitPrice,
         stock: Math.max(1, availableStock(product)),
-      }),
-    );
+      },
+    });
     setVariantProduct(null);
   }
 
@@ -229,8 +232,9 @@ function PosScreen() {
         return;
       }
       const { product, variant } = result;
-      setLines((current) =>
-        addToCart(current, {
+      dispatchCart({
+        type: "add",
+        line: {
           key: lineKey(product.id, variant.id),
           productId: product.id,
           variantId: variant.id,
@@ -241,8 +245,8 @@ function PosScreen() {
           quantity: 1,
           unitPrice: variant.price,
           stock: Math.max(1, availableStock(product)),
-        }),
-      );
+        },
+      });
       setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });
     } catch {
       setScanNotice({ kind: "error" });
@@ -264,8 +268,7 @@ function PosScreen() {
   }, [scanNotice]);
 
   function resetSale() {
-    setLines([]);
-    setDiscount(NO_DISCOUNT);
+    dispatchCart({ type: "reset" });
     setCustomer(null);
     setCartOpen(false);
     // A sold-out variant's stock is server-authoritative at order time either
@@ -282,14 +285,15 @@ function PosScreen() {
     lines,
     totals,
     discount,
-    onDiscountChange: setDiscount,
+    onDiscountChange: (next: CartDiscountInput) =>
+      dispatchCart({ type: "discount", discount: next }),
     canDiscount,
     customer,
     onPickCustomer: () => setCustomerOpen(true),
     onClearCustomer: () => setCustomer(null),
     onQuantity: (key: string, quantity: number) =>
-      setLines((current) => setQuantity(current, key, quantity)),
-    onRemove: (key: string) => setLines((current) => removeLine(current, key)),
+      dispatchCart({ type: "quantity", key, quantity }),
+    onRemove: (key: string) => dispatchCart({ type: "remove", key }),
     onClear: resetSale,
     onCheckout: () => {
       setCartOpen(false);
@@ -497,7 +501,7 @@ function PosScreen() {
                 {t("pos.checkout")}
               </Button>
             </div>
-            {offline || block === "mixed_currency" || block === "discount" ? (
+            {offline || (block !== null && block !== "empty") ? (
               <p
                 role="status"
                 className="text-caption mx-auto mt-1.5 max-w-[var(--screen-max)] text-status-warning-text"
@@ -506,7 +510,9 @@ function PosScreen() {
                   ? t("pos.offline")
                   : block === "mixed_currency"
                     ? t("pos.currency.mixedShort")
-                    : t("pos.discount.fixShort")}
+                    : block === "out_of_range"
+                      ? t("pos.currency.tooLargeShort")
+                      : t("pos.discount.fixShort")}
               </p>
             ) : null}
           </motion.div>

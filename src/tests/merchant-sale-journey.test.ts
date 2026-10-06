@@ -491,8 +491,12 @@ describe("Failure never renders as success", () => {
         "confirmed",
         "null",
         "await getRealOrderDetail(realDetail!.order.id)",
+        // the same server re-read, held in a const so the attempt-identity
+        // check can run between the await and the state write
+        "refreshed",
       ]).toContain(arg);
     }
+    expect(source).toContain("const refreshed = await getRealOrderDetail(realDetail!.order.id);");
   });
 
   it("a permission denial is reported as a permission problem, not a server failure", () => {

@@ -1,6 +1,6 @@
 import { motion, useReducedMotion } from "motion/react";
 import { Check } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ import { useLanguage } from "@/lib/i18n";
 import { approximateCounterpart, calculateChange, formatMoney } from "@/lib/money";
 import { classifyOrderError, isOrderCurrencyMismatch, type RealOrderDetail } from "@/lib/orders";
 import { classifyPaymentError, paymentErrorKey } from "@/lib/payments";
-import { MixedCurrencyNotice } from "@/components/pos/PosCart";
+import { UnpricedCartNotice } from "@/components/pos/PosCart";
 import {
   checkoutBlock,
   classifyCheckout,
@@ -127,6 +127,91 @@ export function PosCheckoutSheet({
     null,
   );
   const submittingRef = useRef(false);
+
+  /*
+   * ── Checkout attempt identity ───────────────────────────────────────────
+   *
+   * A checkout's server calls outlive the state they were made for: the
+   * merchant can close the sheet, change or replace the cart, start another
+   * sale, or the session can switch member/organization while a create or
+   * confirm is still in flight. Before this, every `await` resumed and wrote
+   * unconditionally — a late USD create cleared a newer KHR cart (via
+   * onCompleted) and painted the abandoned order's "Sale complete" over it.
+   *
+   * Every attempt now carries a token: which sheet session it belongs to,
+   * which attempt it is, which principal/organization started it, and — until
+   * an order exists — which cart it was built from. After EVERY await the
+   * token is checked against the live values, and a stale response returns
+   * without touching state, the cart, onCompleted or any cache. The server
+   * may still have completed it (a draft order then exists, visible in
+   * Orders); it just never mutates a newer browser state.
+   *
+   * sessionRef is bumped whenever the sheet's state is discarded (close,
+   * cancel, principal/organization switch, unmount); attemptRef per attempt.
+   */
+  const sessionRef = useRef(0);
+  const attemptRef = useRef(0);
+  const discountMinor = priced?.discount.amount ?? 0;
+  const liveRef = useRef({ userId, organizationId, lines, discountMinor });
+  useEffect(() => {
+    liveRef.current = { userId, organizationId, lines, discountMinor };
+  });
+
+  interface AttemptToken {
+    session: number;
+    attempt: number;
+    userId: string;
+    organizationId: string;
+    /** The cart (lines + discount) the create was built from; null once an order exists. */
+    cart: { lines: CartLine[]; discountMinor: number } | null;
+  }
+
+  function beginAttempt(boundToCart: boolean): AttemptToken {
+    attemptRef.current += 1;
+    return {
+      session: sessionRef.current,
+      attempt: attemptRef.current,
+      userId,
+      organizationId,
+      cart: boundToCart ? { lines, discountMinor } : null,
+    };
+  }
+
+  function isCurrent(token: AttemptToken): boolean {
+    const live = liveRef.current;
+    return (
+      token.session === sessionRef.current &&
+      token.attempt === attemptRef.current &&
+      token.userId === live.userId &&
+      token.organizationId === live.organizationId &&
+      (token.cart === null ||
+        (token.cart.lines === live.lines && token.cart.discountMinor === live.discountMinor))
+    );
+  }
+
+  /*
+   * A different member or organization is a different till: nothing the sheet
+   * holds (an order, a failure, an in-flight attempt) belongs to it.
+   */
+  const principalKey = `${userId}\u0000${organizationId}`;
+  const principalRef = useRef(principalKey);
+  // The latest reset(), so the effect below depends on the principal alone.
+  const resetRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    resetRef.current = reset;
+  });
+  useEffect(() => {
+    if (principalRef.current === principalKey) return;
+    principalRef.current = principalKey;
+    resetRef.current();
+  }, [principalKey]);
+  useEffect(
+    () => () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      sessionRef.current += 1;
+    },
+    [],
+  );
   /*
    * createdOrderId only protects a retry whose create RESPONSE arrived. When
    * the request reached the server but the response was lost, createdOrderId
@@ -185,7 +270,12 @@ export function PosCheckoutSheet({
         ...(submit.reference ? { reference: submit.reference } : {}),
         idempotencyKey: submit.idempotencyKey,
       }),
-    onSuccess: async () => {
+    // The sheet session this payment was recorded from — see "Checkout
+    // attempt identity". A payment for an order the merchant has since walked
+    // away from must not repaint (or re-open) a newer sheet.
+    onMutate: () => ({ token: beginAttempt(false) }),
+    onSuccess: async (_data, _submit, context) => {
+      if (!context || !isCurrent(context.token)) return;
       setRecordPaymentOpen(false);
       invalidateAfterSale();
       /*
@@ -196,7 +286,9 @@ export function PosCheckoutSheet({
        */
       try {
         const { getRealOrderDetail } = await import("@/lib/api");
-        setRealDetail(await getRealOrderDetail(realDetail!.order.id));
+        const refreshed = await getRealOrderDetail(realDetail!.order.id);
+        if (!isCurrent(context.token)) return;
+        setRealDetail(refreshed);
       } catch {
         // The payment is recorded; only this optimistic re-read failed. The
         // caches are already invalidated, so Order detail will show the truth.
@@ -222,6 +314,8 @@ export function PosCheckoutSheet({
     setRecordPaymentOpen(false);
     recordPaymentMutation.reset();
     submittingRef.current = false;
+    // Everything in flight now belongs to a discarded sheet state.
+    sessionRef.current += 1;
   }
 
   function handleOpenChange(next: boolean) {
@@ -237,6 +331,7 @@ export function PosCheckoutSheet({
 
   async function complete() {
     if (!priced || block) return;
+    const token = beginAttempt(true);
     setSubmitting(true);
     setFailed(false);
     try {
@@ -255,11 +350,16 @@ export function PosCheckoutSheet({
         paymentMethod: method,
         ...(customer ? { customerId: customer.id } : {}),
       });
+      if (!isCurrent(token)) return;
       setSale(created);
     } catch {
+      if (!isCurrent(token)) return;
       setFailed(true);
+    } finally {
+      if (token.session === sessionRef.current && token.attempt === attemptRef.current) {
+        setSubmitting(false);
+      }
     }
-    setSubmitting(false);
   }
 
   /**
@@ -286,21 +386,25 @@ export function PosCheckoutSheet({
    */
   async function completeReal() {
     if (submittingRef.current) return;
+    let orderId = createdOrderId;
+    // No order exists yet, so nothing may be created from a cart the cart
+    // itself refuses: a mixed-currency cart or an invalid discount never
+    // reaches the server. (Once an order exists the cart is already cleared,
+    // and a retry only confirms that order — see below.)
+    if (!orderId && (!priced || block)) return;
     submittingRef.current = true;
     setSubmitting(true);
     setRealFailure(null);
+    // Bound to the cart only until an order exists; after that it is bound to
+    // the order (this sheet session), and the cleared cart no longer matters.
+    const token = beginAttempt(!orderId);
     try {
-      let orderId = createdOrderId;
       // Tracked locally, not read back from state: the setRealDetail() calls
       // below are async/batched and would not be visible yet within this
       // same function run.
       let lifecycleStatus = realDetail?.order.lifecycleStatus;
       if (!orderId) {
-        // No order exists yet, so nothing may be created from a cart the cart
-        // itself refuses: a mixed-currency cart or an invalid discount never
-        // reaches the server. (Once an order exists the cart is already
-        // cleared, and a retry only confirms that order — see below.)
-        if (!priced || block) return;
+        if (!priced) return; // unreachable: refused before the attempt began
         const created = await createRealOrder({
           source: "POS",
           items: lines.map((l) => ({
@@ -316,6 +420,11 @@ export function PosCheckoutSheet({
           ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
           idempotency: idempotencyKeys.current,
         });
+        // Abandoned (sheet closed, cart changed, another attempt began, or a
+        // different member/organization): the order may exist server-side,
+        // but this browser state is no longer the one that asked for it.
+        if (!isCurrent(token)) return;
+        token.cart = null;
         orderId = created.order.id;
         lifecycleStatus = created.order.lifecycleStatus;
         setCreatedOrderId(orderId);
@@ -330,12 +439,14 @@ export function PosCheckoutSheet({
       }
       if (lifecycleStatus !== "confirmed") {
         const confirmed = await confirmRealOrder(orderId);
+        if (!isCurrent(token)) return;
         setRealDetail(confirmed);
         // Confirmation commits stock and moves the order's lifecycle, which
         // Orders, Inventory-facing reads and Home attention all reflect.
         invalidateAfterSale();
       }
     } catch (error) {
+      if (!isCurrent(token)) return;
       setRealFailure(
         classifyOrderError(error) === "forbidden"
           ? "permission"
@@ -344,8 +455,15 @@ export function PosCheckoutSheet({
             : "generic",
       );
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      // Only the latest attempt of the live sheet session releases the guard.
+      // A stale one must not release a guard a NEWER attempt holds (that would
+      // re-open double submission); reset() already released it when the
+      // stale attempt was abandoned. (A cart changed under the latest attempt
+      // still releases it, so the merchant can check out the new cart.)
+      if (token.session === sessionRef.current && token.attempt === attemptRef.current) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   }
 
@@ -646,7 +764,7 @@ export function PosCheckoutSheet({
                 )}
               />
             ) : (
-              <MixedCurrencyNotice />
+              <UnpricedCartNotice kind={totals.kind} />
             )}
             <Button
               variant="outline"
