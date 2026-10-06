@@ -496,7 +496,12 @@ describe("Failure never renders as success", () => {
         "refreshed",
       ]).toContain(arg);
     }
-    expect(source).toContain("const refreshed = await getRealOrderDetail(realDetail!.order.id);");
+    // The re-read is of the order the payment was recorded against — the
+    // server's own id, carried on the submit from realDetail (see below).
+    expect(source).toContain("const refreshed = await getRealOrderDetail(submit.orderId);");
+    expect(source).toContain(
+      "recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })",
+    );
   });
 
   it("a permission denial is reported as a permission problem, not a server failure", () => {

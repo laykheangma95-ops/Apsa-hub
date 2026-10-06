@@ -260,7 +260,12 @@ describe("PosCheckoutSheet's production path reuses createRealOrder + confirmRea
       source.indexOf("const recordPaymentMutation"),
       source.indexOf("// COD is only sensible"),
     );
-    expect(fn).toContain("orderId: realDetail!.order.id");
+    // The id is the server's (realDetail), fixed when the merchant submits and
+    // carried on the submit so a later re-render cannot redirect it.
+    expect(fn).toContain("orderId: submit.orderId");
+    expect(source).toContain(
+      "recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })",
+    );
     expect(fn).toContain("idempotencyKey: submit.idempotencyKey");
     // Never asserts a payment status locally: the order is re-read from the
     // server after recording (record_payment_v1 writes pending/unverified).

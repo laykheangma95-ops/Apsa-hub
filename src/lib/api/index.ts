@@ -5,7 +5,12 @@
 import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
-import { orderRequestFingerprint, type IdempotencyKeyHolder } from "@/lib/idempotency";
+import {
+  isIdempotencyKeyHolder,
+  orderRequestFingerprint,
+  type IdempotencyClaim,
+  type IdempotencyKeyHolder,
+} from "@/lib/idempotency";
 import {
   mapDeliveryDetailToUi,
   mapDeliveryListPageToUi,
@@ -1198,12 +1203,21 @@ export interface CreateRealOrderInput {
    */
   shipping?: { name?: string | null; phone?: string | null; address?: string | null };
   /**
-   * The caller's idempotency-key holder for this order flow
-   * (src/lib/idempotency.ts). createRealOrder takes the key for THIS request
-   * from it — the same key on a retry of the same request, a new key for a
-   * different one — and releases it once the order exists.
+   * The key for THIS request (src/lib/idempotency.ts) — the same key on a
+   * retry of the same request, a new key for a different one.
+   *
+   *   - An IdempotencyClaim: the caller owns acceptance. createRealOrder only
+   *     takes the key and NEVER retires it; the caller retires the claim once
+   *     it has decided the response belongs to its current attempt. A flow
+   *     whose attempts can overlap (POS: close/reopen while a create is
+   *     pending) must use this, so a stale response cannot drop replay
+   *     protection a newer identical attempt is relying on.
+   *   - An IdempotencyKeyHolder: for flows that accept every response that
+   *     arrives. createRealOrder claims the key per call and retires that
+   *     claim on success — ownership-checked, so it is still a no-op when a
+   *     newer identical call has since taken the key.
    */
-  idempotency: IdempotencyKeyHolder;
+  idempotency: IdempotencyKeyHolder | IdempotencyClaim;
 }
 
 /**
@@ -1213,16 +1227,20 @@ export interface CreateRealOrderInput {
  */
 export async function createRealOrder(input: CreateRealOrderInput): Promise<RealOrderDetail> {
   const { idempotency, ...request } = input;
+  const acceptsOnArrival = isIdempotencyKeyHolder(idempotency);
+  const claim = acceptsOnArrival ? idempotency.claim() : idempotency;
   // Taken before the request and kept if it fails: a retry of this exact
   // request must re-send this exact key (migration 044 replays the order the
   // first attempt created if it reached the server).
-  const idempotencyKey = idempotency.keyFor(orderRequestFingerprint(request));
+  const idempotencyKey = claim.keyFor(orderRequestFingerprint(request));
   const { createOrderFn } = await import("@/api/orders");
   const detail = await createOrderFn({ data: { ...request, idempotencyKey } });
-  // The order exists now; the next order must never reuse this key. Only THIS
-  // key is released — if a newer attempt already holds a different one, a
-  // late response from this request must leave it alone.
-  idempotency.release(idempotencyKey);
+  // The order exists now, and the next order must never reuse this key — but
+  // only the caller can say whether this response is the one it still wants.
+  // A claim is left for the caller to retire after that check; a holder's
+  // caller accepts whatever arrives, so its per-call claim is retired here
+  // (a no-op if a newer identical call has taken the key since).
+  if (acceptsOnArrival) claim.retire();
   return mapOrderDetailToUi(detail);
 }
 

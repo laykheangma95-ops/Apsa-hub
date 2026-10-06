@@ -152,9 +152,10 @@ export function PosCheckoutSheet({
   const sessionRef = useRef(0);
   const attemptRef = useRef(0);
   const discountMinor = priced?.discount.amount ?? 0;
-  const liveRef = useRef({ userId, organizationId, lines, discountMinor });
+  const shownOrderId = realDetail?.order.id ?? null;
+  const liveRef = useRef({ userId, organizationId, lines, discountMinor, shownOrderId });
   useEffect(() => {
-    liveRef.current = { userId, organizationId, lines, discountMinor };
+    liveRef.current = { userId, organizationId, lines, discountMinor, shownOrderId };
   });
 
   interface AttemptToken {
@@ -204,6 +205,9 @@ export function PosCheckoutSheet({
     if (principalRef.current === principalKey) return;
     principalRef.current = principalKey;
     resetRef.current();
+    // Replay protection is the old principal's too: a new holder, so neither
+    // a key nor a stale claim on it crosses into the new member/organization.
+    idempotencyKeys.current = createIdempotencyKeyHolder();
   }, [principalKey]);
   useEffect(
     () => () => {
@@ -218,11 +222,77 @@ export function PosCheckoutSheet({
    * is still null and a retry calls createRealOrder again — so the create
    * itself carries an idempotency key (src/lib/idempotency.ts): the same cart
    * re-sends the same key and the server returns the order it already made.
-   * Held across a sheet close (reset() leaves it alone) for the same reason;
-   * released once the order exists, so the next sale is always a new order.
+   * Held across a sheet close (reset() leaves it alone) for the same reason.
+   *
+   * Each create attempt takes its own CLAIM on the key, and the key is retired
+   * only by the attempt this sheet ACCEPTS (after isCurrent) — never by
+   * createRealOrder on arrival. An abandoned attempt A whose identical
+   * successor B reuses the same key therefore cannot drop B's replay
+   * protection when it resolves late; and A's late success leaves the key
+   * held, so B (same cart) is answered with A's order rather than a second one.
+   * Once an attempt is accepted the key is retired, so the next sale is always
+   * a new order.
    */
   const idempotencyKeys = useRef(createIdempotencyKeyHolder());
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
+
+  /*
+   * ── Payment entry identity ──────────────────────────────────────────────
+   *
+   * Payment entry has its own session, separate from the checkout attempt:
+   * closing and reopening the payment form discards the old one's in-flight
+   * request just as closing checkout does. Before this, the payment token was
+   * the checkout's, which a payment close/reopen never changed — so a pending
+   * payment that resolved after a reopen passed the check and closed the NEW
+   * form, throwing away what the merchant had just typed.
+   *
+   * paymentSessionRef is bumped on every open and close of the payment form;
+   * paymentAttemptRef on every submit. Every await in the payment path checks
+   * the token (and the checkout session, principal and order) before touching
+   * the form, the order shown, or any cache. reset() and unmount bump the
+   * checkout session, which invalidates every payment token too.
+   */
+  const paymentSessionRef = useRef(0);
+  const paymentAttemptRef = useRef(0);
+
+  interface PaymentToken {
+    checkoutSession: number;
+    paymentSession: number;
+    paymentAttempt: number;
+    userId: string;
+    organizationId: string;
+    orderId: string;
+  }
+
+  function beginPaymentAttempt(forOrderId: string): PaymentToken {
+    paymentAttemptRef.current += 1;
+    return {
+      checkoutSession: sessionRef.current,
+      paymentSession: paymentSessionRef.current,
+      paymentAttempt: paymentAttemptRef.current,
+      userId,
+      organizationId,
+      orderId: forOrderId,
+    };
+  }
+
+  function isPaymentCurrent(token: PaymentToken): boolean {
+    const live = liveRef.current;
+    return (
+      token.checkoutSession === sessionRef.current &&
+      token.paymentSession === paymentSessionRef.current &&
+      token.paymentAttempt === paymentAttemptRef.current &&
+      token.userId === live.userId &&
+      token.organizationId === live.organizationId &&
+      token.orderId === live.shownOrderId
+    );
+  }
+
+  /** Open or close payment entry — either way a new payment session. */
+  function setPaymentEntryOpen(next: boolean) {
+    paymentSessionRef.current += 1;
+    setRecordPaymentOpen(next);
+  }
 
   /*
    * A sale that is confirmed but unpaid is unfinished work, so POS offers the
@@ -262,20 +332,23 @@ export function PosCheckoutSheet({
   }
 
   const recordPaymentMutation = useMutation({
-    mutationFn: (submit: RecordOrderPaymentSubmit) =>
+    mutationFn: (submit: RecordOrderPaymentSubmit & { orderId: string }) =>
       recordRealPayment({
-        orderId: realDetail!.order.id,
+        orderId: submit.orderId,
         method: submit.method,
         amountMinor: submit.amountMinor,
         ...(submit.reference ? { reference: submit.reference } : {}),
         idempotencyKey: submit.idempotencyKey,
       }),
-    // The sheet session this payment was recorded from — see "Checkout
-    // attempt identity". A payment for an order the merchant has since walked
-    // away from must not repaint (or re-open) a newer sheet.
-    onMutate: () => ({ token: beginAttempt(false) }),
-    onSuccess: async (_data, _submit, context) => {
-      if (!context || !isCurrent(context.token)) return;
+    // The payment session this was submitted from — see "Payment entry
+    // identity". A response for a form the merchant has since closed (and
+    // perhaps reopened and typed into), or for an order/sheet/principal they
+    // have since left, must not close, repaint or re-read anything.
+    onMutate: (submit) => ({ token: beginPaymentAttempt(submit.orderId) }),
+    onSuccess: async (_data, submit, context) => {
+      if (!context || !isPaymentCurrent(context.token)) return;
+      // Closed without starting a new payment session: the re-read below is
+      // still this payment's own. (A reopen meanwhile bumps the session.)
       setRecordPaymentOpen(false);
       invalidateAfterSale();
       /*
@@ -286,8 +359,8 @@ export function PosCheckoutSheet({
        */
       try {
         const { getRealOrderDetail } = await import("@/lib/api");
-        const refreshed = await getRealOrderDetail(realDetail!.order.id);
-        if (!isCurrent(context.token)) return;
+        const refreshed = await getRealOrderDetail(submit.orderId);
+        if (!isPaymentCurrent(context.token)) return;
         setRealDetail(refreshed);
       } catch {
         // The payment is recorded; only this optimistic re-read failed. The
@@ -312,6 +385,7 @@ export function PosCheckoutSheet({
     setRealDetail(null);
     setRealFailure(null);
     setRecordPaymentOpen(false);
+    paymentSessionRef.current += 1;
     recordPaymentMutation.reset();
     submittingRef.current = false;
     // Everything in flight now belongs to a discarded sheet state.
@@ -392,6 +466,8 @@ export function PosCheckoutSheet({
     // reaches the server. (Once an order exists the cart is already cleared,
     // and a retry only confirms that order — see below.)
     if (!orderId && (!priced || block)) return;
+    // This attempt's own claim on the replay key (see idempotencyKeys).
+    const claim = idempotencyKeys.current.claim();
     submittingRef.current = true;
     setSubmitting(true);
     setRealFailure(null);
@@ -418,12 +494,17 @@ export function PosCheckoutSheet({
           // POS sends. The server prices every line itself, derives the
           // totals, and bounds this to 0 ≤ discount ≤ subtotal.
           ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
-          idempotency: idempotencyKeys.current,
+          idempotency: claim,
         });
         // Abandoned (sheet closed, cart changed, another attempt began, or a
         // different member/organization): the order may exist server-side,
-        // but this browser state is no longer the one that asked for it.
+        // but this browser state is no longer the one that asked for it. Its
+        // key is NOT retired — a newer identical attempt may own it now, and
+        // if not, an identical retry should be answered with this same order.
         if (!isCurrent(token)) return;
+        // Accepted: this sheet now holds the order itself, so the key has done
+        // its job and the next sale gets a new one.
+        claim.retire();
         token.cart = null;
         orderId = created.order.id;
         lifecycleStatus = created.order.lifecycleStatus;
@@ -661,7 +742,7 @@ export function PosCheckoutSheet({
              * button disappears on its own once the server says otherwise.
              */}
             {realConfirmed && realDetail.order.paymentStatus === "unpaid" && canRecordPayment ? (
-              <Button className="tap-target mt-4 w-full" onClick={() => setRecordPaymentOpen(true)}>
+              <Button className="tap-target mt-4 w-full" onClick={() => setPaymentEntryOpen(true)}>
                 {t("pos.success.recordPayment")}
               </Button>
             ) : null}
@@ -981,7 +1062,7 @@ export function PosCheckoutSheet({
         <RecordOrderPaymentSheet
           open={recordPaymentOpen}
           onOpenChange={(next) => {
-            setRecordPaymentOpen(next);
+            setPaymentEntryOpen(next);
             // A failure belongs to the attempt that produced it — reopening for
             // a fresh attempt must not show the last one's error over an empty
             // form (same reset Order detail's own usage does).
@@ -996,7 +1077,9 @@ export function PosCheckoutSheet({
               ? t(paymentErrorKey(classifyPaymentError(recordPaymentMutation.error)))
               : null
           }
-          onConfirm={(submit) => recordPaymentMutation.mutate(submit)}
+          onConfirm={(submit) =>
+            recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })
+          }
         />
       ) : null}
     </>
