@@ -89,9 +89,30 @@ function isLineQuantity(quantity: number): boolean {
   return Number.isSafeInteger(quantity) && quantity > 0;
 }
 
-/** `quantity` bounded by the line's cap; a null cap bounds nothing. */
+/**
+ * The most units one POS cart line can hold. An ORDER-ENTRY limit, not an
+ * inventory claim: it is never shown as "available", and the server does not
+ * enforce it (it accepts any positive integer quantity).
+ *
+ * It exists so every path agrees on one maximum. The quantity stepper clamps
+ * to its max; if an add path let a line pass it, a single "−" on 1,005 sent
+ * min(999, 1,004) = 999 and silently dropped six units from the sale.
+ */
+export const POS_MAX_LINE_QUANTITY = 999;
+
+/**
+ * The highest quantity a line may reach: the POS limit, or the known stock
+ * when that is lower. A null stock (no figure) is bounded by the POS limit
+ * only. Every cart mutation and every quantity stepper uses this — never a
+ * literal of its own.
+ */
+export function lineQuantityLimit(stock: number | null): number {
+  return stock === null ? POS_MAX_LINE_QUANTITY : Math.min(POS_MAX_LINE_QUANTITY, stock);
+}
+
+/** `quantity` bounded by the line's limit. */
 function capQuantity(stock: number | null, quantity: number): number {
-  return stock === null ? quantity : Math.min(stock, quantity);
+  return Math.min(lineQuantityLimit(stock), quantity);
 }
 
 /**
@@ -112,7 +133,7 @@ export function addToCart(lines: CartLine[], line: CartLine): CartLine[] {
 }
 
 /**
- * Set a line's quantity: at least 1, at most the line's cap when it has one.
+ * Set a line's quantity: at least 1, at most lineQuantityLimit(line.stock).
  * Anything that is not an integer (NaN, Infinity, 2.5) leaves the line as it
  * was — it is never coerced into a reset.
  */

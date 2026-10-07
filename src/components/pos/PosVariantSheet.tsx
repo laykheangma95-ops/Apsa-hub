@@ -7,7 +7,7 @@ import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { formatMoney } from "@/lib/money";
 import { defaultVariantSelection, variantLabel } from "@/lib/order-draft";
-import { availableStock } from "@/lib/pos-cart";
+import { availableStock, lineQuantityLimit } from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Product } from "@/types";
 
@@ -52,7 +52,7 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
 
   const selectedVariant = productionVariants.find((v) => v.variantId === selectedVariantId) ?? null;
   const displayPrice = selectedVariant?.price ?? product?.price;
-  // null: no stock figure (production) — the stepper is not stock-bounded.
+  // null: no stock figure (production) — the stepper is bounded by the POS limit only.
   const available = product ? availableStock(product) : null;
 
   return (
@@ -155,7 +155,7 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
             <QuantityStepper
               value={quantity}
               onChange={setQuantity}
-              {...(available === null ? {} : { max: available })}
+              max={lineQuantityLimit(available)}
             />
           </div>
         </div>

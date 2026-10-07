@@ -91,7 +91,12 @@ const SOLDOUT = product("6", "Soldout", { amount: 1000, currency: "USD" }, 0);
 // Every unit held for open orders: stockState says "available", none is sellable.
 const HELD = { ...product("7", "Held", { amount: 1000, currency: "USD" }, 3), reserved: 3 };
 
-const CATALOG = [SERUM, WATER, SHIRT, COUNTED, SINGLE, SOLDOUT, HELD];
+// Counted rows at and past the POS order-entry limit (999).
+const EXACT = product("8", "Exact", { amount: 1000, currency: "USD" }, 999);
+const OVER = product("9", "Over", { amount: 1000, currency: "USD" }, 1000);
+const BULK = product("10", "Bulk", { amount: 1000, currency: "USD" }, 5000);
+
+const CATALOG = [SERUM, WATER, SHIRT, COUNTED, SINGLE, SOLDOUT, HELD, EXACT, OVER, BULK];
 const BARCODE = "885000111";
 
 interface Pending {
@@ -308,6 +313,41 @@ async function checkoutAndConfirm() {
   await click(buttonIn(dialog()!, en.pos.confirmSale), "Confirm sale");
 }
 
+function minus(scope: HTMLElement): HTMLButtonElement {
+  return buttonIn(scope, en.common.decrease)!;
+}
+
+/** `n` taps on a catalog row inside one React batch: a merchant hammering the row. */
+async function tapMany(name: string, n: number) {
+  const row = await productRow(name);
+  await act(async () => {
+    for (let i = 0; i < n; i++) row.click();
+  });
+  await settle();
+}
+
+/** `n` presses of a stepper button, each its own render (the stepper reads the latest value). */
+async function pressMany(button: () => HTMLButtonElement, n: number) {
+  for (let i = 0; i < n; i++) {
+    await act(async () => {
+      button().click();
+    });
+  }
+  await settle();
+}
+
+/** `n` back-to-back wedge scans of one code. */
+async function scanMany(code: string, n: number) {
+  await act(async () => {
+    for (let s = 0; s < n; s++) {
+      for (const key of [...code, "Enter"]) {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      }
+    }
+  });
+  await settle(10);
+}
+
 async function scan(code: string) {
   await act(async () => {
     for (const key of [...code, "Enter"]) {
@@ -492,4 +532,144 @@ describe("C. fully reserved stock is none left, never unlimited", () => {
     await click(row, "Held");
     expect(cartPanel().textContent).not.toContain("Held");
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The POS order-entry limit: 999 per line, on EVERY path
+//
+// The stepper never offers more than 999. If an add path let a line pass it,
+// one press of "−" on 1,005 sent min(999, 1,004) = 999 — six units silently
+// gone from the sale, and that is what checkout submitted. So no path may
+// create a line above the limit the stepper assumes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("POS quantity limit (999): every add path stops there, − always removes one", () => {
+  it("exact P2: hammering a null-stock row 1,005 times holds at 999; − once → 998", async () => {
+    await mount();
+    await tapMany("Serum", 1005);
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(cartPanel().textContent).toContain("$19,980.00");
+    await click(minus(cartLine("Serum")), "−");
+    expect(lineQuantity("Serum")).toBe(998);
+    expect(cartPanel().textContent).toContain("$19,960.00");
+  }, 60000);
+
+  it("A/B/J. taps: 998 → $19,960; +1 tap → 999 $19,980; more taps stay 999 $19,980", async () => {
+    await mount();
+    await tapMany("Serum", 998);
+    expect(lineQuantity("Serum")).toBe(998);
+    expect(cartPanel().textContent).toContain("$19,960.00");
+    await tap("Serum");
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(cartPanel().textContent).toContain("$19,980.00");
+    await tapMany("Serum", 6);
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(cartPanel().textContent).toContain("$19,980.00");
+    expect(cartPanel().textContent).not.toContain("$20,000.00");
+  }, 60000);
+
+  it("E/F/G. stepper at the boundary: 999 −→ 998 +→ 999, + then disabled and inert", async () => {
+    await mount();
+    await tapMany("Serum", 999);
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(plus(cartLine("Serum")).disabled).toBe(true);
+    await click(minus(cartLine("Serum")), "−");
+    expect(lineQuantity("Serum")).toBe(998);
+    expect(plus(cartLine("Serum")).disabled).toBe(false);
+    await click(plus(cartLine("Serum")), "+");
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(plus(cartLine("Serum")).disabled).toBe(true);
+    await click(plus(cartLine("Serum")), "+");
+    expect(lineQuantity("Serum")).toBe(999);
+  }, 60000);
+
+  it("C. repeated barcode scans stop at 999; − then removes exactly one", async () => {
+    await mount();
+    await scanMany(BARCODE, 1003);
+    expect(lineQuantity("Serum")).toBe(999);
+    await scan(BARCODE);
+    expect(lineQuantity("Serum")).toBe(999);
+    await click(minus(cartLine("Serum")), "−");
+    expect(lineQuantity("Serum")).toBe(998);
+  }, 60000);
+
+  it("D. a variant added from the sheet onto a 999 line stays 999", async () => {
+    await mount();
+    const sheet = () => dialog()!;
+    const pick = async (name: string) =>
+      click(
+        [...sheet().querySelectorAll("button")].find((b) => b.textContent?.includes(name)),
+        name,
+      );
+    await tap("Shirt");
+    await pick("Red");
+    await click(buttonIn(sheet(), en.pos.addToCart), "Add to cart");
+    await pressMany(() => plus(cartLine("Shirt", "Red")), 998);
+    expect(lineQuantity("Shirt", "Red")).toBe(999);
+
+    await tap("Shirt");
+    await pick("Red");
+    await pressMany(() => plus(sheet()), 4);
+    expect(sheet().querySelector("output")!.textContent).toBe("5");
+    await click(buttonIn(sheet(), en.pos.addToCart), "Add to cart");
+    expect(lineQuantity("Shirt", "Red")).toBe(999);
+    expect(cartPanel().textContent).toContain("$14,985.00");
+    await click(minus(cartLine("Shirt", "Red")), "−");
+    expect(lineQuantity("Shirt", "Red")).toBe(998);
+  }, 60000);
+
+  it("H/I. finite stock: 5 caps at 5; 999, 1,000 and 5,000 all cap at the POS limit 999", async () => {
+    await mount();
+    await tapMany("Counted", 8);
+    expect(lineQuantity("Counted")).toBe(5);
+    for (const name of ["Exact", "Over", "Bulk"]) {
+      await tapMany(name, 1005);
+      expect(lineQuantity(name)).toBe(999);
+      expect(plus(cartLine(name)).disabled).toBe(true);
+      await click(minus(cartLine(name)), "−");
+      expect(lineQuantity(name)).toBe(998);
+    }
+    // A real figure is still shown as inventory; the limit is never shown as one.
+    expect(availabilityCaption("Bulk")).toBe(en.pos.available.replace("{{count}}", "5000"));
+    expect(availabilityCaption("Serum")).toBeNull();
+  }, 60000);
+
+  it("K. checkout after extra adds past the limit submits exactly 999 (USD)", async () => {
+    await mount();
+    await tapMany("Serum", 999);
+    await tapMany("Serum", 4);
+    await scan(BARCODE);
+    expect(lineQuantity("Serum")).toBe(999);
+    expect(cartPanel().textContent).toContain("$19,980.00");
+    await checkoutAndConfirm();
+    expect(creates[0]!.input.items).toEqual([
+      { variantId: SERUM.variantId, quantity: 999, productId: SERUM.id },
+    ]);
+  }, 60000);
+
+  it("L. 1,005 attempted → 999 → − once → 998 submits exactly 998 (USD)", async () => {
+    await mount();
+    await tapMany("Serum", 1005);
+    await click(minus(cartLine("Serum")), "−");
+    expect(lineQuantity("Serum")).toBe(998);
+    expect(cartPanel().textContent).toContain("$19,960.00");
+    await checkoutAndConfirm();
+    expect(creates[0]!.input.items).toEqual([
+      { variantId: SERUM.variantId, quantity: 998, productId: SERUM.id },
+    ]);
+  }, 60000);
+
+  it("KHR: 1,005 taps hold at 999 = ៛4,995,000; − → 998 = ៛4,990,000, submitted as 998", async () => {
+    await mount();
+    await tapMany("Water", 1005);
+    expect(lineQuantity("Water")).toBe(999);
+    expect(cartPanel().textContent).toContain("៛4,995,000");
+    await click(minus(cartLine("Water")), "−");
+    expect(lineQuantity("Water")).toBe(998);
+    expect(cartPanel().textContent).toContain("៛4,990,000");
+    await checkoutAndConfirm();
+    expect(creates[0]!.input.items).toEqual([
+      { variantId: WATER.variantId, quantity: 998, productId: WATER.id },
+    ]);
+  }, 60000);
 });

@@ -21,7 +21,9 @@ import {
   calculateCartTotals,
   checkoutBlock,
   EMPTY_POS_CART,
+  lineQuantityLimit,
   NO_DISCOUNT,
+  POS_MAX_LINE_QUANTITY,
   posCartReducer,
   stockState,
   type CartLine,
@@ -298,5 +300,86 @@ describe("G/H/I. money still follows authoritative price × quantity (PR #117 in
       discount: { amount: 500 },
       total: { amount: 9500 },
     });
+  });
+});
+
+describe("one POS line limit (999) on every reducer path — an order-entry limit, not stock", () => {
+  const nul = product(null);
+
+  it("the limit is 999, and the per-line limit is min(999, known stock)", () => {
+    expect(POS_MAX_LINE_QUANTITY).toBe(999);
+    expect(lineQuantityLimit(null)).toBe(999);
+    expect(lineQuantityLimit(0)).toBe(0);
+    expect(lineQuantityLimit(1)).toBe(1);
+    expect(lineQuantityLimit(5)).toBe(5);
+    expect(lineQuantityLimit(999)).toBe(999);
+    expect(lineQuantityLimit(1000)).toBe(999);
+    expect(lineQuantityLimit(5000)).toBe(999);
+    // Never reported as availability: null stays "no figure".
+    expect(availableStock(nul)).toBeNull();
+  });
+
+  it("null stock: 998 adds → 998, +1 → 999, +1 → still 999; 1,000 never exists", () => {
+    let state = run(...Array.from({ length: 998 }, () => add(lineFor(nul))));
+    expect(quantities(state)).toEqual([998]);
+    state = posCartReducer(state, add(lineFor(nul)));
+    expect(quantities(state)).toEqual([999]);
+    for (let i = 0; i < 10; i++) state = posCartReducer(state, add(lineFor(nul)));
+    expect(quantities(state)).toEqual([999]);
+  });
+
+  it("a first add or a bulk add above the limit is held at 999", () => {
+    expect(quantities(run(add(lineFor(nul, 1005))))).toEqual([999]);
+    expect(quantities(run(add(lineFor(nul, 500)), add(lineFor(nul, 600))))).toEqual([999]);
+  });
+
+  it("finite stock: 0 never enters; 1 → 1; 5 → 5; 999 → 999; 1,000 and 5,000 → 999", () => {
+    expect(run(add(lineFor(product(0), 5))).lines).toEqual([]);
+    for (const [stock, max] of [
+      [1, 1],
+      [5, 5],
+      [999, 999],
+      [1000, 999],
+      [5000, 999],
+    ] as const) {
+      const p = product(stock);
+      expect(quantities(run(add(lineFor(p, 1005))))).toEqual([max]);
+      expect(quantities(run(add(lineFor(p)), qty(p.id, 1005)))).toEqual([max]);
+    }
+  });
+
+  it("stepper boundary: 999 → 998 → 999 → (999)", () => {
+    let state = run(add(lineFor(nul, 999)));
+    state = posCartReducer(state, qty(nul.id, 998));
+    expect(quantities(state)).toEqual([998]);
+    state = posCartReducer(state, qty(nul.id, 999));
+    expect(quantities(state)).toEqual([999]);
+    state = posCartReducer(state, qty(nul.id, 1000));
+    expect(quantities(state)).toEqual([999]);
+  });
+
+  it("setter values on a 500 line: 999 → 999; 1,000 / 1,005 → 999; NaN/∞/1.5 ignored; 0/−1 → 1 (pre-existing)", () => {
+    const at500 = () => run(add(lineFor(nul, 500)));
+    const after = (q: number) => quantities(posCartReducer(at500(), qty(nul.id, q)))[0];
+    expect(after(999)).toBe(999);
+    expect(after(1000)).toBe(999);
+    expect(after(1005)).toBe(999);
+    expect(after(Number.NaN)).toBe(500);
+    expect(after(Infinity)).toBe(500);
+    expect(after(1.5)).toBe(500);
+    // Pre-existing (unchanged here): a non-positive integer resets to 1.
+    expect(after(0)).toBe(1);
+    expect(after(-1)).toBe(1);
+  });
+
+  it("totals at the boundary are exact integers: USD $19,960 / $19,980; KHR ៛4,990,000 / ៛4,995,000", () => {
+    const totalAt = (p: Product, n: number) =>
+      calculateCartTotals(run(add(lineFor(p, n))).lines, NO_DISCOUNT);
+    expect(totalAt(nul, 998)).toMatchObject({ kind: "priced", total: { amount: 1_996_000 } });
+    expect(totalAt(nul, 999)).toMatchObject({ kind: "priced", total: { amount: 1_998_000 } });
+    expect(totalAt(nul, 1005)).toMatchObject({ kind: "priced", total: { amount: 1_998_000 } });
+    const riel = product(null, { price: { amount: 5000, currency: "KHR" } });
+    expect(totalAt(riel, 998)).toMatchObject({ total: { amount: 4_990_000, currency: "KHR" } });
+    expect(totalAt(riel, 1005)).toMatchObject({ total: { amount: 4_995_000, currency: "KHR" } });
   });
 });
