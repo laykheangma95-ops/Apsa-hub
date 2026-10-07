@@ -27,7 +27,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Check, Search } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -158,11 +158,73 @@ export function CreateRealOrderSheet({
    * ref, checked synchronously before any await.
    */
   const submittingRef = useRef(false);
+
   /*
-   * One key per logical order attempt. Survives a failed submit and a sheet
-   * close (reset() deliberately leaves it alone), so re-sending the same
-   * request can only ever replay the order that request created. Released
-   * once an order exists, so the next order — even an identical one — is new.
+   * ── Session identity ─────────────────────────────────────────────────────
+   *
+   * Every open of this sheet is one SESSION, for one member of one
+   * organization, and every submit within it one ATTEMPT. A create can outlive
+   * its session: the merchant closes the sheet while it is pending and opens a
+   * new one, the member or organization changes under it, or the Orders list
+   * unmounts. Its late response used to write unconditionally — a create for
+   * product A resolving after close → reopen → product B painted "Order A
+   * created" over B's draft (B was never created), a late failure showed in
+   * B's session, and the late attempt's `finally` released B's submit guard.
+   *
+   * Every attempt now carries a token: its session, its attempt number, and the
+   * member and organization it was sent as. Its response is applied only while
+   * that token is current; a stale one returns without touching state,
+   * onCreated, the submit guard or the replay key. The server's answer stays
+   * authoritative — nothing here cancels or undoes an order it created; that
+   * order is in Orders, and an identical resubmission is answered with it — the
+   * browser just never applies it to a session that did not ask for it.
+   *
+   * sessionRef moves on whenever a session ends: reset() (closed by its own
+   * control or by the parent, or the member/organization changed) and unmount.
+   * Within a session the draft is locked while an attempt is pending (the
+   * <fieldset> below), so the request cannot change under it.
+   */
+  const sessionRef = useRef(0);
+  const attemptRef = useRef(0);
+  /** The member and organization the open session belongs to. */
+  const principalRef = useRef({ userId, organizationId });
+
+  interface AttemptToken {
+    session: number;
+    attempt: number;
+    userId: string;
+    organizationId: string;
+  }
+
+  function beginAttempt(): AttemptToken {
+    attemptRef.current += 1;
+    return { session: sessionRef.current, attempt: attemptRef.current, userId, organizationId };
+  }
+
+  function isCurrent(token: AttemptToken): boolean {
+    const principal = principalRef.current;
+    return (
+      token.session === sessionRef.current &&
+      token.attempt === attemptRef.current &&
+      token.userId === principal.userId &&
+      token.organizationId === principal.organizationId
+    );
+  }
+
+  /*
+   * One replay key per logical order attempt (src/lib/idempotency.ts). It
+   * survives a failed submit and a sheet close, so re-sending the same request —
+   * even from a reopened sheet — can only ever replay the order that request
+   * created.
+   *
+   * Each attempt takes its own CLAIM on the key and retires it only once this
+   * sheet ACCEPTS the response (after isCurrent) — never on arrival. A dropped
+   * late success therefore leaves the key held, so the identical order rebuilt
+   * after reopening is answered with the order the server already made rather
+   * than a second one, and a stale claim can never retire a key a newer
+   * attempt owns. Once a response is accepted the key is retired, so the next
+   * order — even an identical one — is new. A member/organization change
+   * replaces the holder: no key or claim crosses into another principal.
    */
   const idempotencyKeys = useRef(createIdempotencyKeyHolder());
 
@@ -350,6 +412,9 @@ export function CreateRealOrderSheet({
   const moneyBlock = draftBlock(totals);
 
   function reset() {
+    // The session ends here: whatever is still in flight belonged to it, not
+    // to whatever opens next.
+    sessionRef.current += 1;
     setProductQuery("");
     setProduct(null);
     setVariantId(null);
@@ -373,6 +438,37 @@ export function CreateRealOrderSheet({
   }
 
   /*
+   * However a session ends, it ends in reset(): the sheet's own close control
+   * (above), the parent setting `open` to false, or a different member or
+   * organization — which is a different New Order: nothing this session holds
+   * (its draft, an attempt in flight, its replay key) belongs to it. These are
+   * LAYOUT effects so they run in the same commit as the change; no response
+   * can resolve in between and be taken for the new session's.
+   */
+  const resetRef = useRef(reset);
+  useLayoutEffect(() => {
+    resetRef.current = reset;
+  });
+  useLayoutEffect(() => {
+    if (!open) resetRef.current();
+  }, [open]);
+  useLayoutEffect(() => {
+    const principal = principalRef.current;
+    if (principal.userId === userId && principal.organizationId === organizationId) return;
+    principalRef.current = { userId, organizationId };
+    resetRef.current();
+    idempotencyKeys.current = createIdempotencyKeyHolder();
+  }, [userId, organizationId]);
+  useEffect(
+    () => () => {
+      // Unmounted (e.g. the Orders list navigated away): whatever is still in
+      // flight has no session left to update.
+      sessionRef.current += 1;
+    },
+    [],
+  );
+
+  /*
    * Submit is impossible without a resolved variant. For a multi-variant
    * product that means an EXPLICIT choice; `product.variantId` is deliberately
    * not consulted here, so restoring it would fail the regression tests.
@@ -391,6 +487,9 @@ export function CreateRealOrderSheet({
     // Integer minor units in the line's own currency — the only money sent.
     const discountMinor = priced.discount.amount;
     const deliveryMinor = priced.deliveryFee.amount;
+    // This attempt's place in this session, and its own claim on the replay key.
+    const token = beginAttempt();
+    const claim = idempotencyKeys.current.claim();
     try {
       const shippingPayload = orderShippingPayload(shipIntent, shipping);
       const detail = await createRealOrder({
@@ -400,8 +499,15 @@ export function CreateRealOrderSheet({
         ...(discountMinor > 0 ? { discountMinor } : {}),
         ...(deliveryMinor > 0 ? { deliveryMinor } : {}),
         ...(shippingPayload ? { shipping: shippingPayload } : {}),
-        idempotency: idempotencyKeys.current,
+        idempotency: claim,
       });
+      // Abandoned (closed, reopened, member or organization switched,
+      // unmounted): the order may exist server-side, but this is no longer the
+      // session that asked for it. Its key is NOT retired — an identical
+      // request rebuilt later is answered with this same order.
+      if (!isCurrent(token)) return;
+      // Accepted: the next order — even an identical one — gets a new key.
+      claim.retire();
       /*
        * The order is real from here on, so the list is told immediately
        * rather than after a timer — and the sheet stays open on a confirmation
@@ -412,6 +518,8 @@ export function CreateRealOrderSheet({
       setCreated(detail.order);
       onCreated(detail.order);
     } catch (error) {
+      // A failure belongs to its own session too, never to a newer one.
+      if (!isCurrent(token)) return;
       /*
        * The server prices an order in the organization's one currency and
        * refuses a variant priced in another (currency_mismatch). Retrying can
@@ -426,8 +534,12 @@ export function CreateRealOrderSheet({
             : "generic",
       );
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      // Only the live attempt releases the guard: reset() already released it
+      // for an abandoned one, and a newer session may hold it now.
+      if (isCurrent(token)) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   }
 
@@ -512,7 +624,14 @@ export function CreateRealOrderSheet({
           </div>
         </motion.div>
       ) : product && unitPrice ? (
-        <section className="space-y-5 pb-4">
+        /*
+         * The whole draft is inert while its create is in flight: the request
+         * was built from these values, so editing them under it would leave the
+         * merchant looking at an order that is not the one being created. (The
+         * footer button is outside, and already disabled; closing the sheet
+         * stays possible, and ends the session.)
+         */
+        <fieldset disabled={submitting} className="m-0 min-w-0 space-y-5 border-0 p-0 pb-4">
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
               <p className="text-caption text-text-muted">{t("orderCreate.product")}</p>
@@ -860,7 +979,7 @@ export function CreateRealOrderSheet({
               {...(failure === "currency" ? {} : { onRetry: () => void submit() })}
             />
           ) : null}
-        </section>
+        </fieldset>
       ) : (
         <section>
           <div className="relative">

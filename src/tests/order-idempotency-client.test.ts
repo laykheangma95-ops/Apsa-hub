@@ -39,19 +39,18 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
     } else {
       expect(source).toMatch(/const idempotencyKeys = useRef\(createIdempotencyKeyHolder\(\)\)/);
     }
-    if (file.endsWith("PosCheckoutSheet.tsx") || file.endsWith("PrepareOrderSheet.tsx")) {
-      // POS and Inbox attempts can overlap (close/reopen while a create is
-      // pending), so each attempt sends its own claim on the flow's ONE holder
-      // and retires it only after accepting the response (see the mounted
-      // ownership tests in pos-money-mounted / inbox-order-money-mounted).
-      expect(source).toMatch(/const claim = idempotencyKeys(?:\.current)?\.claim\(\);/);
-      expect(source).toMatch(/idempotency: claim,/);
-      expect(source).toMatch(
-        /if \(!isCurrent\(token\)\) return;\s+(?:\/\/[^\n]*\n\s+)*claim\.retire\(\);/,
-      );
-    } else {
-      expect(source).toMatch(/idempotency: idempotencyKeys\.current,/);
-    }
+    // Attempts in every flow can overlap (close/reopen while a create is
+    // pending), so each attempt sends its own claim on the flow's ONE holder
+    // and retires it only after accepting the response (see the mounted
+    // ownership tests in pos-money-mounted, inbox-order-money-mounted and
+    // orders-new-order-money-mounted). Never the holder itself, which
+    // createRealOrder retires on arrival — whichever session that reaches.
+    expect(source).toMatch(/const claim = idempotencyKeys(?:\.current)?\.claim\(\);/);
+    expect(source).toMatch(/idempotency: claim,/);
+    expect(source).toMatch(
+      /if \(!isCurrent\(token\)\) return;\s+(?:\/\/[^\n]*\n\s+)*claim\.retire\(\);/,
+    );
+    expect(source).not.toMatch(/idempotency: idempotencyKeys(?:\.current)?,/);
     expect(source).not.toMatch(/idempotency: createIdempotencyKeyHolder\(\)/);
   }
 });

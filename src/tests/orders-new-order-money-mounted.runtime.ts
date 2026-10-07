@@ -43,6 +43,9 @@ await f.db.query(
    values($1,'Riel shop','Riel shop','riel-shop',$2,'KHR')`,
   [ORG_KHR, f.actor],
 );
+/** A second member, for a member switch under an open sheet. */
+const MEMBER_2 = "aaaaaaaa-0000-4000-8000-0000000000b9";
+await f.db.query("insert into auth.users(id,email) values($1,'member-2@test.invalid')", [MEMBER_2]);
 
 interface Seeded {
   product: string;
@@ -96,6 +99,7 @@ const TONER = await seedProduct(ORG_USD, "Toner", [{ name: "", price: 1500, curr
 // ── Authorization context: the one the server would derive for this member ──
 
 let activeOrg = ORG_KHR;
+let activeUser = f.actor;
 const SERVER_PERMISSIONS = [
   "products.read",
   "orders.create",
@@ -106,7 +110,7 @@ const SERVER_PERMISSIONS = [
 function context(): AuthorizationContext {
   return {
     organizationId: activeOrg,
-    userId: f.actor,
+    userId: activeUser,
     can: (key: string) => SERVER_PERMISSIONS.includes(key),
     require: (key: string) => {
       if (!SERVER_PERMISSIONS.includes(key)) {
@@ -220,32 +224,60 @@ mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: sqlTransport() }));
 const sent: Json[] = [];
 /** When set, the next create COMMITS but its response never reaches the browser. */
 let loseNextResponse = false;
+/**
+ * When set, each create's RESPONSE is held until the test releases it — the
+ * server has already answered (committed or refused) by then, exactly as a
+ * slow network delivers a finished request late.
+ */
+let holdResponses = false;
+/** Release functions for held responses, indexed like `sent`. */
+const held: (() => void)[] = [];
+/** When set, the next create never reaches the database and fails with this. */
+let failNextWith: unknown = null;
 
 mock.module("@/api/orders", () => ({
   createOrderFn: async ({ data }: { data: Json }) => {
-    sent.push(JSON.parse(JSON.stringify(data)));
-    const { createOrder } = await import("@/server/orders/service");
-    // src/api/orders.ts createOrderFn's handler, field for field.
-    const detail = await createOrder(context(), {
-      source: data.source,
-      items: data.items.map((line: Json) => ({
-        variantId: line.variantId,
-        quantity: line.quantity,
-        productId: line.productId,
-      })),
-      customerId: data.customerId ?? null,
-      locationId: data.locationId ?? null,
-      discountMinor: data.discountMinor,
-      sourceConversationRef: data.sourceConversationRef ?? null,
-      deliveryMinor: data.deliveryMinor,
-      idempotencyKey: data.idempotencyKey,
-      ...(data.shipping ? { shipping: data.shipping } : {}),
-    });
-    if (loseNextResponse) {
-      loseNextResponse = false;
-      throw new TypeError("Failed to fetch");
+    const index = sent.push(JSON.parse(JSON.stringify(data))) - 1;
+    // Fixed when the request is SENT: the member and organization it was sent
+    // as, and how its response travels.
+    const ctx = context();
+    const hold = holdResponses;
+    const lose = loseNextResponse;
+    loseNextResponse = false;
+    const failure = failNextWith;
+    failNextWith = null;
+
+    let outcome: { detail: unknown } | { error: unknown };
+    if (failure) {
+      outcome = { error: failure };
+    } else {
+      try {
+        const { createOrder } = await import("@/server/orders/service");
+        // src/api/orders.ts createOrderFn's handler, field for field.
+        const detail = await createOrder(ctx, {
+          source: data.source,
+          items: data.items.map((line: Json) => ({
+            variantId: line.variantId,
+            quantity: line.quantity,
+            productId: line.productId,
+          })),
+          customerId: data.customerId ?? null,
+          locationId: data.locationId ?? null,
+          discountMinor: data.discountMinor,
+          sourceConversationRef: data.sourceConversationRef ?? null,
+          deliveryMinor: data.deliveryMinor,
+          idempotencyKey: data.idempotencyKey,
+          ...(data.shipping ? { shipping: data.shipping } : {}),
+        });
+        outcome = { detail };
+      } catch (error) {
+        outcome = { error };
+      }
     }
-    return detail;
+    if (hold) await new Promise<void>((release) => (held[index] = release));
+    if (lose) throw new TypeError("Failed to fetch");
+    if ("error" in outcome) throw outcome.error;
+    return outcome.detail;
   },
 }));
 
@@ -325,7 +357,7 @@ function tree() {
           h.open = next;
         },
         onCreated: (order: any) => h.created.push(order),
-        userId: f.actor,
+        userId: activeUser,
         organizationId: activeOrg,
       }),
     ),
@@ -369,9 +401,15 @@ afterEach(async () => {
   container?.remove();
   document.body.innerHTML = "";
   client?.clear();
+  // Anything still held belongs to a sheet that no longer exists.
+  for (const release of held) release?.();
+  held.length = 0;
   sent.length = 0;
   crashes.length = 0;
   loseNextResponse = false;
+  holdResponses = false;
+  failNextWith = null;
+  activeUser = f.actor;
 });
 
 afterAll(async () => {
@@ -463,6 +501,53 @@ async function submit() {
   expect(control?.disabled).toBe(false);
   await click(control, "Create order");
   await settle(10);
+}
+
+/** Close the sheet the way a merchant does: the scrim's own close control. */
+async function closeSheet() {
+  await click(button(en.common.close), "sheet close");
+  await rerender();
+  expect(h.open).toBe(false);
+}
+
+/** Open New Order again on the same, still-mounted sheet. */
+async function reopenSheet() {
+  h.open = true;
+  await rerender();
+  await settle(10);
+}
+
+/** Deliver request `index`'s held response — the server answered it long ago. */
+async function release(index: number) {
+  for (let i = 0; i < 200 && !held[index]; i++) await settle(1);
+  if (!held[index]) throw new Error(`request ${index} never reached the server`);
+  await act(async () => held[index]!());
+  await settle(10);
+}
+
+/** True when the control cannot be used: its own flag or a disabled fieldset around it. */
+function inert(el: Element | null | undefined): boolean {
+  if (!el) throw new Error("no control");
+  return (
+    (el as HTMLButtonElement).disabled === true ||
+    (el.closest("fieldset") as HTMLFieldSetElement | null)?.disabled === true
+  );
+}
+
+/** The created confirmation, if the sheet is showing one: "Order <code> created". */
+function createdBanner(): string | null {
+  const pattern = new RegExp(en.orderCreate.created.replace("{{code}}", "(\\S+)"));
+  return pattern.exec(text())?.[0] ?? null;
+}
+
+async function orderNumberFor(request: Json): Promise<string | null> {
+  const rows = (
+    await f.db.query<{ order_number: string }>(
+      "select order_number from orders where idempotency_key=$1",
+      [request.idempotencyKey],
+    )
+  ).rows;
+  return rows[0]?.order_number ?? null;
 }
 
 /** The order row the server persisted for the request the sheet sent last. */
@@ -755,7 +840,7 @@ describe("A currency change clears typed money instead of reinterpreting it", ()
     expect(crashes).toEqual([]);
     expect(unitPrice()).toBe("៛5,000");
     expect(discountSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(discountInput()).toBeNull();
+    expect(discountInput() === null).toBe(true);
     expect(feeInput()?.value).toBe("");
     expect(total()).toBe("៛5,000");
 
@@ -823,7 +908,7 @@ describe("E. currency mismatch fails closed", () => {
     // Told why, and not offered a retry that can never succeed.
     const body = dialog().textContent ?? "";
     expect(body).toContain(en.conversation.prepareOrder.currency.serverMismatch.title);
-    expect(button(en.common.retry, dialog())).toBeUndefined();
+    expect(button(en.common.retry, dialog()) === undefined).toBe(true);
   });
 
   it("the sheet can only ever send one line, so it cannot build a mixed-currency basket", async () => {
@@ -934,5 +1019,365 @@ describe("Idempotency through the real database", () => {
     expect(sent).toHaveLength(2);
     expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
     expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Session identity: a late response never reaches a newer sheet session
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every open of the sheet is one session, for one member of one organization.
+// A create can outlive it: closed while pending, member or organization
+// switched, sheet unmounted. The server's answer stays authoritative — the
+// order it created is real and stays in the database — and these pin that the
+// browser never applies that answer to whichever session is open now.
+
+describe("Session identity: a late response never reaches a newer session", () => {
+  it("1. A pending → close → reopen → choose B → A succeeds late: B's session is untouched", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Soap");
+    await increaseQuantity(1);
+    expect(total()).toBe("៛6,000");
+
+    await release(0);
+    expect(crashes).toEqual([]);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(h.open).toBe(true);
+    expect(unitPrice()).toBe("៛3,000");
+    expect(total()).toBe("៛6,000");
+    expect(alerts()).toEqual([]);
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.submit);
+    expect(submitButton()?.disabled).toBe(false);
+    // A is real: the server created it, and nothing here undoes that.
+    expect(await orderNumberFor(sent[0]!)).not.toBeNull();
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+
+    // B itself is created normally, once.
+    await submit();
+    await release(1);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 6000, currency: "KHR" });
+    expect(createdBanner()).toContain((await orderNumberFor(sent[1]!))!);
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("1b. the same when the PARENT closes the sheet instead of its own control", async () => {
+    await openSheet(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+    h.open = false;
+    await rerender();
+    await reopenSheet();
+    await pickProduct("Soap");
+
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(unitPrice()).toBe("៛3,000");
+    expect(submitButton()?.disabled).toBe(false);
+  });
+
+  it("2. A pending → close → reopen → B submitted → A succeeds late: A cannot close or overwrite B", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Soap");
+    await submit();
+    expect(sent).toHaveLength(2);
+
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(h.open).toBe(true);
+    // B is still the attempt in flight: its guard and its draft are intact.
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+    expect(submitButton()?.disabled).toBe(true);
+    expect(unitPrice()).toBe("៛3,000");
+    await click(submitButton());
+    expect(sent).toHaveLength(2);
+
+    await release(1);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 3000, currency: "KHR" });
+    expect(createdBanner()).toContain((await orderNumberFor(sent[1]!))!);
+    expect(createdBanner()).not.toContain((await orderNumberFor(sent[0]!))!);
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("3. A pending → close → reopen → A fails late: the failure never appears in B's session", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    failNextWith = new TypeError("Failed to fetch");
+    await pickProduct("Water");
+    await submit();
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Soap");
+
+    await release(0);
+    expect(alerts()).toEqual([]);
+    expect(text()).not.toContain(en.orderCreate.error.title);
+    expect(button(en.common.retry, dialog()) === undefined).toBe(true);
+    expect(unitPrice()).toBe("៛3,000");
+    expect(submitButton()?.disabled).toBe(false);
+    expect(await orderCount(ORG_KHR)).toBe(before);
+  });
+
+  it("4a. A pending → the organization changes → A succeeds late: the new organization's session is untouched", async () => {
+    await openSheet(ORG_KHR);
+    const khrBefore = await orderCount(ORG_KHR);
+    const usdBefore = await orderCount(ORG_USD);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+
+    activeOrg = ORG_USD;
+    await rerender();
+    await settle(10);
+    // A fresh New Order for the new organization: its catalog, none of A's draft.
+    expect(text()).toContain("Serum");
+    expect(text()).not.toContain("Water");
+    await pickProduct("Serum");
+
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(unitPrice()).toBe("$20.00");
+    expect(submitButton()?.disabled).toBe(false);
+    // A was created in the organization that sent it.
+    expect(await orderCount(ORG_KHR)).toBe(khrBefore + 1);
+
+    await submit();
+    await release(1);
+    expect(h.created).toHaveLength(1);
+    expect(await persisted()).toMatchObject({
+      organization_id: ORG_USD,
+      currency: "USD",
+      total_minor: 2000,
+    });
+    expect(await orderCount(ORG_USD)).toBe(usdBefore + 1);
+  });
+
+  it("4b. A pending → the member changes → A succeeds late: ignored, and the new member's identical order gets its own key", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+
+    activeUser = MEMBER_2;
+    await rerender();
+    await settle(10);
+    // The new member starts from an empty New Order, not the previous member's draft.
+    expect(submitButton() === undefined).toBe(true);
+    await pickProduct("Water");
+    await submit();
+    // The identical basket, but another member's request: never the first member's key.
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
+
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+
+    await release(1);
+    expect(h.created).toHaveLength(1);
+    const createdBy = async (request: Json) =>
+      (
+        await f.db.query<{ created_by: string }>(
+          "select created_by from orders where idempotency_key=$1",
+          [request.idempotencyKey],
+        )
+      ).rows[0]?.created_by;
+    expect(await createdBy(sent[0]!)).toBe(f.actor);
+    expect(await createdBy(sent[1]!)).toBe(MEMBER_2);
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("5. three sessions, three late responses out of order: only the live session's own answer lands", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit(); // request 0 — session 1
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Soap");
+    await submit(); // request 1 — session 2
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Water");
+    await increaseQuantity(1);
+    await submit(); // request 2 — session 3, the live one
+
+    await release(1);
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+    expect(total()).toBe("៛10,000");
+
+    await release(2);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 10000, currency: "KHR" });
+    expect(createdBanner()).toContain((await orderNumberFor(sent[2]!))!);
+    expect(await orderCount(ORG_KHR)).toBe(before + 3);
+  });
+
+  it("6. the live session's own late success still lands: ៛5,000 × 2 = ៛10,000 created and persisted", async () => {
+    await openSheet(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await increaseQuantity(1);
+    await submit();
+    expect(createdBanner()).toBeNull();
+
+    await release(0);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 10000, currency: "KHR" });
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    expect(await persisted()).toMatchObject({ currency: "KHR", total_minor: 10000 });
+  });
+
+  it("7. the live session's own late failure still shows, keeps the draft, and its retry creates the order once", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    failNextWith = Object.assign(new Error("Order service unavailable"), { statusCode: 500 });
+    await pickProduct("Water");
+    await submit();
+    await release(0);
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+    expect(total()).toBe("៛5,000");
+    expect(await orderCount(ORG_KHR)).toBe(before);
+
+    holdResponses = false;
+    await click(button(en.common.retry, dialog()), "retry");
+    await settle(10);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("8. a dropped late success keeps its key: the identical order rebuilt after reopening is replayed, not duplicated", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await increaseQuantity(1);
+    await submit(); // request 0 — committed by the server, response held
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Water");
+    await increaseQuantity(1);
+    await submit(); // request 1 — the same request
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    await release(1);
+    // The server answered the rebuilt request with the order it had already made.
+    expect(h.created).toHaveLength(1);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("8b. A's late success arrives BEFORE the identical order is rebuilt: dropped, but its key is kept, so the rebuild is replayed — still one order", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit(); // request 0 — committed by the server, response held
+    holdResponses = false;
+    await closeSheet();
+    await reopenSheet();
+
+    await release(0); // A's answer reaches a sheet that never asked for it
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+
+    // The merchant, never told A exists, enters the very same order again.
+    await pickProduct("Water");
+    await submit();
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("9. a late success cannot retire the newer session's key: B's lost-response retry is still replayed exactly once", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit(); // request 0 (A) — response held
+    holdResponses = false;
+    await closeSheet();
+    await reopenSheet();
+    await pickProduct("Soap");
+    loseNextResponse = true;
+    await submit(); // request 1 (B) — committed, response lost
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+
+    await release(0); // A's success arrives now
+    expect(createdBanner()).toBeNull();
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+
+    await click(button(en.common.retry, dialog()), "retry");
+    await settle(10);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]!.idempotencyKey).toBe(sent[1]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 3000, currency: "KHR" });
+    // A once, B once — never a second B.
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("the draft is locked while its create is pending, so the request cannot change under it", async () => {
+    await openSheet(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+    expect(inert(button(en.orderCreate.change))).toBe(true);
+    expect(inert(button(en.common.increase))).toBe(true);
+    expect(inert(discountSwitch())).toBe(true);
+    expect(inert(feeInput())).toBe(true);
+    // Closing is always possible — and ends the session (cases above).
+    expect(inert(button(en.common.close))).toBe(false);
+
+    await release(0);
+    expect(h.created).toHaveLength(1);
+  });
+
+  it("the sheet unmounts while A is pending (navigating away): A's late success reports nothing", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await pickProduct("Water");
+    await submit();
+    await act(async () => root!.unmount());
+    root = null;
+
+    await release(0);
+    expect(crashes).toEqual([]);
+    expect(h.created).toHaveLength(0);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
   });
 });
