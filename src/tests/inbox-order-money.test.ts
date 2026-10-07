@@ -18,7 +18,9 @@ import { createOrder, ORDER_APPROVAL_LIMIT_CENTS, PERMISSION_DENIED } from "@/li
 import { parseDeliveryFee } from "@/lib/delivery-fee";
 import {
   orderRequestFingerprint,
+  SHARED_IDEMPOTENCY_HOLDER_LIMIT,
   sharedIdempotencyHolder,
+  sharedIdempotencyHolderCount,
   type IdempotencyScope,
 } from "@/lib/idempotency";
 import { khr, usd } from "@/lib/money";
@@ -262,5 +264,180 @@ describe("page-lifetime replay identity (sharedIdempotencyHolder)", () => {
     // In use → retained; untouched for 249 newer scopes → evicted (a new holder).
     expect(sharedIdempotencyHolder(scope({ subject: "lru-keep" }))).toBe(keep);
     expect(sharedIdempotencyHolder(scope({ subject: "lru-0" }))).not.toBe(oldest);
+  });
+});
+
+describe("registry capacity never destroys an unresolved replay key (review P2)", () => {
+  // Pressure well past the nominal capacity, using only the public API.
+  const PRESSURE = 250;
+  const scope = (subject: string, over: Partial<IdempotencyScope> = {}): IdempotencyScope => ({
+    userId: "cap-user",
+    organizationId: "cap-org",
+    flow: "inbox-prepare-order",
+    subject,
+    ...over,
+  });
+  const fpX = orderRequestFingerprint({ items: [{ variantId: "x", quantity: 1 }] });
+
+  it("A: an unresolved holder survives more idle scopes than the capacity (same key after)", () => {
+    const k = sharedIdempotencyHolder(scope("cap-A")).claim().keyFor(fpX); // lost response
+    for (let i = 0; i < PRESSURE; i++) sharedIdempotencyHolder(scope(`cap-idle-${i}`));
+    expect(sharedIdempotencyHolder(scope("cap-A")).claim().keyFor(fpX)).toBe(k);
+  });
+});
+
+describe("registry capacity policy: idle evictable, unresolved protected, compaction recovers", () => {
+  const LIMIT = SHARED_IDEMPOTENCY_HOLDER_LIMIT;
+  let seq = 0;
+  const fresh = (tag: string) => `${tag}-${++seq}`;
+  const scope = (subject: string, over: Partial<IdempotencyScope> = {}): IdempotencyScope => ({
+    userId: "pol-user",
+    organizationId: "pol-org",
+    flow: "inbox-prepare-order",
+    subject,
+    ...over,
+  });
+  const fp = (o: object) => orderRequestFingerprint(o);
+  const X = fp({ items: [{ variantId: "v1", quantity: 1 }], deliveryMinor: 0 });
+  const holder = (subject: string, over?: Partial<IdempotencyScope>) =>
+    sharedIdempotencyHolder(scope(subject, over));
+  /** Touch enough brand-new idle scopes to push every older idle scope out. */
+  const idlePressure = () => {
+    for (let i = 0; i < LIMIT + 50; i++) holder(fresh("idle"));
+  };
+  /** An unresolved scope: a create was sent and never accepted. */
+  const unresolved = (subject: string, request = X) => holder(subject).claim().keyFor(request);
+
+  it("defines unresolved precisely: issued-and-not-accepted, cleared only by the owning retire", () => {
+    const h = holder(fresh("state"));
+    expect(h.hasUnresolvedKey()).toBe(false); // nothing issued
+    const a = h.claim();
+    a.keyFor(X);
+    expect(h.hasUnresolvedKey()).toBe(true); // sent, outcome unknown
+    const b = h.claim();
+    b.keyFor(X); // retry of the same request takes ownership
+    a.retire(); // G: stale/superseded callback
+    expect(h.hasUnresolvedKey()).toBe(true);
+    b.retire(); // E: the accepted owner
+    expect(h.hasUnresolvedKey()).toBe(false);
+  });
+
+  it("B: the OLDEST scope is unresolved → an idle scope is evicted instead", () => {
+    const oldest = fresh("oldest");
+    const k = unresolved(oldest);
+    const firstIdleSubject = fresh("first-idle");
+    const firstIdle = holder(firstIdleSubject); // older than the pressure below
+    idlePressure();
+    expect(holder(oldest).claim().keyFor(X)).toBe(k);
+    // The idle scope that was older than the pressure is the one that went.
+    expect(holder(firstIdleSubject)).not.toBe(firstIdle);
+    expect(sharedIdempotencyHolderCount()).toBeLessThanOrEqual(LIMIT + 50);
+  });
+
+  it("C: many unresolved scopes all survive idle pressure, and the registry stays bounded", () => {
+    const subjects = Array.from({ length: 20 }, () => fresh("multi"));
+    const keys = subjects.map((s) => unresolved(s));
+    idlePressure();
+    subjects.forEach((s, i) => expect(holder(s).claim().keyFor(X)).toBe(keys[i]!));
+    for (const s of subjects) holder(s).claim().retire(); // no-op claims: still unresolved
+    subjects.forEach((s, i) => expect(holder(s).claim().keyFor(X)).toBe(keys[i]!));
+  });
+
+  it("D/E: an accepted (retired) holder becomes evictable; the same scope then starts fresh (H)", () => {
+    const subject = fresh("retire");
+    const h = holder(subject);
+    const claim = h.claim();
+    const k = claim.keyFor(X);
+    claim.retire(); // accepted
+    idlePressure();
+    // Evicted while idle: a new holder instance, behaving exactly like a fresh one.
+    const after = holder(subject);
+    expect(after).not.toBe(h);
+    expect(after.hasUnresolvedKey()).toBe(false);
+    // H: an identical NEW order after acceptance gets a new key (two sales).
+    expect(after.claim().keyFor(X)).not.toBe(k);
+  });
+
+  it("F: a failed / uncertain attempt keeps its protection under pressure", () => {
+    const subject = fresh("failed");
+    const k = holder(subject).claim().keyFor(X); // request failed: never retired
+    idlePressure();
+    idlePressure();
+    expect(holder(subject).hasUnresolvedKey()).toBe(true);
+    expect(holder(subject).claim().keyFor(X)).toBe(k);
+  });
+
+  it("G: a stale retire during pressure cannot make the live holder evictable", () => {
+    const subject = fresh("stale");
+    const h = holder(subject);
+    const stale = h.claim();
+    const k = stale.keyFor(X);
+    const live = holder(subject).claim();
+    expect(live.keyFor(X)).toBe(k);
+    stale.retire(); // late abandoned success
+    idlePressure();
+    expect(holder(subject)).toBe(h);
+    expect(holder(subject).claim().keyFor(X)).toBe(k);
+  });
+
+  it("all-unresolved pressure: no key is destroyed to stay at the limit; retirement lets it compact", () => {
+    const subjects = Array.from({ length: LIMIT + 60 }, () => fresh("all-unresolved"));
+    // Each create is sent as soon as its claim is taken — exactly as
+    // createRealOrder does (claim.keyFor runs synchronously in the same call).
+    const keys = subjects.map((s) => holder(s).claim().keyFor(X));
+    // Temporary overflow, by design: every one of these keys is still live.
+    expect(sharedIdempotencyHolderCount()).toBeGreaterThanOrEqual(LIMIT + 60);
+    subjects.forEach((s, i) => expect(holder(s).claim().keyFor(X)).toBe(keys[i]!));
+
+    // Most creates are now accepted (retired by their current owners)…
+    const owners = subjects.map((s) => holder(s).claim());
+    owners.forEach((o, i) => {
+      o.keyFor(X);
+      if (i >= 10) o.retire();
+    });
+    // …so the next lookup compacts back to the nominal limit, and the ten
+    // still-unresolved creates keep their keys.
+    holder(fresh("compact-trigger"));
+    expect(sharedIdempotencyHolderCount()).toBeLessThanOrEqual(LIMIT);
+    subjects.slice(0, 10).forEach((s, i) => expect(holder(s).claim().keyFor(X)).toBe(keys[i]!));
+  });
+
+  it("idle-only pressure never grows the registry past max(limit, its current size)", () => {
+    // Other tests in this process may legitimately leave unresolved holders,
+    // so the bound is relative: idle scopes alone never push it upward.
+    const before = sharedIdempotencyHolderCount();
+    idlePressure();
+    idlePressure();
+    expect(sharedIdempotencyHolderCount()).toBeLessThanOrEqual(Math.max(LIMIT, before));
+  });
+
+  it("scope isolation holds under pressure (member / organization / flow / conversation)", () => {
+    const subject = fresh("iso");
+    const mine = unresolved(subject);
+    const others = [
+      { userId: "pol-user-2" },
+      { organizationId: "pol-org-2" },
+      { flow: "other-flow" },
+    ].map((over) => holder(subject, over).claim().keyFor(X));
+    const otherConversation = holder(fresh("iso-other")).claim().keyFor(X);
+    idlePressure();
+    for (const k of [...others, otherConversation]) expect(k).not.toBe(mine);
+    expect(holder(subject).claim().keyFor(X)).toBe(mine);
+  });
+
+  it("fingerprints after pressure: same request replays; changed quantity / variant / fee are new requests", () => {
+    const base = { items: [{ variantId: "v1", quantity: 2 }], deliveryMinor: 2000 };
+    const changes = [
+      { items: [{ variantId: "v1", quantity: 3 }], deliveryMinor: 2000 }, // quantity
+      { items: [{ variantId: "v2", quantity: 2 }], deliveryMinor: 2000 }, // variant
+      { items: [{ variantId: "v1", quantity: 2 }], deliveryMinor: 3000 }, // fee
+    ];
+    for (const changed of changes) {
+      const subject = fresh("fp");
+      const k = unresolved(subject, fp(base));
+      idlePressure();
+      expect(holder(subject).claim().keyFor(fp(base))).toBe(k);
+      expect(holder(subject).claim().keyFor(fp(changed))).not.toBe(k);
+    }
   });
 });

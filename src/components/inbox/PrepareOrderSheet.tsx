@@ -187,18 +187,22 @@ export function PrepareOrderSheet({
    * retry" must be replayed by the server, not become a second order). It is
    * owned by the page-lifetime registry, scoped to this member, this
    * organization and this conversation — never reachable from another.
+   *
+   * It is looked up at the moment of each attempt, not kept from mount: the
+   * registry may drop an IDLE holder under capacity pressure (it never drops
+   * one with an unresolved key), and an attempt must always claim on the
+   * holder the registry is protecting — never on a stale, untracked copy.
    */
   const { userId, organizationId, conversationId } = replayScope;
-  const idempotencyKeys = useMemo(
-    () =>
+  const idempotencyKeys = {
+    claim: () =>
       sharedIdempotencyHolder({
         userId,
         organizationId,
         flow: "inbox-prepare-order",
         subject: conversationId,
-      }),
-    [userId, organizationId, conversationId],
-  );
+      }).claim(),
+  };
 
   /*
    * ── Attempt identity ────────────────────────────────────────────────────

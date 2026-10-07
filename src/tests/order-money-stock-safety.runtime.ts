@@ -1725,6 +1725,7 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
 describe("Inbox replay identity through the real create_order_v3", () => {
   const perms = ["orders.create", "orders.read"];
   let water: string;
+  let bigWater: string; // a second variant of the same product (៛6,000)
   let waterProduct: string;
   let kCustomer: string;
   const conversationA = "3f2504e0-4f89-41d3-9a0c-0000000ca001";
@@ -1734,6 +1735,7 @@ describe("Inbox replay identity through the real create_order_v3", () => {
     const product = crypto.randomUUID();
     waterProduct = product;
     water = crypto.randomUUID();
+    bigWater = crypto.randomUUID();
     kCustomer = crypto.randomUUID();
     await f.db.query(`insert into products(id,organization_id,name_km) values($1,$2,'ទឹក')`, [
       product,
@@ -1741,8 +1743,8 @@ describe("Inbox replay identity through the real create_order_v3", () => {
     ]);
     await f.db.query(
       `insert into product_variants(id,organization_id,product_id,name,price_amount,price_currency)
-       values($1,$2,$3,'Bottle',5000,'KHR')`,
-      [water, orgK, product],
+       values($1,$2,$3,'Bottle',5000,'KHR'),($4,$2,$3,'Large bottle',6000,'KHR')`,
+      [water, orgK, product, bigWater],
     );
     await f.db.query(
       `insert into customers(id,organization_id,display_name) values($1,$2,'សុខា')`,
@@ -1835,6 +1837,83 @@ describe("Inbox replay identity through the real create_order_v3", () => {
     });
     expect(changed.order.id).not.toBe(first.order.id);
     expect(changed.order.subtotal).toEqual(khr(15000));
+  });
+
+  it("capacity pressure: lost response → 250 other scopes → retry is REPLAYED (one persisted order)", async () => {
+    const { createRealOrder } = await import("../lib/api");
+    const { sharedIdempotencyHolder } = await import("../lib/idempotency");
+    transportOrg = orgK;
+    const scope = { ...scopeA(), subject: "3f2504e0-4f89-41d3-9a0c-0000000ca0ca" };
+    const before = await orderCount(orgK);
+
+    // Attempt A: X under key K commits O1; the browser never accepts it.
+    const claimA = sharedIdempotencyHolder(scope).claim();
+    const o1 = await createRealOrder({ ...request(), idempotency: claimA });
+    expect(await orderCount(orgK)).toBe(before + 1);
+
+    // Visiting many other conversations: registry capacity pressure.
+    for (let i = 0; i < 250; i++) {
+      sharedIdempotencyHolder({ ...scopeA(), subject: `pressure-${i}` }).claim();
+    }
+
+    // Back to A: reconstruct X and retry.
+    const retried = await createRealOrder({
+      ...request(),
+      idempotency: sharedIdempotencyHolder(scope).claim(),
+    });
+    // The stronger proof first: exactly ONE persisted order for this logical
+    // attempt (not merely "the same key came back").
+    expect(await orderCount(orgK)).toBe(before + 1);
+    expect(retried.order.id).toBe(o1.order.id);
+  });
+
+  it("the OLD eviction outcome — a fresh holder after pressure — gets K2 and persists a SECOND order", async () => {
+    // What unconditional LRU eviction did: A's unresolved holder was dropped,
+    // so the retry after pressure ran on a brand-new holder.
+    const { createRealOrder } = await import("../lib/api");
+    const { createIdempotencyKeyHolder, orderRequestFingerprint } =
+      await import("../lib/idempotency");
+    transportOrg = orgK;
+    const before = await orderCount(orgK);
+    const original = createIdempotencyKeyHolder();
+    const claimK = original.claim();
+    const k = claimK.keyFor(orderRequestFingerprint(request()));
+    const o1 = await createRealOrder({ ...request(), idempotency: claimK });
+    const evictedReplacement = createIdempotencyKeyHolder().claim();
+    const k2 = evictedReplacement.keyFor(orderRequestFingerprint(request()));
+    expect(k2).not.toBe(k);
+    const o2 = await createRealOrder({ ...request(), idempotency: evictedReplacement });
+    expect(o2.order.id).not.toBe(o1.order.id);
+    expect(await orderCount(orgK)).toBe(before + 2); // two identical orders
+  });
+
+  it("after capacity pressure a CHANGED request (quantity / variant / fee) is a new order, never a stale replay", async () => {
+    const { createRealOrder } = await import("../lib/api");
+    const { sharedIdempotencyHolder } = await import("../lib/idempotency");
+    transportOrg = orgK;
+    const changes = [
+      { items: [{ variantId: water, quantity: 3, productId: waterProduct }] },
+      { items: [{ variantId: bigWater, quantity: 2, productId: waterProduct }] },
+      { deliveryMinor: 3000 },
+    ];
+    for (const [i, change] of changes.entries()) {
+      const scope = { ...scopeA(), subject: `3f2504e0-4f89-41d3-9a0c-0000000cc0${i}0` };
+      const o1 = await createRealOrder({
+        ...request(),
+        idempotency: sharedIdempotencyHolder(scope).claim(),
+      }); // response "lost": never retired
+      for (let n = 0; n < 250; n++) {
+        sharedIdempotencyHolder({ ...scopeA(), subject: `fp-pressure-${i}-${n}` }).claim();
+      }
+      const before = await orderCount(orgK);
+      const changed = await createRealOrder({
+        ...request(),
+        ...change,
+        idempotency: sharedIdempotencyHolder(scope).claim(),
+      });
+      expect(changed.order.id).not.toBe(o1.order.id);
+      expect(await orderCount(orgK)).toBe(before + 1);
+    }
   });
 
   it("another member's scope never reaches this member's unresolved key", async () => {

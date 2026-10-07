@@ -1315,3 +1315,81 @@ describe("Confirm / discard across a conversation or member switch (real route, 
     });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Registry capacity pressure never evicts an unresolved create (review P2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Replay identity under registry capacity pressure (real route, mounted)", () => {
+  const CONV_A = id("c001");
+  const CONV_B = id("c002");
+  const CUST_A = customer(id("e001"), "Sokha");
+  const CUST_B = customer(id("e002"), "Dara");
+
+  beforeEach(() => {
+    conversations[CONV_A] = conversation(CONV_A, CUST_A.id);
+    conversations[CONV_B] = conversation(CONV_B, CUST_B.id);
+    customers[CUST_A.id] = CUST_A;
+    customers[CUST_B.id] = CUST_B;
+  });
+
+  async function openOrder() {
+    await click(button(en.conversation.actions.title), "actions");
+    await click(buttonContaining(en.conversation.createOrder), "Create order row");
+    await click(buttonContaining("Water", dialog()), "pick Water");
+  }
+
+  /** Other conversations' order scopes, as this member's sheets would use them. */
+  async function pressure(count: number) {
+    const { sharedIdempotencyHolder } = await import("@/lib/idempotency");
+    for (let i = 0; i < count; i++) {
+      sharedIdempotencyHolder({
+        userId: routeContext.session.userId,
+        organizationId: routeContext.organizationId,
+        flow: "inbox-prepare-order",
+        subject: id(`f${String(i).padStart(4, "0")}`),
+      }).claim();
+    }
+  }
+
+  it("ownership under pressure: abandoned late success + lost retry + more pressure → same key, ONE order", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton()); // attempt 1, pending
+    routeParams.id = CONV_B;
+    await rerender();
+    await pressure(250);
+    routeParams.id = CONV_A;
+    await rerender();
+    await openOrder();
+    await click(submitButton()); // attempt 2: same key, now its owner
+    expect(creates[1]!.data.idempotencyKey).toBe(creates[0]!.data.idempotencyKey);
+    await resolveCreate(0, "APSA-2026-000701"); // attempt 1 lands late: must not retire
+    await rejectCreate(new TypeError("Failed to fetch"), 1); // attempt 2 lost
+    await pressure(250);
+    await click(submitButton()); // retry
+    expect(creates[2]!.data.idempotencyKey).toBe(creates[0]!.data.idempotencyKey);
+    await resolveCreate(2);
+    expect(committedOrders).toBe(1);
+  });
+
+  it("lost response in A → 250 other scopes → back to A → identical retry: same key, ONE order", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await commitButLoseResponse(0);
+    expect(committedOrders).toBe(1);
+
+    routeParams.id = CONV_B;
+    await rerender();
+    await pressure(250);
+    routeParams.id = CONV_A;
+    await rerender();
+
+    await openOrder();
+    await click(submitButton());
+    expect(creates[1]!.data.idempotencyKey).toBe(creates[0]!.data.idempotencyKey);
+    await resolveCreate(1);
+    expect(committedOrders).toBe(1);
+  });
+});
