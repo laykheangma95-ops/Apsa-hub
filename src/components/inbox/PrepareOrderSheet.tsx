@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { Check, Search, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,7 +21,6 @@ import {
   isProductionId,
   PERMISSION_DENIED,
 } from "@/lib/api";
-import { parseDeliveryFee } from "@/lib/delivery-fee";
 import { localName } from "@/lib/format";
 import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { useLanguage } from "@/lib/i18n";
@@ -30,17 +29,24 @@ import {
   channelToSourceDb,
   classifyPreparedOrder,
   explainUnsellablePreparedOrder,
+  isOrderCurrencyMismatch,
   type PreparedOrderBlocker,
   type RealOrderDetail,
 } from "@/lib/orders";
-import { addMoney, formatMoney, multiplyMoney, usd } from "@/lib/money";
+import { formatMoney } from "@/lib/money";
 import {
+  calculateDraftTotals,
   defaultProductVariantId,
   defaultVariantSelection,
+  draftBlock,
+  draftCurrency,
   needsVariantChoice,
+  NO_DELIVERY_FEE,
   productVariantPrice,
   variantLabel,
+  type DraftDeliveryFee,
 } from "@/lib/order-draft";
+import { cartCurrencyContext, lineTotal, NO_DISCOUNT } from "@/lib/pos-cart";
 import type { PrepareOrderItemInput } from "@/lib/conversation/smart-actions";
 import { cn } from "@/lib/utils";
 import type { Channel, Customer, Money, Order, Product } from "@/types";
@@ -140,9 +146,9 @@ export function PrepareOrderSheet({
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
-  const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
+  const [failure, setFailure] = useState<"generic" | "permission" | "currency" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
-  const [deliveryFeeText, setDeliveryFeeText] = useState("");
+  const [deliveryFee, setDeliveryFee] = useState<DraftDeliveryFee>(NO_DELIVERY_FEE);
   /*
    * Optional order shipping destination for the production path — the parcel's
    * authoritative destination, snapshotted onto the order (§13). Prefilled with
@@ -160,20 +166,58 @@ export function PrepareOrderSheet({
   /*
    * One idempotency key per logical order attempt (src/lib/idempotency.ts).
    * A retry of the same request re-sends the same key, so a create whose
-   * response was lost is replayed by the server rather than duplicated. It is
-   * released once the order exists, so "Edit" (cancel the draft, rebuild)
-   * creates a genuinely new order even from identical lines.
+   * response was lost is replayed by the server rather than duplicated.
+   *
+   * Each create attempt takes its own CLAIM on the key and retires it only
+   * once this sheet ACCEPTS the response (see "Attempt identity" below) —
+   * never on arrival. An abandoned attempt's late success therefore leaves
+   * the key held, so an identical resubmission is answered with the order the
+   * server already made; and "Edit" (cancel the draft, rebuild) after an
+   * accepted create still gets a genuinely new order from identical lines.
    */
   const idempotencyKeys = useRef(createIdempotencyKeyHolder());
 
+  /*
+   * ── Attempt identity ────────────────────────────────────────────────────
+   *
+   * A create/confirm can outlive the draft it was made for: the merchant can
+   * close the sheet (and reopen a fresh draft) while it is in flight, and the
+   * conversation route remounts this sheet when the conversation, member or
+   * organization changes. Each attempt carries the sheet session it began in;
+   * a response arriving after that session ended is dropped — it never
+   * paints "created" over a newer draft, reports onCreated into another
+   * thread, or shows an old failure. (The server may still have created the
+   * draft order; it is visible in Orders, and an identical resubmission is
+   * answered with it.) The draft itself is locked while a create is pending,
+   * so within one session the lines cannot change under a request.
+   */
+  const sessionRef = useRef(0);
+  const attemptRef = useRef(0);
+  useEffect(
+    () => () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      sessionRef.current += 1;
+    },
+    [],
+  );
+  function beginAttempt() {
+    attemptRef.current += 1;
+    return { session: sessionRef.current, attempt: attemptRef.current };
+  }
+  function isCurrent(token: { session: number; attempt: number }): boolean {
+    return token.session === sessionRef.current && token.attempt === attemptRef.current;
+  }
+
   function reset() {
+    sessionRef.current += 1;
     setLines((initialItems.length > 0 ? initialItems : [{ quantity: 1 }]).map(toEditableLine));
     setStep({ name: "review" });
     setSubmitting(false);
     setConfirming(false);
+    setDiscarding(false);
     setFailure(null);
     setBlocker(null);
-    setDeliveryFeeText("");
+    setDeliveryFee(NO_DELIVERY_FEE);
     setShipping({ ...EMPTY_SHIPPING_DESTINATION, name: displayName, phone: customer.phone ?? "" });
     setShipIntent(false);
     submittingRef.current = false;
@@ -183,6 +227,17 @@ export function PrepareOrderSheet({
     if (!next) reset();
     onOpenChange(next);
   }
+
+  /*
+   * However the sheet was closed — its own close control above, or the parent
+   * setting `open` to false — the draft session ends with it, so a response
+   * still in flight can never land on whatever is opened next.
+   */
+  const resetRef = useRef(reset);
+  resetRef.current = reset;
+  useEffect(() => {
+    if (!open) resetRef.current();
+  }, [open]);
 
   function updateLine(key: string, patch: Partial<EditableLine>) {
     setLines((prev) => prev.map((line) => (line.key === key ? { ...line, ...patch } : line)));
@@ -211,29 +266,6 @@ export function PrepareOrderSheet({
         Boolean(line.product) && (!needsVariantChoice(line.product!) || Boolean(line.variantId)),
     );
 
-  const estimatedTotal = useMemo(
-    () =>
-      lines.reduce(
-        (sum, line) =>
-          line.product ? addMoney(sum, multiplyMoney(linePrice(line), line.quantity)) : sum,
-        usd(0),
-      ),
-    [lines],
-  );
-
-  /*
-   * The delivery fee is a real Order amount only on the production path
-   * (migration 044); the prototype path has no server to charge it.
-   */
-  const deliveryMinor = realCustomer
-    ? parseDeliveryFee(deliveryFeeText, estimatedTotal.currency)
-    : 0;
-  const deliveryFee: Money = { amount: deliveryMinor ?? 0, currency: estimatedTotal.currency };
-  const previewTotal = addMoney(estimatedTotal, deliveryFee);
-
-  const readyToSubmit =
-    itemsReady && deliveryMinor !== null && shippingIntentReady(shipIntent, shipping);
-
   /** The chosen lines, for naming the ones that blocked the order. */
   const readyLinesForDisplay = useMemo(
     () =>
@@ -241,16 +273,51 @@ export function PrepareOrderSheet({
     [lines],
   );
 
+  /** Each chosen line's price and quantity — the only inputs to the money preview. */
+  const pricedLines = useMemo(
+    () =>
+      readyLinesForDisplay.map((line) => ({ unitPrice: linePrice(line), quantity: line.quantity })),
+    [readyLinesForDisplay],
+  );
+
+  /*
+   * A delivery fee belongs to the currency context it was typed in. When the
+   * draft's currencies change — dollars → riel, single → mixed, anything →
+   * empty — the fee is CLEARED (adjusted during render, so no frame ever
+   * shows the old text against the new currency), never kept dormant to
+   * reappear as "$5" when the draft returns to dollars.
+   */
+  const currencyContext = cartCurrencyContext(pricedLines);
+  const [feeContext, setFeeContext] = useState(currencyContext);
+  if (feeContext !== currencyContext) {
+    setFeeContext(currencyContext);
+    setDeliveryFee(NO_DELIVERY_FEE);
+  }
+
+  /*
+   * The delivery fee is a real Order amount only on the production path
+   * (migration 044); the prototype path has no server to charge it.
+   */
+  const totals = calculateDraftTotals(
+    pricedLines,
+    NO_DISCOUNT,
+    realCustomer ? deliveryFee : NO_DELIVERY_FEE,
+  );
+  const moneyBlock = draftBlock(totals);
+  const priced = totals.kind === "priced" ? totals : null;
+
+  const readyToSubmit =
+    itemsReady && moneyBlock === null && shippingIntentReady(shipIntent, shipping);
+
   async function submit() {
-    if (submittingRef.current || !readyToSubmit) return;
+    if (submittingRef.current || !readyToSubmit || !priced) return;
     submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
     setBlocker(null);
+    const token = beginAttempt();
 
-    const readyLines = lines.filter((line): line is EditableLine & { product: Product } =>
-      Boolean(line.product),
-    );
+    const readyLines = readyLinesForDisplay;
 
     /*
      * Three-way, never two-way. The old test was "is this fully production?",
@@ -283,6 +350,8 @@ export function PrepareOrderSheet({
 
     try {
       if (kind === "production") {
+        // This attempt's own claim on the replay key (see idempotencyKeys).
+        const claim = idempotencyKeys.current.claim();
         // classifyPreparedOrder returned "production", which is true only when
         // the channel maps to a writable DB source and every line carries a
         // real variant. Both non-null assertions are that guarantee.
@@ -295,16 +364,24 @@ export function PrepareOrderSheet({
           })),
           customerId: customer.id,
           ...(sourceConversationRef ? { sourceConversationRef } : {}),
-          // readyToSubmit guarantees a parsed fee on this (production) path.
-          ...(deliveryMinor! > 0 ? { deliveryMinor: deliveryMinor! } : {}),
+          // Integer minor units in the draft's one currency — the only money
+          // this sends. The server prices the lines and derives every total.
+          ...(priced.deliveryFee.amount > 0 ? { deliveryMinor: priced.deliveryFee.amount } : {}),
           ...(orderShippingPayload(shipIntent, shipping)
             ? { shipping: orderShippingPayload(shipIntent, shipping)! }
             : {}),
-          idempotency: idempotencyKeys.current,
+          idempotency: claim,
         });
+        // Abandoned (closed, conversation/member switched, unmounted): the
+        // order may exist server-side, but this is no longer the draft that
+        // asked for it. Its key is NOT retired (see idempotencyKeys).
+        if (!isCurrent(token)) return;
+        claim.retire();
         setStep({ name: "created-real", detail });
         onCreated(detail.order);
       } else {
+        // Every Money in the draft's own currency — never a USD zero beside
+        // riel lines. The prototype path charges no delivery fee.
         const order = await createOrder({
           customerId: customer.id,
           channel,
@@ -316,23 +393,31 @@ export function PrepareOrderSheet({
             quantity: line.quantity,
             unitPrice: line.product.price,
           })),
-          subtotal: estimatedTotal,
-          discount: usd(0),
-          deliveryFee: usd(0),
-          total: estimatedTotal,
+          subtotal: priced.subtotal,
+          discount: priced.discount,
+          deliveryFee: priced.deliveryFee,
+          total: priced.total,
         });
+        if (!isCurrent(token)) return;
         setStep({ name: "created-mock", order });
         onCreated(order);
       }
     } catch (error) {
+      if (!isCurrent(token)) return;
       if (error instanceof Error && error.message === PERMISSION_DENIED) {
         setFailure("permission");
+      } else if (classifyOrderError(error) === "forbidden") {
+        setFailure("permission");
       } else {
-        setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
+        setFailure(isOrderCurrencyMismatch(error) ? "currency" : "generic");
       }
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      // Only the live attempt releases the guard: reset() already released
+      // it for an abandoned one, and a newer attempt may hold it now.
+      if (isCurrent(token)) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   }
 
@@ -340,14 +425,17 @@ export function PrepareOrderSheet({
     if (step.name !== "created-real" || confirming) return;
     setConfirming(true);
     setFailure(null);
+    const token = beginAttempt();
     try {
       const confirmed = await confirmRealOrder(step.detail.order.id);
+      if (!isCurrent(token)) return;
       setStep({ name: "created-real", detail: confirmed });
       onConfirmed?.(confirmed.order);
     } catch (error) {
+      if (!isCurrent(token)) return;
       setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
     } finally {
-      setConfirming(false);
+      if (isCurrent(token)) setConfirming(false);
     }
   }
 
@@ -362,16 +450,24 @@ export function PrepareOrderSheet({
   async function discardAndEdit() {
     if (step.name !== "created-real" || discarding) return;
     setDiscarding(true);
+    const token = beginAttempt();
     try {
       await cancelRealOrder(step.detail.order.id, "Merchant edited before confirming");
     } catch {
       // Best-effort: if cancellation fails (e.g. permission), the merchant can
       // still cancel it later from Order Detail. Editing must not get stuck.
-    } finally {
-      setDiscarding(false);
     }
+    if (!isCurrent(token)) return;
+    setDiscarding(false);
     setStep({ name: "review" });
   }
+
+  const failureCopy =
+    failure === "permission"
+      ? "conversation.prepareOrder.permission"
+      : failure === "currency"
+        ? "conversation.prepareOrder.currency.serverMismatch"
+        : "conversation.prepareOrder.error";
 
   return (
     <BottomSheet
@@ -409,13 +505,27 @@ export function PrepareOrderSheet({
               <p className="text-caption mt-2 text-center text-text-muted">
                 {t("conversation.prepareOrder.resolveItemsFirst")}
               </p>
+            ) : moneyBlock === "mixed_currency" || moneyBlock === "out_of_range" ? (
+              <p className="text-caption mt-2 text-center text-status-danger-text">
+                {t(
+                  moneyBlock === "mixed_currency"
+                    ? "conversation.prepareOrder.currency.mixedShort"
+                    : "conversation.prepareOrder.currency.tooLargeShort",
+                )}
+              </p>
             ) : null}
           </div>
         ) : undefined
       }
     >
       {step.name === "review" ? (
-        <div className="space-y-5 pb-4">
+        /*
+         * The whole draft is inert while a create is in flight: the request
+         * was built from these lines and this fee, so editing them under it
+         * would leave the merchant looking at an order that is not the one
+         * being created. (The footer button is outside, and already disabled.)
+         */
+        <fieldset disabled={submitting} className="m-0 min-w-0 space-y-5 border-0 p-0 pb-4">
           <section className="rounded-xl border border-border-default bg-surface-secondary px-3 py-2.5">
             <p className="text-caption text-text-muted">
               {t("conversation.prepareOrder.customer")}
@@ -551,7 +661,9 @@ export function PrepareOrderSheet({
                       {formatMoney(linePrice(line))} × {line.quantity}
                     </span>
                     <span className="text-financial text-text-primary">
-                      {formatMoney(multiplyMoney(linePrice(line), line.quantity))}
+                      {formatMoney(
+                        lineTotal({ unitPrice: linePrice(line), quantity: line.quantity }),
+                      )}
                     </span>
                   </div>
                 </div>
@@ -591,12 +703,18 @@ export function PrepareOrderSheet({
             </section>
           ))}
 
-          {realCustomer ? (
+          {/*
+           * Only once the draft HAS one currency: before an item is chosen
+           * there is nothing to type a fee in (the field used to say "USD"
+           * for every empty draft), and a mixed draft has no single currency
+           * a fee could be in.
+           */}
+          {realCustomer && priced ? (
             <DeliveryFeeField
               id="prepare-order-delivery-fee"
-              value={deliveryFeeText}
-              onChange={setDeliveryFeeText}
-              currency={estimatedTotal.currency}
+              value={deliveryFee.currency === priced.currency ? deliveryFee.text : ""}
+              onChange={(text) => setDeliveryFee({ text, currency: priced.currency })}
+              currency={priced.currency}
             />
           ) : null}
 
@@ -613,25 +731,51 @@ export function PrepareOrderSheet({
             </div>
           ) : null}
 
-          <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
-            {deliveryFee.amount > 0 ? (
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
-                <span className="text-data text-text-primary">+{formatMoney(deliveryFee)}</span>
+          {/*
+           * A total only for a draft that honestly has one. A mixed USD/KHR
+           * draft gets an explanation instead — never a summed or converted
+           * figure — and an empty draft shows no total at all.
+           */}
+          {priced ? (
+            <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
+              {priced.deliveryFee.amount > 0 ? (
+                <div className="mb-1 flex items-center justify-between gap-3">
+                  <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
+                  <span className="text-data text-text-primary">
+                    +{formatMoney(priced.deliveryFee)}
+                  </span>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-center justify-between gap-x-3">
+                <span className="text-label text-text-primary">
+                  {t("conversation.prepareOrder.estimatedTotal")}
+                </span>
+                <span className="text-financial-lg min-w-0 break-all text-text-primary">
+                  {formatMoney(priced.total)}
+                </span>
               </div>
-            ) : null}
-            <div className="flex items-center justify-between">
-              <span className="text-label text-text-primary">
-                {t("conversation.prepareOrder.estimatedTotal")}
-              </span>
-              <span className="text-financial-lg text-text-primary">
-                {formatMoney(previewTotal)}
-              </span>
+              <p className="text-caption mt-1 text-text-muted">
+                {t("conversation.prepareOrder.estimatedNote")}
+              </p>
             </div>
-            <p className="text-caption mt-1 text-text-muted">
-              {t("conversation.prepareOrder.estimatedNote")}
-            </p>
-          </div>
+          ) : totals.kind === "mixed_currency" || totals.kind === "out_of_range" ? (
+            <div role="alert" className="rounded-xl bg-status-danger-soft p-3">
+              <p className="text-label text-status-danger-text">
+                {t(
+                  totals.kind === "mixed_currency"
+                    ? "conversation.prepareOrder.currency.mixedTitle"
+                    : "conversation.prepareOrder.currency.tooLargeTitle",
+                )}
+              </p>
+              <p className="text-body-sm mt-1 text-text-primary">
+                {t(
+                  totals.kind === "mixed_currency"
+                    ? "conversation.prepareOrder.currency.mixedBody"
+                    : "conversation.prepareOrder.currency.tooLargeBody",
+                )}
+              </p>
+            </div>
+          ) : null}
 
           {/*
            * A refusal, not a failure: APSA cannot turn this draft into a real
@@ -668,21 +812,13 @@ export function PrepareOrderSheet({
 
           {failure ? (
             <ErrorState
-              title={t(
-                failure === "permission"
-                  ? "conversation.prepareOrder.permission.title"
-                  : "conversation.prepareOrder.error.title",
-              )}
-              body={t(
-                failure === "permission"
-                  ? "conversation.prepareOrder.permission.body"
-                  : "conversation.prepareOrder.error.body",
-              )}
-              onRetry={() => void submit()}
+              title={t(`${failureCopy}.title`)}
+              body={t(`${failureCopy}.body`)}
+              {...(failure === "currency" ? {} : { onRetry: () => void submit() })}
               className="py-4"
             />
           ) : null}
-        </div>
+        </fieldset>
       ) : step.name === "created-mock" ? (
         <CreatedCelebration code={step.order.code} />
       ) : (

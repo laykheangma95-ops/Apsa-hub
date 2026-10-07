@@ -24,6 +24,7 @@ import {
   type CartDiscountInput,
   type CartLine,
 } from "../lib/pos-cart";
+import { calculateDraftTotals, draftBlock } from "../lib/order-draft";
 import type { Money } from "../types";
 import { financialFixture } from "./helpers/payment-order-fixture";
 
@@ -1471,6 +1472,240 @@ describe("POS money: cart preview agrees with the persisted order", () => {
     await expect(
       checkout(orgK, lines, discount("percent", "20", "KHR"), key),
     ).rejects.toMatchObject({ statusCode: 409, code: "idempotency_conflict" });
+    expect(await orderCount(orgK)).toBe(before + 1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INBOX MONEY — the Prepare Order preview agrees with the persisted order
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// PrepareOrderSheet previews the draft with calculateDraftTotals and sends the
+// server exactly one money value: the delivery fee, as integer minor units in
+// the draft's own currency. These drive both halves through the real migrated
+// SQL: the preview and the persisted order must agree to the minor unit, the
+// currency must survive end-to-end, the order must carry the conversation's
+// customer and provenance, and nothing a manipulated browser adds may change
+// what is persisted.
+
+describe("Inbox money: Prepare Order preview agrees with the persisted order", () => {
+  const perms = ["orders.create", "orders.read"];
+  let water: string; // ៛5,000 in the riel organization
+  let imported: string; // a USD-priced variant inside the riel organization
+  let kCustomer: string;
+  const conversationRef = "3f2504e0-4f89-41d3-9a0c-0000000c0001";
+
+  beforeAll(async () => {
+    const product = crypto.randomUUID();
+    water = crypto.randomUUID();
+    imported = crypto.randomUUID();
+    kCustomer = crypto.randomUUID();
+    await f.db.query(`insert into products(id,organization_id,name_km) values($1,$2,'ទឹក')`, [
+      product,
+      orgK,
+    ]);
+    await f.db.query(
+      `insert into product_variants(id,organization_id,product_id,name,price_amount,price_currency)
+       values($1,$3,$4,'Bottle',5000,'KHR'),($2,$3,$4,'Imported',300,'USD')`,
+      [water, imported, orgK, product],
+    );
+    await f.db.query(
+      `insert into customers(id,organization_id,display_name) values($1,$2,'សុខា')`,
+      [kCustomer, orgK],
+    );
+  });
+
+  /** Exactly what PrepareOrderSheet.submit sends for a priced, unblocked draft. */
+  async function prepareOrder(
+    org: string,
+    customerId: string,
+    lines: { variantId: string; unitPrice: Money; quantity: number }[],
+    feeText: string,
+    key: string,
+  ) {
+    const service = await import("../server/orders/service");
+    const currency = lines[0]!.unitPrice.currency;
+    const totals = calculateDraftTotals(lines, undefined, { text: feeText, currency });
+    if (totals.kind !== "priced" || draftBlock(totals)) throw new Error("draft refused");
+    const detail = await service.createOrder(context(org, f.actor, perms), {
+      source: "FACEBOOK",
+      items: lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })),
+      customerId,
+      sourceConversationRef: conversationRef,
+      ...(totals.deliveryFee.amount > 0 ? { deliveryMinor: totals.deliveryFee.amount } : {}),
+      idempotencyKey: key,
+    });
+    return { totals, detail };
+  }
+
+  async function linkage(id: string) {
+    return (
+      await f.db.query<Json>(
+        `select organization_id, customer_id, source, source_conversation_ref from orders where id=$1`,
+        [id],
+      )
+    ).rows[0];
+  }
+
+  it("KHR: 2 × ៛5,000 + ៛2,000 delivery persists as KHR 12,000 — never as cents or dollars", async () => {
+    const { totals, detail } = await prepareOrder(
+      orgK,
+      kCustomer,
+      [{ variantId: water, unitPrice: khr(5000), quantity: 2 }],
+      "2,000",
+      crypto.randomUUID(),
+    );
+    expect(totals).toMatchObject({
+      currency: "KHR",
+      subtotal: khr(10000),
+      deliveryFee: khr(2000),
+      total: khr(12000),
+    });
+    if (totals.kind !== "priced") throw new Error("unreachable");
+    expect(detail.currency).toBe("KHR");
+    expect(detail.subtotal).toEqual(totals.subtotal);
+    expect(detail.delivery).toEqual(totals.deliveryFee);
+    expect(detail.total).toEqual(totals.total);
+    expect(await orderRow(detail.id)).toMatchObject({
+      currency: "KHR",
+      subtotal_minor: 10000,
+      discount_minor: 0,
+      delivery_minor: 2000,
+      total_minor: 12000,
+    });
+  });
+
+  it("USD: 2 × $15.00 + $1.50 delivery persists as 3,150 cents", async () => {
+    const { totals, detail } = await prepareOrder(
+      f.org,
+      A.customer,
+      [{ variantId: A.variant1, unitPrice: usd(1500), quantity: 2 }],
+      "1.50",
+      crypto.randomUUID(),
+    );
+    expect(totals).toMatchObject({ total: usd(3150), deliveryFee: usd(150) });
+    expect(detail.total).toEqual(usd(3150));
+    expect(await orderRow(detail.id)).toMatchObject({
+      currency: "USD",
+      delivery_minor: 150,
+      total_minor: 3150,
+    });
+  });
+
+  it("the order is linked to this organization, this customer and this conversation", async () => {
+    const { detail } = await prepareOrder(
+      orgK,
+      kCustomer,
+      [{ variantId: water, unitPrice: khr(5000), quantity: 1 }],
+      "",
+      crypto.randomUUID(),
+    );
+    expect(await linkage(detail.id)).toEqual({
+      organization_id: orgK,
+      customer_id: kCustomer,
+      source: "FACEBOOK",
+      source_conversation_ref: conversationRef,
+    });
+  });
+
+  it("a forged browser payload cannot set prices, totals, currency or tenant", async () => {
+    const service = await import("../server/orders/service");
+    const forged = {
+      source: "FACEBOOK",
+      items: [
+        // Unknown line fields are not part of the contract and price nothing.
+        { variantId: water, quantity: 2, unitPrice: 1, price: { amount: 1, currency: "USD" } },
+      ],
+      customerId: kCustomer,
+      sourceConversationRef: conversationRef,
+      deliveryMinor: 2000,
+      subtotal: { amount: 1, currency: "USD" },
+      total: { amount: 1, currency: "USD" },
+      currency: "USD",
+      organizationId: f.orgB,
+      idempotencyKey: crypto.randomUUID(),
+    } as unknown as Parameters<typeof service.createOrder>[1];
+    const detail = await service.createOrder(context(orgK, f.actor, perms), forged);
+    expect(await orderRow(detail.id)).toMatchObject({
+      organization_id: orgK,
+      currency: "KHR",
+      subtotal_minor: 10000,
+      delivery_minor: 2000,
+      total_minor: 12000,
+    });
+  });
+
+  it("a fee beyond the organization currency's bound, fractional or negative, is refused server-side", async () => {
+    const service = await import("../server/orders/service");
+    const before = await orderCount(orgK);
+    for (const deliveryMinor of [4_000_001, 1.5, -1]) {
+      await expect(
+        service.createOrder(context(orgK, f.actor, perms), {
+          source: "FACEBOOK",
+          items: [{ variantId: water, quantity: 1 }],
+          customerId: kCustomer,
+          deliveryMinor,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      ).rejects.toMatchObject({ statusCode: 400 });
+    }
+    expect(await orderCount(orgK)).toBe(before);
+  });
+
+  it("another organization's customer cannot be attached (no cross-org or stale-customer leak)", async () => {
+    const service = await import("../server/orders/service");
+    const before = await orderCount(orgK);
+    await expect(
+      service.createOrder(context(orgK, f.actor, perms), {
+        source: "FACEBOOK",
+        items: [{ variantId: water, quantity: 1 }],
+        customerId: B.customer,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(await orderCount(orgK)).toBe(before);
+  });
+
+  it("a mixed-currency draft is refused by the preview, and by the server", async () => {
+    const totals = calculateDraftTotals([
+      { unitPrice: khr(5000), quantity: 1 },
+      { unitPrice: usd(300), quantity: 1 },
+    ]);
+    expect(draftBlock(totals)).toBe("mixed_currency");
+    const service = await import("../server/orders/service");
+    const before = await orderCount(orgK);
+    let caught: unknown;
+    try {
+      await service.createOrder(context(orgK, f.actor, perms), {
+        source: "FACEBOOK",
+        items: [
+          { variantId: water, quantity: 1 },
+          { variantId: imported, quantity: 1 },
+        ],
+        customerId: kCustomer,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ statusCode: 409 });
+    expect(isOrderCurrencyMismatch(caught)).toBe(true);
+    expect(await orderCount(orgK)).toBe(before);
+  });
+
+  it("same-payload retry returns the same order; a changed fee under the same key is a conflict", async () => {
+    const key = crypto.randomUUID();
+    const lines = [{ variantId: water, unitPrice: khr(5000), quantity: 2 }];
+    const before = await orderCount(orgK);
+    const first = await prepareOrder(orgK, kCustomer, lines, "2,000", key);
+    const retry = await prepareOrder(orgK, kCustomer, lines, "2,000", key);
+    expect(retry.detail.id).toBe(first.detail.id);
+    expect(retry.detail.total).toEqual(khr(12000));
+    expect(await orderCount(orgK)).toBe(before + 1);
+    await expect(prepareOrder(orgK, kCustomer, lines, "3,000", key)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "idempotency_conflict",
+    });
     expect(await orderCount(orgK)).toBe(before + 1);
   });
 });

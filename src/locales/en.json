@@ -755,6 +755,18 @@
         "unwritable-channel": "APSA can't tell which channel this conversation came from, and an order has to record where it came from. Take this one in POS instead.",
         "mixed": "Some items in this order aren't from your live catalogue, so APSA can't create it. Search the catalogue and choose each item again.",
         "noVariantLine": "No sellable variant"
+      },
+      "currency": {
+        "mixedTitle": "This order mixes USD and KHR prices",
+        "mixedBody": "An order can only use one currency. Remove or change the items priced in the other currency to continue. APSA never converts prices for you.",
+        "mixedShort": "Order mixes USD and KHR — keep one currency's items.",
+        "tooLargeTitle": "This total is too large",
+        "tooLargeBody": "APSA can't price an order this large exactly. Lower the quantities and try again.",
+        "tooLargeShort": "Total too large — lower the quantities.",
+        "serverMismatch": {
+          "title": "Price currency doesn't match your business",
+          "body": "These items are priced in a currency your business doesn't sell in, so the order wasn't created. Update the product prices, then try again."
+        }
       }
     },
     "loadEarlier": "Load earlier messages",

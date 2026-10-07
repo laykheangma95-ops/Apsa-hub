@@ -22,6 +22,13 @@ export interface CartLine {
   stock: number;
 }
 
+/**
+ * The only two things cart arithmetic reads from a line. The Inbox order draft
+ * (src/lib/order-draft.ts) prices its lines through the same functions, so the
+ * currency and exact-integer rules below are one implementation, not two.
+ */
+export type PricedLine = Pick<CartLine, "unitPrice" | "quantity">;
+
 /** Why a typed discount is not applied. Checkout stays blocked while one is set. */
 export type DiscountProblem = "malformed" | "percent_out_of_range" | "exceeds_subtotal";
 
@@ -72,7 +79,7 @@ export function lineKey(productId: string, variant?: string): string {
 }
 
 /** A line's own total, exact (BigInt) — see "Exact money arithmetic" below. */
-export function lineTotal(line: CartLine): Money {
+export function lineTotal(line: PricedLine): Money {
   return { amount: Number(lineTotalMinor(line)), currency: line.unitPrice.currency };
 }
 
@@ -137,7 +144,7 @@ export const NO_DISCOUNT: CartDiscountInput = {
 };
 
 /** The distinct currencies of a cart's lines, in first-seen order. */
-export function cartCurrencies(lines: CartLine[]): Currency[] {
+export function cartCurrencies(lines: readonly PricedLine[]): Currency[] {
   const seen: Currency[] = [];
   for (const line of lines) {
     if (!seen.includes(line.unitPrice.currency)) seen.push(line.unitPrice.currency);
@@ -174,7 +181,7 @@ export type PosCartAction =
   | { type: "reset" };
 
 /** The cart's currency context: "" (empty), "USD", "KHR" or "KHR+USD" (mixed). */
-export function cartCurrencyContext(lines: CartLine[]): string {
+export function cartCurrencyContext(lines: readonly PricedLine[]): string {
   return [...cartCurrencies(lines)].sort().join("+");
 }
 
@@ -221,7 +228,7 @@ export function posCartReducer(state: PosCartState, action: PosCartAction): PosC
 export const MAX_CART_MINOR = Number.MAX_SAFE_INTEGER;
 const MAX_CART_MINOR_BIG = BigInt(MAX_CART_MINOR);
 
-function lineTotalMinor(line: CartLine): bigint {
+function lineTotalMinor(line: PricedLine): bigint {
   return BigInt(line.unitPrice.amount) * BigInt(line.quantity);
 }
 
@@ -308,7 +315,7 @@ function resolveDiscount(
  * and total = subtotal − discount ≥ 0, all exact integers.
  */
 export function calculateCartTotals(
-  lines: CartLine[],
+  lines: readonly PricedLine[],
   discountInput: CartDiscountInput,
 ): CartTotals {
   const itemCount = lines.reduce((sum, l) => sum + l.quantity, 0);

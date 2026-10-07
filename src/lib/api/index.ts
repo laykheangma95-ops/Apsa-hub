@@ -522,7 +522,10 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         "Real orders must go through createRealOrder.",
     );
   }
-  if (input.total.amount > ORDER_APPROVAL_LIMIT_CENTS) {
+  // A limit in CENTS applies only to a dollar total: riel are never read as
+  // cents (៛60,000 is about $15, not $600), and no exchange rate is invented
+  // to compare them.
+  if (input.total.currency === "USD" && input.total.amount > ORDER_APPROVAL_LIMIT_CENTS) {
     await resolve(null, 160);
     throw new Error(PERMISSION_DENIED);
   }

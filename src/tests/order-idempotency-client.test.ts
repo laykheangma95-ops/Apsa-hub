@@ -29,10 +29,11 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
   ]) {
     const source = readFileSync(resolve(file), "utf8");
     expect(source).toMatch(/const idempotencyKeys = useRef\(createIdempotencyKeyHolder\(\)\)/);
-    if (file.endsWith("PosCheckoutSheet.tsx")) {
-      // POS attempts can overlap (close/reopen while a create is pending), so
-      // each attempt sends its own claim on the flow's ONE holder and retires
-      // it only after accepting the response (see the mounted ownership tests).
+    if (file.endsWith("PosCheckoutSheet.tsx") || file.endsWith("PrepareOrderSheet.tsx")) {
+      // POS and Inbox attempts can overlap (close/reopen while a create is
+      // pending), so each attempt sends its own claim on the flow's ONE holder
+      // and retires it only after accepting the response (see the mounted
+      // ownership tests in pos-money-mounted / inbox-order-money-mounted).
       expect(source).toMatch(/const claim = idempotencyKeys\.current\.claim\(\);/);
       expect(source).toMatch(/idempotency: claim,/);
       expect(source).toMatch(

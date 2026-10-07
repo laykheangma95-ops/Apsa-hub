@@ -9,15 +9,20 @@ import { BottomSheet, ErrorState, QuantityStepper, SkeletonBlock } from "@/desig
 import { createOrder, getRecentProducts, PERMISSION_DENIED } from "@/lib/api";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { formatMoney, usd, usdToKhr } from "@/lib/money";
+import { DELIVERY_FEE_MAX_MINOR } from "@/lib/delivery-fee";
+import { approximateCounterpart, formatMoney, MINOR_UNIT_DIGITS } from "@/lib/money";
 import {
   calculateDraftTotals,
   defaultVariantSelection,
+  draftBlock,
+  NO_DELIVERY_FEE,
   variantLabel,
   type DiscountMode,
+  type DraftDeliveryFee,
 } from "@/lib/order-draft";
+import { discountProblemKey, NO_DISCOUNT, type CartDiscountInput } from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
-import type { Channel, Customer, Order, Product } from "@/types";
+import type { Channel, Currency, Customer, Order, Product } from "@/types";
 
 interface CreateOrderSheetProps {
   open: boolean;
@@ -45,10 +50,16 @@ export function CreateOrderSheet({
   const [product, setProduct] = useState<Product | null>(null);
   const [variant, setVariant] = useState<Record<string, string>>({});
   const [quantity, setQuantity] = useState(1);
-  const [discountEnabled, setDiscountEnabled] = useState(false);
-  const [discountMode, setDiscountMode] = useState<DiscountMode>("amount");
-  const [discountValue, setDiscountValue] = useState(0);
-  const [deliveryFeeCents, setDeliveryFeeCents] = useState(90);
+  /*
+   * Discount and delivery fee are kept as the text the merchant typed plus the
+   * currency it was typed for, and parsed per currency on every render
+   * (integer minor units — dollars-and-cents for USD, whole riel for KHR).
+   * The previous version stored both as USD cents from `parseFloat(x) * 100`
+   * and seeded the fee with a $0.90 default, so a riel product's draft added
+   * dollar amounts to riel and crashed.
+   */
+  const [discount, setDiscount] = useState<CartDiscountInput>(NO_DISCOUNT);
+  const [deliveryFee, setDeliveryFee] = useState<DraftDeliveryFee>(NO_DELIVERY_FEE);
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<"generic" | "permission" | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
@@ -71,24 +82,37 @@ export function CreateOrderSheet({
     );
   }, [productsQuery.data, query]);
 
-  const totals = calculateDraftTotals({
-    unitPrice: product?.price ?? usd(0),
-    quantity,
-    discountEnabled,
-    discountMode,
-    discountValue,
-    deliveryFeeCents,
-  });
+  /*
+   * The draft's currency is the product's. Discount and fee belong to the
+   * currency they were typed for: a product change into another currency
+   * clears both (adjusted during render), so "5" can never silently move from
+   * $5.00 to ៛5 — nor come back when the product returns to dollars.
+   */
+  const currency = product?.price.currency ?? null;
+  const [moneyContext, setMoneyContext] = useState(currency);
+  if (moneyContext !== currency) {
+    setMoneyContext(currency);
+    setDiscount(NO_DISCOUNT);
+    setDeliveryFee(NO_DELIVERY_FEE);
+  }
+
+  const totals = calculateDraftTotals(
+    product ? [{ unitPrice: product.price, quantity: Math.max(1, quantity) }] : [],
+    discount,
+    deliveryFee,
+  );
+  const priced = totals.kind === "priced" ? totals : null;
+  const block = draftBlock(totals);
+  const discountText = discount.currency === currency ? discount.text : "";
+  const feeText = deliveryFee.currency === currency ? deliveryFee.text : "";
 
   function reset() {
     setQuery("");
     setProduct(null);
     setVariant({});
     setQuantity(1);
-    setDiscountEnabled(false);
-    setDiscountMode("amount");
-    setDiscountValue(0);
-    setDeliveryFeeCents(90);
+    setDiscount(NO_DISCOUNT);
+    setDeliveryFee(NO_DELIVERY_FEE);
     setSubmitting(false);
     setFailure(null);
     setCreatedCode(null);
@@ -106,7 +130,7 @@ export function CreateOrderSheet({
   }
 
   async function submit() {
-    if (!product) return;
+    if (!product || !priced || block || submitting) return;
     setSubmitting(true);
     setFailure(null);
     try {
@@ -123,10 +147,11 @@ export function CreateOrderSheet({
             unitPrice: product.price,
           },
         ],
-        subtotal: totals.subtotal,
-        discount: totals.discount,
-        deliveryFee: totals.deliveryFee,
-        total: totals.total,
+        // Every amount in the product's own currency.
+        subtotal: priced.subtotal,
+        discount: priced.discount,
+        deliveryFee: priced.deliveryFee,
+        total: priced.total,
       });
       setCreatedCode(order.code);
       window.setTimeout(() => {
@@ -252,38 +277,37 @@ export function CreateOrderSheet({
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={discountEnabled}
+                    aria-checked={discount.enabled}
                     aria-label={t("createOrder.discount")}
-                    onClick={() => setDiscountEnabled((v) => !v)}
+                    onClick={() =>
+                      setDiscount((d) => ({ ...d, enabled: !d.enabled, text: "", currency }))
+                    }
                     className={cn(
                       "tap-target flex w-14 items-center rounded-full px-1",
-                      discountEnabled ? "bg-action-primary" : "bg-surface-secondary",
+                      discount.enabled ? "bg-action-primary" : "bg-surface-secondary",
                     )}
                   >
                     <span
                       aria-hidden
                       className={cn(
                         "size-6 rounded-full bg-surface-primary shadow transition-transform",
-                        discountEnabled ? "translate-x-6" : "translate-x-0",
+                        discount.enabled ? "translate-x-6" : "translate-x-0",
                       )}
                     />
                   </button>
                 </div>
-                {discountEnabled ? (
+                {discount.enabled ? (
                   <div className="flex items-center gap-2">
                     <div className="flex rounded-full border border-border-default p-0.5">
-                      {(["amount", "percent"] as const).map((mode) => (
+                      {(["amount", "percent"] as const).map((mode: DiscountMode) => (
                         <button
                           key={mode}
                           type="button"
-                          aria-pressed={discountMode === mode}
-                          onClick={() => {
-                            setDiscountMode(mode);
-                            setDiscountValue(0);
-                          }}
+                          aria-pressed={discount.mode === mode}
+                          onClick={() => setDiscount((d) => ({ ...d, mode, text: "", currency }))}
                           className={cn(
                             "text-caption chip-text rounded-full px-3 py-2",
-                            discountMode === mode
+                            discount.mode === mode
                               ? "bg-action-primary text-text-on-action"
                               : "text-text-secondary",
                           )}
@@ -297,79 +321,102 @@ export function CreateOrderSheet({
                       ))}
                     </div>
                     <Input
-                      inputMode="decimal"
-                      aria-label={t("createOrder.discount")}
-                      className="text-financial h-12 flex-1"
-                      value={
-                        discountMode === "amount"
-                          ? (discountValue / 100).toFixed(2)
-                          : String(discountValue)
+                      inputMode={
+                        discount.mode === "percent" || currency === "KHR" ? "numeric" : "decimal"
                       }
-                      onChange={(e) => {
-                        const parsed = Number.parseFloat(e.target.value.replace(/[^0-9.]/g, ""));
-                        const safe = Number.isFinite(parsed) ? parsed : 0;
-                        setDiscountValue(
-                          discountMode === "amount" ? Math.round(safe * 100) : Math.round(safe),
-                        );
-                      }}
+                      aria-label={t("createOrder.discount")}
+                      aria-invalid={priced?.discountProblem ? true : undefined}
+                      className="text-financial h-12 min-w-0 flex-1"
+                      value={discountText}
+                      placeholder={discount.mode === "percent" ? "0" : moneyPlaceholder(currency)}
+                      onChange={(e) =>
+                        setDiscount((d) => ({ ...d, text: e.target.value, currency }))
+                      }
                     />
                   </div>
                 ) : null}
-              </div>
-
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-label text-text-secondary">{t("createOrder.delivery")}</span>
-                <Input
-                  inputMode="decimal"
-                  aria-label={t("createOrder.delivery")}
-                  className="text-financial h-12 w-28 text-right"
-                  value={(deliveryFeeCents / 100).toFixed(2)}
-                  onChange={(e) => {
-                    const parsed = Number.parseFloat(e.target.value.replace(/[^0-9.]/g, ""));
-                    setDeliveryFeeCents(Number.isFinite(parsed) ? Math.round(parsed * 100) : 0);
-                  }}
-                />
-              </div>
-
-              <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-body-sm text-text-secondary">
-                    {t("createOrder.subtotal")}
-                  </span>
-                  <span className="text-data text-text-primary">
-                    {formatMoney(totals.subtotal)}
-                  </span>
-                </div>
-                {totals.discount.amount > 0 ? (
-                  <div className="flex items-center justify-between">
-                    <span className="text-body-sm text-text-secondary">
-                      {t("createOrder.discount")}
-                    </span>
-                    <span className="text-data text-text-primary">
-                      -{formatMoney(totals.discount)}
-                    </span>
-                  </div>
+                {priced?.discountProblem ? (
+                  <p role="alert" className="text-caption text-status-danger-text">
+                    {t(discountProblemKey(priced.discountProblem, discount.mode, priced.currency))}
+                  </p>
                 ) : null}
-                <div className="flex items-center justify-between">
-                  <span className="text-body-sm text-text-secondary">
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-label text-text-secondary">
                     {t("createOrder.delivery")}
                   </span>
-                  <span className="text-data text-text-primary">
-                    {formatMoney(totals.deliveryFee)}
-                  </span>
+                  <Input
+                    inputMode={currency === "KHR" ? "numeric" : "decimal"}
+                    aria-label={t("createOrder.delivery")}
+                    aria-invalid={priced?.deliveryFeeInvalid ? true : undefined}
+                    className="text-financial h-12 w-32 min-w-0 text-right"
+                    value={feeText}
+                    placeholder={moneyPlaceholder(currency)}
+                    onChange={(e) => setDeliveryFee({ text: e.target.value, currency })}
+                  />
                 </div>
-                <div className="mt-2 flex items-end justify-between border-t border-border-default pt-2">
-                  <span className="text-label text-text-primary">{t("createOrder.total")}</span>
-                  <span className="text-right">
-                    <span className="text-financial-lg block text-text-primary">
-                      {formatMoney(totals.total)}
-                    </span>
-                    <span className="text-data block text-text-muted">
-                      {t("money.approx", { value: formatMoney(usdToKhr(totals.total)) })}
-                    </span>
-                  </span>
-                </div>
+                {priced?.deliveryFeeInvalid ? (
+                  <p role="alert" className="text-caption text-status-danger-text">
+                    {t("deliveryFee.invalid", {
+                      max: formatMoney({
+                        amount: DELIVERY_FEE_MAX_MINOR[priced.currency],
+                        currency: priced.currency,
+                      }),
+                    })}
+                  </p>
+                ) : null}
               </div>
+
+              {priced ? (
+                <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-body-sm text-text-secondary">
+                      {t("createOrder.subtotal")}
+                    </span>
+                    <span className="text-data text-text-primary">
+                      {formatMoney(priced.subtotal)}
+                    </span>
+                  </div>
+                  {priced.discount.amount > 0 ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-body-sm text-text-secondary">
+                        {t("createOrder.discount")}
+                      </span>
+                      <span className="text-data text-text-primary">
+                        -{formatMoney(priced.discount)}
+                      </span>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-body-sm text-text-secondary">
+                      {t("createOrder.delivery")}
+                    </span>
+                    <span className="text-data text-text-primary">
+                      {formatMoney(priced.deliveryFee)}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-end justify-between gap-3 border-t border-border-default pt-2">
+                    <span className="text-label text-text-primary">{t("createOrder.total")}</span>
+                    <span className="min-w-0 text-right">
+                      <span className="text-financial-lg block break-all text-text-primary">
+                        {formatMoney(priced.total)}
+                      </span>
+                      {/* Display-only hint in the OTHER currency; never stored or submitted. */}
+                      <span className="text-data block text-text-muted">
+                        {t("money.approx", {
+                          value: formatMoney(approximateCounterpart(priced.total)),
+                        })}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              ) : totals.kind === "out_of_range" ? (
+                <p role="alert" className="text-body-sm text-status-danger-text">
+                  {t("conversation.prepareOrder.currency.tooLargeBody")}
+                </p>
+              ) : null}
 
               {failure ? (
                 <ErrorState
@@ -390,7 +437,7 @@ export function CreateOrderSheet({
 
               <Button
                 className="tap-target h-12 w-full"
-                disabled={submitting}
+                disabled={submitting || block !== null}
                 onClick={() => void submit()}
               >
                 {submitting ? t("createOrder.creating") : t("createOrder.submit")}
@@ -477,4 +524,9 @@ export function CreateOrderSheet({
       )}
     </BottomSheet>
   );
+}
+
+/** An empty field's hint in the draft currency's own shape: "0.00" for USD, "0" for riel. */
+function moneyPlaceholder(currency: Currency | null): string {
+  return currency && MINOR_UNIT_DIGITS[currency] === 0 ? "0" : "0.00";
 }
