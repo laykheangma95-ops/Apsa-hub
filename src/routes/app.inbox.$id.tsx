@@ -840,6 +840,9 @@ function ConversationScreen() {
           // through unchanged once Inbox is productionized, with no change
           // needed here.
           sourceConversationRef={isProductionId(id) ? id : null}
+          // The create's replay identity outlives this keyed sheet; it is scoped
+          // to exactly the member, organization and conversation it is keyed by.
+          replayScope={{ userId, organizationId: routeOrganizationId, conversationId: id }}
           onCreated={(order) => {
             append({
               id: `sys-${order.code}`,

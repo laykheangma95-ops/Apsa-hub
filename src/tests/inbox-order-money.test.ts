@@ -16,6 +16,11 @@
 import { describe, expect, it } from "bun:test";
 import { createOrder, ORDER_APPROVAL_LIMIT_CENTS, PERMISSION_DENIED } from "@/lib/api";
 import { parseDeliveryFee } from "@/lib/delivery-fee";
+import {
+  orderRequestFingerprint,
+  sharedIdempotencyHolder,
+  type IdempotencyScope,
+} from "@/lib/idempotency";
 import { khr, usd } from "@/lib/money";
 import {
   calculateDraftTotals,
@@ -186,5 +191,76 @@ describe("prototype createOrder never reads riel as cents", () => {
     await expect(createOrder(order(usd(ORDER_APPROVAL_LIMIT_CENTS + 1)))).rejects.toThrow(
       PERMISSION_DENIED,
     );
+  });
+});
+
+describe("page-lifetime replay identity (sharedIdempotencyHolder)", () => {
+  const scope = (over: Partial<IdempotencyScope> = {}): IdempotencyScope => ({
+    userId: "user-1",
+    organizationId: "org-1",
+    flow: "inbox-prepare-order",
+    subject: "conversation-a",
+    ...over,
+  });
+  const fp = orderRequestFingerprint({ items: [{ variantId: "v", quantity: 1 }] });
+
+  it("the same scope gets the same holder (a remount finds the unresolved key)", () => {
+    const first = sharedIdempotencyHolder(scope()).claim().keyFor(fp);
+    const afterRemount = sharedIdempotencyHolder(scope()).claim().keyFor(fp);
+    expect(afterRemount).toBe(first);
+  });
+
+  it("member, organization, flow and conversation each partition the identity", () => {
+    const key = sharedIdempotencyHolder(scope({ subject: "conv-iso" }))
+      .claim()
+      .keyFor(fp);
+    for (const other of [
+      scope({ subject: "conv-iso", userId: "user-2" }),
+      scope({ subject: "conv-iso", organizationId: "org-2" }),
+      scope({ subject: "conv-iso", flow: "other-flow" }),
+      scope({ subject: "conv-other" }),
+    ]) {
+      expect(sharedIdempotencyHolder(other).claim().keyFor(fp)).not.toBe(key);
+    }
+    // …and the original scope still holds its own key.
+    expect(
+      sharedIdempotencyHolder(scope({ subject: "conv-iso" }))
+        .claim()
+        .keyFor(fp),
+    ).toBe(key);
+  });
+
+  it("an accepted claim retires the key; a superseded claim cannot", () => {
+    const holder = sharedIdempotencyHolder(scope({ subject: "conv-retire" }));
+    const abandoned = holder.claim();
+    const key = abandoned.keyFor(fp);
+    const newer = holder.claim();
+    expect(newer.keyFor(fp)).toBe(key);
+    abandoned.retire(); // late, superseded: no effect
+    expect(
+      sharedIdempotencyHolder(scope({ subject: "conv-retire" }))
+        .claim()
+        .keyFor(fp),
+    ).toBe(key);
+    const owner = sharedIdempotencyHolder(scope({ subject: "conv-retire" })).claim();
+    owner.keyFor(fp);
+    owner.retire(); // accepted
+    expect(
+      sharedIdempotencyHolder(scope({ subject: "conv-retire" }))
+        .claim()
+        .keyFor(fp),
+    ).not.toBe(key);
+  });
+
+  it("is bounded: the least recently used scopes are dropped first", () => {
+    const keep = sharedIdempotencyHolder(scope({ subject: "lru-keep" }));
+    const oldest = sharedIdempotencyHolder(scope({ subject: "lru-0" }));
+    for (let i = 1; i < 250; i++) {
+      sharedIdempotencyHolder(scope({ subject: `lru-${i}` }));
+      if (i % 50 === 0) sharedIdempotencyHolder(scope({ subject: "lru-keep" })); // in use
+    }
+    // In use → retained; untouched for 249 newer scopes → evicted (a new holder).
+    expect(sharedIdempotencyHolder(scope({ subject: "lru-keep" }))).toBe(keep);
+    expect(sharedIdempotencyHolder(scope({ subject: "lru-0" }))).not.toBe(oldest);
   });
 });

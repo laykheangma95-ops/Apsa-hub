@@ -117,3 +117,55 @@ export function isIdempotencyKeyHolder(
 export function orderRequestFingerprint(input: unknown): string {
   return JSON.stringify(input);
 }
+
+/* ── Holders that outlive a component ─────────────────────────────────────
+ *
+ * A holder kept in a component (useRef) dies with that component. The Inbox
+ * conversation route deliberately remounts its order sheet when the
+ * conversation, member or organization changes, so a create whose outcome
+ * was still unknown — pending, or committed with the response lost — lost
+ * its key on "navigate away and back", the retry minted a new key, and the
+ * server correctly created a SECOND identical order.
+ *
+ * So the replay identity of such a flow is owned here, for the lifetime of
+ * the page, under a scope the caller names:
+ *
+ *   member + organization + flow + subject (e.g. the conversation id)
+ *
+ * A different member or organization gets a different holder — the previous
+ * one's key is unreachable from it — and one conversation's key is never
+ * offered to another's request. Within a scope the ordinary rules apply
+ * unchanged: same request → same key, changed request → new key, and only
+ * the claim that owns the key (and whose result was accepted) retires it.
+ *
+ * Memory only, never Web Storage: a key plus the request fingerprint it was
+ * issued for (which can include a shipping address) must not outlive the tab
+ * or be readable by another origin script. Bounded, least-recently-used out.
+ */
+export interface IdempotencyScope {
+  userId: string;
+  organizationId: string;
+  /** The flow, e.g. "inbox-prepare-order". */
+  flow: string;
+  /** What the flow is about, e.g. the conversation id. */
+  subject: string;
+}
+
+const SHARED_HOLDER_LIMIT = 200;
+const sharedHolders = new Map<string, IdempotencyKeyHolder>();
+
+/** The page-lifetime holder for one scope — the same instance on every call. */
+export function sharedIdempotencyHolder(scope: IdempotencyScope): IdempotencyKeyHolder {
+  const id = JSON.stringify([scope.userId, scope.organizationId, scope.flow, scope.subject]);
+  let holder = sharedHolders.get(id);
+  if (holder) {
+    sharedHolders.delete(id); // re-inserted below: most recently used last
+  } else {
+    holder = createIdempotencyKeyHolder();
+    if (sharedHolders.size >= SHARED_HOLDER_LIMIT) {
+      sharedHolders.delete(sharedHolders.keys().next().value!);
+    }
+  }
+  sharedHolders.set(id, holder);
+  return holder;
+}

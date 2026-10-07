@@ -1709,3 +1709,146 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
     expect(await orderCount(orgK)).toBe(before + 1);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INBOX REPLAY IDENTITY — a remount must not turn one order into two
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// PR #118 review P2 #1, against the real migrated create_order_v3: the REAL
+// client createRealOrder() and the REAL idempotency holders, with only the
+// TanStack server-function transport routed straight into the real service.
+//
+// A create commits on the server, the browser never sees the response, the
+// merchant navigates to another conversation and back (the sheet remounts),
+// rebuilds the identical order and retries.
+
+describe("Inbox replay identity through the real create_order_v3", () => {
+  const perms = ["orders.create", "orders.read"];
+  let water: string;
+  let waterProduct: string;
+  let kCustomer: string;
+  const conversationA = "3f2504e0-4f89-41d3-9a0c-0000000ca001";
+  let transportOrg = orgK;
+
+  beforeAll(async () => {
+    const product = crypto.randomUUID();
+    waterProduct = product;
+    water = crypto.randomUUID();
+    kCustomer = crypto.randomUUID();
+    await f.db.query(`insert into products(id,organization_id,name_km) values($1,$2,'ទឹក')`, [
+      product,
+      orgK,
+    ]);
+    await f.db.query(
+      `insert into product_variants(id,organization_id,product_id,name,price_amount,price_currency)
+       values($1,$2,$3,'Bottle',5000,'KHR')`,
+      [water, orgK, product],
+    );
+    await f.db.query(
+      `insert into customers(id,organization_id,display_name) values($1,$2,'សុខា')`,
+      [kCustomer, orgK],
+    );
+    // The browser → server boundary, and nothing else, goes straight to the
+    // real service (which runs the real RPC in PGlite).
+    mock.module("../api/orders", () => ({
+      createOrderFn: async ({ data }: { data: Record<string, unknown> }) => {
+        const service = await import("../server/orders/service");
+        return service.createOrder(
+          context(transportOrg, f.actor, perms),
+          data as Parameters<typeof service.createOrder>[1],
+        );
+      },
+    }));
+  });
+
+  /** Exactly the request PrepareOrderSheet builds for 2 × ៛5,000 from conversation A. */
+  const request = () => ({
+    source: "FACEBOOK" as const,
+    items: [{ variantId: water, quantity: 2, productId: waterProduct }],
+    customerId: kCustomer,
+    sourceConversationRef: conversationA,
+    deliveryMinor: 2000,
+  });
+
+  const scopeA = () => ({
+    userId: f.actor,
+    organizationId: orgK,
+    flow: "inbox-prepare-order",
+    subject: conversationA,
+  });
+
+  it("lost response → remount → identical retry is REPLAYED: one order, same id", async () => {
+    const { createRealOrder } = await import("../lib/api");
+    const { sharedIdempotencyHolder } = await import("../lib/idempotency");
+    transportOrg = orgK;
+    const before = await orderCount(orgK);
+
+    // Mount 1: the create commits; the sheet never accepts the response
+    // (unmounted), so its claim is not retired.
+    const lost = await createRealOrder({
+      ...request(),
+      idempotency: sharedIdempotencyHolder(scopeA()).claim(),
+    });
+    expect(await orderCount(orgK)).toBe(before + 1);
+
+    // Mount 2 (after navigating away and back): a fresh sheet asks the
+    // registry for the same scope and retries the identical request.
+    const retried = await createRealOrder({
+      ...request(),
+      idempotency: sharedIdempotencyHolder(scopeA()).claim(),
+    });
+    expect(retried.order.id).toBe(lost.order.id);
+    expect(retried.order.total).toEqual(khr(12000));
+    expect(await orderCount(orgK)).toBe(before + 1);
+  });
+
+  it("the OLD sheet-local holder (one per mount) creates a SECOND identical order — the defect", async () => {
+    const { createRealOrder } = await import("../lib/api");
+    const { createIdempotencyKeyHolder } = await import("../lib/idempotency");
+    transportOrg = orgK;
+    const before = await orderCount(orgK);
+    const first = await createRealOrder({
+      ...request(),
+      idempotency: createIdempotencyKeyHolder().claim(), // mount 1's own holder
+    });
+    const second = await createRealOrder({
+      ...request(),
+      idempotency: createIdempotencyKeyHolder().claim(), // mount 2's own holder
+    });
+    expect(second.order.id).not.toBe(first.order.id);
+    expect(await orderCount(orgK)).toBe(before + 2);
+  });
+
+  it("a changed request after the remount is a new order, never a stale replay", async () => {
+    const { createRealOrder } = await import("../lib/api");
+    const { sharedIdempotencyHolder } = await import("../lib/idempotency");
+    transportOrg = orgK;
+    const scope = { ...scopeA(), subject: "3f2504e0-4f89-41d3-9a0c-0000000ca002" };
+    const first = await createRealOrder({
+      ...request(),
+      idempotency: sharedIdempotencyHolder(scope).claim(),
+    });
+    const changed = await createRealOrder({
+      ...request(),
+      items: [{ variantId: water, quantity: 3, productId: waterProduct }],
+      idempotency: sharedIdempotencyHolder(scope).claim(),
+    });
+    expect(changed.order.id).not.toBe(first.order.id);
+    expect(changed.order.subtotal).toEqual(khr(15000));
+  });
+
+  it("another member's scope never reaches this member's unresolved key", async () => {
+    const { sharedIdempotencyHolder } = await import("../lib/idempotency");
+    const { orderRequestFingerprint } = await import("../lib/idempotency");
+    const fp = orderRequestFingerprint(request());
+    const mine = sharedIdempotencyHolder(scopeA()).claim().keyFor(fp);
+    const theirs = sharedIdempotencyHolder({ ...scopeA(), userId: actorA2 })
+      .claim()
+      .keyFor(fp);
+    const otherOrg = sharedIdempotencyHolder({ ...scopeA(), organizationId: f.org })
+      .claim()
+      .keyFor(fp);
+    expect(theirs).not.toBe(mine);
+    expect(otherOrg).not.toBe(mine);
+  });
+});

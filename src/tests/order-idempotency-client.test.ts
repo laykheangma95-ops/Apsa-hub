@@ -28,13 +28,23 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
     "src/components/inbox/PrepareOrderSheet.tsx",
   ]) {
     const source = readFileSync(resolve(file), "utf8");
-    expect(source).toMatch(/const idempotencyKeys = useRef\(createIdempotencyKeyHolder\(\)\)/);
+    if (file.endsWith("PrepareOrderSheet.tsx")) {
+      // The conversation route remounts this sheet on every conversation /
+      // member / organization switch, so its ONE holder must outlive it: the
+      // page-lifetime registry, scoped to member + organization + conversation
+      // (PR #118 review P2 #1; behaviour in inbox-order-money-mounted).
+      expect(source).toMatch(/sharedIdempotencyHolder\(\{/);
+      expect(source).toMatch(/flow: "inbox-prepare-order"/);
+      expect(source).not.toMatch(/useRef\(createIdempotencyKeyHolder\(\)\)/);
+    } else {
+      expect(source).toMatch(/const idempotencyKeys = useRef\(createIdempotencyKeyHolder\(\)\)/);
+    }
     if (file.endsWith("PosCheckoutSheet.tsx") || file.endsWith("PrepareOrderSheet.tsx")) {
       // POS and Inbox attempts can overlap (close/reopen while a create is
       // pending), so each attempt sends its own claim on the flow's ONE holder
       // and retires it only after accepting the response (see the mounted
       // ownership tests in pos-money-mounted / inbox-order-money-mounted).
-      expect(source).toMatch(/const claim = idempotencyKeys\.current\.claim\(\);/);
+      expect(source).toMatch(/const claim = idempotencyKeys(?:\.current)?\.claim\(\);/);
       expect(source).toMatch(/idempotency: claim,/);
       expect(source).toMatch(
         /if \(!isCurrent\(token\)\) return;\s+(?:\/\/[^\n]*\n\s+)*claim\.retire\(\);/,

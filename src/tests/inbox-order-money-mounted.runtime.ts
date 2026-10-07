@@ -39,6 +39,7 @@ const routeContext = {
   organizationId: id("b001"),
 };
 const routeParams = { id: id("c001") };
+let testSeq = 1;
 const realRouter = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({
   ...realRouter,
@@ -280,9 +281,14 @@ afterEach(async () => {
   container?.remove();
   document.body.innerHTML = "";
   creates.length = 0;
+  committedByKey.clear();
+  committedOrders = 0;
   transitions.length = 0;
   prototypeCreates.length = 0;
-  routeContext.session.userId = id("a001");
+  // A fresh member per test: the replay-key registry is page-lifetime (by
+  // design), so tests must not share one principal's replay identities.
+  testSeq += 1;
+  routeContext.session.userId = id(`a${String(testSeq).padStart(3, "0")}`);
   routeContext.organizationId = id("b001");
   routeParams.id = id("c001");
 });
@@ -317,6 +323,11 @@ async function mountSheet(h: SheetHarness) {
       products: CATALOG as any,
       initialItems: h.initialItems,
       sourceConversationRef: CONVERSATION_REF,
+      replayScope: {
+        userId: routeContext.session.userId,
+        organizationId: routeContext.organizationId,
+        conversationId: CONVERSATION_REF,
+      },
       onCreated: (order: any) => h.created.push(order),
       onConfirmed: (order: any) => h.confirmed.push(order),
     }),
@@ -400,9 +411,42 @@ function estimatedTotal(): string | null {
   return label?.parentElement?.querySelector(".text-financial-lg")?.textContent?.trim() ?? null;
 }
 
+/*
+ * The fake server keeps create_order_v3's replay rule: once a key has COMMITTED
+ * an order, the same key returns that same order again (the real-SQL proof of
+ * the rule itself is in order-money-stock-safety.runtime.ts). Every distinct
+ * committed order is counted, so a duplicate is visible.
+ */
+const committedByKey = new Map<string, any>();
+let committedOrders = 0;
+let orderNumberSeq = 0;
+
+function commit(pending: Pending, orderNumber?: string) {
+  const key = pending.data.idempotencyKey as string;
+  let detail = committedByKey.get(key);
+  if (!detail) {
+    orderNumberSeq += 1;
+    detail = serverDetail(
+      pending.data,
+      orderNumber ?? `APSA-2026-${String(900000 + orderNumberSeq).padStart(6, "0")}`,
+    );
+    committedByKey.set(key, detail);
+    committedOrders += 1;
+  }
+  return detail;
+}
+
 async function resolveCreate(index = creates.length - 1, orderNumber = "APSA-2026-000101") {
   const pending = creates[index]!;
-  await act(async () => pending.resolve(serverDetail(pending.data, orderNumber)));
+  await act(async () => pending.resolve(commit(pending, orderNumber)));
+  await settle(6);
+}
+
+/** The server commits the order, but the browser never receives the response. */
+async function commitButLoseResponse(index = creates.length - 1) {
+  const pending = creates[index]!;
+  commit(pending);
+  await act(async () => pending.reject(new TypeError("Failed to fetch")));
   await settle(6);
 }
 
@@ -870,4 +914,404 @@ describe("Create Order (prototype sheet, mounted) — shared draft arithmetic", 
     expect(dialog().textContent).toContain(en.pos.discount.exceedsSubtotal);
     expect(button(en.createOrder.submit, dialog())?.disabled).toBe(true);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. Replay identity outlives the sheet (PR #118 review P2 #1)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The conversation route remounts the Prepare Order sheet whenever the
+// conversation, member or organization changes. A create whose outcome is
+// still unknown must keep its idempotency key across that remount — otherwise
+// "navigate away, come back, retry the same order" mints a second key and the
+// server, correctly, creates a SECOND order.
+
+describe("Replay identity across conversation navigation (real route, mounted)", () => {
+  const CONV_A = id("c001");
+  const CONV_B = id("c002");
+  const CUST_A = customer(id("e001"), "Sokha");
+  const CUST_B = customer(id("e002"), "Dara");
+
+  beforeEach(() => {
+    conversations[CONV_A] = conversation(CONV_A, CUST_A.id);
+    conversations[CONV_B] = conversation(CONV_B, CUST_B.id);
+    customers[CUST_A.id] = CUST_A;
+    customers[CUST_B.id] = CUST_B;
+  });
+
+  async function openOrder(productName = "Water") {
+    await click(button(en.conversation.actions.title), "actions");
+    await click(buttonContaining(en.conversation.createOrder), "Create order row");
+    await click(buttonContaining(productName, dialog()), `pick ${productName}`);
+  }
+
+  async function goTo(cid: string) {
+    routeParams.id = cid;
+    await rerender();
+  }
+
+  const keyOf = (i: number) => creates[i]!.data.idempotencyKey as string;
+
+  it("A: pending in A → B → back to A → identical retry re-sends the SAME key", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await goTo(CONV_B);
+    await goTo(CONV_A);
+    await openOrder();
+    await click(submitButton());
+    expect(creates).toHaveLength(2);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(creates[1]!.data.items).toEqual(creates[0]!.data.items);
+  });
+
+  it("B: committed server-side, response lost → away and back → retry is REPLAYED, not duplicated", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await goTo(CONV_B);
+    // A's request reaches the server and commits; the browser never hears.
+    await commitButLoseResponse(0);
+    expect(committedOrders).toBe(1);
+
+    await goTo(CONV_A);
+    await openOrder();
+    await click(submitButton());
+    expect(keyOf(1)).toBe(keyOf(0));
+    await resolveCreate(1);
+    // One order on the server, and the merchant is shown THAT order.
+    expect(committedOrders).toBe(1);
+    const shown = committedByKey.get(keyOf(0)).orderNumber;
+    expect(text()).toContain(en.createOrder.created.replace("{{code}}", shown));
+  });
+
+  it("C: pending in A → B → back to A → a CHANGED request gets a new key (no stale replay)", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await goTo(CONV_B);
+    await goTo(CONV_A);
+    await openOrder();
+    await click(button(en.common.increase, dialog()));
+    await click(submitButton());
+    expect(creates[1]!.data.items[0].quantity).toBe(2);
+    expect(keyOf(1)).not.toBe(keyOf(0));
+  });
+
+  it("D: a member switch makes the old member's replay identity unreachable", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    const original = routeContext.session.userId;
+    routeContext.session.userId = id("a999");
+    await rerender();
+    await openOrder();
+    await click(submitButton());
+    expect(keyOf(1)).not.toBe(keyOf(0));
+    // …and it is still the ORIGINAL member's, intact, when they return.
+    routeContext.session.userId = original;
+    await rerender();
+    await openOrder();
+    await click(submitButton());
+    expect(keyOf(2)).toBe(keyOf(0));
+  });
+
+  it("E: an organization switch makes the old organization's replay identity unreachable", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    routeContext.organizationId = id("b002");
+    await rerender();
+    await openOrder();
+    await click(submitButton());
+    expect(keyOf(1)).not.toBe(keyOf(0));
+  });
+
+  it("F: conversation A's replay identity is never used for conversation B", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await goTo(CONV_B);
+    await openOrder();
+    await click(submitButton());
+    expect(creates[1]!.data.customerId).toBe(CUST_B.id);
+    expect(keyOf(1)).not.toBe(keyOf(0));
+  });
+
+  it("G: an ACCEPTED order retires its key — the next identical order is a new order, even after a remount", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton());
+    await resolveCreate(0, "APSA-2026-000501");
+    await goTo(CONV_B);
+    await goTo(CONV_A);
+    await openOrder();
+    await click(submitButton());
+    expect(keyOf(1)).not.toBe(keyOf(0));
+  });
+
+  it("H: an abandoned attempt's late success cannot retire the key a newer identical attempt owns", async () => {
+    await mount(() => React.createElement(ConversationScreen));
+    await openOrder();
+    await click(submitButton()); // attempt 1 (abandoned below)
+    await goTo(CONV_B);
+    await goTo(CONV_A);
+    await openOrder();
+    await click(submitButton()); // attempt 2 — same key, now its owner
+    expect(keyOf(1)).toBe(keyOf(0));
+    await resolveCreate(0, "APSA-2026-000601"); // attempt 1 lands late, unmounted
+    await rejectCreate(new TypeError("Failed to fetch"), 1); // attempt 2 lost
+    await click(submitButton()); // retry of attempt 2
+    expect(keyOf(2)).toBe(keyOf(0));
+    await resolveCreate(2);
+    expect(committedOrders).toBe(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. Confirm / discard never corrupt each other's busy state (review P2 #2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Confirm and discard on a created draft (production sheet, mounted)", () => {
+  const confirmLabel = en.conversation.prepareOrder.confirmOrder;
+  const confirmingLabel = en.conversation.prepareOrder.confirming;
+  const discardLabel = en.conversation.prepareOrder.discardDraft;
+  const discardingLabel = en.conversation.prepareOrder.discardingDraft;
+
+  async function createDraft(h: SheetHarness) {
+    await click(submitButton(), "Create draft");
+    await resolveCreate(
+      creates.length - 1,
+      `APSA-2026-0007${String(creates.length).padStart(2, "0")}`,
+    );
+    expect(button(confirmLabel, dialog())?.disabled).toBe(false);
+    void h;
+  }
+
+  async function settleTransition(index: number, to: "confirmed" | "cancelled", ok = true) {
+    const pending = transitions[index]!;
+    await act(async () => {
+      if (!ok) {
+        pending.reject(new Error("network"));
+        return;
+      }
+      const base = committedByKey.values().next().value ?? serverDetail(creates[0]!.data, "X");
+      pending.resolve({ ...base, lifecycleStatus: to === "confirmed" ? "confirmed" : "cancelled" });
+    });
+    await settle(6);
+  }
+
+  /** The legitimate next draft can be confirmed: a live "Confirm order" button, nothing busy. */
+  async function nextDraftConfirmable(h: SheetHarness) {
+    expect(submitButton()?.disabled).toBe(false);
+    await createDraft(h);
+    const confirm = button(confirmLabel, dialog());
+    expect(confirm?.disabled).toBe(false);
+    expect(button(confirmingLabel, dialog())).toBeUndefined();
+    expect(button(discardingLabel, dialog())).toBeUndefined();
+    const before = transitions.length;
+    await click(confirm, "Confirm");
+    expect(transitions.length).toBe(before + 1);
+    expect(transitions[before]!.data.to).toBe("confirmed");
+  }
+
+  it("Codex repro: confirm pending → discard attempt → confirm rejects → next draft is NOT stuck 'Confirming…'", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()), "Confirm");
+    expect(button(confirmingLabel, dialog())).toBeDefined();
+    // Discard is unavailable while the confirm is in flight.
+    const discard = button(discardLabel, dialog());
+    expect(discard?.disabled).toBe(true);
+    await click(discard);
+    expect(transitions.map((t) => t.data.to)).toEqual(["confirmed"]);
+    await settleTransition(0, "confirmed", false);
+    expect(dialog().textContent).toContain(en.conversation.prepareOrder.error.title);
+    // Now discard is available, succeeds, and the next draft confirms.
+    await click(button(discardLabel, dialog()), "Discard");
+    expect(transitions[1]!.data.to).toBe("cancelled");
+    await settleTransition(1, "cancelled");
+    await nextDraftConfirmable(h);
+  });
+
+  it("Codex sequence verbatim: tap Discard during a pending confirm, cancel OK, confirm fails → next draft is not stuck", async () => {
+    // Drives exactly the reported sequence and asserts only the outcome, so
+    // it holds whether the overlapping Discard tap is refused (this design)
+    // or accepted (the old one, where it left "Confirming…" stuck forever).
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()), "Confirm");
+    const discard = button(discardLabel, dialog());
+    if (discard && !discard.disabled) await click(discard);
+    const cancelIndex = transitions.findIndex((t) => t.data.to === "cancelled");
+    if (cancelIndex >= 0) await settleTransition(cancelIndex, "cancelled");
+    await settleTransition(0, "confirmed", false);
+    if (!submitButton()) {
+      // The overlapping tap was refused: discard now, as the merchant would.
+      await click(button(discardLabel, dialog()), "Discard");
+      await settleTransition(transitions.length - 1, "cancelled");
+    }
+    await nextDraftConfirmable(h);
+  });
+
+  it("A: confirm pending → discard is refused, and nothing is cancelled", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()));
+    expect(button(discardLabel, dialog())?.disabled).toBe(true);
+    await settleTransition(0, "confirmed");
+    expect(dialog().textContent).toContain(en.conversation.prepareOrder.confirmed);
+    expect(transitions).toHaveLength(1);
+  });
+
+  it("B: discard pending → confirm is refused, and nothing is confirmed", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(discardLabel, dialog()));
+    expect(button(discardingLabel, dialog())).toBeDefined();
+    const confirm = button(confirmLabel, dialog());
+    expect(confirm?.disabled).toBe(true);
+    await click(confirm);
+    expect(transitions.map((t) => t.data.to)).toEqual(["cancelled"]);
+    await settleTransition(0, "cancelled");
+    await nextDraftConfirmable(h);
+  });
+
+  it("C: confirm failure → retry the confirm on the same draft", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()));
+    await settleTransition(0, "confirmed", false);
+    expect(button(confirmLabel, dialog())?.disabled).toBe(false);
+    expect(button(discardLabel, dialog())?.disabled).toBe(false);
+    await click(button(confirmLabel, dialog()));
+    await settleTransition(1, "confirmed");
+    expect(dialog().textContent).toContain(en.conversation.prepareOrder.confirmed);
+  });
+
+  it("D: discard failure (best-effort) → back to review, next draft confirms", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(discardLabel, dialog()));
+    await settleTransition(0, "cancelled", false);
+    await nextDraftConfirmable(h);
+  });
+
+  it("E/F: confirm success, and discard success then a confirmable next draft", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(discardLabel, dialog()));
+    await settleTransition(0, "cancelled");
+    await nextDraftConfirmable(h);
+    await settleTransition(1, "confirmed");
+    expect(h.confirmed).toHaveLength(1);
+    expect(dialog().textContent).toContain(en.conversation.prepareOrder.confirmed);
+  });
+
+  it("G/I: confirm pending → close → reopen → new draft; the stale confirm's failure cannot leave it busy", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()));
+    await closeSheet(h);
+    await setOpen(h, true);
+    await createDraft(h);
+    await settleTransition(0, "confirmed", false); // the OLD confirm, late
+    expect(dialog().textContent).not.toContain(en.conversation.prepareOrder.error.title);
+    expect(button(confirmLabel, dialog())?.disabled).toBe(false);
+    expect(h.confirmed).toHaveLength(0);
+  });
+
+  it("G/I: discard pending → close → reopen → new draft; the stale discard cannot reset the new draft", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(discardLabel, dialog()));
+    await closeSheet(h);
+    await setOpen(h, true);
+    await createDraft(h);
+    await settleTransition(0, "cancelled"); // the OLD discard, late
+    // Still on the new draft's created step, confirmable.
+    expect(button(confirmLabel, dialog())?.disabled).toBe(false);
+  });
+
+  it("G: a stale confirm SUCCESS after reopen does not mark the new draft confirmed", async () => {
+    const h = sheetHarness([{ product: WATER, quantity: 1 }]);
+    await mountSheet(h);
+    await createDraft(h);
+    await click(button(confirmLabel, dialog()));
+    await closeSheet(h);
+    await setOpen(h, true);
+    await createDraft(h);
+    await settleTransition(0, "confirmed");
+    expect(dialog().textContent).not.toContain(en.conversation.prepareOrder.confirmed);
+    expect(h.confirmed).toHaveLength(0);
+  });
+});
+
+describe("Confirm / discard across a conversation or member switch (real route, mounted)", () => {
+  const CONV_A = id("c001");
+  const CONV_B = id("c002");
+  const CUST_A = customer(id("e001"), "Sokha");
+  const CUST_B = customer(id("e002"), "Dara");
+
+  beforeEach(() => {
+    conversations[CONV_A] = conversation(CONV_A, CUST_A.id);
+    conversations[CONV_B] = conversation(CONV_B, CUST_B.id);
+    customers[CUST_A.id] = CUST_A;
+    customers[CUST_B.id] = CUST_B;
+  });
+
+  async function draftIn() {
+    await click(button(en.conversation.actions.title), "actions");
+    await click(buttonContaining(en.conversation.createOrder), "Create order row");
+    await click(buttonContaining("Water", dialog()), "pick Water");
+    await click(submitButton());
+    await resolveCreate(
+      creates.length - 1,
+      `APSA-2026-0008${String(creates.length).padStart(2, "0")}`,
+    );
+  }
+
+  for (const sw of ["conversation", "member"] as const) {
+    it(`J: confirm pending → ${sw} switch → back → the next draft confirms (no stuck busy state)`, async () => {
+      await mount(() => React.createElement(ConversationScreen));
+      const original = { id: routeParams.id, user: routeContext.session.userId };
+      // Visit the other side first so it is CACHED (Codex's reproduction):
+      // the switch then renders it immediately, with no loading gap that
+      // would unmount the sheet for us.
+      const goOther = async () => {
+        if (sw === "conversation") routeParams.id = CONV_B;
+        else routeContext.session.userId = id("a998");
+        await rerender();
+      };
+      const goBack = async () => {
+        routeParams.id = original.id;
+        routeContext.session.userId = original.user;
+        await rerender();
+      };
+      await goOther();
+      await goBack();
+      await draftIn();
+      await click(button(en.conversation.prepareOrder.confirmOrder, dialog()), "Confirm");
+      await goOther();
+      // On the other side: nothing from A's draft is showing.
+      expect(text()).not.toContain(en.conversation.prepareOrder.confirming);
+      routeParams.id = original.id;
+      routeContext.session.userId = original.user;
+      await rerender();
+      await act(async () => transitions[0]!.reject(new Error("network")));
+      await settle(6);
+      await draftIn();
+      expect(button(en.conversation.prepareOrder.confirmOrder, dialog())?.disabled).toBe(false);
+      expect(button(en.conversation.prepareOrder.confirming, dialog())).toBeUndefined();
+    });
+  }
 });

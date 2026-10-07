@@ -22,7 +22,7 @@ import {
   PERMISSION_DENIED,
 } from "@/lib/api";
 import { localName } from "@/lib/format";
-import { createIdempotencyKeyHolder } from "@/lib/idempotency";
+import { sharedIdempotencyHolder } from "@/lib/idempotency";
 import { useLanguage } from "@/lib/i18n";
 import {
   classifyOrderError,
@@ -71,6 +71,11 @@ interface PrepareOrderSheetProps {
   onCreated: (order: Order) => void;
   /** Fires when a draft is confirmed — a status update, not a second "created" event. */
   onConfirmed?: (order: Order) => void;
+  /**
+   * Who is creating the order, and for which conversation. Scopes the create's
+   * idempotency key, which must outlive this sheet (see idempotencyKeys).
+   */
+  replayScope: { userId: string; organizationId: string; conversationId: string };
 }
 
 let lineKeySeq = 0;
@@ -135,6 +140,7 @@ export function PrepareOrderSheet({
   sourceConversationRef,
   onCreated,
   onConfirmed,
+  replayScope,
 }: PrepareOrderSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -144,8 +150,8 @@ export function PrepareOrderSheet({
   );
   const [step, setStep] = useState<Step>({ name: "review" });
   const [submitting, setSubmitting] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [discarding, setDiscarding] = useState(false);
+  /** The draft operation in flight (see "Draft operations"), for the buttons. */
+  const [operation, setOperation] = useState<"confirm" | "discard" | null>(null);
   const [failure, setFailure] = useState<"generic" | "permission" | "currency" | null>(null);
   const [blocker, setBlocker] = useState<PreparedOrderBlocker | null>(null);
   const [deliveryFee, setDeliveryFee] = useState<DraftDeliveryFee>(NO_DELIVERY_FEE);
@@ -174,8 +180,25 @@ export function PrepareOrderSheet({
    * the key held, so an identical resubmission is answered with the order the
    * server already made; and "Edit" (cancel the draft, rebuild) after an
    * accepted create still gets a genuinely new order from identical lines.
+   *
+   * The holder is NOT this sheet's: the conversation route remounts the sheet
+   * on every conversation/member/organization change, and an unresolved
+   * create must keep its key across that ("pending in A → B → back to A →
+   * retry" must be replayed by the server, not become a second order). It is
+   * owned by the page-lifetime registry, scoped to this member, this
+   * organization and this conversation — never reachable from another.
    */
-  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
+  const { userId, organizationId, conversationId } = replayScope;
+  const idempotencyKeys = useMemo(
+    () =>
+      sharedIdempotencyHolder({
+        userId,
+        organizationId,
+        flow: "inbox-prepare-order",
+        subject: conversationId,
+      }),
+    [userId, organizationId, conversationId],
+  );
 
   /*
    * ── Attempt identity ────────────────────────────────────────────────────
@@ -213,8 +236,9 @@ export function PrepareOrderSheet({
     setLines((initialItems.length > 0 ? initialItems : [{ quantity: 1 }]).map(toEditableLine));
     setStep({ name: "review" });
     setSubmitting(false);
-    setConfirming(false);
-    setDiscarding(false);
+    // Any confirm/discard in flight belonged to the session just ended.
+    operationRef.current = null;
+    setOperation(null);
     setFailure(null);
     setBlocker(null);
     setDeliveryFee(NO_DELIVERY_FEE);
@@ -351,7 +375,7 @@ export function PrepareOrderSheet({
     try {
       if (kind === "production") {
         // This attempt's own claim on the replay key (see idempotencyKeys).
-        const claim = idempotencyKeys.current.claim();
+        const claim = idempotencyKeys.claim();
         // classifyPreparedOrder returned "production", which is true only when
         // the channel maps to a writable DB source and every line carries a
         // real variant. Both non-null assertions are that guarantee.
@@ -421,21 +445,56 @@ export function PrepareOrderSheet({
     }
   }
 
+  /*
+   * ── Draft operations: confirm OR discard, never both ────────────────────
+   *
+   * A created draft offers two server operations, and they conflict: one
+   * confirms the order, the other cancels it. They used to share the create's
+   * attempt counter, so starting a discard while a confirm was pending made
+   * the confirm "stale" — its finally then refused to clear `confirming`, and
+   * the next draft's button stayed stuck on "Confirming…" for good.
+   *
+   * Now they share ONE operation slot, taken synchronously (a ref, not state,
+   * so a double tap cannot start two): while either is in flight the other's
+   * control is disabled and its handler refuses. Each operation is an object
+   * identity; only the operation that still owns the slot — in the sheet
+   * session it began in — may write state or release the slot. reset() (close,
+   * reopen) empties the slot and ends the session, so a late callback can
+   * neither touch the new draft nor leave it looking busy.
+   */
+  type DraftOperation = { kind: "confirm" | "discard"; session: number };
+  const operationRef = useRef<DraftOperation | null>(null);
+  function beginOperation(kind: DraftOperation["kind"]): DraftOperation | null {
+    if (operationRef.current) return null;
+    const op = { kind, session: sessionRef.current };
+    operationRef.current = op;
+    setOperation(kind);
+    return op;
+  }
+  function ownsOperation(op: DraftOperation): boolean {
+    return operationRef.current === op && op.session === sessionRef.current;
+  }
+  function endOperation(op: DraftOperation) {
+    if (!ownsOperation(op)) return;
+    operationRef.current = null;
+    setOperation(null);
+  }
+
   async function confirm() {
-    if (step.name !== "created-real" || confirming) return;
-    setConfirming(true);
+    if (step.name !== "created-real") return;
+    const op = beginOperation("confirm");
+    if (!op) return;
     setFailure(null);
-    const token = beginAttempt();
     try {
       const confirmed = await confirmRealOrder(step.detail.order.id);
-      if (!isCurrent(token)) return;
+      if (!ownsOperation(op)) return;
       setStep({ name: "created-real", detail: confirmed });
       onConfirmed?.(confirmed.order);
     } catch (error) {
-      if (!isCurrent(token)) return;
+      if (!ownsOperation(op)) return;
       setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
     } finally {
-      if (isCurrent(token)) setConfirming(false);
+      endOperation(op);
     }
   }
 
@@ -448,17 +507,18 @@ export function PrepareOrderSheet({
    * starting lines.
    */
   async function discardAndEdit() {
-    if (step.name !== "created-real" || discarding) return;
-    setDiscarding(true);
-    const token = beginAttempt();
+    if (step.name !== "created-real") return;
+    const op = beginOperation("discard");
+    if (!op) return;
     try {
       await cancelRealOrder(step.detail.order.id, "Merchant edited before confirming");
     } catch {
       // Best-effort: if cancellation fails (e.g. permission), the merchant can
       // still cancel it later from Order Detail. Editing must not get stuck.
     }
-    if (!isCurrent(token)) return;
-    setDiscarding(false);
+    if (!ownsOperation(op)) return;
+    endOperation(op);
+    setFailure(null);
     setStep({ name: "review" });
   }
 
@@ -848,10 +908,12 @@ export function PrepareOrderSheet({
           ) : (
             <Button
               className="tap-target h-12 w-full"
-              disabled={confirming}
+              // Either draft operation in flight blocks the other (see "Draft operations").
+              disabled={operation !== null}
+              aria-busy={operation === "confirm"}
               onClick={() => void confirm()}
             >
-              {confirming
+              {operation === "confirm"
                 ? t("conversation.prepareOrder.confirming")
                 : t("conversation.prepareOrder.confirmOrder")}
             </Button>
@@ -861,12 +923,12 @@ export function PrepareOrderSheet({
             {step.detail.order.lifecycleStatus !== "confirmed" ? (
               <button
                 type="button"
-                disabled={discarding}
-                aria-busy={discarding}
+                disabled={operation !== null}
+                aria-busy={operation === "discard"}
                 onClick={() => void discardAndEdit()}
                 className="press tap-target text-label flex-1 rounded-full border border-border-default px-4 py-3 text-text-primary disabled:opacity-50"
               >
-                {discarding
+                {operation === "discard"
                   ? t("conversation.prepareOrder.discardingDraft")
                   : t("conversation.prepareOrder.discardDraft")}
               </button>
