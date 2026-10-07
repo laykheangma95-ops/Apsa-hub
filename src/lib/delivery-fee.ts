@@ -9,6 +9,7 @@
  * with integer arithmetic (parseMinorUnits) — never `parseFloat(x) * 100`.
  */
 import { parseMinorUnits } from "@/lib/money";
+import { parseDiscountAmount } from "@/lib/pos-cart";
 import type { Currency, Money } from "@/types";
 
 /** Mirrors create_order_v2's bound: $1,000.00 / 4,000,000៛. The server re-checks. */
@@ -17,10 +18,15 @@ export const DELIVERY_FEE_MAX_MINOR: Record<Currency, number> = { USD: 100_000, 
 /**
  * Typed delivery-fee text -> integer minor units, or null when it is not a
  * valid fee. Empty text is a fee of 0, which is the default.
+ *
+ * Same strict amount grammar as the POS discount (parseDiscountAmount): a
+ * comma is only a thousands separator in correct three-digit groups. The
+ * plain parseMinorUnits strips every comma, so "1,5" — a decimal comma to
+ * many merchants — was charged as 15 dollars (or 15 riel), not refused.
  */
 export function parseDeliveryFee(text: string, currency: Currency): number | null {
   if (text.trim() === "") return 0;
-  const minor = parseMinorUnits(text, currency);
+  const minor = parseDiscountAmount(text, currency);
   if (minor === null || minor < 0 || minor > DELIVERY_FEE_MAX_MINOR[currency]) return null;
   return minor;
 }

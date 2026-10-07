@@ -1,44 +1,131 @@
 /**
  * Pure order-draft arithmetic. No React, no formatting — components only render.
  */
-import { addMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
-import type { Money, Product } from "@/types";
+import { parseDeliveryFee } from "@/lib/delivery-fee";
+import { usd } from "@/lib/money";
+import {
+  calculateCartTotals,
+  cartCurrencies,
+  checkoutBlock,
+  MAX_CART_MINOR,
+  NO_DISCOUNT,
+  type CartDiscountInput,
+  type DiscountProblem,
+  type MixedCurrencyCart,
+  type OutOfRangeCart,
+  type PricedLine,
+} from "@/lib/pos-cart";
+import type { Currency, Money, Product } from "@/types";
 
 export type DiscountMode = "amount" | "percent";
 
-export interface OrderDraftInput {
-  unitPrice: Money;
-  quantity: number;
-  discountEnabled: boolean;
-  discountMode: DiscountMode;
-  /** integer cents when mode is "amount", whole percent when mode is "percent" */
-  discountValue: number;
-  /** integer cents */
-  deliveryFeeCents: number;
+/*
+ * ── Draft money (Inbox Prepare Order / Create Order) ──────────────────────
+ *
+ * Every amount here is in the draft's OWN currency — the one currency its
+ * priced lines share. There is no USD default: the previous version seeded
+ * the line sum, the discount and the delivery fee with usd(0), so the first
+ * riel line threw "Cannot add different currencies" and the sheet crashed,
+ * and an empty draft advertised a "$0.00" total and a dollar fee field.
+ *
+ * The line and discount arithmetic is POS's own (calculateCartTotals, exact
+ * BigInt, currency-checked) rather than a second implementation. This adds
+ * the one thing a chat order has that a POS sale does not: a delivery fee,
+ * typed as text and bound to the currency it was typed in.
+ *
+ * All of it is a PREVIEW. The server prices the lines from the catalog,
+ * requires one organization currency, bounds the fee and derives every total
+ * itself (create_order_v2). The only money a real Inbox order sends is the
+ * delivery fee, as integer minor units in this same currency.
+ */
+
+/** What the merchant typed as the delivery fee, and the currency it was typed for. */
+export interface DraftDeliveryFee {
+  /** Kept as text so a half-typed "1." survives a re-render; parsed on use. */
+  text: string;
+  /**
+   * The single draft currency the fee was entered for. A fee is never applied
+   * to a draft of another currency: "5" means $5.00 or ៛5, never both.
+   */
+  currency: Currency | null;
 }
 
-export interface OrderDraftTotals {
+export const NO_DELIVERY_FEE: DraftDeliveryFee = { text: "", currency: null };
+
+/** A draft whose priced lines all share one currency. Every Money is in it. */
+export interface PricedDraftTotals {
+  kind: "priced";
+  currency: Currency;
   subtotal: Money;
   discount: Money;
   deliveryFee: Money;
   total: Money;
+  itemCount: number;
+  /** Set when the typed discount is not valid; `discount` is then zero. */
+  discountProblem: DiscountProblem | null;
+  /** True when the typed fee is not a valid fee; `deliveryFee` is then zero. */
+  deliveryFeeInvalid: boolean;
 }
 
-export function calculateDraftTotals(input: OrderDraftInput): OrderDraftTotals {
-  const subtotal = multiplyMoney(input.unitPrice, Math.max(1, input.quantity));
+/** No line has a product yet: there is no currency, so there is no amount. */
+export interface EmptyDraft {
+  kind: "empty";
+  itemCount: 0;
+}
 
-  let discount = usd(0);
-  if (input.discountEnabled && input.discountValue > 0) {
-    discount =
-      input.discountMode === "percent"
-        ? multiplyMoney(subtotal, Math.min(100, input.discountValue) / 100)
-        : usd(Math.min(input.discountValue, subtotal.amount));
+/**
+ * Mixed-currency and out-of-range drafts carry no Money at all, exactly like
+ * their POS counterparts: nothing can render or submit a summed, converted or
+ * inexact total for them.
+ */
+export type DraftTotals = PricedDraftTotals | EmptyDraft | MixedCurrencyCart | OutOfRangeCart;
+
+/** The currency a single-currency draft is in, or null (empty or mixed). */
+export function draftCurrency(lines: readonly PricedLine[]): Currency | null {
+  const currencies = cartCurrencies(lines);
+  return currencies.length === 1 ? currencies[0]! : null;
+}
+
+export function calculateDraftTotals(
+  lines: readonly PricedLine[],
+  discountInput: CartDiscountInput = NO_DISCOUNT,
+  deliveryFeeInput: DraftDeliveryFee = NO_DELIVERY_FEE,
+): DraftTotals {
+  if (lines.length === 0) return { kind: "empty", itemCount: 0 };
+  const cart = calculateCartTotals(lines, discountInput);
+  if (cart.kind !== "priced") return cart;
+
+  const { currency } = cart;
+  // Typed for another currency context: not this draft's fee. (The sheets
+  // clear it on that transition; this is the backstop.)
+  const feeText = deliveryFeeInput.currency === currency ? deliveryFeeInput.text : "";
+  const parsedFee = parseDeliveryFee(feeText, currency);
+  const fee = parsedFee ?? 0;
+
+  const total = BigInt(cart.total.amount) + BigInt(fee);
+  if (total > BigInt(MAX_CART_MINOR)) {
+    return { kind: "out_of_range", currency, itemCount: cart.itemCount };
   }
+  return {
+    kind: "priced",
+    currency,
+    subtotal: cart.subtotal,
+    discount: cart.discount,
+    deliveryFee: { amount: fee, currency },
+    total: { amount: Number(total), currency },
+    itemCount: cart.itemCount,
+    discountProblem: cart.discountProblem,
+    deliveryFeeInvalid: parsedFee === null,
+  };
+}
 
-  const deliveryFee = usd(Math.max(0, input.deliveryFeeCents));
-  const total = addMoney(subtractMoney(subtotal, discount), deliveryFee);
+/** Why a draft cannot be submitted, or null when its money allows it. */
+export type DraftBlock = "empty" | "mixed_currency" | "out_of_range" | "discount" | "delivery_fee";
 
-  return { subtotal, discount, deliveryFee, total };
+export function draftBlock(totals: DraftTotals): DraftBlock | null {
+  if (totals.kind === "empty") return "empty";
+  if (totals.kind === "priced" && totals.deliveryFeeInvalid) return "delivery_fee";
+  return checkoutBlock(totals);
 }
 
 /** Variant chips are rendered from this shape; selection order follows option order. */

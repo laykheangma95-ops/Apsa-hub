@@ -262,6 +262,21 @@ function ConversationScreen() {
     setActionsOpen(false);
   }, [id]);
 
+  /*
+   * An order draft belongs to ONE conversation's customer, for ONE member of
+   * ONE organization. This route stays mounted across conversations, so the
+   * order sheets are keyed to that scope (a switch remounts them, discarding
+   * the draft and dropping any response still in flight — see
+   * PrepareOrderSheet's "Attempt identity") and closed on a switch, so the
+   * previous customer's lines can never be submitted for the next one.
+   */
+  const orderScope = `${userId}\u0000${routeOrganizationId}\u0000${id}`;
+  useEffect(() => {
+    setOrderOpen(false);
+    setPrepareOpen(false);
+    setPrepareItems([]);
+  }, [orderScope]);
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
@@ -790,6 +805,7 @@ function ConversationScreen() {
 
       {customer && conversation ? (
         <CreateOrderSheet
+          key={`create:${orderScope}`}
           open={orderOpen}
           onOpenChange={setOrderOpen}
           customer={customer}
@@ -810,6 +826,7 @@ function ConversationScreen() {
 
       {customer && conversation ? (
         <PrepareOrderSheet
+          key={`prepare:${orderScope}`}
           open={prepareOpen}
           onOpenChange={setPrepareOpen}
           customer={customer}
@@ -823,6 +840,9 @@ function ConversationScreen() {
           // through unchanged once Inbox is productionized, with no change
           // needed here.
           sourceConversationRef={isProductionId(id) ? id : null}
+          // The create's replay identity outlives this keyed sheet; it is scoped
+          // to exactly the member, organization and conversation it is keyed by.
+          replayScope={{ userId, organizationId: routeOrganizationId, conversationId: id }}
           onCreated={(order) => {
             append({
               id: `sys-${order.code}`,
