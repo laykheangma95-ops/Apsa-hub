@@ -16,6 +16,7 @@ import {
   type CartLine,
   type CartTotals,
   discountProblemKey,
+  lineQuantityLimit,
 } from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Customer } from "@/types";
@@ -112,7 +113,7 @@ export function PosCart({
                 <QuantityStepper
                   value={line.quantity}
                   onChange={(q) => onQuantity(line.key, q)}
-                  max={Math.max(1, line.stock)}
+                  max={lineQuantityLimit(line.stock)}
                 />
               </div>
             </li>

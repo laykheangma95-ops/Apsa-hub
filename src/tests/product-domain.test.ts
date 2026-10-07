@@ -594,7 +594,8 @@ describe("Test 16: Existing Product and POS routes still render (structural guar
       companion: "nilo" as const,
     };
     expect(stockState(productWithNullStock)).toBe("available");
-    expect(availableStock(productWithNullStock)).toBe(0); // 0 = no cap in cart
+    // null = no stock figure, never a cap; distinct from 0 ("none left").
+    expect(availableStock(productWithNullStock)).toBeNull();
   });
 
   it("pos-cart.ts stockState still works for mock products with numeric stock", async () => {

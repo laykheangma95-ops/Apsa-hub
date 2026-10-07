@@ -18,8 +18,16 @@ export interface CartLine {
   variant?: string;
   quantity: number;
   unitPrice: Money;
-  /** stock available at the moment the line was added */
-  stock: number;
+  /**
+   * The line's client-side cap: units available when it was added, or null
+   * when POS holds no stock figure for it. null is the production path — the
+   * catalog read carries no inventory (mapServerProductToUi), and the server
+   * does not cap a sale by stock (create_order_v2 takes any positive integer;
+   * confirming writes the persisted quantity to the ledger with no
+   * availability check — migration 026). null is never a cap; 0 is "none left"
+   * and never "unlimited". UX only: the server, not this number, is authority.
+   */
+  stock: number | null;
 }
 
 /** Why a typed discount is not applied. Checkout stays blocked while one is set. */
@@ -76,33 +84,63 @@ export function lineTotal(line: CartLine): Money {
   return { amount: Number(lineTotalMinor(line)), currency: line.unitPrice.currency };
 }
 
+/** A quantity a cart line can hold: a positive safe integer. */
+function isLineQuantity(quantity: number): boolean {
+  return Number.isSafeInteger(quantity) && quantity > 0;
+}
+
+/**
+ * The most units one POS cart line can hold. An ORDER-ENTRY limit, not an
+ * inventory claim: it is never shown as "available", and the server does not
+ * enforce it (it accepts any positive integer quantity).
+ *
+ * It exists so every path agrees on one maximum. The quantity stepper clamps
+ * to its max; if an add path let a line pass it, a single "−" on 1,005 sent
+ * min(999, 1,004) = 999 and silently dropped six units from the sale.
+ */
+export const POS_MAX_LINE_QUANTITY = 999;
+
+/**
+ * The highest quantity a line may reach: the POS limit, or the known stock
+ * when that is lower. A null stock (no figure) is bounded by the POS limit
+ * only. Every cart mutation and every quantity stepper uses this — never a
+ * literal of its own.
+ */
+export function lineQuantityLimit(stock: number | null): number {
+  return stock === null ? POS_MAX_LINE_QUANTITY : Math.min(POS_MAX_LINE_QUANTITY, stock);
+}
+
+/** `quantity` bounded by the line's limit. */
+function capQuantity(stock: number | null, quantity: number): number {
+  return Math.min(lineQuantityLimit(stock), quantity);
+}
+
+/**
+ * Add a line, or grow the existing line for the same key. A line with no unit
+ * left (stock 0) never enters, and a quantity that is not a positive integer
+ * is refused rather than coerced.
+ */
 export function addToCart(lines: CartLine[], line: CartLine): CartLine[] {
+  if (!isLineQuantity(line.quantity)) return lines;
   const existing = lines.find((l) => l.key === line.key);
-  if (!existing) return [...lines, line];
+  if (!existing) {
+    if (line.stock !== null && line.stock <= 0) return lines;
+    return [...lines, { ...line, quantity: capQuantity(line.stock, line.quantity) }];
+  }
   return lines.map((l) =>
-    l.key === line.key
-      ? {
-          ...l,
-          // When stock = 0 (unlimited — inventory not yet connected), don't cap.
-          quantity:
-            l.stock === 0
-              ? l.quantity + line.quantity
-              : Math.min(l.stock, l.quantity + line.quantity),
-        }
-      : l,
+    l.key === line.key ? { ...l, quantity: capQuantity(l.stock, l.quantity + line.quantity) } : l,
   );
 }
 
+/**
+ * Set a line's quantity: at least 1, at most lineQuantityLimit(line.stock).
+ * Anything that is not an integer (NaN, Infinity, 2.5) leaves the line as it
+ * was — it is never coerced into a reset.
+ */
 export function setQuantity(lines: CartLine[], key: string, quantity: number): CartLine[] {
+  if (!Number.isSafeInteger(quantity)) return lines;
   return lines.map((l) =>
-    l.key === key
-      ? {
-          ...l,
-          // When stock = 0 (unlimited), allow any positive quantity.
-          quantity:
-            l.stock === 0 ? Math.max(1, quantity) : Math.max(1, Math.min(l.stock, quantity)),
-        }
-      : l,
+    l.key === key ? { ...l, quantity: Math.max(1, capQuantity(l.stock, quantity)) } : l,
   );
 }
 
@@ -372,12 +410,14 @@ export function stockState(product: Product): StockState {
   return "available";
 }
 
-/** Units available for sale.
- * Returns 0 (meaning "unlimited" for the cart) when inventory is not connected (stock == null).
- * CartLine.stock stores this value; 0 means no cap.
+/**
+ * Units available for sale, or null when POS holds no stock figure for the
+ * product (the production path — see CartLine.stock). null means "no cap" and
+ * stays distinct from 0, which means "none left": never collapse one into the
+ * other (`?? 0`, `Math.max(1, …)`).
  */
-export function availableStock(product: Product): number {
-  if (product.stock == null) return 0; // inventory not yet connected — no cap in cart
+export function availableStock(product: Product): number | null {
+  if (product.stock == null) return null;
   return Math.max(0, product.stock - (product.reserved ?? 0));
 }
 

@@ -1305,7 +1305,7 @@ describe("POS money: cart preview agrees with the persisted order", () => {
       sku: "SKU",
       quantity,
       unitPrice,
-      stock: 0,
+      stock: null,
     };
   }
 
