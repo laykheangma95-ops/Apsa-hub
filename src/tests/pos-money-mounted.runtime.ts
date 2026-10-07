@@ -63,9 +63,9 @@ function product(pid: string, nameEn: string, price: { amount: number; currency:
     nameEn,
     sku: `SKU-${nameEn}`,
     price,
-    // A counted stock: with stock null POS caps every line at quantity 1 (a
-    // separate, pre-existing defect outside this repair), which would hide
-    // the quantity transitions these tests drive.
+    // A counted stock, high enough never to bound these tests. (null — the
+    // production shape — no longer caps a line at 1; see
+    // pos-stock-quantity-mounted.runtime.ts.)
     stock: 50,
     lowStockThreshold: 0,
     companion: "minto",

@@ -41,7 +41,7 @@ function line(id: string, unitPrice: Money, quantity = 1): CartLine {
     sku: id,
     quantity,
     unitPrice,
-    stock: 0,
+    stock: null,
   };
 }
 

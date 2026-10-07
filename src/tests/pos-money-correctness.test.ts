@@ -49,7 +49,7 @@ function line(id: string, unitPrice: Money, quantity = 1): CartLine {
     sku: `SKU-${id}`,
     quantity,
     unitPrice,
-    stock: 0,
+    stock: null,
   };
 }
 

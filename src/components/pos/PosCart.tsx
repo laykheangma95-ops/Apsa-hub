@@ -112,7 +112,7 @@ export function PosCart({
                 <QuantityStepper
                   value={line.quantity}
                   onChange={(q) => onQuantity(line.key, q)}
-                  max={Math.max(1, line.stock)}
+                  {...(line.stock === null ? {} : { max: line.stock })}
                 />
               </div>
             </li>

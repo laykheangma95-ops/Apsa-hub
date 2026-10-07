@@ -62,7 +62,10 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
          * why rather than failing silently at checkout.
          */
         const sellable = isSellable(product);
-        const disabled = state === "out_of_stock" || !sellable;
+        // null: POS holds no stock figure (production) — nothing to claim, no cap.
+        // 0: none left (stock − reserved), whatever stockState says about stock.
+        const available = availableStock(product);
+        const disabled = state === "out_of_stock" || available === 0 || !sellable;
         const name = localName(product, language);
         const variants = product.options?.map((o) => o.values.join("/")).join(" · ");
         const label = t("pos.addToCartLabel", { name });
@@ -82,9 +85,11 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
                 <span className="text-financial text-text-primary">
                   {formatMoney(product.price)}
                 </span>
-                <span className="text-caption text-text-muted">
-                  {t("pos.available", { count: availableStock(product) })}
-                </span>
+                {available === null ? null : (
+                  <span className="text-caption text-text-muted">
+                    {t("pos.available", { count: available })}
+                  </span>
+                )}
                 {state !== "available" ? <StatusChip status={state} size="sm" /> : null}
                 {sellable ? null : (
                   <span className="text-caption text-status-danger-text">
@@ -121,9 +126,11 @@ export function PosProductList({ products, view, onSelect }: PosProductListProps
                   <span className="text-financial text-text-primary">
                     {formatMoney(product.price)}
                   </span>
-                  <span className="text-caption text-text-muted">
-                    {t("pos.available", { count: availableStock(product) })}
-                  </span>
+                  {available === null ? null : (
+                    <span className="text-caption text-text-muted">
+                      {t("pos.available", { count: available })}
+                    </span>
+                  )}
                   {product.reserved ? (
                     <span className="text-caption text-text-muted">
                       {t("pos.reserved", { count: product.reserved })}

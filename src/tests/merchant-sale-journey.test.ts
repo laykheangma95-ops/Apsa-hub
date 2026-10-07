@@ -208,7 +208,7 @@ describe("The fabricating sale path cannot be reached with production data", () 
   it("an unsellable product is disabled in the catalog and says why", () => {
     const list = readSource(PRODUCT_LIST);
     expect(list).toContain("isSellable(product)");
-    expect(list).toContain('state === "out_of_stock" || !sellable');
+    expect(list).toContain('state === "out_of_stock" || available === 0 || !sellable');
     expect(list).toContain("pos.unsellable.noVariant");
   });
 });

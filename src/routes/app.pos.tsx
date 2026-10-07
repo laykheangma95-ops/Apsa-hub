@@ -189,7 +189,7 @@ function PosScreen() {
         ...(variant ? { variant } : {}),
         quantity,
         unitPrice,
-        stock: Math.max(1, availableStock(product)),
+        stock: availableStock(product),
       },
     });
     setVariantProduct(null);
@@ -244,7 +244,7 @@ function PosScreen() {
           ...(variant.name ? { variant: variant.name } : {}),
           quantity: 1,
           unitPrice: variant.price,
-          stock: Math.max(1, availableStock(product)),
+          stock: availableStock(product),
         },
       });
       setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });

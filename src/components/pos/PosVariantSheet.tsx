@@ -52,6 +52,8 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
 
   const selectedVariant = productionVariants.find((v) => v.variantId === selectedVariantId) ?? null;
   const displayPrice = selectedVariant?.price ?? product?.price;
+  // null: no stock figure (production) — the stepper is not stock-bounded.
+  const available = product ? availableStock(product) : null;
 
   return (
     <BottomSheet
@@ -153,7 +155,7 @@ export function PosVariantSheet({ product, onOpenChange, onAdd }: PosVariantShee
             <QuantityStepper
               value={quantity}
               onChange={setQuantity}
-              max={Math.max(1, availableStock(product))}
+              {...(available === null ? {} : { max: available })}
             />
           </div>
         </div>

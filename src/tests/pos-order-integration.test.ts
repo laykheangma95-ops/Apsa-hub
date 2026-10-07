@@ -85,7 +85,7 @@ function makeLine(overrides: Partial<CartLine> = {}): CartLine {
     sku: "SKU-1",
     quantity: 1,
     unitPrice: usd(1000),
-    stock: 0,
+    stock: null,
     ...overrides,
   };
 }
@@ -123,7 +123,7 @@ describe("pos-cart: variantId threads through cart operations", () => {
 
   it("setQuantity and removeLine operate by key and never drop variantId", () => {
     const key = lineKey("prod-1", "variant-a");
-    let lines: CartLine[] = [makeLine({ key, variantId: "variant-a", stock: 0 })];
+    let lines: CartLine[] = [makeLine({ key, variantId: "variant-a", stock: null })];
     lines = setQuantity(lines, key, 5);
     expect(lines[0]!.quantity).toBe(5);
     expect(lines[0]!.variantId).toBe("variant-a");
