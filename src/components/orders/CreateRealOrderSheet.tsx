@@ -9,10 +9,17 @@
  * authoritative order (src/server/orders/service.ts); `onCreated` is called
  * with THAT order, not this preview.
  *
+ * The preview is in the line's OWN currency — the chosen variant's price
+ * currency — through the shared draft arithmetic (calculateDraftTotals), the
+ * same rules the Inbox order sheets and POS use. There is no USD default: the
+ * previous version seeded the discount with usd(0), so selecting any riel
+ * product threw "Cannot subtract different currencies" and the sheet crashed.
+ *
  * Client never supplies organization_id, user_id, a price, a subtotal or a
  * total — createRealOrder()'s input (src/lib/api/index.ts) has no field for
- * any of them. The delivery fee is an integer minor-unit INPUT the server
- * bounds and adds into the total itself (migration 044).
+ * any of them. The discount and the delivery fee are integer minor-unit
+ * INPUTS in that same currency, which the server bounds and folds into the
+ * total itself (create_order_v3).
  *
  * Retry safety: every submit of the same request sends the same idempotency
  * key (src/lib/idempotency.ts), so a retry after a lost response returns the
@@ -25,7 +32,8 @@ import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { BottomSheet, CurrencyInput, QuantityStepper } from "@/design-system";
+import { Label } from "@/components/ui/label";
+import { BottomSheet, QuantityStepper } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { DeliveryFeeField } from "@/components/orders/DeliveryFeeField";
 import { ShippingIntentSection } from "@/components/orders/ShippingIntentSection";
@@ -43,19 +51,23 @@ import {
   searchRealCustomers,
   type OrderCustomerOption,
 } from "@/lib/api";
-import { classifyOrderError } from "@/lib/orders";
-import { parseDeliveryFee } from "@/lib/delivery-fee";
+import { classifyOrderError, isOrderCurrencyMismatch } from "@/lib/orders";
 import { createIdempotencyKeyHolder } from "@/lib/idempotency";
 import { catalogKeys } from "@/lib/catalog";
 import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
-import { addMoney, formatMoney, multiplyMoney, subtractMoney, usd } from "@/lib/money";
+import { formatMoney, MINOR_UNIT_DIGITS } from "@/lib/money";
 import {
+  calculateDraftTotals,
   defaultProductVariantId,
+  draftBlock,
   needsVariantChoice,
+  NO_DELIVERY_FEE,
   productVariantPrice,
+  type DraftDeliveryFee,
 } from "@/lib/order-draft";
+import { discountProblemKey, NO_DISCOUNT, type CartDiscountInput } from "@/lib/pos-cart";
 import { cn } from "@/lib/utils";
 import type { Order, Product } from "@/types";
 
@@ -114,9 +126,15 @@ export function CreateRealOrderSheet({
   const [variantId, setVariantId] = useState<string | null>(null);
   const [quantity, setQuantity] = useState(1);
   const [source, setSource] = useState<OrderSourceDb>("POS");
-  const [discountEnabled, setDiscountEnabled] = useState(false);
-  const [discountCents, setDiscountCents] = useState(0);
-  const [deliveryFeeText, setDeliveryFeeText] = useState("");
+  /*
+   * Discount and delivery fee are kept as the text the merchant typed plus the
+   * currency it was typed for, and parsed in the line's currency on every
+   * render (dollars-and-cents for USD, whole riel for KHR). The discount used
+   * to be a USD-only CurrencyInput (floating-point dollars turned into cents)
+   * applied as usd(...) whatever the product's currency.
+   */
+  const [discount, setDiscount] = useState<CartDiscountInput>(NO_DISCOUNT);
+  const [deliveryFee, setDeliveryFee] = useState<DraftDeliveryFee>(NO_DELIVERY_FEE);
   const [customerQuery, setCustomerQuery] = useState("");
   const [customer, setCustomer] = useState<OrderCustomerOption | null>(null);
   /*
@@ -131,7 +149,7 @@ export function CreateRealOrderSheet({
   // never turn a pickup order into a shipment.
   const [shipIntent, setShipIntent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [failure, setFailure] = useState<"permission" | "generic" | null>(null);
+  const [failure, setFailure] = useState<"permission" | "currency" | "generic" | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
   /*
    * `submitting` state alone does not block a second tap fired in the same
@@ -300,13 +318,36 @@ export function CreateRealOrderSheet({
   const activeVariants = product?.productionVariants ?? [];
   const selectedVariant = activeVariants.find((v) => v.variantId === variantId) ?? null;
   /** The chosen variant's own price — never the product's first-variant price. */
-  const unitPrice = product ? productVariantPrice(product, variantId) : usd(0);
-  const subtotal = multiplyMoney(unitPrice, Math.max(1, quantity));
-  const discount =
-    discountEnabled && discountCents > 0 ? usd(Math.min(discountCents, subtotal.amount)) : usd(0);
-  const deliveryMinor = parseDeliveryFee(deliveryFeeText, subtotal.currency);
-  const deliveryFee = { amount: deliveryMinor ?? 0, currency: subtotal.currency };
-  const total = addMoney(subtractMoney(subtotal, discount), deliveryFee);
+  const unitPrice = product ? productVariantPrice(product, variantId) : null;
+
+  /*
+   * The order's currency is its line's: the chosen variant's price currency.
+   * A discount or fee belongs to the currency it was typed for, so a change of
+   * currency — another product, or a variant priced in the other currency —
+   * CLEARS both (adjusted during render, so no frame shows "5" re-read as ៛5),
+   * rather than keeping them to reappear when the currency changes back.
+   */
+  const currency = unitPrice?.currency ?? null;
+  const [moneyContext, setMoneyContext] = useState(currency);
+  if (moneyContext !== currency) {
+    setMoneyContext(currency);
+    setDiscount(NO_DISCOUNT);
+    setDeliveryFee(NO_DELIVERY_FEE);
+  }
+
+  /*
+   * One line, priced in its own currency. A malformed or over-subtotal
+   * discount and an invalid fee are reported (and block submit) — never
+   * coerced into some other amount, and a discount is never clamped down to
+   * the subtotal: the server refuses discount_exceeds_subtotal too.
+   */
+  const totals = calculateDraftTotals(
+    unitPrice ? [{ unitPrice, quantity }] : [],
+    discount,
+    deliveryFee,
+  );
+  const priced = totals.kind === "priced" ? totals : null;
+  const moneyBlock = draftBlock(totals);
 
   function reset() {
     setProductQuery("");
@@ -314,9 +355,8 @@ export function CreateRealOrderSheet({
     setVariantId(null);
     setQuantity(1);
     setSource("POS");
-    setDiscountEnabled(false);
-    setDiscountCents(0);
-    setDeliveryFeeText("");
+    setDiscount(NO_DISCOUNT);
+    setDeliveryFee(NO_DELIVERY_FEE);
     setCustomerQuery("");
     setCustomer(null);
     setShipping(EMPTY_SHIPPING_DESTINATION);
@@ -338,23 +378,26 @@ export function CreateRealOrderSheet({
    * not consulted here, so restoring it would fail the regression tests.
    */
   const shippingReady = shippingIntentReady(shipIntent, shipping);
-  const orderInputsReady = deliveryMinor !== null && shippingReady;
+  const orderInputsReady = moneyBlock === null && shippingReady;
   const readyToSubmit = Boolean(product) && Boolean(variantId) && orderInputsReady;
 
   async function submit() {
     if (!product || !variantId) return;
-    if (deliveryMinor === null || !shippingReady) return;
+    if (!priced || moneyBlock !== null || !shippingReady) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setFailure(null);
+    // Integer minor units in the line's own currency — the only money sent.
+    const discountMinor = priced.discount.amount;
+    const deliveryMinor = priced.deliveryFee.amount;
     try {
       const shippingPayload = orderShippingPayload(shipIntent, shipping);
       const detail = await createRealOrder({
         source,
         items: [{ variantId, quantity, productId: product.id }],
         customerId: customer?.id ?? null,
-        ...(discountEnabled && discount.amount > 0 ? { discountMinor: discount.amount } : {}),
+        ...(discountMinor > 0 ? { discountMinor } : {}),
         ...(deliveryMinor > 0 ? { deliveryMinor } : {}),
         ...(shippingPayload ? { shipping: shippingPayload } : {}),
         idempotency: idempotencyKeys.current,
@@ -369,7 +412,19 @@ export function CreateRealOrderSheet({
       setCreated(detail.order);
       onCreated(detail.order);
     } catch (error) {
-      setFailure(classifyOrderError(error) === "forbidden" ? "permission" : "generic");
+      /*
+       * The server prices an order in the organization's one currency and
+       * refuses a variant priced in another (currency_mismatch). Retrying can
+       * never succeed, so that refusal is named — the same copy as the Inbox
+       * order sheet — and offers no retry.
+       */
+      setFailure(
+        isOrderCurrencyMismatch(error)
+          ? "currency"
+          : classifyOrderError(error) === "forbidden"
+            ? "permission"
+            : "generic",
+      );
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -456,7 +511,7 @@ export function CreateRealOrderSheet({
             </Button>
           </div>
         </motion.div>
-      ) : product ? (
+      ) : product && unitPrice ? (
         <section className="space-y-5 pb-4">
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
@@ -564,38 +619,77 @@ export function CreateRealOrderSheet({
               <button
                 type="button"
                 role="switch"
-                aria-checked={discountEnabled}
+                aria-checked={discount.enabled}
                 aria-label={t("orderCreate.discount")}
-                onClick={() => setDiscountEnabled((v) => !v)}
+                onClick={() =>
+                  setDiscount((d) => ({
+                    ...d,
+                    enabled: !d.enabled,
+                    text: "",
+                    currency: unitPrice.currency,
+                  }))
+                }
                 className={cn(
                   "tap-target flex w-14 items-center rounded-full px-1",
-                  discountEnabled ? "bg-action-primary" : "bg-surface-secondary",
+                  discount.enabled ? "bg-action-primary" : "bg-surface-secondary",
                 )}
               >
                 <span
                   aria-hidden
                   className={cn(
                     "size-6 rounded-full bg-surface-primary shadow transition-transform",
-                    discountEnabled ? "translate-x-6" : "translate-x-0",
+                    discount.enabled ? "translate-x-6" : "translate-x-0",
                   )}
                 />
               </button>
             </div>
-            {discountEnabled ? (
-              <CurrencyInput
-                id="order-create-discount"
-                label={t("orderCreate.discount")}
-                value={discountCents}
-                onChange={setDiscountCents}
-              />
+            {/*
+             * An amount in the line's currency, typed and parsed the way
+             * DeliveryFeeField below is: the currency is fixed (a picker would
+             * be an implicit conversion), and riel takes whole numbers only.
+             */}
+            {discount.enabled ? (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="order-create-discount" className="text-label text-text-secondary">
+                  {t("pos.discount.amountIn", { currency: unitPrice.currency })}
+                </Label>
+                <Input
+                  id="order-create-discount"
+                  inputMode={MINOR_UNIT_DIGITS[unitPrice.currency] === 0 ? "numeric" : "decimal"}
+                  autoComplete="off"
+                  className="text-financial h-12"
+                  value={discount.currency === unitPrice.currency ? discount.text : ""}
+                  placeholder={MINOR_UNIT_DIGITS[unitPrice.currency] === 0 ? "0" : "0.00"}
+                  aria-invalid={priced?.discountProblem ? true : undefined}
+                  aria-describedby={
+                    priced?.discountProblem ? "order-create-discount-error" : undefined
+                  }
+                  onChange={(event) =>
+                    setDiscount((d) => ({
+                      ...d,
+                      text: event.target.value,
+                      currency: unitPrice.currency,
+                    }))
+                  }
+                />
+                {priced?.discountProblem ? (
+                  <p
+                    id="order-create-discount-error"
+                    role="alert"
+                    className="text-caption text-status-danger-text"
+                  >
+                    {t(discountProblemKey(priced.discountProblem, discount.mode, priced.currency))}
+                  </p>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
           <DeliveryFeeField
             id="order-create-delivery-fee"
-            value={deliveryFeeText}
-            onChange={setDeliveryFeeText}
-            currency={subtotal.currency}
+            value={deliveryFee.currency === unitPrice.currency ? deliveryFee.text : ""}
+            onChange={(text) => setDeliveryFee({ text, currency: unitPrice.currency })}
+            currency={unitPrice.currency}
           />
 
           <div>
@@ -704,31 +798,47 @@ export function CreateRealOrderSheet({
             />
           </div>
 
-          <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
-            <div className="flex items-center justify-between">
-              <span className="text-body-sm text-text-secondary">{t("orderCreate.subtotal")}</span>
-              <span className="text-data text-text-primary">{formatMoney(subtotal)}</span>
-            </div>
-            {discount.amount > 0 ? (
+          {priced ? (
+            <div className="rounded-xl border border-border-default bg-surface-secondary p-3">
               <div className="flex items-center justify-between">
                 <span className="text-body-sm text-text-secondary">
-                  {t("orderCreate.discount")}
+                  {t("orderCreate.subtotal")}
                 </span>
-                <span className="text-data text-text-primary">-{formatMoney(discount)}</span>
+                <span className="text-data text-text-primary">{formatMoney(priced.subtotal)}</span>
               </div>
-            ) : null}
-            {deliveryFee.amount > 0 ? (
-              <div className="flex items-center justify-between">
-                <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
-                <span className="text-data text-text-primary">+{formatMoney(deliveryFee)}</span>
+              {priced.discount.amount > 0 ? (
+                <div className="flex items-center justify-between">
+                  <span className="text-body-sm text-text-secondary">
+                    {t("orderCreate.discount")}
+                  </span>
+                  <span className="text-data text-text-primary">
+                    -{formatMoney(priced.discount)}
+                  </span>
+                </div>
+              ) : null}
+              {priced.deliveryFee.amount > 0 ? (
+                <div className="flex items-center justify-between">
+                  <span className="text-body-sm text-text-secondary">{t("order.deliveryFee")}</span>
+                  <span className="text-data text-text-primary">
+                    +{formatMoney(priced.deliveryFee)}
+                  </span>
+                </div>
+              ) : null}
+              <div className="mt-2 flex items-end justify-between border-t border-border-default pt-2">
+                <span className="text-label text-text-primary">{t("orderCreate.total")}</span>
+                <span className="text-financial-lg text-text-primary">
+                  {formatMoney(priced.total)}
+                </span>
               </div>
-            ) : null}
-            <div className="mt-2 flex items-end justify-between border-t border-border-default pt-2">
-              <span className="text-label text-text-primary">{t("orderCreate.total")}</span>
-              <span className="text-financial-lg text-text-primary">{formatMoney(total)}</span>
+              <p className="text-caption mt-1 text-text-muted">{t("orderCreate.totalNote")}</p>
             </div>
-            <p className="text-caption mt-1 text-text-muted">{t("orderCreate.totalNote")}</p>
-          </div>
+          ) : totals.kind === "out_of_range" ? (
+            // No inexact total is ever shown (or submittable) for an amount
+            // beyond exact integer range.
+            <p role="alert" className="text-body-sm text-status-danger-text">
+              {t("conversation.prepareOrder.currency.tooLargeBody")}
+            </p>
+          ) : null}
 
           {failure ? (
             <OperationalState
@@ -736,12 +846,18 @@ export function CreateRealOrderSheet({
               title={t(
                 failure === "permission"
                   ? "orderCreate.permission.title"
-                  : "orderCreate.error.title",
+                  : failure === "currency"
+                    ? "conversation.prepareOrder.currency.serverMismatch.title"
+                    : "orderCreate.error.title",
               )}
               body={t(
-                failure === "permission" ? "orderCreate.permission.body" : "orderCreate.error.body",
+                failure === "permission"
+                  ? "orderCreate.permission.body"
+                  : failure === "currency"
+                    ? "conversation.prepareOrder.currency.serverMismatch.body"
+                    : "orderCreate.error.body",
               )}
-              onRetry={() => void submit()}
+              {...(failure === "currency" ? {} : { onRetry: () => void submit() })}
             />
           ) : null}
         </section>

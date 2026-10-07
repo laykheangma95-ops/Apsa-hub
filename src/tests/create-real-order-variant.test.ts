@@ -220,15 +220,19 @@ describe("D. pricing follows the chosen variant", () => {
 
   it("the sheet derives unitPrice (and therefore subtotal/total) from the chosen variant", () => {
     const sheet = readSource(CREATE_SHEET);
+    // No product, no price — never a USD zero standing in for one (that
+    // usd(0) beside a riel line is what crashed the sheet for KHR products).
     expect(sheet).toMatch(
-      /const unitPrice = product \? productVariantPrice\(product, variantId\) : usd\(0\)/,
+      /const unitPrice = product \? productVariantPrice\(product, variantId\) : null;/,
     );
-    // subtotal -> discount -> total all descend from unitPrice, unchanged;
-    // the delivery fee (migration 044) is added on top, never folded into it.
-    expect(sheet).toMatch(/const subtotal = multiplyMoney\(unitPrice, Math\.max\(1, quantity\)\)/);
+    // subtotal, discount, delivery fee and total all descend from that one
+    // priced line, in its own currency, through the shared draft arithmetic.
+    // The mounted proof is orders-new-order-money-mounted.runtime.ts.
     expect(sheet).toMatch(
-      /const total = addMoney\(subtractMoney\(subtotal, discount\), deliveryFee\)/,
+      /calculateDraftTotals\(\s*unitPrice \? \[\{ unitPrice, quantity \}\] : \[\],\s*discount,\s*deliveryFee,\s*\)/,
     );
+    // The sheet has no way to make a dollar amount of its own.
+    expect(sheet).not.toMatch(/import \{[^}]*\b(usd|khr)\b[^}]*\} from "@\/lib\/money"/);
   });
 
   it("the picker shows each variant's own price so the choice is priced, not blind", () => {
