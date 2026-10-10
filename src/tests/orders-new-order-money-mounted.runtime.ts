@@ -268,6 +268,7 @@ mock.module("@/api/orders", () => ({
           deliveryMinor: data.deliveryMinor,
           idempotencyKey: data.idempotencyKey,
           ...(data.shipping ? { shipping: data.shipping } : {}),
+          ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
         });
         outcome = { detail };
       } catch (error) {

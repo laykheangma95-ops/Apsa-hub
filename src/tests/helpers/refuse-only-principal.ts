@@ -1,7 +1,8 @@
 /**
  * The ONE sanctioned crossing of a member/organization identity into order
- * creation: POS checkout's refuse-only `expectedPrincipal` (CORRECTIONS.md,
- * CORRECTION-004).
+ * creation: the refuse-only `expectedPrincipal` every order-creation entry
+ * point sends — POS checkout, Orders → New Order and Inbox → Prepare Order
+ * (CORRECTIONS.md, CORRECTION-004).
  *
  * The order API's invariant tests forbid any tenant or actor field on the
  * client → server order path, because such a field could be mistaken for
@@ -28,6 +29,12 @@ export const SANCTIONED_CREATE_INPUT_FIELD = `principal?: { userId: string; orga
 
 /** src/components/pos/PosCheckoutSheet.tsx — completeReal's createRealOrder call. */
 export const SANCTIONED_POS_CALL_ARG = `principal: { userId: token.userId, organizationId: token.organizationId },`;
+
+/** src/components/orders/CreateRealOrderSheet.tsx — submit's createRealOrder call (the attempt's token). */
+export const SANCTIONED_NEW_ORDER_CALL_ARG = `principal: { userId: token.userId, organizationId: token.organizationId },`;
+
+/** src/components/inbox/PrepareOrderSheet.tsx — submit's createRealOrder call (the replay scope's principal). */
+export const SANCTIONED_INBOX_CALL_ARG = `principal: { userId, organizationId },`;
 
 /** `source` with `snippet` removed — which must occur in it exactly once. */
 export function withoutSanctioned(source: string, snippet: string): string {

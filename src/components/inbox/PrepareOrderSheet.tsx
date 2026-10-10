@@ -399,6 +399,15 @@ export function PrepareOrderSheet({
             ? { shipping: orderShippingPayload(shipIntent, shipping)! }
             : {}),
           idempotency: claim,
+          /*
+           * The principal this draft was started as — the replay scope's member
+           * and organization, the same ones its claim belongs to (the route
+           * remounts this sheet for any other). The server derives who is
+           * acting only when it handles the request; if that changed in between
+           * (here, or in another tab), it refuses instead of creating this
+           * conversation's order as someone else, and writes nothing.
+           */
+          principal: { userId, organizationId },
         });
         // Abandoned (closed, conversation/member switched, unmounted): the
         // order may exist server-side, but this is no longer the draft that

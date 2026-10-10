@@ -15,11 +15,14 @@
  * previous version seeded the discount with usd(0), so selecting any riel
  * product threw "Cannot subtract different currencies" and the sheet crashed.
  *
- * Client never supplies organization_id, user_id, a price, a subtotal or a
- * total — createRealOrder()'s input (src/lib/api/index.ts) has no field for
- * any of them. The discount and the delivery fee are integer minor-unit
- * INPUTS in that same currency, which the server bounds and folds into the
- * total itself (create_order_v3).
+ * Client never supplies a price, a subtotal or a total, and never a member or
+ * organization for the server to act as — createRealOrder()'s input
+ * (src/lib/api/index.ts) has no field for any of them. The one identity it
+ * sends is the refuse-only principal the attempt was started as, which the
+ * server only compares with its own session-derived principal and refuses on
+ * a mismatch (CORRECTIONS.md, CORRECTION-004). The discount and the delivery
+ * fee are integer minor-unit INPUTS in that same currency, which the server
+ * bounds and folds into the total itself (create_order_v3).
  *
  * Retry safety: every submit of the same request sends the same idempotency
  * key (src/lib/idempotency.ts), so a retry after a lost response returns the
@@ -517,6 +520,15 @@ export function CreateRealOrderSheet({
         ...(deliveryMinor > 0 ? { deliveryMinor } : {}),
         ...(shippingPayload ? { shipping: shippingPayload } : {}),
         idempotency: claim,
+        /*
+         * The principal this attempt was started as — the one its token and its
+         * replay claim belong to. The server derives who is acting only when it
+         * handles the request, after the lazy import and the trip; if the member
+         * or the organization changed in between (here, or in another tab), it
+         * refuses instead of creating this order as someone else, and writes
+         * nothing — so this principal's retry still owns the key.
+         */
+        principal: { userId: token.userId, organizationId: token.organizationId },
       });
       // Abandoned (closed, reopened, member or organization switched,
       // unmounted): the order may exist server-side, but this is no longer the

@@ -97,17 +97,45 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
 });
 
 /*
- * POS checkout is bound to the principal that started it (PR #121 review P2):
- * the server derives who is acting only when it handles the request, so the
- * create carries the attempt's own principal and the server refuses — before
- * any limit or write — when its derivation differs. Behaviour, against the
- * database: pos-checkout-replay-mounted "A checkout runs as the principal that
- * started it".
+ * Every order-creation entry point is bound to the principal that started it
+ * (PR #121 review P2, CORRECTION-004): the server derives who is acting only
+ * when it handles the request, so each create carries its attempt's own
+ * principal — the one its replay claim belongs to — and the server refuses,
+ * before any limit or write, when its derivation differs. Behaviour, against
+ * the database: pos-checkout-replay-mounted "A checkout runs as the principal
+ * that started it", and order-entry-principal-mounted (New Order, Inbox).
  */
-it("POS create carries its attempt's principal, and the server checks it before anything else", () => {
-  const pos = readFileSync(resolve("src/components/pos/PosCheckoutSheet.tsx"), "utf8");
-  expect(pos).toMatch(
-    /principal: \{ userId: token\.userId, organizationId: token\.organizationId \}/,
+it("every order-creation entry point sends its attempt's principal, and the server checks it before anything else", () => {
+  const callOf = (file: string) => {
+    const source = readFileSync(resolve(file), "utf8").replace(/\r\n/g, "\n");
+    const start = source.indexOf("await createRealOrder({");
+    expect(start).toBeGreaterThan(0);
+    return source.slice(start, source.indexOf("});", start));
+  };
+  // POS and New Order: the attempt token's principal, the one its claim was
+  // taken for.
+  for (const file of [
+    "src/components/pos/PosCheckoutSheet.tsx",
+    "src/components/orders/CreateRealOrderSheet.tsx",
+  ]) {
+    expect(callOf(file)).toMatch(
+      /principal: \{ userId: token\.userId, organizationId: token\.organizationId \}/,
+    );
+  }
+  // Inbox: the replay scope's principal — its claim's, and the only one the
+  // route mounts this sheet for (it is keyed by member + organization).
+  const inbox = readFileSync(resolve("src/components/inbox/PrepareOrderSheet.tsx"), "utf8");
+  expect(inbox).toMatch(/const \{ userId, organizationId, conversationId \} = replayScope;/);
+  expect(callOf("src/components/inbox/PrepareOrderSheet.tsx")).toMatch(
+    /idempotency: claim,[\s\S]*principal: \{ userId, organizationId \},\s*$/,
+  );
+  const route = readFileSync(resolve("src/routes/app.inbox.$id.tsx"), "utf8");
+  expect(route).toMatch(/key=\{`prepare:\$\{orderScope\}`\}/);
+  expect(route).toMatch(
+    /const orderScope = `\$\{userId\}\\u0000\$\{routeOrganizationId\}\\u0000\$\{id\}`;/,
+  );
+  expect(route).toMatch(
+    /replayScope=\{\{ userId, organizationId: routeOrganizationId, conversationId: id \}\}/,
   );
 
   const fn = readFileSync(resolve("src/api/orders.ts"), "utf8");
