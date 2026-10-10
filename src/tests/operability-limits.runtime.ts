@@ -561,14 +561,14 @@ describe("financial mutations FAIL CLOSED when the durable limiter is unavailabl
     [
       "REFUND",
       (ctx) =>
-        payments.refundPayment(
-          ctx,
-          PAYMENT,
-          100,
-          "customer refund",
-          "idem-key-refund-000001",
-          principalOf(ctx),
-        ),
+        payments.refundPayment(ctx, {
+          paymentId: PAYMENT,
+          amountMinor: 100,
+          reason: "customer refund",
+          idempotencyKey: "idem-key-refund-000001",
+          expectedRefundedMinor: 0,
+          expectedPrincipal: principalOf(ctx),
+        }),
     ],
     [
       "REVERSAL",

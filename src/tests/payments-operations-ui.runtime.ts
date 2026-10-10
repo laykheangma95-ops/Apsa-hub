@@ -334,7 +334,14 @@ describe("permission denial happens before any data is touched", () => {
       const { refundPayment, reversePayment } = await import("../server/payments/service");
       const ctx = makeCtx(["payments.read", "payments.verify"]);
       await expectForbidden(() =>
-        refundPayment(ctx, PAYMENT_ID, 1000, "Damaged", null, principalOf(ctx)),
+        refundPayment(ctx, {
+          paymentId: PAYMENT_ID,
+          amountMinor: 1000,
+          reason: "Damaged",
+          idempotencyKey: "refund-click-1",
+          expectedRefundedMinor: 0,
+          expectedPrincipal: principalOf(ctx),
+        }),
       );
       await expectForbidden(() =>
         reversePayment(ctx, PAYMENT_ID, "Recorded in error", principalOf(ctx)),
@@ -562,12 +569,21 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { refundRealPayment } = await import("../lib/api");
-    await refundRealPayment(PAYMENT_ID, STARTED_AS, 2000, "Damaged item");
+    await refundRealPayment(PAYMENT_ID, STARTED_AS, {
+      amountMinor: 2000,
+      reason: "Damaged item",
+      expectedRefundedMinor: 500,
+      idempotencyKey: "refund-click-1",
+    });
 
+    // The amount, the reason, the one logical refund's key, the refunded total
+    // it was started from (a precondition) and the refuse-only principal.
     expect(seen[0]!.data).toEqual({
       paymentId: PAYMENT_ID,
       amountMinor: 2000,
       reason: "Damaged item",
+      expectedRefundedMinor: 500,
+      idempotencyKey: "refund-click-1",
       expectedPrincipal: STARTED_AS,
     });
     expect(Number.isInteger(seen[0]!.data!["amountMinor"])).toBe(true);

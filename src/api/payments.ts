@@ -193,6 +193,11 @@ export const reversePaymentFn = createServerFn({ method: "POST" })
   });
 
 // ── refundPaymentFn ───────────────────────────────────────────────────────────
+//
+// Durable idempotency (migration 062): the key is stored in the refund's own
+// ledger event and bound to the member, the payment, the amount and the
+// reason — a lost-response retry replays, anything else under that key is a
+// conflict. The refund and its mandatory audit row are one transaction.
 
 export const refundPaymentFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
@@ -201,7 +206,13 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
         paymentId: z.string().uuid("Invalid payment ID"),
         amountMinor: z.number().int().positive("amountMinor must be a positive integer"),
         reason: z.string().trim().min(1, "A refund reason is required").max(1000),
-        idempotencyKey: z.string().trim().min(1).max(200).nullish(),
+        // REQUIRED: one logical refund, re-sent verbatim on every retry of it
+        // (migration 062). A request without one — a browser bundle from
+        // before the rule — is refused here, before anything runs.
+        idempotencyKey: z.string().trim().min(1).max(200),
+        // The refunded total the refund was started from: a precondition,
+        // never an amount (refused as stale when it no longer holds).
+        expectedRefundedMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
         // Refuse-only: the principal this refund was started as.
         expectedPrincipal: expectedPrincipalSchema,
       })
@@ -210,14 +221,14 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { refundPayment } = await import("@/server/payments/service");
-    return refundPayment(
-      authCtx,
-      data.paymentId,
-      data.amountMinor,
-      data.reason,
-      data.idempotencyKey,
-      data.expectedPrincipal,
-    );
+    return refundPayment(authCtx, {
+      paymentId: data.paymentId,
+      amountMinor: data.amountMinor,
+      reason: data.reason,
+      idempotencyKey: data.idempotencyKey,
+      expectedRefundedMinor: data.expectedRefundedMinor,
+      expectedPrincipal: data.expectedPrincipal,
+    });
   });
 
 // ── correctPaymentFn ──────────────────────────────────────────────────────────

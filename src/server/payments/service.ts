@@ -379,6 +379,18 @@ async function bestEffortAudit(
   }
 }
 
+/**
+ * A replay key that names a different request or another member's operation
+ * (migration 062). Nothing was written; nothing is handed back.
+ */
+function idempotencyConflict(): Error {
+  return publicError(
+    "This request's idempotency key was already used for a different request",
+    409,
+    "idempotency_conflict",
+  );
+}
+
 function recordFailureToError(result: { status: string }): Error {
   switch (result.status) {
     case "invalid_amount":
@@ -386,7 +398,10 @@ function recordFailureToError(result: { status: string }): Error {
     case "invalid_method":
       return badRequest("Invalid payment method");
     case "order_not_found":
+    case "not_found":
       return notFound("Order not found");
+    case "idempotency_conflict":
+      return idempotencyConflict();
     default:
       return new Error(`Payment record failed: ${result.status}`);
   }
@@ -451,6 +466,18 @@ function refundFailureToError(result: {
       return result.reason === "exceeds_paid_amount"
         ? conflict("Refund amount exceeds what remains to be refunded")
         : badRequest("Refund amount must be a positive integer minor amount");
+    case "idempotency_conflict":
+      return idempotencyConflict();
+    case "stale":
+      return publicError(
+        "This payment's refunds changed after this refund was started — re-read it and try again",
+        409,
+        "refund_stale",
+      );
+    case "idempotency_key_required":
+      return badRequest("A refund idempotency key is required");
+    case "expected_refunded_required":
+      return badRequest("The refunded total this refund was started from is required");
     default:
       return new Error(`Payment refund failed: ${result.status}`);
   }
@@ -780,61 +807,78 @@ export async function reversePayment(
   return requireDetail(ctx, paymentId);
 }
 
+export interface RefundPaymentServiceInput {
+  paymentId: string;
+  /** This refund only, in the payment's own currency — an integer minor amount. */
+  amountMinor: number;
+  reason: string;
+  /**
+   * REQUIRED. One logical refund: minted when the merchant starts it and
+   * re-sent verbatim on every retry of it. Stored in the refund's own ledger
+   * event (migration 062), so a retry after a lost response replays the
+   * refund that committed instead of making a second one.
+   */
+  idempotencyKey: string;
+  /**
+   * The refunded total the merchant's screen showed when this refund was
+   * started — a precondition, never an amount. A different current total
+   * (a refund the screen had not seen yet) is refused as `refund_stale`. An
+   * additional safeguard for a retry that lost its key; the key is the
+   * idempotency.
+   */
+  expectedRefundedMinor: number;
+  /** Refuse-only (assertExpectedPrincipal): who started this refund. */
+  expectedPrincipal: ExpectedPrincipal;
+}
+
 /**
  * Refund a payment, in full or in part. Refunded totals are DERIVED by
  * summing prior refund events (migration 035) — payments.amount_minor is
  * never mutated.
+ *
+ * ONE TRANSACTION (refund_payment_v2, migration 062): the refund event, the
+ * payment status, the derived order state and the mandatory `payments.refund`
+ * audit row commit together or not at all — an audit-store failure rolls the
+ * money back (503 audit_unavailable). A replay (same member, payment, key,
+ * amount and reason) returns the committed refund and writes nothing, its
+ * audit row included: the original committed one with it.
  */
 export async function refundPayment(
   ctx: AuthorizationContext,
-  paymentId: string,
-  amountMinor: number,
-  reason: string,
-  idempotencyKey: string | null | undefined,
-  /** Refuse-only (assertExpectedPrincipal): who started this refund. */
-  expectedPrincipal: ExpectedPrincipal,
+  input: RefundPaymentServiceInput,
 ): Promise<PaymentDetail> {
   // Refused before the permission, the fail-closed rate limit, the payment
   // read and every write (refund event, status, order state, audit).
-  assertExpectedPrincipal(ctx, expectedPrincipal);
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("payments.refund");
   await enforcePaymentReversalLimit(ctx);
 
-  if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
     throw badRequest("Refund amount must be a positive integer minor amount");
   }
-  if (!reason?.trim()) throw badRequest("A refund reason is required");
+  if (!input.reason?.trim()) throw badRequest("A refund reason is required");
+  if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()) {
+    throw badRequest("A refund idempotency key is required");
+  }
+  if (!Number.isInteger(input.expectedRefundedMinor) || input.expectedRefundedMinor < 0) {
+    throw badRequest("The refunded total this refund was started from is required");
+  }
 
-  const payment = await repo.findPaymentById(ctx.organizationId, paymentId);
+  const payment = await repo.findPaymentById(ctx.organizationId, input.paymentId);
   if (!payment) throw notFound("Payment not found");
 
   const result = await repo.refundPayment(
     ctx.organizationId,
-    paymentId,
+    input.paymentId,
     ctx.userId,
-    amountMinor,
-    reason.trim(),
-    idempotencyKey,
+    input.amountMinor,
+    input.reason.trim(),
+    input.idempotencyKey.trim(),
+    input.expectedRefundedMinor,
   );
   if (result.status !== "success") throw refundFailureToError(result);
 
-  // A previous attempt may have committed the refund but failed its separate
-  // required audit write. Replay must persist that audit before returning
-  // success too; its explicit flag distinguishes a retry from new money.
-  await auditLogRequired(ctx, {
-    action: "payments.refund",
-    resourceType: "payments",
-    resourceId: paymentId,
-    afterJson: {
-      refunded_amount_minor: amountMinor,
-      refunded_total: result.refunded_total,
-      fully_refunded: result.fully_refunded ?? false,
-      replayed: result.replayed ?? false,
-    },
-    reason,
-  });
-
-  return requireDetail(ctx, paymentId);
+  return requireDetail(ctx, input.paymentId);
 }
 
 /**

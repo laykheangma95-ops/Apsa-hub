@@ -337,6 +337,14 @@ async function writeSurface() {
 type Surface = Awaited<ReturnType<typeof writeSurface>>;
 const wroteSince = (before: Surface, after: Surface) =>
   (Object.keys(before) as (keyof Surface)[]).filter((k) => before[k] !== after[k]);
+/**
+ * What an AUTHORIZED refusal wrote. A replay conflict, a stale refund or an
+ * amount over the balance is decided after the permission check and the rate
+ * limiter (by design: an authorized attempt is counted), so its token is
+ * spent; no order, ledger, payment, evidence or audit row may move.
+ */
+const ledgerWritesSince = (before: Surface, after: Surface) =>
+  wroteSince(before, after).filter((k) => k !== "rateLimits");
 
 /** Audit rows written after `before` was taken, oldest first. */
 async function auditsSince(before: Surface) {
@@ -360,6 +368,28 @@ async function eventsOf(paymentId: string, type?: string) {
       type ? [paymentId, type] : [paymentId],
     )
   ).rows;
+}
+
+async function paymentRow(paymentId: string) {
+  return (
+    await db.query<Json>(
+      "select status, verification_state, recorded_by, reference, note from payments where id = $1",
+      [paymentId],
+    )
+  ).rows[0]!;
+}
+async function orderMoney(orderId: string) {
+  return (
+    await db.query<Json>(
+      `select o.payment_status, o.refund_status, t.received_minor::int, t.refunded_minor::int
+         from orders o join order_payment_totals t on t.order_id = o.id where o.id = $1`,
+      [orderId],
+    )
+  ).rows[0]!;
+}
+async function stockMovementCount() {
+  return (await db.query<{ n: number }>("select count(*)::int as n from inventory_movements"))
+    .rows[0]!.n;
 }
 
 // ── Seeding: everything below is created by member A in organization A ──────
@@ -698,3 +728,357 @@ for (const path of PATHS) {
     });
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 #3 — a durable replay identity belongs to one actor, tenant and operation
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("P2#3 payment recording: replay is bound to the actor, the tenant and the request", () => {
+  it("R1. B's payment under a key is never replayed to A as A's success; nothing is reassigned", async () => {
+    const orderId = await seedConfirmed();
+    const key = freshKey("pay");
+    const request = { orderId, method: "cash", amountMinor: 10000, idempotencyKey: key };
+    as(USER_B);
+    const first = await call(payments.recordPaymentFn, {
+      ...request,
+      expectedPrincipal: { userId: USER_B, organizationId: ORG_A },
+    });
+    expect(codeOf(first)).toBe("ok");
+    as(USER_A);
+    const before = await writeSurface();
+    const retry = await call(payments.recordPaymentFn, { ...request, expectedPrincipal: P_A });
+    const wrote = ledgerWritesSince(before, await writeSurface());
+    const rows = (
+      await db.query<Json>("select id, recorded_by from payments where order_id = $1", [orderId])
+    ).rows;
+    console.log(
+      `[evidence] record replay across actors: A's retry=${codeOf(retry)}` +
+        (retry.ok ? ` returned recordedBy=${who(retry.value.recordedBy)}` : "") +
+        ` payments=[${rows.map((r) => who(r.recorded_by))}] wrote=[${wrote}]`,
+    );
+    expect(codeOf(retry)).toBe("idempotency_conflict");
+    expect(wrote).toEqual([]);
+    expect(rows.map((r) => who(r.recorded_by))).toEqual(["B"]);
+    expect((await eventsOf(rows[0]!.id)).map((e) => [e.event_type, who(e.actor_user_id)])).toEqual([
+      ["created", "B"],
+    ]);
+  });
+
+  it("R2. the same key with a different request is a conflict — order, amount, method, reference or note", async () => {
+    const orderId = await seedConfirmed();
+    const otherOrder = await seedConfirmed();
+    const key = freshKey("pay");
+    const original = {
+      orderId,
+      method: "khqr",
+      amountMinor: 10000,
+      reference: "KHQR-55120",
+      note: "Paid at the counter",
+      idempotencyKey: key,
+      expectedPrincipal: P_A,
+    };
+    expect(codeOf(await call(payments.recordPaymentFn, original))).toBe("ok");
+    const variants: [string, Json][] = [
+      ["order", { orderId: otherOrder }],
+      ["amount", { amountMinor: 9000 }],
+      ["method", { method: "bank_transfer" }],
+      ["reference", { reference: "KHQR-99999" }],
+      ["note", { note: "Paid by phone" }],
+    ];
+    const results: string[] = [];
+    for (const [label, change] of variants) {
+      const before = await writeSurface();
+      const outcome = await call(payments.recordPaymentFn, { ...original, ...change });
+      const wrote = ledgerWritesSince(before, await writeSurface());
+      results.push(`${label}=${codeOf(outcome)}${wrote.length ? `+wrote[${wrote}]` : ""}`);
+    }
+    console.log(`[evidence] record same key, different request: ${results.join("; ")}`);
+    expect(results).toEqual(variants.map(([label]) => `${label}=idempotency_conflict`));
+  });
+
+  it("R3. A's lost-response retry replays A's own payment: one payment, one created event, one audit row", async () => {
+    const orderId = await seedConfirmed();
+    const request = {
+      orderId,
+      method: "cash",
+      amountMinor: 10000,
+      idempotencyKey: freshKey("pay"),
+      expectedPrincipal: P_A,
+    };
+    const before = await writeSurface();
+    const first = await call(payments.recordPaymentFn, request); // committed; response lost
+    const retry = await call(payments.recordPaymentFn, request);
+    expect([codeOf(first), codeOf(retry)]).toEqual(["ok", "ok"]);
+    expect((retry as any).value.id).toBe((first as any).value.id);
+    const rows = (
+      await db.query<Json>("select id, recorded_by from payments where order_id = $1", [orderId])
+    ).rows;
+    expect(rows.map((r) => who(r.recorded_by))).toEqual(["A"]);
+    expect((await eventsOf(rows[0]!.id)).map((e) => e.event_type)).toEqual(["created"]);
+    expect((await auditsSince(before)).map((a) => [a.action, who(a.actor_user_id)])).toEqual([
+      ["payments.record", "A"],
+    ]);
+  });
+
+  it("R4. the same key in another organization never reaches the first organization's payment", async () => {
+    const orderId = await seedConfirmed();
+    const key = freshKey("pay");
+    const inA = await call(payments.recordPaymentFn, {
+      orderId,
+      method: "cash",
+      amountMinor: 10000,
+      idempotencyKey: key,
+      expectedPrincipal: P_A,
+    });
+    expect(codeOf(inA)).toBe("ok");
+    as(USER_A, ORG_B);
+    const before = await writeSurface();
+    // Organization B cannot see organization A's order: the key alone names nothing there.
+    const inB = await call(payments.recordPaymentFn, {
+      orderId,
+      method: "cash",
+      amountMinor: 10000,
+      idempotencyKey: key,
+      expectedPrincipal: { userId: USER_A, organizationId: ORG_B },
+    });
+    expect(codeOf(inB)).toBe("status_404");
+    expect(wroteSince(before, await writeSurface())).not.toContain("payments");
+  });
+
+  it("R8. two simultaneous requests with one key create one payment", async () => {
+    const orderId = await seedConfirmed();
+    const request = {
+      orderId,
+      method: "cash",
+      amountMinor: 10000,
+      idempotencyKey: freshKey("pay"),
+      expectedPrincipal: P_A,
+    };
+    const [a, b] = await Promise.all([
+      call(payments.recordPaymentFn, request),
+      call(payments.recordPaymentFn, request),
+    ]);
+    expect([codeOf(a), codeOf(b)]).toEqual(["ok", "ok"]);
+    expect(
+      (await db.query("select id from payments where order_id = $1", [orderId])).rows,
+    ).toHaveLength(1);
+  });
+});
+
+/** A paid $100.00 payment and a refund request against it, as A. */
+function refundRequest(paymentId: string, change: Json = {}) {
+  return {
+    paymentId,
+    amountMinor: 4000,
+    reason: "Customer returned one cup",
+    idempotencyKey: freshKey("refund"),
+    expectedRefundedMinor: 0,
+    expectedPrincipal: P_A,
+    ...change,
+  };
+}
+
+describe("P2#3 refunds: replay is bound to the actor, the payment and the request", () => {
+  it("R5. B's refund under a key is never replayed to A, and A gets no audit row for B's money", async () => {
+    const { paymentId } = await seedPaidPayment();
+    const key = freshKey("refund");
+    as(USER_B);
+    const first = await call(
+      payments.refundPaymentFn,
+      refundRequest(paymentId, {
+        idempotencyKey: key,
+        expectedPrincipal: { userId: USER_B, organizationId: ORG_A },
+      }),
+    );
+    expect(codeOf(first)).toBe("ok");
+    as(USER_A);
+    const before = await writeSurface();
+    const retry = await call(
+      payments.refundPaymentFn,
+      refundRequest(paymentId, { idempotencyKey: key }),
+    );
+    const wrote = ledgerWritesSince(before, await writeSurface());
+    const audits = await auditsSince(before);
+    console.log(
+      `[evidence] refund replay across actors: A's retry=${codeOf(retry)} ` +
+        `refunds=[${(await eventsOf(paymentId, "refund")).map((e) => who(e.actor_user_id))}] ` +
+        `newAudits=[${audits.map((a) => `${a.action}:${who(a.actor_user_id)}`)}] wrote=[${wrote}]`,
+    );
+    expect(codeOf(retry)).toBe("idempotency_conflict");
+    expect(wrote).toEqual([]);
+    expect((await eventsOf(paymentId, "refund")).map((e) => who(e.actor_user_id))).toEqual(["B"]);
+  });
+
+  it("R6. the same refund key with a different amount or reason is a conflict, nothing written", async () => {
+    const { paymentId } = await seedPaidPayment();
+    const original = refundRequest(paymentId);
+    expect(codeOf(await call(payments.refundPaymentFn, original))).toBe("ok");
+    const results: string[] = [];
+    for (const [label, change] of [
+      ["amount", { amountMinor: 3000, expectedRefundedMinor: 4000 }],
+      ["reason", { reason: "Something else", expectedRefundedMinor: 4000 }],
+    ] as [string, Json][]) {
+      const before = await writeSurface();
+      const outcome = await call(payments.refundPaymentFn, { ...original, ...change });
+      const wrote = ledgerWritesSince(before, await writeSurface());
+      results.push(`${label}=${codeOf(outcome)}${wrote.length ? `+wrote[${wrote}]` : ""}`);
+    }
+    console.log(`[evidence] refund same key, different request: ${results.join("; ")}`);
+    expect(results).toEqual(["amount=idempotency_conflict", "reason=idempotency_conflict"]);
+    expect(await eventsOf(paymentId, "refund")).toHaveLength(1);
+  });
+
+  it("R7. a refund key already used on one payment cannot refund another", async () => {
+    const one = await seedPaidPayment();
+    const two = await seedPaidPayment();
+    const key = freshKey("refund");
+    expect(
+      codeOf(
+        await call(payments.refundPaymentFn, refundRequest(one.paymentId, { idempotencyKey: key })),
+      ),
+    ).toBe("ok");
+    const before = await writeSurface();
+    const reuse = await call(
+      payments.refundPaymentFn,
+      refundRequest(two.paymentId, { idempotencyKey: key }),
+    );
+    const wrote = ledgerWritesSince(before, await writeSurface());
+    console.log(
+      `[evidence] refund key reused on another payment: ${codeOf(reuse)} wrote=[${wrote}]`,
+    );
+    expect(codeOf(reuse)).toBe("idempotency_conflict");
+    expect(wrote).toEqual([]);
+  });
+
+  it("R9. two simultaneous requests with one refund key refund once and audit once", async () => {
+    const { paymentId } = await seedPaidPayment();
+    const request = refundRequest(paymentId);
+    const before = await writeSurface();
+    const [a, b] = await Promise.all([
+      call(payments.refundPaymentFn, request),
+      call(payments.refundPaymentFn, request),
+    ]);
+    expect([codeOf(a), codeOf(b)]).toEqual(["ok", "ok"]);
+    expect((await eventsOf(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([4000]);
+    expect((await auditsSince(before)).map((a) => a.action)).toEqual(["payments.refund"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 #4 — a refund retried after a lost response refunds once
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("P2#4 refunds: exactly one refund effect per logical refund", () => {
+  it("D1. committed, response lost, same-key retry: one refund, one audit row, no stock or payment side effect twice", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    const stockBefore = await stockMovementCount();
+    const request = refundRequest(paymentId);
+    const before = await writeSurface();
+    const first = await call(payments.refundPaymentFn, request); // committed; response lost
+    const retry = await call(payments.refundPaymentFn, request);
+    const refunds = await eventsOf(paymentId, "refund");
+    const audits = await auditsSince(before);
+    console.log(
+      `[evidence] refund lost response + same-key retry: [${codeOf(first)},${codeOf(retry)}] ` +
+        `refunds=[${refunds.map((e) => `${e.amount_minor}:${who(e.actor_user_id)}`)}] ` +
+        `audits=[${audits.map((a) => `${a.action}:${who(a.actor_user_id)}`)}]`,
+    );
+    expect([codeOf(first), codeOf(retry)]).toEqual(["ok", "ok"]);
+    expect(refunds.map((e) => [e.amount_minor, who(e.actor_user_id)])).toEqual([[4000, "A"]]);
+    expect(await orderMoney(orderId)).toEqual({
+      payment_status: "paid",
+      refund_status: "partial",
+      received_minor: 10000,
+      refunded_minor: 4000,
+    });
+    expect((await paymentRow(paymentId)).status).toBe("paid");
+    expect(await stockMovementCount()).toBe(stockBefore);
+    expect(
+      audits.map((a) => [a.action, who(a.actor_user_id), a.after_json.refunded_amount_minor]),
+    ).toEqual([["payments.refund", "A", 4000]]);
+  });
+
+  it("D2. the pre-repair bundle's keyless retry of a committed refund is refused — the money moves once", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    // The pre-repair Payment detail sent exactly this: no key, no refunded total, no principal.
+    const legacy = { paymentId, amountMinor: 4000, reason: "Customer returned one cup" };
+    const first = await call(payments.refundPaymentFn, legacy);
+    const retry = await call(payments.refundPaymentFn, legacy);
+    const refunds = await eventsOf(paymentId, "refund");
+    console.log(
+      `[evidence] keyless refund (old bundle) twice: [${codeOf(first)},${codeOf(retry)}] ` +
+        `refunds=[${refunds.map((e) => e.amount_minor)}] refunded=${(await orderMoney(orderId)).refunded_minor}`,
+    );
+    expect(codeOf(first)).not.toBe("ok");
+    expect(codeOf(retry)).not.toBe("ok");
+    expect(refunds).toEqual([]);
+  });
+
+  it("D3. a retry with a fresh key but the refunded total it last saw is refused as stale", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    expect(codeOf(await call(payments.refundPaymentFn, refundRequest(paymentId)))).toBe("ok");
+    // The screen remounted and lost its key, but still shows "nothing refunded".
+    const before = await writeSurface();
+    const stale = await call(payments.refundPaymentFn, refundRequest(paymentId));
+    const wrote = ledgerWritesSince(before, await writeSurface());
+    console.log(
+      `[evidence] refund retried under a new key, stale total: ${codeOf(stale)} wrote=[${wrote}]`,
+    );
+    expect(codeOf(stale)).toBe("refund_stale");
+    expect(wrote).toEqual([]);
+    expect((await orderMoney(orderId)).refunded_minor).toBe(4000);
+  });
+
+  it("D4. a deliberate second refund, made after re-reading the payment, is applied and audited", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    const before = await writeSurface();
+    expect(codeOf(await call(payments.refundPaymentFn, refundRequest(paymentId)))).toBe("ok");
+    const second = await call(
+      payments.refundPaymentFn,
+      refundRequest(paymentId, { expectedRefundedMinor: 4000 }),
+    );
+    expect(codeOf(second)).toBe("ok");
+    expect((await eventsOf(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([4000, 4000]);
+    expect((await orderMoney(orderId)).refunded_minor).toBe(8000);
+    expect((await auditsSince(before)).map((a) => [a.action, who(a.actor_user_id)])).toEqual([
+      ["payments.refund", "A"],
+      ["payments.refund", "A"],
+    ]);
+  });
+
+  it("D5. a full refund retried after a lost response refunds once and moves the payment once", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    const request = refundRequest(paymentId, { amountMinor: 10000 });
+    expect(codeOf(await call(payments.refundPaymentFn, request))).toBe("ok");
+    expect(codeOf(await call(payments.refundPaymentFn, request))).toBe("ok");
+    expect((await eventsOf(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([10000]);
+    expect((await paymentRow(paymentId)).status).toBe("refunded");
+    expect(await orderMoney(orderId)).toMatchObject({
+      refund_status: "full",
+      refunded_minor: 10000,
+    });
+  });
+
+  it("D6. two simultaneous refunds started from the same screen state: one is applied, the other is stale", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    const [a, b] = await Promise.all([
+      call(payments.refundPaymentFn, refundRequest(paymentId, { amountMinor: 6000 })),
+      call(payments.refundPaymentFn, refundRequest(paymentId, { amountMinor: 6000 })),
+    ]);
+    expect([codeOf(a), codeOf(b)].sort()).toEqual(["ok", "refund_stale"]);
+    expect((await orderMoney(orderId)).refunded_minor).toBe(6000);
+  });
+
+  it("D7. a refund over what remains is refused, nothing written but the attempt's rate-limit token", async () => {
+    const { paymentId } = await seedPaidPayment();
+    const before = await writeSurface();
+    const over = await call(
+      payments.refundPaymentFn,
+      refundRequest(paymentId, { amountMinor: 10001 }),
+    );
+    expect(codeOf(over)).toBe("status_409");
+    // An authorized attempt is counted (the limiter runs after the permission
+    // check, by design); no money, ledger or audit row moves.
+    expect(wroteSince(before, await writeSurface())).toEqual(["rateLimits"]);
+  });
+});

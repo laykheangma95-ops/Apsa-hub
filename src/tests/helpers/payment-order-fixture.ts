@@ -28,6 +28,8 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
     // 061 revokes browser authority on every relation by name, including 040's
     // order_payment_totals view — so it waits for applyAuthority() as well.
     if (skipAuthority && name.startsWith("061_")) continue;
+    // 062 replaces 040's record_payment_v1 and wraps its refund_payment_v1.
+    if (skipAuthority && name.startsWith("062_")) continue;
     try {
       await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
     } catch (error) {
@@ -128,6 +130,9 @@ export async function financialFixture(skipAuthority = false, skipReferencelessD
       await db.exec(readFileSync("supabase/migrations/060_customer_purchase_profile.sql", "utf8"));
       await db.exec(
         readFileSync("supabase/migrations/061_browser_table_authority_hardening.sql", "utf8"),
+      );
+      await db.exec(
+        readFileSync("supabase/migrations/062_financial_replay_refund_audit_atomicity.sql", "utf8"),
       );
     },
   };

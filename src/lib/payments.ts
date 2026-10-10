@@ -455,6 +455,16 @@ export function refundEventsOf(detail: UiPaymentDetail): UiPaymentEvent[] {
   return detail.events.filter((event) => event.eventType === "refund");
 }
 
+/**
+ * The refunded total THIS payment's ledger shows: the sum of its refund
+ * events, in integer minor units of the payment's own currency. Sent with a
+ * refund as the total it was started from — the server's own sum is the
+ * authority; a mismatch refuses the refund as stale.
+ */
+export function refundedMinorOf(detail: UiPaymentDetail): number {
+  return refundEventsOf(detail).reduce((sum, event) => sum + (event.amount?.amount ?? 0), 0);
+}
+
 // ── Error classification ──────────────────────────────────────────────────────
 //
 // src/server/payments/service.ts throws Error instances carrying a

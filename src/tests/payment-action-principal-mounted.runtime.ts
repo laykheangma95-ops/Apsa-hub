@@ -749,6 +749,70 @@ describe("Payment detail: verify / refund / reverse run as the member who tapped
     expect(money!.refund_status).toBe("partial");
   });
 
+  it("RF2. Refund committed but its response was lost: tapping Refund again in the open sheet refunds ONCE", async () => {
+    const { orderId, paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund(); // committed server-side; the browser saw "Failed to fetch"
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    await submitRefund(); // the merchant taps again
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the retry");
+    const refunds = await events(paymentId, "refund");
+    const [order] = (
+      await db.query<Json>("select refund_status from orders where id = $1", [orderId])
+    ).rows;
+    console.log(
+      `[evidence] payment detail refund, lost response + retry: server=[${outcomes()}] ` +
+        `sameKey=${Boolean(sent[0]!.data.idempotencyKey) && sent[0]!.data.idempotencyKey === sent[1]!.data.idempotencyKey} ` +
+        `refunds=[${refunds.map((e) => e.amount_minor)}] audits=[${await auditsFor(paymentId, "payments.refund")}] ` +
+        `orderRefund=${order!.refund_status}`,
+    );
+    expect(sent[0]!.data.idempotencyKey).toBeTruthy();
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(sent.map((s) => s.data.expectedRefundedMinor)).toEqual([0, 0]);
+    expect(outcomes()).toEqual(["ok", "ok"]); // the retry is the original refund, replayed
+    expect(refunds.map((e) => [e.amount_minor, who(e.actor_user_id)])).toEqual([[4000, "A"]]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+    expect(order!.refund_status).toBe("partial");
+  });
+
+  it("RF3. Refund response lost, then the screen remounts still showing the old total: re-submitting refunds ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    // The merchant leaves and comes back before the screen has caught up with
+    // the committed refund (its cached payment still shows nothing refunded).
+    await unmount();
+    client.setDefaultOptions({ queries: { retry: false, staleTime: Infinity } });
+    await mount({ kind: "payment" }, true);
+    await waitFor(() => containing(en.payments.actions.refund.label), "the payment actions");
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the retry");
+    const refunds = await events(paymentId, "refund");
+    console.log(
+      `[evidence] payment detail refund, lost response + remount + retry: server=[${outcomes()}] ` +
+        `sameKey=${sent[0]!.data.idempotencyKey === sent[1]!.data.idempotencyKey} refunds=[${refunds.map((e) => e.amount_minor)}]`,
+    );
+    // The page-lifetime key survived the remount: the retry is a replay.
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(refunds.map((e) => e.amount_minor)).toEqual([4000]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
   it("RV1. organization A → B during Reverse: refused, nothing written in either organization", async () => {
     const { paymentId } = await seedPayment(true);
     await openPayment(paymentId);

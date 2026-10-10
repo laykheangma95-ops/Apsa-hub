@@ -766,8 +766,19 @@ describe("Test 13: Reversal appends an event", () => {
   });
 });
 
-describe("Test 14: Refund appends an event; audit is fail-closed", () => {
-  it("refundPayment calls refund_payment_v1 with the amount and reason", async () => {
+describe("Test 14: Refund appends an event; its mandatory audit is in the same transaction", () => {
+  /** One logical refund as the Payment detail screen sends it (migration 062). */
+  const refund = (ctx: AuthCtxType, change: Record<string, unknown> = {}) => ({
+    paymentId: PAYMENT_ID,
+    amountMinor: 400,
+    reason: "Partial refund — damaged item",
+    idempotencyKey: "refund-click-1",
+    expectedRefundedMinor: 0,
+    expectedPrincipal: principalOf(ctx),
+    ...change,
+  });
+
+  it("refundPayment calls refund_payment_v2 with the amount, reason, key, refunded total and the server's actor", async () => {
     const { refundPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
@@ -779,28 +790,30 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          refund_payment_v1: {
+          refund_payment_v2: {
             data: { status: "success", refunded_total: 400, fully_refunded: false },
             error: null,
           },
         },
       },
       async (recorded) => {
-        await refundPayment(
-          ctx,
-          PAYMENT_ID,
-          400,
-          "Partial refund — damaged item",
-          null,
-          principalOf(ctx),
-        );
+        await refundPayment(ctx, refund(ctx));
         return recorded;
       },
     );
 
-    const call = calls.find((c) => c.fn === "refund_payment_v1");
-    expect(call?.args["p_amount_minor"]).toBe(400);
-    expect(call?.args["p_reason"]).toBe("Partial refund — damaged item");
+    const call = calls.find((c) => c.fn === "refund_payment_v2");
+    expect(call?.args).toEqual({
+      p_organization_id: ORG_A_ID,
+      p_payment_id: PAYMENT_ID,
+      p_actor: USER_ORG_A,
+      p_amount_minor: 400,
+      p_reason: "Partial refund — damaged item",
+      p_idempotency_key: "refund-click-1",
+      p_expected_refunded_minor: 0,
+    });
+    // The retired, non-atomic RPC is never called.
+    expect(calls.some((c) => c.fn === "refund_payment_v1")).toBe(false);
   });
 
   it("a partial refund leaves the payment's status untouched by the service (DB decides finality)", async () => {
@@ -815,13 +828,13 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          refund_payment_v1: {
+          refund_payment_v2: {
             data: { status: "success", refunded_total: 400, fully_refunded: false },
             error: null,
           },
         },
       },
-      () => refundPayment(ctx, PAYMENT_ID, 400, "Partial refund", null, principalOf(ctx)),
+      () => refundPayment(ctx, refund(ctx, { reason: "Partial refund" })),
     );
 
     // The service never writes payments.status itself — it always re-reads the
@@ -838,7 +851,7 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
       {
         tables: { payments: paymentRow({ status: "paid", amount_minor: 1000 }) },
         rpc: {
-          refund_payment_v1: {
+          refund_payment_v2: {
             data: {
               status: "invalid_amount",
               reason: "exceeds_paid_amount",
@@ -851,7 +864,7 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
       },
       async () => {
         const err = await expectRejects(() =>
-          refundPayment(ctx, PAYMENT_ID, 500, "Too much", null, principalOf(ctx)),
+          refundPayment(ctx, refund(ctx, { amountMinor: 500, reason: "Too much" })),
         );
         expect(err.message).toMatch(/exceeds what remains/i);
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
@@ -859,15 +872,34 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
     );
   });
 
-  it("reports failure when the separate mandatory refund audit cannot be persisted", async () => {
-    mock.module("@/server/auth/audit", () => ({
-      auditLog: async () => {},
-      auditLogRequired: async () => {
-        throw new Error("Audit record could not be persisted");
-      },
-      MANDATORY_AUDIT_ACTIONS: new Set(["payments.refund"]),
-    }));
+  it("maps a replay conflict and a stale refunded total to their own 409s", async () => {
+    const { refundPayment } = await import("../server/payments/service");
+    const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
+    for (const [status, code] of [
+      ["idempotency_conflict", "idempotency_conflict"],
+      ["stale", "refund_stale"],
+    ] as const) {
+      await withPaymentDb(
+        {
+          tables: { payments: paymentRow({ status: "paid" }) },
+          rpc: { refund_payment_v2: { data: { status }, error: null } },
+        },
+        async () => {
+          const err = (await expectRejects(() => refundPayment(ctx, refund(ctx)))) as Error & {
+            statusCode?: number;
+            code?: string;
+          };
+          expect({ status, statusCode: err.statusCode, code: err.code }).toEqual({
+            status,
+            statusCode: 409,
+            code,
+          });
+        },
+      );
+    }
+  });
 
+  it("an audit-store failure inside refund_payment_v2 is a public 503 — the refund rolled back with it", async () => {
     const { refundPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
@@ -875,32 +907,27 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
       {
         tables: { payments: paymentRow({ status: "paid" }) },
         rpc: {
-          refund_payment_v1: {
-            data: { status: "success", refunded_total: 1000, fully_refunded: true },
-            error: null,
+          refund_payment_v2: {
+            data: null,
+            error: { message: "apsa_audit_unavailable" },
           },
         },
       },
       async () => {
-        await expect(
-          refundPayment(ctx, PAYMENT_ID, 1000, "Full refund", null, principalOf(ctx)),
-        ).rejects.toThrow(/could not be persisted/i);
+        const err = (await expectRejects(() => refundPayment(ctx, refund(ctx)))) as Error & {
+          statusCode?: number;
+          code?: string;
+        };
+        expect([err.statusCode, err.code]).toEqual([503, "audit_unavailable"]);
       },
     );
-
-    restoreDefaultAuditMock();
   });
 
-  it("a keyed refund retry repairs an earlier mandatory audit failure before succeeding", async () => {
-    let attempts = 0;
-    const persisted: Array<{ afterJson?: { replayed?: boolean } }> = [];
+  it("the service never writes a refund audit row of its own — not on a first refund, not on a replay", async () => {
+    const written: unknown[] = [];
     mock.module("@/server/auth/audit", () => ({
-      auditLog: async () => {},
-      auditLogRequired: async (_ctx: unknown, payload: { afterJson?: { replayed?: boolean } }) => {
-        attempts++;
-        if (attempts === 1) throw new Error("Audit record could not be persisted");
-        persisted.push(payload);
-      },
+      auditLog: async (_ctx: unknown, payload: unknown) => written.push(payload),
+      auditLogRequired: async (_ctx: unknown, payload: unknown) => written.push(payload),
       MANDATORY_AUDIT_ACTIONS: new Set(["payments.refund"]),
     }));
     const { refundPayment } = await import("../server/payments/service");
@@ -915,32 +942,18 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
               payment_evidence: emptyEvidence,
             },
             rpc: {
-              refund_payment_v1: {
+              refund_payment_v2: {
                 data: { status: "success", refunded_total: 400, fully_refunded: false, replayed },
                 error: null,
               },
             },
           },
-          async (calls) => {
-            const result = refundPayment(
-              ctx,
-              PAYMENT_ID,
-              400,
-              "Partial refund",
-              "refund-retry",
-              principalOf(ctx),
-            );
-            if (replayed) await expect(result).resolves.toBeDefined();
-            else await expect(result).rejects.toThrow("could not be persisted");
-            expect(calls.find((c) => c.fn === "refund_payment_v1")?.args["p_idempotency_key"]).toBe(
-              "refund-retry",
-            );
-          },
+          () => refundPayment(ctx, refund(ctx)),
         );
       }
-      expect(attempts).toBe(2);
-      expect(persisted).toHaveLength(1);
-      expect(persisted[0]?.afterJson?.replayed).toBe(true);
+      // refund_payment_v2 writes payments.refund in the refund's own
+      // transaction; a replay writes nothing at all.
+      expect(written).toEqual([]);
     } finally {
       restoreDefaultAuditMock();
     }

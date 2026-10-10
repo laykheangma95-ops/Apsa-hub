@@ -587,9 +587,17 @@ describe("public error shape", () => {
   });
 
   it("the audit-blocked refusal is public, classifiable and carries no database text", () => {
+    // Built in one place (audit-unavailable.ts) for the separate audit write and
+    // the in-transaction one (migration 062); neither carries database text.
     const audit = read("src/server/auth/audit.ts");
-    expect(audit).toContain('"audit_unavailable",');
-    expect(audit).not.toContain("audit trail. (${msg})");
+    const refusal = read("src/server/auth/audit-unavailable.ts");
+    expect(refusal).toContain('"audit_unavailable",');
+    expect(audit).toContain("throw auditUnavailableError(payload.action);");
+    for (const source of [audit, refusal]) expect(source).not.toContain("audit trail. (${msg})");
+    // The in-transaction refusal never carries the database's own error into the message.
+    expect(read("src/server/payments/repository.ts")).not.toMatch(
+      /auditUnavailableError\([^)]*error/,
+    );
     const wire = new Error(
       "Audit record could not be persisted for action 'inventory.adjust'. The operation was blocked to preserve the audit trail.",
     );

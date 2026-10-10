@@ -2030,15 +2030,39 @@ export async function verifyRealPayment(
  * immutable refund event ledger; `amountMinor` is this one refund only, in the
  * payment's own currency, as an integer minor unit.
  */
+export interface RealRefundRequest {
+  /** This refund only, in the payment's own currency — an integer minor amount. */
+  amountMinor: number;
+  reason: string;
+  /**
+   * The refunded total the screen showed when the merchant started this
+   * refund (refundedMinorOf). The server refuses the refund as stale — writing
+   * nothing — when the payment's refunds have changed since.
+   */
+  expectedRefundedMinor: number;
+  /**
+   * One logical refund's key — the same on every retry of it (the caller
+   * holds it; see app.payments.$id.tsx). The server replays the refund it
+   * already made under it instead of making a second one.
+   */
+  idempotencyKey: string;
+}
+
 export async function refundRealPayment(
   paymentId: string,
   principal: InitiatingPrincipal,
-  amountMinor: number,
-  reason: string,
+  refund: RealRefundRequest,
 ): Promise<UiPaymentDetail> {
   const { refundPaymentFn } = await import("@/api/payments");
   const detail = await refundPaymentFn({
-    data: { paymentId, amountMinor, reason, expectedPrincipal: principal },
+    data: {
+      paymentId,
+      amountMinor: refund.amountMinor,
+      reason: refund.reason,
+      expectedRefundedMinor: refund.expectedRefundedMinor,
+      idempotencyKey: refund.idempotencyKey,
+      expectedPrincipal: principal,
+    },
   });
   return mapPaymentDetailToUi(detail);
 }

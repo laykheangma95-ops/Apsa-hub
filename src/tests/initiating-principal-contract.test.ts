@@ -249,14 +249,14 @@ const SERVICE_CASES: ServiceCase[] = [
   {
     name: "refundPayment",
     file: "src/server/payments/service.ts",
-    check: "assertExpectedPrincipal(ctx, expectedPrincipal);",
+    check: "assertExpectedPrincipal(ctx, input.expectedPrincipal);",
     later: [
       'ctx.require("payments.refund")',
       "enforcePaymentReversalLimit(",
       "repo.findPaymentById(",
       "repo.refundPayment(",
     ],
-    writesAs: /repo\.refundPayment\(\s*ctx\.organizationId,\s*paymentId,\s*ctx\.userId,/,
+    writesAs: /repo\.refundPayment\(\s*ctx\.organizationId,\s*input\.paymentId,\s*ctx\.userId,/,
   },
   {
     name: "reversePayment",
@@ -325,6 +325,9 @@ describe("each protected service checks it before anything else and records only
       "expectedPrincipal: ExpectedPrincipal;",
     );
     expect(between(payments, "export interface AttachEvidenceServiceInput", "\n}\n")).toContain(
+      "expectedPrincipal: ExpectedPrincipal;",
+    );
+    expect(between(payments, "export interface RefundPaymentServiceInput", "\n}\n")).toContain(
       "expectedPrincipal: ExpectedPrincipal;",
     );
   });
@@ -534,7 +537,7 @@ describe("every call site passes the principal its attempt was started as", () =
       count(route, "const memberPrincipal = { userId, organizationId: routeOrganizationId };"),
     ).toBe(1);
     expect(route).toContain("verifyRealPayment(id, to, startedAs, reason)");
-    expect(route).toMatch(/refundRealPayment\(id, startedAs,/);
+    expect(route).toMatch(/refundRealPayment\(id, attempt\.startedAs, \{/);
     expect(route).toContain("reverseRealPayment(id, startedAs, reason)");
     // Each tap passes the principal it was made as — never one re-read later.
     expect(count(route, "startedAs: memberPrincipal")).toBe(3);
