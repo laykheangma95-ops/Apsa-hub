@@ -71,6 +71,8 @@ import {
   verifyRealPayment,
 } from "@/lib/api";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import { sharedIdempotencyHolder, type IdempotencyClaim } from "@/lib/idempotency";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { ordersKeys } from "@/lib/orders-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { notifyError, notifySuccess } from "@/lib/feedback";
@@ -86,6 +88,7 @@ import {
   paymentErrorKey,
   paymentNeedsReview,
   refundEventsOf,
+  refundedMinorOf,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
   type PaymentVerificationState,
   type UiPaymentDetail,
@@ -127,6 +130,18 @@ const EVENT_TONE: Record<string, TimelineItem["tone"]> = {
   refund: "warning",
   duplicate_flagged: "warning",
 };
+
+/** One logical refund, as the merchant started it. */
+interface RefundAttempt {
+  amountMinor: number;
+  reason: string;
+  /** The refunded total on screen when it was started. */
+  expectedRefundedMinor: number;
+  idempotencyKey: string;
+  /** Retired only once the server accepted it, so a retry keeps the key. */
+  claim: IdempotencyClaim;
+  startedAs: InitiatingPrincipal;
+}
 
 function PaymentDetailScreen() {
   const { id } = Route.useParams();
@@ -215,9 +230,25 @@ function PaymentDetailScreen() {
     notifyError(message);
   }
 
+  /*
+   * The member + organization this screen acts as. Each action hands it to its
+   * mutation as a VARIABLE at the tap (CORRECTIONS.md, CORRECTION-004): the
+   * request carries the principal it was started as, and the server refuses it
+   * — writing nothing — if a member or organization switch lands before it is
+   * handled. Never authorization; the server derives that itself.
+   */
+  const memberPrincipal = { userId, organizationId: routeOrganizationId };
+
   const verifyMutation = useMutation({
-    mutationFn: ({ to, reason }: { to: PaymentVerificationState; reason: string | undefined }) =>
-      verifyRealPayment(id, to, reason),
+    mutationFn: ({
+      to,
+      reason,
+      startedAs,
+    }: {
+      to: PaymentVerificationState;
+      reason: string | undefined;
+      startedAs: typeof memberPrincipal;
+    }) => verifyRealPayment(id, to, startedAs, reason),
     onSuccess: (_detail, variables) => {
       setVerifyTarget(null);
       setActionError(null);
@@ -228,9 +259,16 @@ function PaymentDetailScreen() {
   });
 
   const refundMutation = useMutation({
-    mutationFn: ({ amountMinor, reason }: { amountMinor: number; reason: string }) =>
-      refundRealPayment(id, amountMinor, reason),
-    onSuccess: () => {
+    mutationFn: (attempt: RefundAttempt) =>
+      refundRealPayment(id, attempt.startedAs, {
+        amountMinor: attempt.amountMinor,
+        reason: attempt.reason,
+        expectedRefundedMinor: attempt.expectedRefundedMinor,
+        idempotencyKey: attempt.idempotencyKey,
+      }),
+    onSuccess: (_detail, attempt) => {
+      // Accepted: that logical refund is done — the next one gets a new key.
+      attempt.claim.retire();
       setRefundOpen(false);
       setActionError(null);
       invalidatePayments();
@@ -240,7 +278,8 @@ function PaymentDetailScreen() {
   });
 
   const reverseMutation = useMutation({
-    mutationFn: (reason: string) => reverseRealPayment(id, reason),
+    mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof memberPrincipal }) =>
+      reverseRealPayment(id, startedAs, reason),
     onSuccess: () => {
       setReverseOpen(false);
       setActionError(null);
@@ -654,7 +693,7 @@ function PaymentDetailScreen() {
         error={actionError}
         onConfirm={(reason) => {
           if (!verifyTarget) return;
-          verifyMutation.mutate({ to: verifyTarget, reason });
+          verifyMutation.mutate({ to: verifyTarget, reason, startedAs: memberPrincipal });
         }}
       />
 
@@ -664,7 +703,34 @@ function PaymentDetailScreen() {
         principal={payment.amount}
         pending={refundMutation.isPending}
         error={actionError}
-        onConfirm={(amountMinor, reason) => refundMutation.mutate({ amountMinor, reason })}
+        onConfirm={(amountMinor, reason) => {
+          /*
+           * One logical refund, one key — held for the page's lifetime in this
+           * member + organization's scope, so a retry after a lost response
+           * (from this sheet, or after leaving the payment and coming back)
+           * re-sends it and the server replays the refund it already made
+           * (migration 062). The refunded total on screen travels with it: a
+           * retry from a screen that has not seen the committed refund is
+           * refused as stale, never applied twice.
+           */
+          const expectedRefundedMinor = refundedMinorOf(payment);
+          const claim = sharedIdempotencyHolder({
+            userId,
+            organizationId: routeOrganizationId,
+            flow: "payment-refund",
+            subject: id,
+          }).claim();
+          refundMutation.mutate({
+            amountMinor,
+            reason,
+            expectedRefundedMinor,
+            idempotencyKey: claim.keyFor(
+              JSON.stringify([amountMinor, reason, expectedRefundedMinor]),
+            ),
+            claim,
+            startedAs: memberPrincipal,
+          });
+        }}
       />
 
       <PaymentReverseSheet
@@ -672,7 +738,7 @@ function PaymentDetailScreen() {
         onOpenChange={setReverseOpen}
         pending={reverseMutation.isPending}
         error={actionError}
-        onConfirm={(reason) => reverseMutation.mutate(reason)}
+        onConfirm={(reason) => reverseMutation.mutate({ reason, startedAs: memberPrincipal })}
       />
     </ScreenBleed>
   );

@@ -12,6 +12,7 @@ import {
   createSale,
   isProductionId,
   recordRealPayment,
+  type RecordRealPaymentInput,
 } from "@/lib/api";
 import {
   RecordOrderPaymentSheet,
@@ -19,7 +20,7 @@ import {
 } from "@/components/orders/RecordOrderPaymentSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
-import { createIdempotencyKeyHolder } from "@/lib/idempotency";
+import type { ScopedIdempotencyHolders } from "@/lib/idempotency";
 import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
@@ -53,6 +54,14 @@ interface PosCheckoutSheetProps {
    */
   userId: string;
   organizationId: string;
+  /**
+   * Replay keys, one holder per member + organization (createScopedIdempotency
+   * Holders), owned by the POS screen ABOVE the principal-keyed till that
+   * mounts this sheet: the till — and this sheet with it — is remounted for a
+   * different member or organization, and an unresolved key must survive that
+   * remount and the switch back. See idempotencyKeys below.
+   */
+  replayHolders: ScopedIdempotencyHolders;
 }
 
 const METHODS: PaymentMethod[] = ["cash", "khqr", "bank_transfer", "cod"];
@@ -67,6 +76,7 @@ export function PosCheckoutSheet({
   onCompleted,
   userId,
   organizationId,
+  replayHolders,
 }: PosCheckoutSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -192,7 +202,10 @@ export function PosCheckoutSheet({
 
   /*
    * A different member or organization is a different till: nothing the sheet
-   * holds (an order, a failure, an in-flight attempt) belongs to it.
+   * holds (an order, a failure, an in-flight attempt) belongs to it. The
+   * replay key is not the session's: it stays with its member + organization's
+   * holder (see idempotencyKeys), unreachable from the new principal, for when
+   * the switch comes back.
    */
   const principalKey = `${userId}\u0000${organizationId}`;
   const principalRef = useRef(principalKey);
@@ -205,9 +218,6 @@ export function PosCheckoutSheet({
     if (principalRef.current === principalKey) return;
     principalRef.current = principalKey;
     resetRef.current();
-    // Replay protection is the old principal's too: a new holder, so neither
-    // a key nor a stale claim on it crosses into the new member/organization.
-    idempotencyKeys.current = createIdempotencyKeyHolder();
   }, [principalKey]);
   useEffect(
     () => () => {
@@ -232,8 +242,31 @@ export function PosCheckoutSheet({
    * held, so B (same cart) is answered with A's order rather than a second one.
    * Once an attempt is accepted the key is retired, so the next sale is always
    * a new order.
+   *
+   * Replay protection outlives a member or organization switch: one holder
+   * PER member + organization (createScopedIdempotencyHolders), owned by the
+   * POS screen above this sheet (the `replayHolders` prop) rather than by the
+   * sheet. The sheet used to replace its one holder on every switch, which
+   * discarded an unresolved key: "lost response in A → B → back to A → the
+   * identical cart" minted a new key and the server created a second order.
+   * And the till that mounts this sheet is now remounted per principal, so a
+   * holder owned here would die with it. Now no key or claim crosses into
+   * another principal, and A's unresolved key is waiting for A's retry. The
+   * holder is looked up per attempt, as the principal that attempt's token
+   * records — the one the request is sent as.
    */
-  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
+  const idempotencyKeys = {
+    claim: (principal: { userId: string; organizationId: string }) =>
+      replayHolders
+        // No subject: one checkout flow per member and organization.
+        .holderFor({
+          userId: principal.userId,
+          organizationId: principal.organizationId,
+          flow: "pos-checkout",
+          subject: "",
+        })
+        .claim(),
+  };
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
 
   /*
@@ -332,13 +365,19 @@ export function PosCheckoutSheet({
   }
 
   const recordPaymentMutation = useMutation({
-    mutationFn: (submit: RecordOrderPaymentSubmit & { orderId: string }) =>
+    mutationFn: (
+      submit: RecordOrderPaymentSubmit & {
+        orderId: string;
+        principal: RecordRealPaymentInput["principal"];
+      },
+    ) =>
       recordRealPayment({
         orderId: submit.orderId,
         method: submit.method,
         amountMinor: submit.amountMinor,
         ...(submit.reference ? { reference: submit.reference } : {}),
         idempotencyKey: submit.idempotencyKey,
+        principal: submit.principal,
       }),
     // The payment session this was submitted from — see "Payment entry
     // identity". A response for a form the merchant has since closed (and
@@ -466,14 +505,25 @@ export function PosCheckoutSheet({
     // reaches the server. (Once an order exists the cart is already cleared,
     // and a retry only confirms that order — see below.)
     if (!orderId && (!priced || block)) return;
-    // This attempt's own claim on the replay key (see idempotencyKeys).
-    const claim = idempotencyKeys.current.claim();
     submittingRef.current = true;
     setSubmitting(true);
     setRealFailure(null);
     // Bound to the cart only until an order exists; after that it is bound to
     // the order (this sheet session), and the cleared cart no longer matters.
     const token = beginAttempt(!orderId);
+    /*
+     * The principal this attempt was started as — the same one its token and
+     * its replay claim are bound to — sent with BOTH of its server mutations
+     * (create, then confirm). The server derives who is acting only when it
+     * handles each request, after the lazy import and the trip; if the member
+     * or organization changed in between, it refuses instead of executing this
+     * cart or this confirmation as someone else, and nothing is written — so
+     * this principal's retry still owns the key, and the order its confirm.
+     */
+    const principal = { userId: token.userId, organizationId: token.organizationId };
+    // This attempt's own claim on the replay key of the member and
+    // organization it is sent as (see idempotencyKeys).
+    const claim = idempotencyKeys.claim(token);
     try {
       // Tracked locally, not read back from state: the setRealDetail() calls
       // below are async/batched and would not be visible yet within this
@@ -495,6 +545,7 @@ export function PosCheckoutSheet({
           // totals, and bounds this to 0 ≤ discount ≤ subtotal.
           ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
           idempotency: claim,
+          principal,
         });
         // Abandoned (sheet closed, cart changed, another attempt began, or a
         // different member/organization): the order may exist server-side,
@@ -519,7 +570,7 @@ export function PosCheckoutSheet({
         invalidateAfterSale();
       }
       if (lifecycleStatus !== "confirmed") {
-        const confirmed = await confirmRealOrder(orderId);
+        const confirmed = await confirmRealOrder(orderId, principal);
         if (!isCurrent(token)) return;
         setRealDetail(confirmed);
         // Confirmation commits stock and moves the order's lifecycle, which
@@ -1078,7 +1129,13 @@ export function PosCheckoutSheet({
               : null
           }
           onConfirm={(submit) =>
-            recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })
+            recordPaymentMutation.mutate({
+              ...submit,
+              orderId: realDetail.order.id,
+              // This till's principal, captured at submit: a refuse-only
+              // precondition the server checks before recording anything.
+              principal: { userId, organizationId },
+            })
           }
         />
       ) : null}

@@ -13,6 +13,9 @@
  *   Recording a payment writes payments + payment_events (and possibly a
  *   duplicate_flagged event) in one transaction; verifying, reversing,
  *   refunding and correcting each write payments + payment_events together.
+ *   Refunding, reversing and correcting also write their MANDATORY audit row
+ *   inside that same transaction (the v2 RPCs, migration 062): the financial
+ *   change and its audit commit together or not at all.
  *   supabase-js has no client-side transaction, so the transaction has to
  *   live in the database — the RPC IS that transaction.
  *
@@ -29,6 +32,8 @@
  * Never import this file from browser-bundled code.
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
+import type { AuditAction } from "@/server/auth/audit";
+import { auditUnavailableError } from "@/server/auth/audit-unavailable";
 import type {
   PaymentRow,
   PaymentEventRow,
@@ -63,6 +68,17 @@ const PGRST_NO_ROW = "PGRST116";
 
 function errMessage(error: unknown): string {
   return (error as { message?: string })?.message ?? "unknown error";
+}
+
+/**
+ * A financial RPC that writes its own mandatory audit row (migration 062)
+ * raises `apsa_audit_unavailable` when that insert fails — and the whole call,
+ * money included, has rolled back. Surfaced as the same public 503 as
+ * auditLogRequired; any other database error stays an internal one.
+ */
+function rpcError(fn: string, action: AuditAction, error: unknown): Error {
+  if (errMessage(error).includes("apsa_audit_unavailable")) return auditUnavailableError(action);
+  return new Error(`${fn}: ${errMessage(error)}`);
 }
 
 // ── Writes (RPC only) ─────────────────────────────────────────────────────────
@@ -135,35 +151,47 @@ export async function reversePayment(
   actor: string | null,
   reason: string,
 ): Promise<ReversePaymentRpcResult> {
-  const { data, error } = await db.rpc("reverse_payment_v1", {
+  // reverse_payment_v2 (migration 062): 040's reversal and the mandatory
+  // payments.reverse audit row, in one transaction.
+  const { data, error } = await db.rpc("reverse_payment_v2", {
     p_organization_id: organizationId,
     p_payment_id: paymentId,
     p_actor: actor,
     p_reason: reason,
   });
 
-  if (error) throw new Error(`reversePayment: ${errMessage(error)}`);
+  if (error) throw rpcError("reversePayment", "payments.reverse", error);
   return data as ReversePaymentRpcResult;
 }
 
+/**
+ * refund_payment_v2 (migration 062): the key is required and names ONE
+ * logical refund in the organization — replayed only for the same member,
+ * payment, amount and reason; `expectedRefundedMinor` is the refunded total the
+ * request was started from, refused as `stale` when it no longer holds. The
+ * refund event, payment status, derived order state and the mandatory
+ * `payments.refund` audit row commit in that one transaction.
+ */
 export async function refundPayment(
   organizationId: string,
   paymentId: string,
   actor: string | null,
   amountMinor: number,
   reason: string,
-  idempotencyKey?: string | null,
+  idempotencyKey: string,
+  expectedRefundedMinor: number,
 ): Promise<RefundPaymentRpcResult> {
-  const { data, error } = await db.rpc("refund_payment_v1", {
+  const { data, error } = await db.rpc("refund_payment_v2", {
     p_organization_id: organizationId,
     p_payment_id: paymentId,
     p_actor: actor,
     p_amount_minor: amountMinor,
     p_reason: reason,
-    p_idempotency_key: idempotencyKey ?? null,
+    p_idempotency_key: idempotencyKey,
+    p_expected_refunded_minor: expectedRefundedMinor,
   });
 
-  if (error) throw new Error(`refundPayment: ${errMessage(error)}`);
+  if (error) throw rpcError("refundPayment", "payments.refund", error);
   return data as RefundPaymentRpcResult;
 }
 
@@ -175,7 +203,9 @@ export async function correctPayment(
   newReference: string | null,
   newNote: string | null,
 ): Promise<CorrectPaymentRpcResult> {
-  const { data, error } = await db.rpc("correct_payment_v1", {
+  // correct_payment_v2 (migration 062): 035's correction and the mandatory
+  // payments.override audit row (before/after values), in one transaction.
+  const { data, error } = await db.rpc("correct_payment_v2", {
     p_organization_id: organizationId,
     p_payment_id: paymentId,
     p_actor: actor,
@@ -184,7 +214,7 @@ export async function correctPayment(
     p_new_note: newNote,
   });
 
-  if (error) throw new Error(`correctPayment: ${errMessage(error)}`);
+  if (error) throw rpcError("correctPayment", "payments.override", error);
   return data as CorrectPaymentRpcResult;
 }
 

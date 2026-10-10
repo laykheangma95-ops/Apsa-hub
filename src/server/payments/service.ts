@@ -44,7 +44,8 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
-import { auditLog, auditLogRequired } from "@/server/auth/audit";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
+import { auditLog } from "@/server/auth/audit";
 import { enforceRateLimits } from "@/server/rate-limit/limiter";
 import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { Money, Currency } from "@/types";
@@ -361,7 +362,9 @@ function conflict(message: string): Error {
  * Best-effort audit write that genuinely cannot fail the operation it
  * describes — same rationale as src/server/orders/service.ts#bestEffortAudit.
  * Reserved for routine actions (record, evidence, staff confirm, manager
- * verify). Reversal, refund and override use auditLogRequired instead.
+ * verify). Reversal, refund and override are MANDATORY audits and are written
+ * by their own RPC, in the same transaction as the money (migration 062) —
+ * never by a second write from here.
  */
 async function bestEffortAudit(
   ctx: AuthorizationContext,
@@ -378,6 +381,18 @@ async function bestEffortAudit(
   }
 }
 
+/**
+ * A replay key that names a different request or another member's operation
+ * (migration 062). Nothing was written; nothing is handed back.
+ */
+function idempotencyConflict(): Error {
+  return publicError(
+    "This request's idempotency key was already used for a different request",
+    409,
+    "idempotency_conflict",
+  );
+}
+
 function recordFailureToError(result: { status: string }): Error {
   switch (result.status) {
     case "invalid_amount":
@@ -385,7 +400,10 @@ function recordFailureToError(result: { status: string }): Error {
     case "invalid_method":
       return badRequest("Invalid payment method");
     case "order_not_found":
+    case "not_found":
       return notFound("Order not found");
+    case "idempotency_conflict":
+      return idempotencyConflict();
     default:
       return new Error(`Payment record failed: ${result.status}`);
   }
@@ -450,6 +468,18 @@ function refundFailureToError(result: {
       return result.reason === "exceeds_paid_amount"
         ? conflict("Refund amount exceeds what remains to be refunded")
         : badRequest("Refund amount must be a positive integer minor amount");
+    case "idempotency_conflict":
+      return idempotencyConflict();
+    case "stale":
+      return publicError(
+        "This payment's refunds changed after this refund was started — re-read it and try again",
+        409,
+        "refund_stale",
+      );
+    case "idempotency_key_required":
+      return badRequest("A refund idempotency key is required");
+    case "expected_refunded_required":
+      return badRequest("The refunded total this refund was started from is required");
     default:
       return new Error(`Payment refund failed: ${result.status}`);
   }
@@ -477,6 +507,12 @@ export interface RecordPaymentServiceInput {
   reference?: string | null | undefined;
   idempotencyKey?: string | null | undefined;
   note?: string | null | undefined;
+  /**
+   * The member + organization the client started this payment as — a
+   * required, refuse-only precondition (assertExpectedPrincipal), never a
+   * credential. The recorder, the ledger actor and the audit actor stay `ctx`.
+   */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 // ── Abuse limits ──────────────────────────────────────────────────────────────
@@ -528,6 +564,10 @@ export async function recordPayment(
   ctx: AuthorizationContext,
   input: RecordPaymentServiceInput,
 ): Promise<PaymentDetail> {
+  // Started as another member or organization: refused before the method,
+  // the permission, the rate limit, the order read and every write (payment,
+  // payment event, order payment state, audit).
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   /*
    * Validate the method BEFORE deriving its permission: an unknown method must
    * be rejected as a bad request, never used to index the permission table
@@ -589,6 +629,8 @@ export interface AttachEvidenceServiceInput {
   storageRef: string;
   extractedAmountMinor?: number | null | undefined;
   extractedReference?: string | null | undefined;
+  /** Refuse-only (assertExpectedPrincipal): who started this attachment. */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 /**
@@ -600,6 +642,9 @@ export async function attachEvidence(
   ctx: AuthorizationContext,
   input: AttachEvidenceServiceInput,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the rate limit, the payment read and the
+  // evidence / event / audit write.
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("payments.record");
   await enforcePaymentMutationLimit(ctx);
 
@@ -681,9 +726,14 @@ export async function verifyPayment(
   ctx: AuthorizationContext,
   paymentId: string,
   to: PaymentVerificationState,
-  reason?: string | null,
-  metadata?: Record<string, unknown> | null,
+  reason: string | null | undefined,
+  metadata: Record<string, unknown> | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this verification. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Started as another member or organization: refused before the target's
+  // permission, the rate limit, the payment read and every write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   const permission = VERIFICATION_TRANSITION_PERMISSIONS[to];
   // Permission is checked before the payment is loaded, so an unauthorized
   // caller cannot use timing or error shape to learn whether a payment id is real.
@@ -726,13 +776,22 @@ export async function reversePayment(
   ctx: AuthorizationContext,
   paymentId: string,
   reason: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this reversal. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (status, event, order state, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("payments.reverse");
   await enforcePaymentReversalLimit(ctx);
 
   if (!reason?.trim()) throw badRequest("A reversal reason is required");
   await loadTransitionTarget(ctx, paymentId);
 
+  // Reversal is a fail-closed, mandatory-audit action: reverse_payment_v2
+  // writes the reversal, the order state and the payments.reverse audit row
+  // in ONE transaction — an audit-store failure rolls the reversal back
+  // (503 audit_unavailable) instead of leaving it unaudited.
   const result = await repo.reversePayment(
     ctx.organizationId,
     paymentId,
@@ -741,69 +800,81 @@ export async function reversePayment(
   );
   if (result.status !== "success") throw reverseFailureToError(result);
 
-  // Reversal is a fail-closed, mandatory-audit action (same tier as
-  // orders.refund / payments.override) — the operation must not silently
-  // succeed with no audit trail.
-  await auditLogRequired(ctx, {
-    action: "payments.reverse",
-    resourceType: "payments",
-    resourceId: paymentId,
-    reason,
-  });
-
   return requireDetail(ctx, paymentId);
+}
+
+export interface RefundPaymentServiceInput {
+  paymentId: string;
+  /** This refund only, in the payment's own currency — an integer minor amount. */
+  amountMinor: number;
+  reason: string;
+  /**
+   * REQUIRED. One logical refund: minted when the merchant starts it and
+   * re-sent verbatim on every retry of it. Stored in the refund's own ledger
+   * event (migration 062), so a retry after a lost response replays the
+   * refund that committed instead of making a second one.
+   */
+  idempotencyKey: string;
+  /**
+   * The refunded total the merchant's screen showed when this refund was
+   * started — a precondition, never an amount. A different current total
+   * (a refund the screen had not seen yet) is refused as `refund_stale`. An
+   * additional safeguard for a retry that lost its key; the key is the
+   * idempotency.
+   */
+  expectedRefundedMinor: number;
+  /** Refuse-only (assertExpectedPrincipal): who started this refund. */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 /**
  * Refund a payment, in full or in part. Refunded totals are DERIVED by
  * summing prior refund events (migration 035) — payments.amount_minor is
  * never mutated.
+ *
+ * ONE TRANSACTION (refund_payment_v2, migration 062): the refund event, the
+ * payment status, the derived order state and the mandatory `payments.refund`
+ * audit row commit together or not at all — an audit-store failure rolls the
+ * money back (503 audit_unavailable). A replay (same member, payment, key,
+ * amount and reason) returns the committed refund and writes nothing, its
+ * audit row included: the original committed one with it.
  */
 export async function refundPayment(
   ctx: AuthorizationContext,
-  paymentId: string,
-  amountMinor: number,
-  reason: string,
-  idempotencyKey?: string | null,
+  input: RefundPaymentServiceInput,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (refund event, status, order state, audit).
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("payments.refund");
   await enforcePaymentReversalLimit(ctx);
 
-  if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
     throw badRequest("Refund amount must be a positive integer minor amount");
   }
-  if (!reason?.trim()) throw badRequest("A refund reason is required");
+  if (!input.reason?.trim()) throw badRequest("A refund reason is required");
+  if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()) {
+    throw badRequest("A refund idempotency key is required");
+  }
+  if (!Number.isInteger(input.expectedRefundedMinor) || input.expectedRefundedMinor < 0) {
+    throw badRequest("The refunded total this refund was started from is required");
+  }
 
-  const payment = await repo.findPaymentById(ctx.organizationId, paymentId);
+  const payment = await repo.findPaymentById(ctx.organizationId, input.paymentId);
   if (!payment) throw notFound("Payment not found");
 
   const result = await repo.refundPayment(
     ctx.organizationId,
-    paymentId,
+    input.paymentId,
     ctx.userId,
-    amountMinor,
-    reason.trim(),
-    idempotencyKey,
+    input.amountMinor,
+    input.reason.trim(),
+    input.idempotencyKey.trim(),
+    input.expectedRefundedMinor,
   );
   if (result.status !== "success") throw refundFailureToError(result);
 
-  // A previous attempt may have committed the refund but failed its separate
-  // required audit write. Replay must persist that audit before returning
-  // success too; its explicit flag distinguishes a retry from new money.
-  await auditLogRequired(ctx, {
-    action: "payments.refund",
-    resourceType: "payments",
-    resourceId: paymentId,
-    afterJson: {
-      refunded_amount_minor: amountMinor,
-      refunded_total: result.refunded_total,
-      fully_refunded: result.fully_refunded ?? false,
-      replayed: result.replayed ?? false,
-    },
-    reason,
-  });
-
-  return requireDetail(ctx, paymentId);
+  return requireDetail(ctx, input.paymentId);
 }
 
 /**
@@ -815,7 +886,12 @@ export async function correctPayment(
   paymentId: string,
   reason: string,
   updates: { reference?: string | null; note?: string | null },
+  /** Refuse-only (assertExpectedPrincipal): who started this correction. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (reference / note, event, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("payments.override_status");
   await enforcePaymentReversalLimit(ctx);
 
@@ -827,6 +903,9 @@ export async function correctPayment(
   const payment = await repo.findPaymentById(ctx.organizationId, paymentId);
   if (!payment) throw notFound("Payment not found");
 
+  // correct_payment_v2 writes the correction and its payments.override audit
+  // row (the before/after values, read under the payment lock) in ONE
+  // transaction — or neither (503 audit_unavailable).
   const result = await repo.correctPayment(
     ctx.organizationId,
     paymentId,
@@ -836,15 +915,6 @@ export async function correctPayment(
     updates.note ?? null,
   );
   if (result.status !== "success") throw correctFailureToError(result);
-
-  await auditLogRequired(ctx, {
-    action: "payments.override",
-    resourceType: "payments",
-    resourceId: paymentId,
-    beforeJson: { reference: payment.reference, note: payment.note },
-    afterJson: { reference: updates.reference ?? undefined, note: updates.note ?? undefined },
-    reason,
-  });
 
   return requireDetail(ctx, paymentId);
 }

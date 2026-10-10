@@ -37,6 +37,7 @@ import type {
   PaymentSummary as ServerPaymentSummary,
 } from "@/server/payments/service";
 import type { OrderSettlement } from "@/server/payments/reconciliation";
+import { SANCTIONED_PAYMENT_INPUT_FIELD, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 import {
   availableVerificationTargets,
@@ -886,9 +887,13 @@ describe("production boundary", () => {
     // The server derives both from the validated session and the caller's own
     // DB membership, so neither may appear anywhere in what the browser builds
     // and sends to the Payment domain.
-    const block = paymentsApiBlock();
+    // CORRECTION-004: except the one sanctioned, refuse-only principal on
+    // RecordRealPaymentInput — sent as expectedPrincipal, which the server only
+    // compares with its own derivation and refuses on. Stripped exactly once.
+    const block = withoutSanctioned(paymentsApiBlock(), SANCTIONED_PAYMENT_INPUT_FIELD);
     expect(block).not.toMatch(/organizationId/);
     expect(block).not.toMatch(/userId/);
+    expect(block).toContain("expectedPrincipal: principal,");
   });
 
   it("never proposes a payment status — only a verification target", () => {
@@ -927,8 +932,10 @@ describe("production boundary", () => {
       // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase;
       // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair;
       // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase;
-      // 061 (browser table authority hardening) is an unrelated security fix.
-      return Number.isFinite(prefix) && prefix > 61;
+      // 061 (browser table authority hardening) is an unrelated security fix;
+      // 062 (financial replay identity, refund idempotency and audit atomicity)
+      // belongs to the PR #121 security repair, not this UI phase.
+      return Number.isFinite(prefix) && prefix > 62;
     });
     expect(beyond047).toEqual([]);
   });

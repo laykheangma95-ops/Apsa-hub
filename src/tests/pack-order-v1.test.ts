@@ -40,6 +40,7 @@ import {
 import { classifyScan } from "../lib/barcode/scan-router";
 import { normalizeScannedCode } from "../lib/barcode/camera-scan";
 import { variantQrPayload } from "../lib/barcode/payload";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -1366,6 +1367,7 @@ describe("operational history marker cannot be forged through generic APIs", () 
         ORDER_ID,
         "processing",
         reason,
+        principalOf(mockCtx(ORG_A, GENERIC_PERMS)),
       ).catch((e: unknown) => e as { statusCode?: number });
       expect(error).toMatchObject({ statusCode: 400 });
     }
@@ -1384,6 +1386,7 @@ describe("operational history marker cannot be forged through generic APIs", () 
       ORDER_ID,
       "confirmed",
       PACK_ORDER_PACKED_REASON_CODE,
+      principalOf(mockCtx(ORG_A, [...GENERIC_PERMS, "orders.confirm"])),
     ).catch((e: unknown) => e as { statusCode?: number });
     expect(error).toMatchObject({ statusCode: 400 });
     expect(rpcCalls).toHaveLength(0);
@@ -1421,7 +1424,13 @@ describe("operational history marker cannot be forged through generic APIs", () 
     const reader = mockCtx(ORG_A, ["orders.read"]);
     for (const call of [
       () =>
-        transitionFulfillmentStatus(reader, ORDER_ID, "processing", PACK_ORDER_PACKED_REASON_CODE),
+        transitionFulfillmentStatus(
+          reader,
+          ORDER_ID,
+          "processing",
+          PACK_ORDER_PACKED_REASON_CODE,
+          principalOf(reader),
+        ),
       () => markDeliveryReady(reader, "delivery-1", PACK_ORDER_PACKED_REASON_CODE),
       () => markOrderPacked(reader, ORDER_ID, COMPLETE_LINES),
     ]) {
@@ -1617,7 +1626,13 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(true);
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Customer changed the items");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Customer changed the items",
+      principalOf(ctx),
+    );
     expect(mockOrders[0].fulfillment_status).toBe("unfulfilled");
     return ctx;
   }
@@ -1705,7 +1720,13 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     rpcResponder = stateful;
     expect(mockDeliveries[0].status).toBe("preparing");
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
     expect(await retryPackedDeliveryReady(ctx, ORDER_ID)).toEqual({ kind: "not_packed" });
     expect(mockDeliveries[0].status).toBe("preparing");
   });
@@ -1738,7 +1759,13 @@ describe("reopening the order invalidates a ready delivery", () => {
     const { getOrderPackState } = await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Customer changed the items");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Customer changed the items",
+      principalOf(ctx),
+    );
 
     expect(rpcCalls.map((c) => c.fn)).toContain("reopen_order_fulfillment_v1");
     expect(mockOrders[0].fulfillment_status).toBe("unfulfilled");
@@ -1764,7 +1791,13 @@ describe("reopening the order invalidates a ready delivery", () => {
       await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
 
     // Arrange Delivery: the new delivery waits for Pack Order.
     const arranged = await createDelivery(ctx, {
@@ -1796,7 +1829,13 @@ describe("reopening the order invalidates a ready delivery", () => {
     const ctx = await packThenReady();
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
     const { markOrderPacked } = await import("../server/packing/service");
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
     expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
       kind: "packed",
       deliveryId: null,
@@ -1815,7 +1854,13 @@ describe("reopening the order invalidates a ready delivery", () => {
     expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
     expect(mockDeliveries[0].status).toBe("ready");
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
   });
@@ -1826,7 +1871,13 @@ describe("reopening the order invalidates a ready delivery", () => {
     mockOrders[0].fulfillment_status = "processing";
     rpcResponder = statefulRpc;
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
-    await transitionFulfillmentStatus(mockCtx(ORG_A, OPS_PERMS), ORDER_ID, "unfulfilled", null);
+    await transitionFulfillmentStatus(
+      mockCtx(ORG_A, OPS_PERMS),
+      ORDER_ID,
+      "unfulfilled",
+      null,
+      principalOf(mockCtx(ORG_A, OPS_PERMS)),
+    );
     expect(mockDeliveries[0].status).toBe("pending");
     expect(mockOrders[0].fulfillment_status).toBe("unfulfilled");
   });
@@ -1835,7 +1886,13 @@ describe("reopening the order invalidates a ready delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
-    await transitionFulfillmentStatus(mockCtx(ORG_A, OPS_PERMS), ORDER_ID, "processing", null);
+    await transitionFulfillmentStatus(
+      mockCtx(ORG_A, OPS_PERMS),
+      ORDER_ID,
+      "processing",
+      null,
+      principalOf(mockCtx(ORG_A, OPS_PERMS)),
+    );
     expect(rpcCalls.map((c) => c.fn)).toEqual(["transition_order_status_v1"]);
   });
 });
@@ -1943,7 +2000,13 @@ describe("readiness recovery races a reopen", () => {
     expect((await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).kind).toBe("ready");
     expect(mockDeliveryHistory.some((h) => h.reason === PACK_ORDER_PACKED_REASON_CODE)).toBe(false);
 
-    await transitionFulfillmentStatus(mockCtx(ORG_A, OPS_PERMS), ORDER_ID, "unfulfilled", null);
+    await transitionFulfillmentStatus(
+      mockCtx(ORG_A, OPS_PERMS),
+      ORDER_ID,
+      "unfulfilled",
+      null,
+      principalOf(mockCtx(ORG_A, OPS_PERMS)),
+    );
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect((await getOrderPackState(mockCtx(ORG_A), ORDER_ID))?.packed).toBe(false);
     expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
@@ -1989,7 +2052,13 @@ describe("generic delivery Ready transition enforces the current packed state", 
     expect(first.status).toBe("ready");
 
     // Reopen → the ready delivery is cancelled.
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
     expect(mockDeliveries[0].status).toBe("cancelled");
 
     // Replacement delivery, moved along through the GENERIC delivery API.
@@ -2095,7 +2164,13 @@ describe("reopen races a delivery created or readied before its order lock", () 
       return stateful(fn, args);
     };
 
-    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Repack needed");
+    await transitionFulfillmentStatus(
+      ctx,
+      ORDER_ID,
+      "unfulfilled",
+      "Repack needed",
+      principalOf(ctx),
+    );
     expect(rpcCalls.filter((c) => c.fn === "reopen_order_fulfillment_v1")).toHaveLength(2);
     // Auto-ready did not survive the concurrent reopen.
     expect(mockDeliveries[0].status).toBe("cancelled");
@@ -2114,6 +2189,7 @@ describe("reopen races a delivery created or readied before its order lock", () 
       ORDER_ID,
       "unfulfilled",
       null,
+      principalOf(mockCtx(ORG_A, OPS_PERMS)),
     ).catch((e: unknown) => e as { statusCode?: number; message?: string });
     expect(error).toMatchObject({ statusCode: 409 });
     expect((error as { message: string }).message).toContain("retry");

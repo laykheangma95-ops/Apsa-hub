@@ -21,6 +21,7 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 type Fixture = Awaited<ReturnType<typeof financialFixture>>;
 type Json = Record<string, unknown>;
@@ -323,6 +324,7 @@ describe("Order shipping snapshot through the real service", () => {
     const ctx = context(orgA, actorA, ["orders.create", "orders.read"]);
     const auditsBefore = audits.length;
     const detail = await service.createOrder(ctx, {
+      expectedPrincipal: principalOf(ctx),
       source: "MANUAL",
       items: [{ variantId: A.variant, quantity: 1 }],
       customerId: A.customer,
@@ -347,6 +349,7 @@ describe("Order shipping snapshot through the real service", () => {
     const ctx = context(orgA, actorA, ["orders.create", "orders.read"]);
     await expect(
       service.createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
         source: "MANUAL",
         items: [{ variantId: A.variant, quantity: 1 }],
         customerId: A.customer,
@@ -362,6 +365,7 @@ describe("Order shipping snapshot through the real service", () => {
     const detail = await service.createOrder(
       context(orgA, actorA, ["orders.create", "orders.read"]),
       {
+        expectedPrincipal: principalOf(context(orgA, actorA, ["orders.create", "orders.read"])),
         source: "MANUAL",
         items: [{ variantId: A.variant, quantity: 1 }],
         customerId: A.customer,
@@ -371,10 +375,15 @@ describe("Order shipping snapshot through the real service", () => {
 
     // A context lacking orders.update is refused.
     await expect(
-      service.updateOrderShippingSnapshot(context(orgA, actorA, ["orders.read"]), detail.id, {
-        name: "X",
-        address: "Y",
-      }),
+      service.updateOrderShippingSnapshot(
+        context(orgA, actorA, ["orders.read"]),
+        detail.id,
+        {
+          name: "X",
+          address: "Y",
+        },
+        principalOf(context(orgA, actorA, ["orders.read"])),
+      ),
     ).rejects.toMatchObject({ statusCode: 403 });
 
     const auditsBefore = audits.length;
@@ -382,6 +391,7 @@ describe("Order shipping snapshot through the real service", () => {
       context(orgA, actorA, ["orders.update"]),
       detail.id,
       { name: "Confirmed Person", phone: "0912345678", address: "Confirmed Blvd 7, Takeo" },
+      principalOf(context(orgA, actorA, ["orders.update"])),
     );
     expect(result).toEqual({ ok: true });
     expect((await orderShipping(detail.id)).shipping_address).toBe("Confirmed Blvd 7, Takeo");
@@ -486,6 +496,7 @@ describe("parcel label uses the ORDER's shipping snapshot, never the customer pr
   async function newOrder(shipping?: { name: string; phone: string; address: string }) {
     const orders = await import("../server/orders/service");
     const created = await orders.createOrder(ctx(), {
+      expectedPrincipal: principalOf(ctx()),
       source: "MANUAL",
       items: [{ variantId: A.variant, quantity: 1 }],
       customerId: A.customer,
@@ -590,11 +601,16 @@ describe("parcel label uses the ORDER's shipping snapshot, never the customer pr
 
     // Explicit merchant entry creates the Order-owned snapshot…
     const orders = await import("../server/orders/service");
-    await orders.updateOrderShippingSnapshot(ctx(), old.id, {
-      name: "Entered Recipient",
-      phone: "012999000",
-      address: "Entered Address, Phnom Penh",
-    });
+    await orders.updateOrderShippingSnapshot(
+      ctx(),
+      old.id,
+      {
+        name: "Entered Recipient",
+        phone: "012999000",
+        address: "Entered Address, Phnom Penh",
+      },
+      principalOf(ctx()),
+    );
     expect((await label(old.id)).customer).toMatchObject({
       name: "Entered Recipient",
       address: "Entered Address, Phnom Penh",
@@ -629,11 +645,16 @@ describe("parcel label uses the ORDER's shipping snapshot, never the customer pr
     ).rows;
     const auditsBefore = audits.length;
 
-    await orders.updateOrderShippingSnapshot(ctx(), order.id, {
-      name: "Right Person",
-      phone: "012777888",
-      address: "Corrected Address 2",
-    });
+    await orders.updateOrderShippingSnapshot(
+      ctx(),
+      order.id,
+      {
+        name: "Right Person",
+        phone: "012777888",
+        address: "Corrected Address 2",
+      },
+      principalOf(ctx()),
+    );
 
     expect((await label(order.id)).customer).toMatchObject({
       name: "Right Person",
@@ -657,6 +678,7 @@ describe("parcel label uses the ORDER's shipping snapshot, never the customer pr
         context(orgA, actorA, ["orders.read", "fulfillment.print_label"]),
         order.id,
         { name: "Nope", address: "Nowhere" },
+        principalOf(context(orgA, actorA, ["orders.read", "fulfillment.print_label"])),
       ),
     ).rejects.toMatchObject({ statusCode: 403 });
     expect((await label(order.id)).customer.address).toBe("Corrected Address 2");

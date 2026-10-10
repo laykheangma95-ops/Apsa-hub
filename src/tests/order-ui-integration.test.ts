@@ -23,6 +23,12 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  SANCTIONED_CREATE_INPUT_FIELD,
+  SANCTIONED_INBOX_CALL_ARG,
+  SANCTIONED_NEW_ORDER_CALL_ARG,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 
@@ -34,6 +40,7 @@ const API_INDEX = "src/lib/api/index.ts";
 const ORDER_LIST_ROUTE = "src/routes/app.orders.tsx";
 const ORDER_DETAIL_ROUTE = "src/routes/app.orders.$id.tsx";
 const CREATE_SHEET = "src/components/orders/CreateRealOrderSheet.tsx";
+const PREPARE_SHEET = "src/components/inbox/PrepareOrderSheet.tsx";
 const CANCEL_SHEET = "src/components/orders/CancelOrderSheet.tsx";
 const ORDERS_LIB = "src/lib/orders.ts";
 
@@ -131,11 +138,16 @@ describe("Create flow calls createOrderFn, never a client-computed price/total",
     expect(fn).not.toMatch(/transitionOrderLifecycleFn|recordMovementFn/);
   });
 
-  it("CreateRealOrderInput / the sheet's payload has no organizationId, userId, price, subtotal or total field", () => {
+  it("CreateRealOrderInput / the sheets' payloads have no organizationId, userId, price, subtotal or total field", () => {
     const apiIndex = readSource(API_INDEX);
-    const createInputBlock = apiIndex.slice(
-      apiIndex.indexOf("export interface CreateRealOrderInput"),
-      apiIndex.indexOf("export async function createRealOrder"),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const createInputBlock = withoutSanctioned(
+      apiIndex.slice(
+        apiIndex.indexOf("export interface CreateRealOrderInput"),
+        apiIndex.indexOf("export async function createRealOrder"),
+      ),
+      SANCTIONED_CREATE_INPUT_FIELD,
     );
     for (const forbidden of [
       "organizationId",
@@ -149,20 +161,26 @@ describe("Create flow calls createOrderFn, never a client-computed price/total",
       expect(createInputBlock).not.toContain(forbidden);
     }
 
-    const sheet = readSource(CREATE_SHEET);
-    const call = sheet.slice(
-      sheet.indexOf("createRealOrder({"),
-      sheet.indexOf("});", sheet.indexOf("createRealOrder({")),
-    );
-    for (const forbidden of [
-      "organizationId",
-      "organization_id",
-      "userId",
-      "user_id",
-      "price",
-      "total:",
-    ]) {
-      expect(call).not.toContain(forbidden);
+    // Both sheets' create calls, each minus only its own sanctioned principal.
+    const IDENTITY = ["organizationId", "organization_id", "userId", "user_id"];
+    for (const [file, sanctioned, money] of [
+      [CREATE_SHEET, SANCTIONED_NEW_ORDER_CALL_ARG, ["price", "total:"]],
+      // The Inbox call sends its delivery fee from the draft preview
+      // (`priced.deliveryFee.amount`, an integer minor-unit INPUT), so its
+      // money guard is on price/total FIELDS rather than on the bare word.
+      [PREPARE_SHEET, SANCTIONED_INBOX_CALL_ARG, ["price:", "unitPrice", "subtotal:", "total:"]],
+    ] as const) {
+      const sheet = readSource(file);
+      const call = withoutSanctioned(
+        sheet.slice(
+          sheet.indexOf("createRealOrder({"),
+          sheet.indexOf("});", sheet.indexOf("createRealOrder({")),
+        ),
+        sanctioned,
+      );
+      for (const forbidden of [...IDENTITY, ...money]) {
+        expect(call).not.toContain(forbidden);
+      }
     }
   });
 
@@ -235,8 +253,9 @@ describe("Confirm and cancel call transitionOrderLifecycleFn only", () => {
     const route = readSource(ORDER_DETAIL_ROUTE);
     expect(route).toMatch(/canConfirmOrder\(order\.lifecycleStatus\)/);
     expect(route).toMatch(/canCancelOrder\(order\.lifecycleStatus\)/);
-    expect(route).toMatch(/confirmMutation\.mutate\(\)/);
-    expect(route).toMatch(/cancelMutation\.mutate\(reason\)/);
+    // Each carries the principal it was started as (CORRECTION-004, refuse-only).
+    expect(route).toMatch(/confirmMutation\.mutate\(principal\)/);
+    expect(route).toMatch(/cancelMutation\.mutate\(\{ reason, startedAs: principal \}\)/);
   });
 });
 

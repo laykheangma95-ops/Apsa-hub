@@ -20,7 +20,7 @@
  * SECURITY: Never pass organizationId or actorUserId from client-supplied request body.
  * Always derive them from the validated AuthorizationContext (ctx.organizationId, ctx.userId).
  */
-import { publicError } from "@/server/public-domain-error";
+import { auditUnavailableError } from "./audit-unavailable";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "./authorization";
@@ -176,10 +176,6 @@ export async function auditLogRequired(
     // the server-function boundary passes it through for the UI to explain.
     // The database's own error (scrubbed) stays in the structured server log
     // above; it is not part of the message the browser receives.
-    throw publicError(
-      `Audit record could not be persisted for action '${payload.action}'. The operation was blocked to preserve the audit trail.`,
-      503,
-      "audit_unavailable",
-    );
+    throw auditUnavailableError(payload.action);
   }
 }

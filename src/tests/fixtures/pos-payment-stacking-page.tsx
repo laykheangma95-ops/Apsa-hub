@@ -28,6 +28,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PosCheckoutSheet } from "@/components/pos/PosCheckoutSheet";
 import { CapabilityFixtureProvider } from "@/hooks/use-capabilities";
+import { createScopedIdempotencyHolders } from "@/lib/idempotency";
 import { calculateCartTotals, NO_DISCOUNT, type CartLine } from "@/lib/pos-cart";
 import "@/lib/i18n";
 
@@ -73,6 +74,7 @@ export function Fixture() {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   );
+  const [replayHolders] = useState(() => createScopedIdempotencyHolders());
   const totals = calculateCartTotals(LINES, NO_DISCOUNT);
 
   window.apsaCheckoutOpen = open;
@@ -98,6 +100,7 @@ export function Fixture() {
           }}
           userId={USER_ID}
           organizationId={ORG_ID}
+          replayHolders={replayHolders}
         />
       </CapabilityFixtureProvider>
     </QueryClientProvider>

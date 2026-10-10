@@ -49,6 +49,7 @@ import {
 import { products as mockProducts } from "../lib/mock/products";
 import type { Product } from "../types";
 import { usd } from "../lib/money";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 /**
  * create_order_v2 (migration 044) requires one; its behaviour is proven in
@@ -527,6 +528,7 @@ describe("Test 17: sourceConversationRef reaches the create RPC unchanged", () =
       },
       async (calls) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -565,6 +567,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
       },
       async (calls) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -601,6 +604,7 @@ describe("Test 18: a blank conversation ref is stored as null", () => {
       },
       async (calls) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -620,6 +624,7 @@ describe("Test 19: an overly long conversation ref is rejected before any DB cal
     await withOrderDb({}, async (calls) => {
       await expect(
         createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],

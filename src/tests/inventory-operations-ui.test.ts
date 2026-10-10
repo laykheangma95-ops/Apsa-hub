@@ -1372,9 +1372,13 @@ describe("E. every stock change is a ledger movement", () => {
     expect(insertIdx).toBeGreaterThan(-1);
     expect(auditIdx).toBeLessThan(insertIdx);
 
-    // And the audit helper itself throws rather than warning.
+    // And the audit helper itself throws rather than warning — the public 503
+    // it throws is built in one place (shared with the in-transaction audits).
     const audit = read("src/server/auth/audit.ts");
-    expect(audit).toContain("The operation was blocked to preserve the audit trail");
+    expect(audit).toContain("throw auditUnavailableError(payload.action);");
+    expect(read("src/server/auth/audit-unavailable.ts")).toContain(
+      "The operation was blocked to preserve the audit trail",
+    );
   });
 
   it("a blocked audit surfaces as its own message, never as a generic retry", () => {

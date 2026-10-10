@@ -399,6 +399,15 @@ export function PrepareOrderSheet({
             ? { shipping: orderShippingPayload(shipIntent, shipping)! }
             : {}),
           idempotency: claim,
+          /*
+           * The principal this draft was started as — the replay scope's member
+           * and organization, the same ones its claim belongs to (the route
+           * remounts this sheet for any other). The server derives who is
+           * acting only when it handles the request; if that changed in between
+           * (here, or in another tab), it refuses instead of creating this
+           * conversation's order as someone else, and writes nothing.
+           */
+          principal: { userId, organizationId },
         });
         // Abandoned (closed, conversation/member switched, unmounted): the
         // order may exist server-side, but this is no longer the draft that
@@ -490,7 +499,8 @@ export function PrepareOrderSheet({
     if (!op) return;
     setFailure(null);
     try {
-      const confirmed = await confirmRealOrder(step.detail.order.id);
+      // Started as this sheet's principal (refuse-only — see the create call).
+      const confirmed = await confirmRealOrder(step.detail.order.id, { userId, organizationId });
       if (!ownsOperation(op)) return;
       setStep({ name: "created-real", detail: confirmed });
       onConfirmed?.(confirmed.order);
@@ -515,7 +525,12 @@ export function PrepareOrderSheet({
     const op = beginOperation("discard");
     if (!op) return;
     try {
-      await cancelRealOrder(step.detail.order.id, "Merchant edited before confirming");
+      await cancelRealOrder(
+        step.detail.order.id,
+        // Started as this sheet's principal (refuse-only — see the create call).
+        { userId, organizationId },
+        "Merchant edited before confirming",
+      );
     } catch {
       // Best-effort: if cancellation fails (e.g. permission), the merchant can
       // still cancel it later from Order Detail. Editing must not get stuck.

@@ -18,6 +18,7 @@
 import { describe, it, expect, mock } from "bun:test";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 mock.module("@/server/auth/audit", () => ({
   auditLog: async () => {},
@@ -32,10 +33,19 @@ const ORG_B_ID = "b0000000-0000-0000-0000-000000000002";
 const USER_ORG_A = "10000000-0000-0000-0000-000000000001";
 const ORDER_ID = "20000000-0000-0000-0000-000000000001";
 const PAYMENT_ID = "30000000-0000-0000-0000-000000000001";
+/** The member + organization a Payment detail action is started as (CORRECTION-004). */
+const STARTED_AS = { userId: USER_ORG_A, organizationId: ORG_A_ID };
 /** A payment that really exists — but in Organization B. */
 const ORG_B_PAYMENT_ID = "30000000-0000-0000-0000-0000000000b2";
 /** A UUID that names nothing at all. */
 const NONEXISTENT_PAYMENT_ID = "30000000-0000-0000-0000-00000000dead";
+
+/**
+ * One logical refund's key in these tests. Low-entropy on purpose (the repo's
+ * fixture convention, cf. TEST_IDEMPOTENCY_KEY): a synthetic test string, not a
+ * credential, that secret scanners must not mistake for one.
+ */
+const REFUND_IDEMPOTENCY_KEY = "fixture-bbbbbbbbbbbbbbbb";
 
 function makeCtx(permissions: string[], organizationId = ORG_A_ID): AuthCtxType {
   const perms = new Set<string>(permissions);
@@ -316,6 +326,9 @@ describe("permission denial happens before any data is touched", () => {
           makeCtx(["payments.read", "payments.manual_confirm"]),
           PAYMENT_ID,
           "mismatch",
+          null,
+          null,
+          principalOf(makeCtx(["payments.read", "payments.manual_confirm"])),
         ),
       );
       // Checked before the payment is even loaded, so no id is confirmed real.
@@ -327,8 +340,19 @@ describe("permission denial happens before any data is touched", () => {
     await withDb({ payments: { data: paymentRow(), error: null } }, async () => {
       const { refundPayment, reversePayment } = await import("../server/payments/service");
       const ctx = makeCtx(["payments.read", "payments.verify"]);
-      await expectForbidden(() => refundPayment(ctx, PAYMENT_ID, 1000, "Damaged"));
-      await expectForbidden(() => reversePayment(ctx, PAYMENT_ID, "Recorded in error"));
+      await expectForbidden(() =>
+        refundPayment(ctx, {
+          paymentId: PAYMENT_ID,
+          amountMinor: 1000,
+          reason: "Damaged",
+          idempotencyKey: REFUND_IDEMPOTENCY_KEY,
+          expectedRefundedMinor: 0,
+          expectedPrincipal: principalOf(ctx),
+        }),
+      );
+      await expectForbidden(() =>
+        reversePayment(ctx, PAYMENT_ID, "Recorded in error", principalOf(ctx)),
+      );
     });
   });
 });
@@ -513,12 +537,13 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { verifyRealPayment } = await import("../lib/api");
-    await verifyRealPayment(PAYMENT_ID, "staff_confirmed", "Counted the cash");
+    await verifyRealPayment(PAYMENT_ID, "staff_confirmed", STARTED_AS, "Counted the cash");
 
     expect(seen[0]!.data).toEqual({
       paymentId: PAYMENT_ID,
       to: "staff_confirmed",
       reason: "Counted the cash",
+      expectedPrincipal: STARTED_AS,
     });
     expect(Object.keys(seen[0]!.data!)).not.toContain("status");
   });
@@ -533,8 +558,12 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { verifyRealPayment } = await import("../lib/api");
-    await verifyRealPayment(PAYMENT_ID, "bank_verified");
-    expect(seen[0]!.data).toEqual({ paymentId: PAYMENT_ID, to: "bank_verified" });
+    await verifyRealPayment(PAYMENT_ID, "bank_verified", STARTED_AS);
+    expect(seen[0]!.data).toEqual({
+      paymentId: PAYMENT_ID,
+      to: "bank_verified",
+      expectedPrincipal: STARTED_AS,
+    });
   });
 
   it("sends a refund as an integer minor amount with its reason, and nothing else", async () => {
@@ -547,12 +576,22 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { refundRealPayment } = await import("../lib/api");
-    await refundRealPayment(PAYMENT_ID, 2000, "Damaged item");
+    await refundRealPayment(PAYMENT_ID, STARTED_AS, {
+      amountMinor: 2000,
+      reason: "Damaged item",
+      expectedRefundedMinor: 500,
+      idempotencyKey: REFUND_IDEMPOTENCY_KEY,
+    });
 
+    // The amount, the reason, the one logical refund's key, the refunded total
+    // it was started from (a precondition) and the refuse-only principal.
     expect(seen[0]!.data).toEqual({
       paymentId: PAYMENT_ID,
       amountMinor: 2000,
       reason: "Damaged item",
+      expectedRefundedMinor: 500,
+      idempotencyKey: REFUND_IDEMPOTENCY_KEY,
+      expectedPrincipal: STARTED_AS,
     });
     expect(Number.isInteger(seen[0]!.data!["amountMinor"])).toBe(true);
     // No currency is sent: a refund is always in the payment's own currency,
@@ -570,7 +609,11 @@ describe("the client boundary in src/lib/api", () => {
     });
 
     const { reverseRealPayment } = await import("../lib/api");
-    await reverseRealPayment(PAYMENT_ID, "Recorded in error");
-    expect(seen[0]!.data).toEqual({ paymentId: PAYMENT_ID, reason: "Recorded in error" });
+    await reverseRealPayment(PAYMENT_ID, STARTED_AS, "Recorded in error");
+    expect(seen[0]!.data).toEqual({
+      paymentId: PAYMENT_ID,
+      reason: "Recorded in error",
+      expectedPrincipal: STARTED_AS,
+    });
   });
 });

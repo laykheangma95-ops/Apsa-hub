@@ -53,6 +53,10 @@ const { parseDeliveryFee, codDiffersFromTotal, DELIVERY_FEE_MAX_MINOR } =
   await import("../lib/delivery-fee");
 
 const request = () => ({
+  principal: {
+    userId: "aaaaaaaa-0000-4000-8000-000000000002",
+    organizationId: "aaaaaaaa-0000-4000-8000-000000000001",
+  },
   source: "POS" as const,
   items: [{ variantId: "11111111-1111-4111-8111-111111111111", quantity: 1 }],
   customerId: null,
@@ -89,7 +93,15 @@ describe("createRealOrder idempotency-key lifecycle", () => {
     sent.length = 0;
     await createRealOrder({ ...request(), idempotency: createIdempotencyKeyHolder() });
     expect(Object.keys(sent[0]!).sort()).toEqual(
-      ["customerId", "deliveryMinor", "idempotencyKey", "items", "source"].sort(),
+      // expectedPrincipal: the required, refuse-only precondition (CORRECTION-004).
+      [
+        "customerId",
+        "deliveryMinor",
+        "expectedPrincipal",
+        "idempotencyKey",
+        "items",
+        "source",
+      ].sort(),
     );
   });
 

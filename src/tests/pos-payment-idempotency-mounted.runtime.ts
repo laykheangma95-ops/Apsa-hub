@@ -771,6 +771,13 @@ describe("P2 #2: a stale checkout attempt never releases the current attempt's r
       await confirmSale(); // old principal, key-1
       change();
       await rerender();
+      // A different principal is a fresh till: none of the old cart or the
+      // old checkout carries over (src/routes/app.pos.tsx, principal
+      // isolation). The new principal rings up its own sale.
+      expect(dialog()).toBeNull();
+      expect(cartNames()).toEqual([]);
+      await addProduct("Serum");
+      await openCheckout();
       await confirmSale(); // new principal: a new key
       expect(keys()[1]).not.toBe(keys()[0]!);
       await createCalls[0]!.deliver(); // old principal's late response
