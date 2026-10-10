@@ -19,7 +19,7 @@ import {
 } from "@/components/orders/RecordOrderPaymentSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
-import { createScopedIdempotencyHolders } from "@/lib/idempotency";
+import type { ScopedIdempotencyHolders } from "@/lib/idempotency";
 import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
@@ -53,6 +53,14 @@ interface PosCheckoutSheetProps {
    */
   userId: string;
   organizationId: string;
+  /**
+   * Replay keys, one holder per member + organization (createScopedIdempotency
+   * Holders), owned by the POS screen ABOVE the principal-keyed till that
+   * mounts this sheet: the till — and this sheet with it — is remounted for a
+   * different member or organization, and an unresolved key must survive that
+   * remount and the switch back. See idempotencyKeys below.
+   */
+  replayHolders: ScopedIdempotencyHolders;
 }
 
 const METHODS: PaymentMethod[] = ["cash", "khqr", "bank_transfer", "cod"];
@@ -67,6 +75,7 @@ export function PosCheckoutSheet({
   onCompleted,
   userId,
   organizationId,
+  replayHolders,
 }: PosCheckoutSheetProps) {
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -233,20 +242,21 @@ export function PosCheckoutSheet({
    * Once an attempt is accepted the key is retired, so the next sale is always
    * a new order.
    *
-   * The sheet stays mounted while the member or organization changes, so it
-   * keeps one holder PER member + organization (createScopedIdempotencyHolders)
-   * rather than one for its lifetime. It used to replace its one holder on
-   * every switch, which discarded an unresolved key: "lost response in A → B →
-   * back to A → the identical cart" minted a new key and the server created a
-   * second order. Now no key or claim crosses into another principal, and A's
-   * unresolved key is waiting for A's retry. The holder is looked up per
-   * attempt, as the principal that attempt's token records — the one the
-   * request is sent as.
+   * Replay protection outlives a member or organization switch: one holder
+   * PER member + organization (createScopedIdempotencyHolders), owned by the
+   * POS screen above this sheet (the `replayHolders` prop) rather than by the
+   * sheet. The sheet used to replace its one holder on every switch, which
+   * discarded an unresolved key: "lost response in A → B → back to A → the
+   * identical cart" minted a new key and the server created a second order.
+   * And the till that mounts this sheet is now remounted per principal, so a
+   * holder owned here would die with it. Now no key or claim crosses into
+   * another principal, and A's unresolved key is waiting for A's retry. The
+   * holder is looked up per attempt, as the principal that attempt's token
+   * records — the one the request is sent as.
    */
-  const replayHolders = useRef(createScopedIdempotencyHolders());
   const idempotencyKeys = {
     claim: (principal: { userId: string; organizationId: string }) =>
-      replayHolders.current
+      replayHolders
         // No subject: one checkout flow per member and organization.
         .holderFor({
           userId: principal.userId,

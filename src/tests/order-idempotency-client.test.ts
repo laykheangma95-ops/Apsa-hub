@@ -51,12 +51,29 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
       expect(source).not.toMatch(/idempotencyKeys(?:\.current)? = createIdempotencyKeyHolder\(\)/);
       expect(source).not.toMatch(/createIdempotencyKeyHolder/);
     } else {
-      // POS checkout: the same — mounted across member/organization switches,
-      // so one holder per member + organization, looked up per attempt as the
-      // principal its token records (POS checkout replay P2; behaviour in
-      // pos-checkout-replay-mounted).
-      expect(source).toMatch(/const replayHolders = useRef\(createScopedIdempotencyHolders\(\)\)/);
+      // POS checkout: one holder per member + organization, looked up per
+      // attempt as the principal its token records (POS checkout replay P2;
+      // behaviour in pos-checkout-replay-mounted). The registry is NOT the
+      // sheet's: the POS route remounts its till — and this sheet — for every
+      // principal (principal isolation; pos-principal-isolation-mounted), so
+      // the registry lives in the route ABOVE the keyed till and is passed in.
+      // Owning it here again would drop an unresolved key on A → B → A.
+      expect(source).toMatch(/replayHolders: ScopedIdempotencyHolders;/);
+      expect(source).not.toMatch(/createScopedIdempotencyHolders\(/);
       expect(source).toMatch(/flow: "pos-checkout"/);
+      const route = readFileSync(resolve("src/routes/app.pos.tsx"), "utf8");
+      const shell = route.slice(
+        route.indexOf("function PosScreen()"),
+        route.indexOf("function PosTill("),
+      );
+      expect(shell).toMatch(
+        /const \[replayHolders\] = useState\(\(\) => createScopedIdempotencyHolders\(\)\)/,
+      );
+      expect(shell).toMatch(
+        /<PosTill\s+key=\{JSON\.stringify\(\[userId, routeOrganizationId\]\)\}/,
+      );
+      expect(shell).toMatch(/replayHolders=\{replayHolders\}/);
+      expect(route).toMatch(/<PosCheckoutSheet[\s\S]*?replayHolders=\{replayHolders\}[\s\S]*?\/>/);
       expect(source).toMatch(
         /const token = beginAttempt\(!orderId\);\s+(?:\/\/[^\n]*\n\s+)*const claim = idempotencyKeys\.claim\(token\);/,
       );

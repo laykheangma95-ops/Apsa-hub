@@ -444,8 +444,9 @@ async function setCart(names: string[]) {
 }
 /**
  * The identical cart X for a retry: kept as it is when the cart still holds it
- * (POS keeps the cart across a principal switch today — a separate finding),
- * rebuilt identically otherwise, so these cases do not depend on that.
+ * (same principal), rebuilt identically otherwise — a principal switch mounts a
+ * fresh till with an empty cart (src/routes/app.pos.tsx, principal isolation),
+ * and the rebuilt cart is the same request, so it re-sends the same key.
  */
 async function ensureCart(names: string[]) {
   if (JSON.stringify(cartNames()) !== JSON.stringify(names)) await setCart(names);
@@ -698,8 +699,8 @@ describe("A pending create across a principal switch", () => {
     await release(0); // A's late success arrives while B is live
     expect(successShown()).toBe(false);
     expect(confirms).toHaveLength(0);
-    // Not accepted, so not cleared — and its key was not retired.
-    expect(cartNames()).toEqual(["Serum"]);
+    // B's till never held A's cart, and A's late response put nothing in it.
+    expect(cartNames()).toEqual([]);
 
     await switchTo({ org: ORG_A });
     await ensureCart(["Serum"]);

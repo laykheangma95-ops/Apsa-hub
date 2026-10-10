@@ -27,6 +27,8 @@ import { getPosProducts, lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
+import { visibleCustomerPhone } from "@/lib/customers-query";
+import { createScopedIdempotencyHolders, type ScopedIdempotencyHolders } from "@/lib/idempotency";
 import { formatMoney } from "@/lib/money";
 import {
   availableStock,
@@ -69,7 +71,62 @@ const CATEGORIES: (ProductCategory | "all")[] = [
   "drinks",
 ];
 
+/*
+ * ── Principal isolation ───────────────────────────────────────────────────
+ *
+ * This route is NOT remounted when the member or organization changes — a
+ * workspace switch or a sign-in as somebody else re-runs the /app guard and
+ * hands the same mounted screen a new route context. Everything the till
+ * holds — the cart, the selected customer (name and phone), the customer and
+ * variant pickers, an open or pending checkout — therefore used to carry
+ * straight over: organization B was shown organization A's cart and A's
+ * customer's phone number, and a member without customers.view_sensitive
+ * was shown the phone a previous member had been allowed to see.
+ *
+ * So the till is keyed by the principal. A different member or organization
+ * mounts a NEW till in the very render that observes it: none of the old
+ * state ever renders under the new principal, not even for a frame, and
+ * every late callback of the old till (a barcode lookup, a customer quick-
+ * create, a checkout response) resolves into an unmounted instance and
+ * changes nothing. Switching back (A → B → A) mounts a fresh till too, so B
+ * never sees A's state and A never sees B's.
+ *
+ * What must NOT reset with it is replay protection. A create whose outcome is
+ * unknown (committed, response lost) keeps its idempotency key in its own
+ * member + organization's holder, and that registry lives HERE, above the
+ * keyed till, so it survives the switch, the remount and the switch back. A
+ * merchant who returns to A and rings up the same sale again re-sends A's
+ * original key and the server answers with the order it already made rather
+ * than a second one (see PosCheckoutSheet's idempotencyKeys). The order A
+ * committed is also already in Orders as a draft, so nothing about the sale
+ * is lost with the cleared cart. The registry holds keys and request
+ * fingerprints only — never anything it renders — and hands a principal
+ * nothing but its own holder.
+ */
 function PosScreen() {
+  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
+  const userId = session.userId;
+  const [replayHolders] = useState(() => createScopedIdempotencyHolders());
+  return (
+    <PosTill
+      key={JSON.stringify([userId, routeOrganizationId])}
+      userId={userId}
+      routeOrganizationId={routeOrganizationId}
+      replayHolders={replayHolders}
+    />
+  );
+}
+
+interface PosTillProps {
+  /** From the /app route guard's server-derived context — never client input. */
+  userId: string;
+  routeOrganizationId: string;
+  /** Replay keys that outlive this till, one holder per member + organization (above). */
+  replayHolders: ScopedIdempotencyHolders;
+}
+
+/** One principal's till. Remounted, never reused, for a different principal. */
+function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
   const { t } = useTranslation();
   const reduceMotion = useReducedMotion();
   const capabilities = useCapabilities();
@@ -87,8 +144,6 @@ function PosScreen() {
    * purge the Product screens already use, rather than inventing a second
    * catalog partition.
    */
-  const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
-  const userId = session.userId;
   enforceCatalogCachePrincipal(queryClient, userId, routeOrganizationId);
   /*
    * POS exists to take a sale, and taking a sale is createOrder — which
@@ -116,6 +171,19 @@ function PosScreen() {
    */
   const [{ lines, discount }, dispatchCart] = useReducer(posCartReducer, EMPTY_POS_CART);
   const [customer, setCustomer] = useState<Customer | null>(null);
+  /*
+   * The selected customer as it may be SHOWN: the phone masked against the
+   * CURRENT grant on every render, not the one held when the customer was
+   * picked. The picker masks at selection time, but a selection outlives the
+   * grant — revoked while POS stays open, or a capability refresh that fails
+   * or is still pending — so the cart and checkout render this, never the
+   * raw selection. `canSensitive`, not `can`: a phone's display is itself the
+   * disclosure, so it must not ride on an unconfirmed snapshot.
+   */
+  const canSeeCustomerPhone = capabilities.canSensitive("customers.view_sensitive");
+  const shownCustomer = customer
+    ? { ...customer, phone: visibleCustomerPhone(customer, canSeeCustomerPhone) }
+    : null;
   const [variantProduct, setVariantProduct] = useState<Product | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [customerOpen, setCustomerOpen] = useState(false);
@@ -288,7 +356,7 @@ function PosScreen() {
     onDiscountChange: (next: CartDiscountInput) =>
       dispatchCart({ type: "discount", discount: next }),
     canDiscount,
-    customer,
+    customer: shownCustomer,
     onPickCustomer: () => setCustomerOpen(true),
     onClearCustomer: () => setCustomer(null),
     onQuantity: (key: string, quantity: number) =>
@@ -558,11 +626,12 @@ function PosScreen() {
         onOpenChange={setCheckoutOpen}
         lines={lines}
         totals={totals}
-        customer={customer}
+        customer={shownCustomer}
         offline={offline}
         onCompleted={resetSale}
         userId={userId}
         organizationId={routeOrganizationId}
+        replayHolders={replayHolders}
       />
 
       <BottomNav workspace="business" />
