@@ -13,6 +13,9 @@
  *   Recording a payment writes payments + payment_events (and possibly a
  *   duplicate_flagged event) in one transaction; verifying, reversing,
  *   refunding and correcting each write payments + payment_events together.
+ *   Refunding, reversing and correcting also write their MANDATORY audit row
+ *   inside that same transaction (the v2 RPCs, migration 062): the financial
+ *   change and its audit commit together or not at all.
  *   supabase-js has no client-side transaction, so the transaction has to
  *   live in the database — the RPC IS that transaction.
  *
@@ -148,14 +151,16 @@ export async function reversePayment(
   actor: string | null,
   reason: string,
 ): Promise<ReversePaymentRpcResult> {
-  const { data, error } = await db.rpc("reverse_payment_v1", {
+  // reverse_payment_v2 (migration 062): 040's reversal and the mandatory
+  // payments.reverse audit row, in one transaction.
+  const { data, error } = await db.rpc("reverse_payment_v2", {
     p_organization_id: organizationId,
     p_payment_id: paymentId,
     p_actor: actor,
     p_reason: reason,
   });
 
-  if (error) throw new Error(`reversePayment: ${errMessage(error)}`);
+  if (error) throw rpcError("reversePayment", "payments.reverse", error);
   return data as ReversePaymentRpcResult;
 }
 
@@ -198,7 +203,9 @@ export async function correctPayment(
   newReference: string | null,
   newNote: string | null,
 ): Promise<CorrectPaymentRpcResult> {
-  const { data, error } = await db.rpc("correct_payment_v1", {
+  // correct_payment_v2 (migration 062): 035's correction and the mandatory
+  // payments.override audit row (before/after values), in one transaction.
+  const { data, error } = await db.rpc("correct_payment_v2", {
     p_organization_id: organizationId,
     p_payment_id: paymentId,
     p_actor: actor,
@@ -207,7 +214,7 @@ export async function correctPayment(
     p_new_note: newNote,
   });
 
-  if (error) throw new Error(`correctPayment: ${errMessage(error)}`);
+  if (error) throw rpcError("correctPayment", "payments.override", error);
   return data as CorrectPaymentRpcResult;
 }
 

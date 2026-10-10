@@ -1,7 +1,8 @@
 -- 062_financial_replay_refund_audit_atomicity.sql
 --
 -- Financial replay identity, durable refund idempotency, and mandatory-audit
--- atomicity for refunds (PR #121 independent review: P2 #3, #4, #5).
+-- atomicity for refunds, reversals and corrections (PR #121 independent
+-- review: P2 #3, #4, #5).
 --
 -- Functions and grants only. No table, column, index, constraint, RLS policy
 -- or data change; migrations 040, 043, 060 and 061 are untouched.
@@ -23,10 +24,13 @@
 --   so "committed, response lost, tap again" was a second refund. Even with a
 --   key, a key held only in browser memory is lost on a remount or reload.
 --
--- P2 #5 (refunds) — the refund committed before its mandatory audit.
---   The service called the RPC (one transaction) and then inserted the
---   mandatory audit row (another). An audit-store failure left the money moved
---   with no audit row, and the merchant was told it was blocked.
+-- P2 #5 — a financial mutation committed before its mandatory audit.
+--   Refund, reversal and correction each called their RPC (one transaction)
+--   and then inserted the mandatory audit row (another). An audit-store
+--   failure left the money moved (or the reference rewritten) with no audit
+--   row, and the merchant was told it was blocked; a reversal could never be
+--   retried into an audited state (already reversed), and a correction retry
+--   applied a second correction.
 --
 -- ── WHAT ───────────────────────────────────────────────────────────────────
 --
@@ -56,10 +60,21 @@
 --     audit insert fails the whole call fails with `apsa_audit_unavailable`
 --     and nothing commits.
 --
--- refund_payment_v1(…, text) is RETIRED: EXECUTE is revoked from every role
--- except its owner (refund_payment_v2 calls it as the owner). A post-condition
--- below aborts this migration if any role other than the owner can still run
--- it, or if the server role cannot run its replacements.
+-- reverse_payment_v2 / correct_payment_v2 (new; the server's only entry points)
+--   The 040 / 035 bodies, unchanged, followed by the mandatory
+--   `payments.reverse` / `payments.override` audit row — in ONE transaction.
+--   An audit-store failure rolls the whole call back (`apsa_audit_unavailable`).
+--
+-- refund_payment_v1(…, text), reverse_payment_v1 and correct_payment_v1 are
+-- RETIRED: EXECUTE is revoked from every role except their owner (the v2
+-- functions call them as the owner). A post-condition below aborts this
+-- migration if any role other than the owner can still run one of them, or
+-- if the server role cannot run the replacements.
+--
+-- Why not "write the audit first" or "compensate after": an audit row for a
+-- refund that then failed is a false record, and a compensating write after a
+-- failed audit is a second financial event that can itself fail. One
+-- transaction is the only boundary in which both commit or neither does.
 --
 -- Lock order is unchanged: advisory key lock, then Order, then Payment — the
 -- same Order-before-Payment order as every 040 financial RPC. Only refund_
@@ -249,6 +264,72 @@ BEGIN
 END;
 $$;
 
+-- ── reverse_payment_v2 / correct_payment_v2 ─────────────────────────────────
+
+CREATE FUNCTION public.reverse_payment_v2(
+  p_organization_id uuid,
+  p_payment_id uuid,
+  p_actor uuid,
+  p_reason text
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth AS $$
+DECLARE
+  v_result jsonb;
+BEGIN
+  -- 040's body: Order lock, then Payment; the reversal event, the payment
+  -- status and the derived order state.
+  v_result := public.reverse_payment_v1(p_organization_id, p_payment_id, p_actor, p_reason);
+  IF v_result ->> 'status' = 'success' THEN
+    BEGIN
+      INSERT INTO public.audit_logs(
+        organization_id, actor_user_id, action, resource_type, resource_id, reason
+      ) VALUES (
+        p_organization_id, p_actor, 'payments.reverse', 'payments', p_payment_id::text, p_reason
+      );
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'apsa_audit_unavailable' USING DETAIL = SQLERRM;
+    END;
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
+CREATE FUNCTION public.correct_payment_v2(
+  p_organization_id uuid,
+  p_payment_id uuid,
+  p_actor uuid,
+  p_reason text,
+  p_new_reference text DEFAULT NULL,
+  p_new_note text DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth AS $$
+DECLARE
+  v_before record;
+  v_result jsonb;
+BEGIN
+  -- The values being replaced, read under the lock 035's body then takes again.
+  SELECT reference, note INTO v_before FROM public.payments
+   WHERE id = p_payment_id AND organization_id = p_organization_id
+   FOR UPDATE;
+  v_result := public.correct_payment_v1(p_organization_id, p_payment_id, p_actor, p_reason,
+    p_new_reference, p_new_note);
+  IF v_result ->> 'status' = 'success' THEN
+    BEGIN
+      INSERT INTO public.audit_logs(
+        organization_id, actor_user_id, action, resource_type, resource_id,
+        before_json, after_json, reason
+      ) VALUES (
+        p_organization_id, p_actor, 'payments.override', 'payments', p_payment_id::text,
+        jsonb_build_object('reference', v_before.reference, 'note', v_before.note),
+        jsonb_strip_nulls(jsonb_build_object('reference', p_new_reference, 'note', p_new_note)),
+        p_reason
+      );
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'apsa_audit_unavailable' USING DETAIL = SQLERRM;
+    END;
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
 -- ── Privileges ─────────────────────────────────────────────────────────────
 --
 -- 061 left function EXECUTE alone, and functions default to PUBLIC EXECUTE —
@@ -263,14 +344,26 @@ REVOKE ALL ON FUNCTION public.payment_replay_matches_v1(uuid,uuid,uuid,text,bigi
   FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text)
   FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.reverse_payment_v1(uuid,uuid,uuid,text)
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.correct_payment_v1(uuid,uuid,uuid,text,text,text)
+  FROM PUBLIC, anon, authenticated, service_role;
 
 REVOKE ALL ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)
   FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.reverse_payment_v2(uuid,uuid,uuid,text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.correct_payment_v2(uuid,uuid,uuid,text,text,text)
+  FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.reverse_payment_v2(uuid,uuid,uuid,text)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.correct_payment_v2(uuid,uuid,uuid,text,text,text)
   TO service_role;
 
 DO $$
@@ -283,8 +376,12 @@ BEGIN
     SELECT f::regprocedure, k FROM (VALUES
       ('public.payment_replay_matches_v1(uuid,uuid,uuid,text,bigint,text,text)', false),
       ('public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text)', false),
+      ('public.reverse_payment_v1(uuid,uuid,uuid,text)', false),
+      ('public.correct_payment_v1(uuid,uuid,uuid,text,text,text)', false),
       ('public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)', true),
-      ('public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)', true)
+      ('public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)', true),
+      ('public.reverse_payment_v2(uuid,uuid,uuid,text)', true),
+      ('public.correct_payment_v2(uuid,uuid,uuid,text,text,text)', true)
     ) AS t(f, k)
   LOOP
     FOR v_grantee IN
@@ -315,8 +412,12 @@ BEGIN
     SELECT f::regprocedure, k FROM (VALUES
       ('public.payment_replay_matches_v1(uuid,uuid,uuid,text,bigint,text,text)', false),
       ('public.refund_payment_v1(uuid,uuid,uuid,bigint,text,text)', false),
+      ('public.reverse_payment_v1(uuid,uuid,uuid,text)', false),
+      ('public.correct_payment_v1(uuid,uuid,uuid,text,text,text)', false),
       ('public.record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)', true),
-      ('public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)', true)
+      ('public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)', true),
+      ('public.reverse_payment_v2(uuid,uuid,uuid,text)', true),
+      ('public.correct_payment_v2(uuid,uuid,uuid,text,text,text)', true)
     ) AS t(f, k)
   LOOP
     -- Stored ACL (or the PUBLIC default when none is stored): no grantee but

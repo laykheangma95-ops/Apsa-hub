@@ -414,16 +414,19 @@ describe("Payment transaction authority and isolation", () => {
       "check_payment_cross_tenant_refs()",
       "guard_order_financial_state()",
       "assert_payment_order_consistency()",
-      // Migration 062: the replay comparison, and the retired refund RPC that
-      // refund_payment_v2 wraps — callable by their owner only.
+      // Migration 062: the replay comparison, and the retired refund, reversal
+      // and correction RPCs the v2 functions wrap — callable by their owner only.
       "payment_replay_matches_v1(uuid,uuid,uuid,text,bigint,text,text)",
       "refund_payment_v1(uuid,uuid,uuid,bigint,text,text)",
+      "reverse_payment_v1(uuid,uuid,uuid,text)",
+      "correct_payment_v1(uuid,uuid,uuid,text,text,text)",
     ];
     const rpcs = [
       "record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)",
       "verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)",
-      "reverse_payment_v1(uuid,uuid,uuid,text)",
       "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)",
+      "reverse_payment_v2(uuid,uuid,uuid,text)",
+      "correct_payment_v2(uuid,uuid,uuid,text,text,text)",
     ];
     for (const role of ["anon", "authenticated", "service_role"]) {
       for (const signature of [...helpers, ...rpcs]) {

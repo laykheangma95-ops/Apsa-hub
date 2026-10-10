@@ -45,7 +45,7 @@ import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
-import { auditLog, auditLogRequired } from "@/server/auth/audit";
+import { auditLog } from "@/server/auth/audit";
 import { enforceRateLimits } from "@/server/rate-limit/limiter";
 import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
 import type { Money, Currency } from "@/types";
@@ -362,7 +362,9 @@ function conflict(message: string): Error {
  * Best-effort audit write that genuinely cannot fail the operation it
  * describes — same rationale as src/server/orders/service.ts#bestEffortAudit.
  * Reserved for routine actions (record, evidence, staff confirm, manager
- * verify). Reversal, refund and override use auditLogRequired instead.
+ * verify). Reversal, refund and override are MANDATORY audits and are written
+ * by their own RPC, in the same transaction as the money (migration 062) —
+ * never by a second write from here.
  */
 async function bestEffortAudit(
   ctx: AuthorizationContext,
@@ -786,6 +788,10 @@ export async function reversePayment(
   if (!reason?.trim()) throw badRequest("A reversal reason is required");
   await loadTransitionTarget(ctx, paymentId);
 
+  // Reversal is a fail-closed, mandatory-audit action: reverse_payment_v2
+  // writes the reversal, the order state and the payments.reverse audit row
+  // in ONE transaction — an audit-store failure rolls the reversal back
+  // (503 audit_unavailable) instead of leaving it unaudited.
   const result = await repo.reversePayment(
     ctx.organizationId,
     paymentId,
@@ -793,16 +799,6 @@ export async function reversePayment(
     reason.trim(),
   );
   if (result.status !== "success") throw reverseFailureToError(result);
-
-  // Reversal is a fail-closed, mandatory-audit action (same tier as
-  // orders.refund / payments.override) — the operation must not silently
-  // succeed with no audit trail.
-  await auditLogRequired(ctx, {
-    action: "payments.reverse",
-    resourceType: "payments",
-    resourceId: paymentId,
-    reason,
-  });
 
   return requireDetail(ctx, paymentId);
 }
@@ -907,6 +903,9 @@ export async function correctPayment(
   const payment = await repo.findPaymentById(ctx.organizationId, paymentId);
   if (!payment) throw notFound("Payment not found");
 
+  // correct_payment_v2 writes the correction and its payments.override audit
+  // row (the before/after values, read under the payment lock) in ONE
+  // transaction — or neither (503 audit_unavailable).
   const result = await repo.correctPayment(
     ctx.organizationId,
     paymentId,
@@ -916,15 +915,6 @@ export async function correctPayment(
     updates.note ?? null,
   );
   if (result.status !== "success") throw correctFailureToError(result);
-
-  await auditLogRequired(ctx, {
-    action: "payments.override",
-    resourceType: "payments",
-    resourceId: paymentId,
-    beforeJson: { reference: payment.reference, note: payment.note },
-    afterJson: { reference: updates.reference ?? undefined, note: updates.note ?? undefined },
-    reason,
-  });
 
   return requireDetail(ctx, paymentId);
 }

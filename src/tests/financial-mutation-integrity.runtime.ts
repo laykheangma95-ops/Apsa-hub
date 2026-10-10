@@ -1,6 +1,7 @@
 /**
- * Financial and fulfillment mutations run only as the principal that started
- * them — through the REAL server functions and REAL SQL.
+ * Financial and fulfillment mutations: initiating principal, durable replay,
+ * refund idempotency and mandatory-audit atomicity — through the REAL server
+ * functions and REAL SQL.
  *
  * The real `src/api/orders.ts`, `src/api/payments.ts` and `src/api/parcels.ts`
  * modules run here: their zod validators, their handlers, their services and
@@ -29,7 +30,10 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { migratedThrough060, MIGRATION_061 } from "./helpers/browser-authority-pg";
 
 type Json = Record<string, any>;
 
@@ -60,6 +64,28 @@ async function seedProduct(org: string, name: string, price: number) {
   return { product, variant };
 }
 const TEA = await seedProduct(ORG_A, "Iced tea", 5000); // $50.00 × 2 = $100.00 an order
+
+// A switchable audit-store failure, INSIDE the database: an audit insert that
+// matches a row here raises, wherever it comes from (a service or an RPC).
+await db.exec(`
+  CREATE TABLE test_audit_failure(action text NOT NULL, reason text);
+  CREATE FUNCTION test_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM test_audit_failure f
+               WHERE f.action = NEW.action AND (f.reason IS NULL OR f.reason = NEW.reason)) THEN
+      RAISE EXCEPTION 'simulated audit store failure';
+    END IF;
+    RETURN NEW;
+  END $$;
+  CREATE TRIGGER test_fail_audit BEFORE INSERT ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION test_fail_audit();
+`);
+async function failAudits(action: string, reason: string | null = null) {
+  await db.query("insert into test_audit_failure(action, reason) values($1,$2)", [action, reason]);
+}
+async function restoreAudits() {
+  await db.query("delete from test_audit_failure");
+}
 
 // ── Principals and grants ────────────────────────────────────────────────────
 
@@ -306,6 +332,7 @@ const codeOf = (o: Outcome) => (o.ok ? "ok" : o.code);
 
 beforeEach(async () => {
   await db.query("delete from rate_limit_buckets");
+  await restoreAudits();
   resetGrants();
   as(USER_A);
 });
@@ -351,7 +378,7 @@ async function auditsSince(before: Surface) {
   const known = new Set(before.audits.split("|"));
   const all = (
     await db.query<Json>(
-      "select id::text, action, actor_user_id, organization_id, resource_id, after_json, reason, xmin::text as tx from audit_logs order by created_at, id",
+      "select id::text, action, actor_user_id, organization_id, resource_id, after_json, reason, created_at::text as at from audit_logs order by created_at, id",
     )
   ).rows;
   return all.filter((row) => !known.has(row.id));
@@ -362,7 +389,7 @@ const who = (id: string | null | undefined) =>
 async function eventsOf(paymentId: string, type?: string) {
   return (
     await db.query<Json>(
-      `select id::text, event_type, actor_user_id, amount_minor, idempotency_key, reason, xmin::text as tx
+      `select id::text, event_type, actor_user_id, amount_minor, idempotency_key, reason, created_at::text as at
          from payment_events where payment_id = $1 ${type ? "and event_type = $2" : ""}
         order by created_at, id`,
       type ? [paymentId, type] : [paymentId],
@@ -1081,4 +1108,230 @@ describe("P2#4 refunds: exactly one refund effect per logical refund", () => {
     // check, by design); no money, ledger or audit row moves.
     expect(wroteSince(before, await writeSurface())).toEqual(["rateLimits"]);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 #5 — a mandatory financial audit commits with its mutation, or neither does
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("P2#5 refund / reverse / correct: the mutation and its mandatory audit are one transaction", () => {
+  const cases = [
+    {
+      name: "refund",
+      action: "payments.refund",
+      event: "refund",
+      seed: seedPaidPayment,
+      request: (paymentId: string) => refundRequest(paymentId),
+      fn: () => payments.refundPaymentFn,
+    },
+    {
+      name: "reverse",
+      action: "payments.reverse",
+      event: "reversal",
+      seed: seedPaidPayment,
+      request: (paymentId: string) => ({
+        paymentId,
+        reason: "Recorded against the wrong order",
+        expectedPrincipal: P_A,
+      }),
+      fn: () => payments.reversePaymentFn,
+    },
+    {
+      name: "correct",
+      action: "payments.override",
+      event: "correction",
+      seed: seedPendingPayment,
+      request: (paymentId: string) => ({
+        paymentId,
+        reason: "Typo in reference",
+        reference: "ABA-7781",
+        expectedPrincipal: P_A,
+      }),
+      fn: () => payments.correctPaymentFn,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`A. ${c.name}: the audit store refuses → nothing commits; once it recovers the retry commits both, in ONE transaction`, async () => {
+      const { orderId, paymentId } = await c.seed();
+      const request = c.request(paymentId);
+      const paymentBefore = await paymentRow(paymentId);
+      const moneyBefore = await orderMoney(orderId);
+      await failAudits(c.action);
+      const before = await writeSurface();
+      const refused = await call(c.fn(), request);
+      const wrote = ledgerWritesSince(before, await writeSurface());
+      console.log(
+        `[evidence] ${c.name} with the audit store down: ${codeOf(refused)} wrote=[${wrote}] ` +
+          `events=[${(await eventsOf(paymentId, c.event)).length}] payment=${(await paymentRow(paymentId)).status}`,
+      );
+      expect(codeOf(refused)).toBe("audit_unavailable");
+      expect(wrote).toEqual([]);
+      expect(await paymentRow(paymentId)).toEqual(paymentBefore);
+      expect(await orderMoney(orderId)).toEqual(moneyBefore);
+
+      await restoreAudits();
+      const retry = await call(c.fn(), request);
+      expect(codeOf(retry)).toBe("ok");
+      const events = await eventsOf(paymentId, c.event);
+      const audits = await auditsSince(before);
+      expect(events.map((e) => who(e.actor_user_id))).toEqual(["A"]);
+      expect(
+        audits.map((a) => [a.action, who(a.actor_user_id), a.organization_id, a.resource_id]),
+      ).toEqual([[c.action, "A", ORG_A, paymentId]]);
+      // One transaction: both rows carry its timestamp (now() is fixed for the
+      // whole top-level transaction; the audit insert runs in a subtransaction
+      // of it, so the row XIDs differ while the commit is one).
+      expect(audits[0]!.at).toBe(events[0]!.at);
+    });
+  }
+
+  it("B. concurrent refunds while one audit insert fails: only the audited refund exists", async () => {
+    const { orderId, paymentId } = await seedPaidPayment();
+    await failAudits("payments.refund", "AUDIT-FAIL probe");
+    const before = await writeSurface();
+    const [failed, ok] = await Promise.all([
+      call(
+        payments.refundPaymentFn,
+        refundRequest(paymentId, { reason: "AUDIT-FAIL probe", amountMinor: 3000 }),
+      ),
+      call(payments.refundPaymentFn, refundRequest(paymentId, { amountMinor: 2000 })),
+    ]);
+    expect(codeOf(failed)).not.toBe("ok");
+    expect(codeOf(ok)).toBe("ok");
+    expect((await eventsOf(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([2000]);
+    expect((await orderMoney(orderId)).refunded_minor).toBe(2000);
+    expect((await auditsSince(before)).map((a) => a.after_json.refunded_amount_minor)).toEqual([
+      2000,
+    ]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Migration 062 — the retired v1 RPCs are executable by no one but their owner
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RETIRED = [
+  "refund_payment_v1(uuid,uuid,uuid,bigint,text,text)",
+  "reverse_payment_v1(uuid,uuid,uuid,text)",
+  "correct_payment_v1(uuid,uuid,uuid,text,text,text)",
+];
+const MIGRATION_062 = "062_financial_replay_refund_audit_atomicity.sql";
+
+/** Effective EXECUTE, as the catalog answers it — PUBLIC, direct and inherited. */
+async function executeAuthority(pg: PGlite, signature: string) {
+  await pg.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'probe_plain') THEN
+        CREATE ROLE probe_plain NOLOGIN;
+        CREATE ROLE probe_inherits_service NOLOGIN IN ROLE service_role;
+        CREATE ROLE probe_inherits_browser NOLOGIN IN ROLE anon, authenticated;
+      END IF;
+    END $$;`);
+  const fn = `'public.${signature}'::regprocedure`;
+  const [row] = (
+    await pg.query<Json>(`
+      SELECT
+        EXISTS (SELECT 1 FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                 WHERE p.oid = ${fn} AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS public,
+        has_function_privilege('anon', ${fn}, 'EXECUTE') AS anon,
+        has_function_privilege('authenticated', ${fn}, 'EXECUTE') AS authenticated,
+        has_function_privilege('service_role', ${fn}, 'EXECUTE') AS service_role,
+        has_function_privilege('probe_plain', ${fn}, 'EXECUTE') AS any_role,
+        has_function_privilege('probe_inherits_service', ${fn}, 'EXECUTE') AS member_of_service,
+        has_function_privilege('probe_inherits_browser', ${fn}, 'EXECUTE') AS member_of_browser,
+        (SELECT array_agg(DISTINCT coalesce(r.rolname, 'PUBLIC') ORDER BY coalesce(r.rolname, 'PUBLIC'))
+           FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           LEFT JOIN pg_roles r ON r.oid = a.grantee
+          WHERE p.oid = ${fn} AND a.privilege_type = 'EXECUTE') AS grantees`)
+  ).rows;
+  return row!;
+}
+const CLOSED = {
+  public: false,
+  anon: false,
+  authenticated: false,
+  service_role: false,
+  any_role: false,
+  member_of_service: false,
+  member_of_browser: false,
+};
+const SERVER_ONLY = {
+  public: false,
+  anon: false,
+  authenticated: false,
+  service_role: true,
+  any_role: false,
+  member_of_service: true,
+  member_of_browser: false,
+};
+
+describe("Migration 062: effective EXECUTE on the retired and the replacement RPCs", () => {
+  it("every migration (this suite's database): retired v1 closed to everyone; v2 server-only", async () => {
+    for (const sig of RETIRED) {
+      const m = await executeAuthority(db, sig);
+      console.log(`[evidence] ${sig}: grantees=[${m.grantees}]`);
+      expect({ sig, ...m, grantees: undefined }).toEqual({ sig, ...CLOSED, grantees: undefined });
+    }
+    for (const sig of RETIRED.map((s) => s.replace("_v1(", "_v2("))) {
+      const v2 = sig.startsWith("refund_payment_v2")
+        ? "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)"
+        : sig;
+      const m = await executeAuthority(db, v2);
+      expect({ v2, ...m, grantees: undefined }).toEqual({
+        v2,
+        ...SERVER_ONLY,
+        grantees: undefined,
+      });
+    }
+  });
+
+  it("the server role calling a retired v1 RPC is refused by PostgreSQL (42501)", async () => {
+    const { paymentId } = await seedPaidPayment();
+    await db.exec("SET ROLE service_role");
+    let code = "none";
+    try {
+      await db.query("select refund_payment_v1($1,$2,$3,1,'x','k-probe')", [
+        ORG_A,
+        paymentId,
+        USER_A,
+      ]);
+    } catch (error) {
+      code = (error as Json).code;
+    } finally {
+      await db.exec("RESET ROLE");
+    }
+    expect(code).toBe("42501");
+  });
+
+  it("Supabase's default function grants (anon, authenticated, service_role) and 061: 062 still closes v1 and opens v2 to the server only", async () => {
+    const pg = await migratedThrough060("permissive");
+    try {
+      await pg.exec(readFileSync(`supabase/migrations/${MIGRATION_061}`, "utf8"));
+      // Before 062 the retired functions really are executable by the server.
+      expect((await executeAuthority(pg, RETIRED[0]!)).service_role).toBe(true);
+      await pg.exec(readFileSync(`supabase/migrations/${MIGRATION_062}`, "utf8"));
+      for (const sig of RETIRED) {
+        expect({ sig, ...(await executeAuthority(pg, sig)), grantees: undefined }).toEqual({
+          sig,
+          ...CLOSED,
+          grantees: undefined,
+        });
+      }
+      for (const v2 of [
+        "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)",
+        "reverse_payment_v2(uuid,uuid,uuid,text)",
+        "correct_payment_v2(uuid,uuid,uuid,text,text,text)",
+        "record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)",
+      ]) {
+        expect({ v2, ...(await executeAuthority(pg, v2)), grantees: undefined }).toEqual({
+          v2,
+          ...SERVER_ONLY,
+          grantees: undefined,
+        });
+      }
+    } finally {
+      await pg.close();
+    }
+  }, 120000);
 });

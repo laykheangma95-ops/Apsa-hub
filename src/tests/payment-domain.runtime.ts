@@ -679,7 +679,7 @@ describe("Test 11: payment_events is append-only at the database level", () => {
 });
 
 describe("Test 12: Correction appends, never rewrites directly", () => {
-  it("correctPayment calls correct_payment_v1 and does not touch amount/method/currency", async () => {
+  it("correctPayment calls correct_payment_v2 (correction + its mandatory audit, one transaction) and does not touch amount/method/currency", async () => {
     const { correctPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
@@ -690,7 +690,7 @@ describe("Test 12: Correction appends, never rewrites directly", () => {
           payment_events: emptyEvents,
           payment_evidence: emptyEvidence,
         },
-        rpc: { correct_payment_v1: { data: { status: "success" }, error: null } },
+        rpc: { correct_payment_v2: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
         await correctPayment(
@@ -704,8 +704,9 @@ describe("Test 12: Correction appends, never rewrites directly", () => {
       },
     );
 
-    const call = calls.find((c) => c.fn === "correct_payment_v1");
+    const call = calls.find((c) => c.fn === "correct_payment_v2");
     expect(call).toBeDefined();
+    expect(calls.some((c) => c.fn === "correct_payment_v1")).toBe(false);
     expect(call?.args).not.toHaveProperty("p_amount_minor");
     expect(call?.args).not.toHaveProperty("p_method");
   });
@@ -729,7 +730,7 @@ describe("Test 12: Correction appends, never rewrites directly", () => {
 });
 
 describe("Test 13: Reversal appends an event", () => {
-  it("reversePayment calls reverse_payment_v1 with the reason", async () => {
+  it("reversePayment calls reverse_payment_v2 (reversal + its mandatory audit, one transaction) with the reason", async () => {
     const { reversePayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
@@ -740,7 +741,7 @@ describe("Test 13: Reversal appends an event", () => {
           payment_events: emptyEvents,
           payment_evidence: emptyEvidence,
         },
-        rpc: { reverse_payment_v1: { data: { status: "success" }, error: null } },
+        rpc: { reverse_payment_v2: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
         await reversePayment(ctx, PAYMENT_ID, "Customer disputed the charge", principalOf(ctx));
@@ -748,8 +749,9 @@ describe("Test 13: Reversal appends an event", () => {
       },
     );
 
-    const call = calls.find((c) => c.fn === "reverse_payment_v1");
+    const call = calls.find((c) => c.fn === "reverse_payment_v2");
     expect(call?.args["p_reason"]).toBe("Customer disputed the charge");
+    expect(calls.some((c) => c.fn === "reverse_payment_v1")).toBe(false);
   });
 
   it("requires a non-empty reason before calling the database", async () => {
