@@ -44,6 +44,7 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { auditLog, auditLogRequired } from "@/server/auth/audit";
 import { enforceRateLimits } from "@/server/rate-limit/limiter";
 import { BACKEND_FAILURE_POLICY, RATE_LIMITS } from "@/server/rate-limit/policies";
@@ -477,6 +478,12 @@ export interface RecordPaymentServiceInput {
   reference?: string | null | undefined;
   idempotencyKey?: string | null | undefined;
   note?: string | null | undefined;
+  /**
+   * The member + organization the client started this payment as — a
+   * refuse-only precondition (assertExpectedPrincipal), never a credential.
+   * The recorder, the ledger actor and the audit actor stay `ctx`.
+   */
+  expectedPrincipal?: ExpectedPrincipal | undefined;
 }
 
 // ── Abuse limits ──────────────────────────────────────────────────────────────
@@ -528,6 +535,10 @@ export async function recordPayment(
   ctx: AuthorizationContext,
   input: RecordPaymentServiceInput,
 ): Promise<PaymentDetail> {
+  // Started as another member or organization: refused before the method,
+  // the permission, the rate limit, the order read and every write (payment,
+  // payment event, order payment state, audit).
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   /*
    * Validate the method BEFORE deriving its permission: an unknown method must
    * be rejected as a bad request, never used to index the permission table

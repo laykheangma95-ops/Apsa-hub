@@ -1259,10 +1259,26 @@ export async function createRealOrder(input: CreateRealOrderInput): Promise<Real
   return mapOrderDetailToUi(detail);
 }
 
-/** Confirm flow (requirement 4): draft -> confirmed. Consumes stock server-side (migration 026). */
-export async function confirmRealOrder(orderId: string): Promise<RealOrderDetail> {
+/**
+ * Confirm flow (requirement 4): draft -> confirmed. Consumes stock server-side
+ * (migration 026) and creates the order's APSA Parcel.
+ *
+ * `principal` is the member + organization this confirmation was started as —
+ * the caller's own server-derived route principal, captured when the merchant
+ * tapped. Sent as `expectedPrincipal`, a refuse-only precondition
+ * (CORRECTIONS.md, CORRECTION-004): the server refuses (409 principal_changed,
+ * nothing written) when the principal it derives by the time it handles the
+ * request is a different one. Never authorization. Required, so no caller can
+ * forget it.
+ */
+export async function confirmRealOrder(
+  orderId: string,
+  principal: { userId: string; organizationId: string },
+): Promise<RealOrderDetail> {
   const { transitionOrderLifecycleFn } = await import("@/api/orders");
-  const detail = await transitionOrderLifecycleFn({ data: { orderId, to: "confirmed" } });
+  const detail = await transitionOrderLifecycleFn({
+    data: { orderId, to: "confirmed", expectedPrincipal: principal },
+  });
   return mapOrderDetailToUi(detail);
 }
 
@@ -1277,11 +1293,20 @@ export async function recoverRealOrderParcel(orderId: string): Promise<RealOrder
   return mapOrderDetailToUi(detail);
 }
 
-/** Cancel flow (requirement 5): draft|confirmed -> cancelled. Restores stock server-side when it applies. */
-export async function cancelRealOrder(orderId: string, reason?: string): Promise<RealOrderDetail> {
+/**
+ * Cancel flow (requirement 5): draft|confirmed -> cancelled. Restores stock
+ * server-side when it applies. `principal`: the member + organization the
+ * cancellation was started as — a refuse-only precondition, exactly as for
+ * confirmRealOrder.
+ */
+export async function cancelRealOrder(
+  orderId: string,
+  principal: { userId: string; organizationId: string },
+  reason?: string,
+): Promise<RealOrderDetail> {
   const { transitionOrderLifecycleFn } = await import("@/api/orders");
   const detail = await transitionOrderLifecycleFn({
-    data: { orderId, to: "cancelled", ...(reason ? { reason } : {}) },
+    data: { orderId, to: "cancelled", ...(reason ? { reason } : {}), expectedPrincipal: principal },
   });
   return mapOrderDetailToUi(detail);
 }
@@ -1927,9 +1952,20 @@ export interface RecordRealPaymentInput {
   reference?: string | undefined;
   idempotencyKey: string;
   note?: string | undefined;
+  /**
+   * The member + organization this payment was started as — the caller's own
+   * server-derived route principal, captured when the merchant submitted. Sent
+   * as `expectedPrincipal`, a refuse-only precondition (CORRECTIONS.md,
+   * CORRECTION-004): the server refuses (409 principal_changed — no payment,
+   * payment event, rate-limit token or audit row) when the principal it derives
+   * is a different one, so the key is still unused when this principal retries.
+   * Never authorization, never the recorder. Required, so no caller can forget it.
+   */
+  principal: { userId: string; organizationId: string };
 }
 
 export async function recordRealPayment(input: RecordRealPaymentInput): Promise<UiPaymentDetail> {
+  const { principal } = input;
   const { recordPaymentFn } = await import("@/api/payments");
   const detail = await recordPaymentFn({
     data: {
@@ -1939,6 +1975,7 @@ export async function recordRealPayment(input: RecordRealPaymentInput): Promise<
       ...(input.reference ? { reference: input.reference } : {}),
       idempotencyKey: input.idempotencyKey,
       ...(input.note ? { note: input.note } : {}),
+      expectedPrincipal: principal,
     },
   });
   return mapPaymentDetailToUi(detail);

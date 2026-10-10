@@ -499,7 +499,8 @@ export function PrepareOrderSheet({
     if (!op) return;
     setFailure(null);
     try {
-      const confirmed = await confirmRealOrder(step.detail.order.id);
+      // Started as this sheet's principal (refuse-only — see the create call).
+      const confirmed = await confirmRealOrder(step.detail.order.id, { userId, organizationId });
       if (!ownsOperation(op)) return;
       setStep({ name: "created-real", detail: confirmed });
       onConfirmed?.(confirmed.order);
@@ -524,7 +525,12 @@ export function PrepareOrderSheet({
     const op = beginOperation("discard");
     if (!op) return;
     try {
-      await cancelRealOrder(step.detail.order.id, "Merchant edited before confirming");
+      await cancelRealOrder(
+        step.detail.order.id,
+        // Started as this sheet's principal (refuse-only — see the create call).
+        { userId, organizationId },
+        "Merchant edited before confirming",
+      );
     } catch {
       // Best-effort: if cancellation fails (e.g. permission), the merchant can
       // still cancel it later from Order Detail. Editing must not get stuck.

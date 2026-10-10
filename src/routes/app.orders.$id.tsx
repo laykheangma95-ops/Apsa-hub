@@ -251,6 +251,17 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    */
   const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
   const userId = session.userId;
+  /*
+   * The principal every mutation on this screen is started as, read at the
+   * render the merchant tapped in and handed to the mutation as a VARIABLE —
+   * fixed at mutate() time, never re-read later. This screen stays mounted
+   * across a member or organization switch, and the server derives who is
+   * acting only when it handles the request; with this refuse-only
+   * precondition it refuses (409 principal_changed, nothing written) a
+   * confirm, cancel or payment started as someone else, instead of executing
+   * it with their permissions and in their name (CORRECTION-004).
+   */
+  const principal = { userId, organizationId: routeOrganizationId };
 
   /*
    * Fail closed rather than key a request under a placeholder: if the route's
@@ -372,7 +383,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
 
   const confirmMutation = useMutation({
-    mutationFn: () => confirmRealOrder(id),
+    mutationFn: (startedAs: typeof principal) => confirmRealOrder(id, startedAs),
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
       invalidateAfterLifecycleChange();
@@ -390,7 +401,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (reason: string) => cancelRealOrder(id, reason || undefined),
+    mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof principal }) =>
+      cancelRealOrder(id, startedAs, reason || undefined),
     onSuccess: (detail) => {
       queryClient.setQueryData(queryKey, detail);
       invalidateAfterLifecycleChange();
@@ -429,13 +441,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
 
   const recordPaymentMutation = useMutation({
-    mutationFn: (submit: RecordOrderPaymentSubmit) =>
+    mutationFn: (submit: RecordOrderPaymentSubmit & { startedAs: typeof principal }) =>
       recordRealPayment({
         orderId: id,
         method: submit.method,
         amountMinor: submit.amountMinor,
         ...(submit.reference ? { reference: submit.reference } : {}),
         idempotencyKey: submit.idempotencyKey,
+        principal: submit.startedAs,
       }),
     onSuccess: () => {
       setRecordPaymentOpen(false);
@@ -1075,7 +1088,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
               className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={confirmMutation.isPending}
               aria-busy={confirmMutation.isPending}
-              onClick={() => confirmMutation.mutate()}
+              onClick={() => confirmMutation.mutate(principal)}
             >
               {confirmMutation.isPending ? <Spinner /> : null}
               {confirmMutation.isPending ? t("order.confirming") : t("order.confirmOrder")}
@@ -1088,7 +1101,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         open={cancelOpen}
         onOpenChange={setCancelOpen}
         pending={cancelMutation.isPending}
-        onConfirm={(reason) => cancelMutation.mutate(reason)}
+        onConfirm={(reason) => cancelMutation.mutate({ reason, startedAs: principal })}
       />
       <CreateDeliverySheet
         open={createDeliveryOpen}
@@ -1130,7 +1143,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         canMarkCod={canMarkCod}
         pending={recordPaymentMutation.isPending}
         error={recordPaymentError}
-        onConfirm={(submit) => recordPaymentMutation.mutate(submit)}
+        onConfirm={(submit) => recordPaymentMutation.mutate({ ...submit, startedAs: principal })}
       />
       <InternalParcelLabelDialog
         open={parcelLabelOpen}

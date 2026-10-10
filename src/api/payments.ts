@@ -7,6 +7,10 @@
  *     no organizationId parameter on any function here, so a caller has no way
  *     to name a tenant.
  *   - user_id comes from the validated session, never from input.
+ *   - recordPaymentFn accepts one refuse-only `expectedPrincipal` (CORRECTION-004):
+ *     the member + organization the client started the payment as, which the
+ *     service compares with the session's own derivation and refuses on. It is
+ *     never a credential, never the recorder, never a tenant.
  *   - All server-only modules (@/lib/supabase/server, @/server/payments/*) are
  *     dynamically imported inside handler bodies so they never enter the client
  *     bundle.
@@ -68,6 +72,15 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
+// The member + organization the client STARTED this payment as (CORRECTIONS.md,
+// CORRECTION-004). A precondition the service compares with the principal it
+// derives from the session — it can only refuse, never authorize or attribute
+// (src/server/auth/expected-principal.ts). The one identity field this file's
+// validators accept.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .optional();
+
 // ── recordPaymentFn ───────────────────────────────────────────────────────────
 
 export const recordPaymentFn = createServerFn({ method: "POST" })
@@ -80,6 +93,8 @@ export const recordPaymentFn = createServerFn({ method: "POST" })
         reference: z.string().trim().min(1).max(200).nullish(),
         idempotencyKey: z.string().trim().min(1).max(200).nullish(),
         note: z.string().trim().max(1000).nullish(),
+        // Refuse-only: the principal this payment was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -93,6 +108,7 @@ export const recordPaymentFn = createServerFn({ method: "POST" })
       reference: data.reference ?? null,
       idempotencyKey: data.idempotencyKey ?? null,
       note: data.note ?? null,
+      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
     });
   });
 

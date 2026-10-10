@@ -253,8 +253,9 @@ describe("Confirm and cancel call transitionOrderLifecycleFn only", () => {
     const route = readSource(ORDER_DETAIL_ROUTE);
     expect(route).toMatch(/canConfirmOrder\(order\.lifecycleStatus\)/);
     expect(route).toMatch(/canCancelOrder\(order\.lifecycleStatus\)/);
-    expect(route).toMatch(/confirmMutation\.mutate\(\)/);
-    expect(route).toMatch(/cancelMutation\.mutate\(reason\)/);
+    // Each carries the principal it was started as (CORRECTION-004, refuse-only).
+    expect(route).toMatch(/confirmMutation\.mutate\(principal\)/);
+    expect(route).toMatch(/cancelMutation\.mutate\(\{ reason, startedAs: principal \}\)/);
   });
 });
 

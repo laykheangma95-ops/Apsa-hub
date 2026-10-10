@@ -59,6 +59,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import { SANCTIONED_PAYMENT_FN_SCHEMA, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 // ── Default audit mock ──────────────────────────────────────────────────────
 //
@@ -1503,7 +1504,9 @@ describe("Test 29: src/api/payments.ts respects the server/browser boundary", ()
 
 describe("Test 30: No client-trusted organizationId or userId parameter", () => {
   it("no zod schema in src/api/payments.ts accepts organizationId or userId", () => {
-    const src = paymentsApiSource();
+    // CORRECTION-004: strip only the one sanctioned, refuse-only expectedPrincipal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const src = withoutSanctioned(paymentsApiSource(), SANCTIONED_PAYMENT_FN_SCHEMA);
     expect(src).not.toContain("organizationId:");
     expect(src).not.toContain("userId:");
   });

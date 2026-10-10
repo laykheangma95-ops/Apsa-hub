@@ -307,7 +307,14 @@ mock.module("@/api/orders", () => ({
   transitionOrderLifecycleFn: async ({ data }: { data: Json }) => {
     confirms.push(data.orderId);
     const { transitionLifecycleStatus } = await import("@/server/orders/service");
-    return transitionLifecycleStatus(serverContext(), data.orderId, data.to, data.reason ?? null);
+    // Forwarded exactly as transitionOrderLifecycleFn's handler forwards it.
+    return transitionLifecycleStatus(
+      serverContext(),
+      data.orderId,
+      data.to,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   },
 }));
 mock.module("@/api/products", () => ({

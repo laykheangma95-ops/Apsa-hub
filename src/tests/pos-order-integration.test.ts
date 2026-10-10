@@ -57,7 +57,10 @@ import * as path from "path";
 import { addToCart, calculateCartTotals, lineKey, removeLine, setQuantity } from "@/lib/pos-cart";
 import type { CartLine } from "@/lib/pos-cart";
 import { usd } from "@/lib/money";
-import { SANCTIONED_POS_CALL_ARG, withoutSanctioned } from "./helpers/refuse-only-principal";
+import {
+  SANCTIONED_POS_ATTEMPT_PRINCIPAL,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 
@@ -193,14 +196,16 @@ describe("PosCheckoutSheet's production path reuses createRealOrder + confirmRea
       source.indexOf("async function completeReal"),
       source.indexOf("const realConfirmed"),
     );
-    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
-    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
-    const createCallBlock = withoutSanctioned(
-      completeReal.slice(
-        completeReal.indexOf("createRealOrder({"),
-        completeReal.indexOf("});", completeReal.indexOf("createRealOrder({")),
-      ),
-      SANCTIONED_POS_CALL_ARG,
+    // CORRECTION-004: the call carries the attempt's one refuse-only principal by
+    // reference; its single spelling (SANCTIONED_POS_ATTEMPT_PRINCIPAL) sits above
+    // the call, so the call block itself must name no identity at all.
+    const createCallBlock = completeReal.slice(
+      completeReal.indexOf("createRealOrder({"),
+      completeReal.indexOf("});", completeReal.indexOf("createRealOrder({")),
+    );
+    expect(createCallBlock).toMatch(/\n\s*principal,\n/);
+    expect(withoutSanctioned(completeReal, SANCTIONED_POS_ATTEMPT_PRINCIPAL)).not.toMatch(
+      /organizationId|userId/,
     );
     for (const forbidden of [
       "organizationId",
@@ -269,8 +274,8 @@ describe("PosCheckoutSheet's production path reuses createRealOrder + confirmRea
     // The id is the server's (realDetail), fixed when the merchant submits and
     // carried on the submit so a later re-render cannot redirect it.
     expect(fn).toContain("orderId: submit.orderId");
-    expect(source).toContain(
-      "recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })",
+    expect(source).toMatch(
+      /recordPaymentMutation\.mutate\(\{\s*\.\.\.submit,\s*orderId: realDetail\.order\.id,/,
     );
     expect(fn).toContain("idempotencyKey: submit.idempotencyKey");
     // Never asserts a payment status locally: the order is re-read from the
@@ -338,7 +343,7 @@ describe("Duplicate-submission protection at the POS boundary", () => {
     // The confirm call sits outside the "if (!orderId)" creation branch, so a
     // retry that already has an orderId skips straight to confirmRealOrder.
     const createBlockEnd = fn.indexOf("onCompleted();") + "onCompleted();".length;
-    const confirmCallIndex = fn.indexOf("confirmRealOrder(orderId)");
+    const confirmCallIndex = fn.indexOf("confirmRealOrder(orderId, principal)");
     expect(confirmCallIndex).toBeGreaterThan(createBlockEnd);
   });
 

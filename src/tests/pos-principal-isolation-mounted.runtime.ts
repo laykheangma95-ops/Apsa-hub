@@ -330,7 +330,14 @@ mock.module("@/api/orders", () => ({
   transitionOrderLifecycleFn: async ({ data }: { data: Json }) => {
     confirms.push(data.orderId);
     const { transitionLifecycleStatus } = await import("@/server/orders/service");
-    return transitionLifecycleStatus(context(), data.orderId, data.to, data.reason ?? null);
+    // Forwarded exactly as transitionOrderLifecycleFn's handler forwards it.
+    return transitionLifecycleStatus(
+      context(),
+      data.orderId,
+      data.to,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   },
   getOrderByIdFn: async ({ data }: { data: Json }) => {
     const { getOrderById } = await import("@/server/orders/service");
@@ -347,6 +354,8 @@ mock.module("@/api/payments", () => ({
       reference: data.reference ?? null,
       idempotencyKey: data.idempotencyKey ?? null,
       note: data.note ?? null,
+      // Forwarded exactly as recordPaymentFn's handler forwards it.
+      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
     });
   },
 }));

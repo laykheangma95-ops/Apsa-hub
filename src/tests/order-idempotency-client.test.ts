@@ -74,8 +74,10 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
       );
       expect(shell).toMatch(/replayHolders=\{replayHolders\}/);
       expect(route).toMatch(/<PosCheckoutSheet[\s\S]*?replayHolders=\{replayHolders\}[\s\S]*?\/>/);
+      // The claim and the attempt's principal are both taken from the token —
+      // nothing else stands between the attempt and them.
       expect(source).toMatch(
-        /const token = beginAttempt\(!orderId\);\s+(?:\/\/[^\n]*\n\s+)*const claim = idempotencyKeys\.claim\(token\);/,
+        /const token = beginAttempt\(!orderId\);\s+(?:\/\*[\s\S]*?\*\/\s+)?const principal = \{ userId: token\.userId, organizationId: token\.organizationId \};\s+(?:\/\/[^\n]*\n\s+)*const claim = idempotencyKeys\.claim\(token\);/,
       );
       expect(source).not.toMatch(/idempotencyKeys(?:\.current)? = createIdempotencyKeyHolder\(\)/);
       expect(source).not.toMatch(/createIdempotencyKeyHolder/);
@@ -97,93 +99,10 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
 });
 
 /*
- * Every order-creation entry point is bound to the principal that started it
- * (PR #121 review P2, CORRECTION-004): the server derives who is acting only
- * when it handles the request, so each create carries its attempt's own
- * principal — the one its replay claim belongs to — and the server refuses,
- * before any limit or write, when its derivation differs. Behaviour, against
- * the database: pos-checkout-replay-mounted "A checkout runs as the principal
- * that started it", and order-entry-principal-mounted (New Order, Inbox).
+ * The initiating-principal binding of every protected mutation — order creation
+ * (POS, New Order, Inbox), lifecycle transitions and payment recording — is
+ * pinned at every layer in initiating-principal-contract.test.ts (CORRECTION-004).
  */
-it("every order-creation entry point sends its attempt's principal, and the server checks it before anything else", () => {
-  const callOf = (file: string) => {
-    const source = readFileSync(resolve(file), "utf8").replace(/\r\n/g, "\n");
-    const start = source.indexOf("await createRealOrder({");
-    expect(start).toBeGreaterThan(0);
-    return source.slice(start, source.indexOf("});", start));
-  };
-  // POS and New Order: the attempt token's principal, the one its claim was
-  // taken for.
-  for (const file of [
-    "src/components/pos/PosCheckoutSheet.tsx",
-    "src/components/orders/CreateRealOrderSheet.tsx",
-  ]) {
-    expect(callOf(file)).toMatch(
-      /principal: \{ userId: token\.userId, organizationId: token\.organizationId \}/,
-    );
-  }
-  // Inbox: the replay scope's principal — its claim's, and the only one the
-  // route mounts this sheet for (it is keyed by member + organization).
-  const inbox = readFileSync(resolve("src/components/inbox/PrepareOrderSheet.tsx"), "utf8");
-  expect(inbox).toMatch(/const \{ userId, organizationId, conversationId \} = replayScope;/);
-  expect(callOf("src/components/inbox/PrepareOrderSheet.tsx")).toMatch(
-    /idempotency: claim,[\s\S]*principal: \{ userId, organizationId \},\s*$/,
-  );
-  const route = readFileSync(resolve("src/routes/app.inbox.$id.tsx"), "utf8");
-  expect(route).toMatch(/key=\{`prepare:\$\{orderScope\}`\}/);
-  expect(route).toMatch(
-    /const orderScope = `\$\{userId\}\\u0000\$\{routeOrganizationId\}\\u0000\$\{id\}`;/,
-  );
-  expect(route).toMatch(
-    /replayScope=\{\{ userId, organizationId: routeOrganizationId, conversationId: id \}\}/,
-  );
-
-  const fn = readFileSync(resolve("src/api/orders.ts"), "utf8");
-  const createFn = fn.slice(
-    fn.indexOf("export const createOrderFn"),
-    fn.indexOf("// ── updateOrderShippingFn"),
-  );
-  expect(createFn).toMatch(
-    /expectedPrincipal: z\s*\.object\(\{ userId: z\.string\(\)\.uuid\(\), organizationId: z\.string\(\)\.uuid\(\) \}\)/,
-  );
-  expect(createFn).toMatch(
-    /\.\.\.\(data\.expectedPrincipal \? \{ expectedPrincipal: data\.expectedPrincipal \} : \{\}\)/,
-  );
-  // The acting principal is still the server's own derivation.
-  expect(createFn).toMatch(/const authCtx = await resolveAuthContext\(\);/);
-
-  const service = readFileSync(resolve("src/server/orders/service.ts"), "utf8").replace(
-    /\r\n/g,
-    "\n",
-  );
-  const body = service.slice(service.indexOf("export async function createOrder("));
-  const check = body.indexOf("assertExpectedPrincipal(ctx, input.expectedPrincipal);");
-  expect(check).toBeGreaterThan(0);
-  expect(check).toBeLessThan(body.indexOf('ctx.require("orders.create")'));
-  expect(check).toBeLessThan(body.indexOf("enforceOrderCreateLimit("));
-  expect(check).toBeLessThan(body.indexOf("repo.createOrder("));
-  // Refuse-only: the field is read in ONE place — the equality check — and
-  // never reaches the repository, an RPC, an audit row or the response.
-  expect(service.split("input.expectedPrincipal").length - 1).toBe(1);
-  const helper = service.slice(
-    service.indexOf("function assertExpectedPrincipal("),
-    service.indexOf("/** Provenance identifiers"),
-  );
-  expect(helper).toContain(
-    "if (expected.userId === ctx.userId && expected.organizationId === ctx.organizationId) return;",
-  );
-  // Read exactly twice — both sides of that one equality.
-  expect(helper.match(/expected\.(userId|organizationId)/g)).toHaveLength(2);
-  expect(helper).toContain('code: "principal_changed"');
-  // Ownership stays server-derived: the create is written as ctx, never as the claim.
-  expect(body).toMatch(/repo\.createOrder\(ctx\.organizationId, ctx\.userId,/);
-  const createOrderBody = body.slice(0, body.indexOf("\n}\n"));
-  expect(createOrderBody).not.toMatch(/expected(Principal)?\.(userId|organizationId)/);
-
-  const api = readFileSync(resolve("src/lib/api/index.ts"), "utf8");
-  // Outside the fingerprint: the key holder is already scoped to one principal.
-  expect(api).toMatch(/const \{ idempotency, principal, \.\.\.request \} = input;/);
-});
 
 /*
  * One holder per member + organization for a component that stays mounted

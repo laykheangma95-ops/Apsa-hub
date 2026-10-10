@@ -53,6 +53,7 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { auditLog } from "@/server/auth/audit";
 import { RateLimitedError } from "@/server/rate-limit/errors";
 import { checkRateLimits } from "@/server/rate-limit/limiter";
@@ -481,35 +482,7 @@ export interface CreateOrderServiceInput {
    * between the tap and the server), so nothing is written — see
    * assertExpectedPrincipal.
    */
-  expectedPrincipal?: { userId: string; organizationId: string } | undefined;
-}
-
-/**
- * Refuse an order whose initiating principal is not the one handling it.
- *
- * The server derives who is acting when it HANDLES a request: the session's
- * member and that member's active organization at that moment. A client
- * request can outlive the principal that sent it — the checkout lazily loads
- * its server function, then travels — and a member or organization switch in
- * that window used to execute member A's order as member B: B became its
- * creator under A's replay key, and A's identical retry then met a creator
- * mismatch on that key (idempotency_conflict), leaving the sale unreconciled.
- *
- * Checked before anything else touches the request — no rate-limit token is
- * spent and nothing is written, so the initiating principal's replay key is
- * still unused when it retries as itself. A mismatch is a 409 with its own
- * code, carrying nothing about either principal.
- */
-function assertExpectedPrincipal(
-  ctx: AuthorizationContext,
-  expected: CreateOrderServiceInput["expectedPrincipal"],
-): void {
-  if (!expected) return;
-  if (expected.userId === ctx.userId && expected.organizationId === ctx.organizationId) return;
-  throw Object.assign(
-    conflict("The signed-in member or organization changed before this order was sent"),
-    { code: "principal_changed" },
-  );
+  expectedPrincipal?: ExpectedPrincipal | undefined;
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
@@ -854,7 +827,15 @@ export async function transitionLifecycleStatus(
   orderId: string,
   to: OrderLifecycleStatus,
   reason?: string | null,
+  /**
+   * The member + organization the client started this transition as — a
+   * refuse-only precondition (assertExpectedPrincipal). Checked before the
+   * permission, the order read and every write (status, history, stock,
+   * parcel, audit); it never authorizes or attributes anything.
+   */
+  expectedPrincipal?: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   const permission = LIFECYCLE_TRANSITION_PERMISSIONS[to];
   if (!permission) {
     throw badRequest(`Orders cannot be moved to lifecycle status '${to}'`);

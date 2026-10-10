@@ -28,7 +28,10 @@ import * as path from "path";
 import { classifyCheckout, isSellable, type CartLine } from "@/lib/pos-cart";
 import { usd } from "@/lib/money";
 import type { Product } from "@/types";
-import { SANCTIONED_POS_CALL_ARG, withoutSanctioned } from "./helpers/refuse-only-principal";
+import {
+  SANCTIONED_POS_ATTEMPT_PRINCIPAL,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 const readSource = (p: string) => fs.readFileSync(path.resolve(ROOT, p), "utf-8");
@@ -305,7 +308,7 @@ describe("Money stays integer minor units across the sale journey", () => {
         source.indexOf("async function completeReal"),
         source.indexOf("const realConfirmed"),
       ),
-      SANCTIONED_POS_CALL_ARG,
+      SANCTIONED_POS_ATTEMPT_PRINCIPAL,
     );
     for (const forbidden of ["unitPrice", "subtotal:", "total:", "organizationId", "userId"]) {
       expect(fn).not.toContain(forbidden);
@@ -433,7 +436,7 @@ describe("Payment actions are offered on capability and allowed by the server", 
         source.indexOf("async function completeReal"),
         source.indexOf("const realConfirmed"),
       ),
-      SANCTIONED_POS_CALL_ARG,
+      SANCTIONED_POS_ATTEMPT_PRINCIPAL,
     );
     expect(fn).not.toContain("organizationId");
   });
@@ -510,8 +513,8 @@ describe("Failure never renders as success", () => {
     // The re-read is of the order the payment was recorded against — the
     // server's own id, carried on the submit from realDetail (see below).
     expect(source).toContain("const refreshed = await getRealOrderDetail(submit.orderId);");
-    expect(source).toContain(
-      "recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })",
+    expect(source).toMatch(
+      /recordPaymentMutation\.mutate\(\{\s*\.\.\.submit,\s*orderId: realDetail\.order\.id,/,
     );
   });
 

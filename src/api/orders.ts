@@ -63,6 +63,15 @@ const shippingSnapshotSchema = z.object({
   address: z.string().max(2000).nullish(),
 });
 
+// The member + organization the client STARTED this mutation as (CORRECTIONS.md,
+// CORRECTION-004). A precondition the service compares with the principal it
+// derives from the session — it can only refuse, never authorize or attribute
+// (src/server/auth/expected-principal.ts). The one identity field this file's
+// validators accept.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .optional();
+
 // ── Internal helper: resolve session + organization ────────────────────────────
 // organizationId is NEVER accepted from the caller — always derived from DB membership.
 
@@ -114,13 +123,8 @@ export const createOrderFn = createServerFn({ method: "POST" })
         // Optional order shipping destination — snapshotted onto the order and
         // folded into the idempotency fingerprint server-side (migration 047).
         shipping: shippingSnapshotSchema.optional(),
-        // The member + organization the client started this order as. A
-        // precondition the service checks against the principal it derives
-        // from the session — it can only refuse, never authorize (see
-        // assertExpectedPrincipal in src/server/orders/service.ts).
-        expectedPrincipal: z
-          .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
-          .optional(),
+        // Refuse-only: the principal this order was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -180,13 +184,21 @@ export const transitionOrderLifecycleFn = createServerFn({ method: "POST" })
         orderId: z.string().uuid("Invalid order ID"),
         to: lifecycleStatusSchema,
         reason: z.string().max(1000).nullish(),
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { transitionLifecycleStatus } = await import("@/server/orders/service");
-    return transitionLifecycleStatus(authCtx, data.orderId, data.to, data.reason ?? null);
+    return transitionLifecycleStatus(
+      authCtx,
+      data.orderId,
+      data.to,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 /**
