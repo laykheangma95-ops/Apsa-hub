@@ -40,6 +40,13 @@ const ORG_B_PAYMENT_ID = "30000000-0000-0000-0000-0000000000b2";
 /** A UUID that names nothing at all. */
 const NONEXISTENT_PAYMENT_ID = "30000000-0000-0000-0000-00000000dead";
 
+/**
+ * One logical refund's key in these tests. Low-entropy on purpose (the repo's
+ * fixture convention, cf. TEST_IDEMPOTENCY_KEY): a synthetic test string, not a
+ * credential, that secret scanners must not mistake for one.
+ */
+const REFUND_IDEMPOTENCY_KEY = "fixture-bbbbbbbbbbbbbbbb";
+
 function makeCtx(permissions: string[], organizationId = ORG_A_ID): AuthCtxType {
   const perms = new Set<string>(permissions);
   return {
@@ -338,7 +345,7 @@ describe("permission denial happens before any data is touched", () => {
           paymentId: PAYMENT_ID,
           amountMinor: 1000,
           reason: "Damaged",
-          idempotencyKey: "refund-click-1",
+          idempotencyKey: REFUND_IDEMPOTENCY_KEY,
           expectedRefundedMinor: 0,
           expectedPrincipal: principalOf(ctx),
         }),
@@ -573,7 +580,7 @@ describe("the client boundary in src/lib/api", () => {
       amountMinor: 2000,
       reason: "Damaged item",
       expectedRefundedMinor: 500,
-      idempotencyKey: "refund-click-1",
+      idempotencyKey: REFUND_IDEMPOTENCY_KEY,
     });
 
     // The amount, the reason, the one logical refund's key, the refunded total
@@ -583,7 +590,7 @@ describe("the client boundary in src/lib/api", () => {
       amountMinor: 2000,
       reason: "Damaged item",
       expectedRefundedMinor: 500,
-      idempotencyKey: "refund-click-1",
+      idempotencyKey: REFUND_IDEMPOTENCY_KEY,
       expectedPrincipal: STARTED_AS,
     });
     expect(Number.isInteger(seen[0]!.data!["amountMinor"])).toBe(true);

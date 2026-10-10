@@ -768,13 +768,20 @@ describe("Test 13: Reversal appends an event", () => {
   });
 });
 
+/**
+ * One logical refund's key in these tests. Low-entropy on purpose (the repo's
+ * fixture convention, cf. TEST_IDEMPOTENCY_KEY): a synthetic test string, not a
+ * credential, that secret scanners must not mistake for one.
+ */
+const REFUND_IDEMPOTENCY_KEY = "fixture-bbbbbbbbbbbbbbbb";
+
 describe("Test 14: Refund appends an event; its mandatory audit is in the same transaction", () => {
   /** One logical refund as the Payment detail screen sends it (migration 062). */
   const refund = (ctx: AuthCtxType, change: Record<string, unknown> = {}) => ({
     paymentId: PAYMENT_ID,
     amountMinor: 400,
     reason: "Partial refund — damaged item",
-    idempotencyKey: "refund-click-1",
+    idempotencyKey: REFUND_IDEMPOTENCY_KEY,
     expectedRefundedMinor: 0,
     expectedPrincipal: principalOf(ctx),
     ...change,
@@ -811,7 +818,7 @@ describe("Test 14: Refund appends an event; its mandatory audit is in the same t
       p_actor: USER_ORG_A,
       p_amount_minor: 400,
       p_reason: "Partial refund — damaged item",
-      p_idempotency_key: "refund-click-1",
+      p_idempotency_key: REFUND_IDEMPOTENCY_KEY,
       p_expected_refunded_minor: 0,
     });
     // The retired, non-atomic RPC is never called.
