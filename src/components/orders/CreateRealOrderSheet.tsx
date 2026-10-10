@@ -52,7 +52,7 @@ import {
   type OrderCustomerOption,
 } from "@/lib/api";
 import { classifyOrderError, isOrderCurrencyMismatch } from "@/lib/orders";
-import { createIdempotencyKeyHolder } from "@/lib/idempotency";
+import { createScopedIdempotencyHolders } from "@/lib/idempotency";
 import { catalogKeys } from "@/lib/catalog";
 import { customerKeys, visibleCustomerPhone } from "@/lib/customers-query";
 import { localName } from "@/lib/format";
@@ -223,10 +223,25 @@ export function CreateRealOrderSheet({
    * after reopening is answered with the order the server already made rather
    * than a second one, and a stale claim can never retire a key a newer
    * attempt owns. Once a response is accepted the key is retired, so the next
-   * order — even an identical one — is new. A member/organization change
-   * replaces the holder: no key or claim crosses into another principal.
+   * order — even an identical one — is new.
+   *
+   * The sheet stays mounted while the member or organization changes, so it
+   * keeps one holder PER member + organization (createScopedIdempotencyHolders)
+   * rather than one for its lifetime. No key or claim crosses into another
+   * principal — and switching away no longer discards one: replacing the holder
+   * on every switch turned "lost response in A → B → back to A → the identical
+   * order" into a second order. A's unresolved key is waiting for A's rebuild.
+   * The holder is looked up at each attempt, as the principal the request is
+   * sent as.
    */
-  const idempotencyKeys = useRef(createIdempotencyKeyHolder());
+  const replayHolders = useRef(createScopedIdempotencyHolders());
+  const idempotencyKeys = {
+    claim: () =>
+      replayHolders.current
+        // No subject: one New Order flow per member and organization.
+        .holderFor({ userId, organizationId, flow: "orders-new-order", subject: "" })
+        .claim(),
+  };
 
   /*
    * Both reads are organization data — the catalog with its prices, and a
@@ -441,9 +456,11 @@ export function CreateRealOrderSheet({
    * However a session ends, it ends in reset(): the sheet's own close control
    * (above), the parent setting `open` to false, or a different member or
    * organization — which is a different New Order: nothing this session holds
-   * (its draft, an attempt in flight, its replay key) belongs to it. These are
-   * LAYOUT effects so they run in the same commit as the change; no response
-   * can resolve in between and be taken for the new session's.
+   * (its draft, an attempt in flight) belongs to it. The replay key is not the
+   * session's: it stays with its member + organization's holder (above),
+   * unreachable from the new principal, for when the switch comes back. These
+   * are LAYOUT effects so they run in the same commit as the change; no
+   * response can resolve in between and be taken for the new session's.
    */
   const resetRef = useRef(reset);
   useLayoutEffect(() => {
@@ -457,7 +474,6 @@ export function CreateRealOrderSheet({
     if (principal.userId === userId && principal.organizationId === organizationId) return;
     principalRef.current = { userId, organizationId };
     resetRef.current();
-    idempotencyKeys.current = createIdempotencyKeyHolder();
   }, [userId, organizationId]);
   useEffect(
     () => () => {
@@ -487,9 +503,10 @@ export function CreateRealOrderSheet({
     // Integer minor units in the line's own currency — the only money sent.
     const discountMinor = priced.discount.amount;
     const deliveryMinor = priced.deliveryFee.amount;
-    // This attempt's place in this session, and its own claim on the replay key.
+    // This attempt's place in this session, and its own claim on the replay key
+    // of the member and organization it is sent as.
     const token = beginAttempt();
-    const claim = idempotencyKeys.current.claim();
+    const claim = idempotencyKeys.claim();
     try {
       const shippingPayload = orderShippingPayload(shipIntent, shipping);
       const detail = await createRealOrder({

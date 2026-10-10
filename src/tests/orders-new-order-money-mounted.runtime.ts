@@ -1381,3 +1381,323 @@ describe("Session identity: a late response never reaches a newer session", () =
     expect(await orderCount(ORG_KHR)).toBe(before + 1);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Replay identity survives an identity switch and back (PR #120 review P2)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The sheet stays mounted while the member or organization changes under it.
+// A create whose outcome is unknown (committed, response lost) must keep its
+// key for ITS member and organization: switching away and back, then
+// rebuilding the identical order, must be replayed by the server — one order.
+// The first repair replaced the holder on every switch, so A → B → A minted a
+// new key and create_order_v3 correctly persisted a second order.
+
+/** Switch the member and/or organization under the still-mounted sheet. */
+async function switchIdentity(next: { org?: string; user?: string }) {
+  if (next.org) activeOrg = next.org;
+  if (next.user) activeUser = next.user;
+  await rerender();
+  await settle(10);
+}
+
+/** Orders persisted under one request's key — the authoritative duplicate check. */
+async function ordersUnderKey(request: Json): Promise<number> {
+  return (
+    await f.db.query<{ n: number }>(
+      "select count(*)::int as n from orders where idempotency_key=$1",
+      [request.idempotencyKey],
+    )
+  ).rows[0]!.n;
+}
+
+/** Water × 2, the committed-but-lost request every case below rebuilds. */
+async function buildWaterTimesTwo() {
+  await pickProduct("Water");
+  await increaseQuantity(1);
+  expect(total()).toBe("៛10,000");
+}
+
+describe("Replay identity survives an identity switch and back", () => {
+  it("A. organization A → B → A: the identical retry sends the original key — exactly one order", async () => {
+    await openSheet(ORG_KHR);
+    const khrBefore = await orderCount(ORG_KHR);
+    const usdBefore = await orderCount(ORG_USD);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit(); // committed by the server, response lost
+    expect(h.created).toHaveLength(0);
+    expect(await orderCount(ORG_KHR)).toBe(khrBefore + 1);
+    await closeSheet();
+
+    await switchIdentity({ org: ORG_USD });
+    await reopenSheet();
+    expect(text()).toContain("Serum");
+    await closeSheet();
+    await switchIdentity({ org: ORG_KHR });
+    await reopenSheet();
+
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    // The server answered with the order the first request made.
+    expect(h.created).toHaveLength(1);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    expect(await ordersUnderKey(sent[0]!)).toBe(1);
+    expect(await orderCount(ORG_KHR)).toBe(khrBefore + 1);
+    expect(await orderCount(ORG_USD)).toBe(usdBefore);
+    expect(await persisted()).toMatchObject({ currency: "KHR", total_minor: 10000 });
+  });
+
+  it("A2. the same without closing first: the organization switches under the open, failed sheet", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit();
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+
+    await switchIdentity({ org: ORG_USD });
+    // B's session starts clean: none of A's draft or failure.
+    expect(alerts()).toEqual([]);
+    expect(text()).not.toContain("Water");
+    await switchIdentity({ org: ORG_KHR });
+
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("B. member A → B → A: the identical retry sends the original key — exactly one order", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit();
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+    await closeSheet();
+
+    await switchIdentity({ user: MEMBER_2 });
+    await reopenSheet();
+    await closeSheet();
+    await switchIdentity({ user: f.actor });
+    await reopenSheet();
+
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    expect(await ordersUnderKey(sent[0]!)).toBe(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("C1. different organizations never share a key: each keeps its own, and each is replayed once", async () => {
+    await openSheet(ORG_KHR);
+    const khrBefore = await orderCount(ORG_KHR);
+    const usdBefore = await orderCount(ORG_USD);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit(); // 0: A's Water, lost
+
+    await switchIdentity({ org: ORG_USD });
+    await pickProduct("Serum");
+    loseNextResponse = true;
+    await submit(); // 1: B's Serum, lost
+    expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
+
+    await switchIdentity({ org: ORG_KHR });
+    await buildWaterTimesTwo();
+    await submit(); // 2: A's retry
+    expect(sent[2]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+
+    await closeSheet();
+    await switchIdentity({ org: ORG_USD });
+    await reopenSheet();
+    await pickProduct("Serum");
+    await submit(); // 3: B's retry
+    expect(sent[3]!.idempotencyKey).toBe(sent[1]!.idempotencyKey);
+    expect(h.created).toHaveLength(2);
+    expect(h.created[1]!.total).toEqual({ amount: 2000, currency: "USD" });
+
+    expect(await orderCount(ORG_KHR)).toBe(khrBefore + 1);
+    expect(await orderCount(ORG_USD)).toBe(usdBefore + 1);
+  });
+
+  it("C2. different members never share a key, even for the identical basket", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit(); // 0: member 1, lost
+
+    await switchIdentity({ user: MEMBER_2 });
+    await buildWaterTimesTwo();
+    await submit(); // 1: member 2's identical basket — their own order
+    expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+
+    await closeSheet();
+    await switchIdentity({ user: f.actor });
+    await reopenSheet();
+    await buildWaterTimesTwo();
+    await submit(); // 2: member 1's retry — their key, never member 2's
+    expect(sent[2]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(sent[2]!.idempotencyKey).not.toBe(sent[1]!.idempotencyKey);
+    expect(h.created).toHaveLength(2);
+    expect(await ordersUnderKey(sent[0]!)).toBe(1);
+    expect(await ordersUnderKey(sent[1]!)).toBe(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("C3. a different logical order after the switch back is a new order with a new key", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit(); // 0: Water × 2, lost
+
+    await switchIdentity({ org: ORG_USD });
+    await switchIdentity({ org: ORG_KHR });
+    await pickProduct("Water"); // Water × 1 — a different request
+    await submit();
+    expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.total).toEqual({ amount: 5000, currency: "KHR" });
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("D. late responses across A → B → A reach no session, retire no key, and the rebuilds are replayed once each", async () => {
+    await openSheet(ORG_KHR);
+    const khrBefore = await orderCount(ORG_KHR);
+    const usdBefore = await orderCount(ORG_USD);
+    holdResponses = true;
+    await buildWaterTimesTwo();
+    await submit(); // 0: A, committed, response held
+
+    await switchIdentity({ org: ORG_USD });
+    await pickProduct("Serum");
+    await submit(); // 1: B, committed, response held
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+
+    // A's late success lands in B's live session: ignored.
+    await release(0);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(submitButton()?.textContent?.trim()).toBe(en.orderCreate.creating);
+    expect(unitPrice()).toBe("$20.00");
+
+    await switchIdentity({ org: ORG_KHR });
+    await buildWaterTimesTwo();
+    // B's late success lands in A's live, unsubmitted session: ignored.
+    await release(1);
+    expect(createdBanner()).toBeNull();
+    expect(h.created).toHaveLength(0);
+    expect(total()).toBe("៛10,000");
+    expect(submitButton()?.disabled).toBe(false);
+
+    // Neither stale success retired its key: both rebuilds are replays.
+    holdResponses = false;
+    await submit(); // 2: A's rebuild
+    expect(sent[2]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[0]!))!);
+    await closeSheet();
+    await switchIdentity({ org: ORG_USD });
+    await reopenSheet();
+    await pickProduct("Serum");
+    await submit(); // 3: B's rebuild
+    expect(sent[3]!.idempotencyKey).toBe(sent[1]!.idempotencyKey);
+    expect(createdBanner()).toContain((await orderNumberFor(sent[1]!))!);
+
+    expect(h.created).toHaveLength(2);
+    expect(await orderCount(ORG_KHR)).toBe(khrBefore + 1);
+    expect(await orderCount(ORG_USD)).toBe(usdBefore + 1);
+  });
+
+  it("D2. an old attempt cannot retire the newer replay key: A stale, A rebuilt and lost, A's retry still replayed", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    holdResponses = true;
+    await buildWaterTimesTwo();
+    await submit(); // 0: held
+    holdResponses = false;
+
+    await switchIdentity({ org: ORG_USD });
+    await switchIdentity({ org: ORG_KHR });
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit(); // 1: same key, server replays, response lost
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+
+    await release(0); // the first session's late success
+    expect(createdBanner()).toBeNull();
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+
+    await click(button(en.common.retry, dialog()), "retry");
+    await settle(10);
+    expect(sent[2]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("E1. an accepted create is retired: after A → B → A the identical order is a NEW order", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    await submit();
+    expect(h.created).toHaveLength(1);
+    await click(button(en.orderCreate.done), "Done");
+    await rerender();
+
+    await switchIdentity({ org: ORG_USD });
+    await switchIdentity({ org: ORG_KHR });
+    await reopenSheet();
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent[1]!.idempotencyKey).not.toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(2);
+    expect(await orderCount(ORG_KHR)).toBe(before + 2);
+  });
+
+  it("E2. a refused attempt stays retryable across A → B → A on its original key", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    failNextWith = Object.assign(new Error("Order service unavailable"), { statusCode: 500 });
+    await buildWaterTimesTwo();
+    await submit();
+    expect(alerts().join(" ")).toContain(en.orderCreate.error.title);
+    expect(await orderCount(ORG_KHR)).toBe(before);
+
+    await switchIdentity({ org: ORG_USD });
+    await switchIdentity({ org: ORG_KHR });
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+
+  it("E3. many identity switches in between never evict the unresolved key", async () => {
+    await openSheet(ORG_KHR);
+    const before = await orderCount(ORG_KHR);
+    await buildWaterTimesTwo();
+    loseNextResponse = true;
+    await submit();
+
+    // Organizations this member passes through without ordering anything.
+    for (let i = 0; i < 30; i++) {
+      await switchIdentity({ org: `dddddddd-0000-4000-8000-${String(i).padStart(12, "0")}` });
+    }
+    await switchIdentity({ org: ORG_KHR });
+    await buildWaterTimesTwo();
+    await submit();
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(h.created).toHaveLength(1);
+    expect(await orderCount(ORG_KHR)).toBe(before + 1);
+  });
+});

@@ -219,3 +219,56 @@ export function sharedIdempotencyHolder(scope: IdempotencyScope): IdempotencyKey
 export function sharedIdempotencyHolderCount(): number {
   return sharedHolders.size;
 }
+
+/* ── Holders that outlive an identity switch, not the component ───────────
+ *
+ * A sheet that stays MOUNTED while the member or organization changes under
+ * it (Orders → New Order) must not hand one principal's key to another — and
+ * must not drop a principal's unresolved key either. Replacing its one holder
+ * on every switch did the second: "lost response in organization A → switch
+ * to B → back to A → rebuild the identical order" minted a new key, and
+ * create_order_v3 persisted a duplicate.
+ *
+ * So such a component keeps one holder PER SCOPE, owned by the component
+ * (it dies with it — this changes nothing about unmount or reload):
+ *
+ *   - a scope's holder is the same instance on every lookup, so A → B → A
+ *     finds A's unresolved key exactly where it left it;
+ *   - a different member, organization or flow is a different holder, so no
+ *     key is ever offered across them; within a holder a different request
+ *     fingerprint still gets a new key (keyFor);
+ *   - bounded without a capacity eviction: every lookup drops the OTHER
+ *     scopes' IDLE holders (stateless — dropping one loses nothing), and an
+ *     UNRESOLVED holder is never dropped. The set therefore holds at most the
+ *     current scope plus one holder per scope with a create still unresolved,
+ *     each a key and a fingerprint, and shrinks as those are accepted.
+ */
+export interface ScopedIdempotencyHolders {
+  /** The holder for `scope` — the same instance for as long as it matters. */
+  holderFor(scope: IdempotencyScope): IdempotencyKeyHolder;
+  /** How many holders are kept (diagnostics and tests). */
+  size(): number;
+}
+
+export function createScopedIdempotencyHolders(
+  create: () => IdempotencyKeyHolder = createIdempotencyKeyHolder,
+): ScopedIdempotencyHolders {
+  const holders = new Map<string, IdempotencyKeyHolder>();
+  return {
+    holderFor(scope) {
+      const id = JSON.stringify([scope.userId, scope.organizationId, scope.flow, scope.subject]);
+      let holder = holders.get(id);
+      if (!holder) {
+        holder = create();
+        holders.set(id, holder);
+      }
+      for (const [other, kept] of holders) {
+        if (other !== id && !kept.hasUnresolvedKey()) holders.delete(other);
+      }
+      return holder;
+    },
+    size() {
+      return holders.size;
+    },
+  };
+}
