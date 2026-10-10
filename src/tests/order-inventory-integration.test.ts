@@ -47,7 +47,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
-import { SANCTIONED_ORDER_FN_SCHEMA, withoutSanctioned } from "./helpers/refuse-only-principal";
+import {
+  SANCTIONED_ORDER_FN_SCHEMA,
+  withoutSanctioned,
+  principalOf,
+} from "./helpers/refuse-only-principal";
 
 // ── Context factory ───────────────────────────────────────────────────────────
 
@@ -367,7 +371,7 @@ describe("Test 2: quantity is the persisted line's, never a caller's", () => {
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx));
         const call = calls.find((c) => c.fn === "transition_order_status_v1");
         expect(call).toBeDefined();
         // organization_id and changed_by come from the server-verified context.
@@ -438,7 +442,7 @@ describe("Test 4: duplicate confirmation cannot double-decrement", () => {
       },
       async (calls) => {
         const err = await expectRejects(() =>
-          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
+          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
         );
         expect((err as { statusCode?: number }).statusCode).toBe(409);
         // The state machine rejected it in the service; the DB was never asked.
@@ -467,7 +471,7 @@ describe("Test 4: duplicate confirmation cannot double-decrement", () => {
       },
       async () => {
         const err = await expectRejects(() =>
-          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
+          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
         );
         expect((err as { statusCode?: number }).statusCode).toBe(409);
       },
@@ -548,7 +552,7 @@ describe("Test 6: draft -> cancelled moves no stock", () => {
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx));
         const call = calls.find((c) => c.fn === "transition_order_status_v1");
         expect(call!.args["p_expected_from"]).toBe("draft");
         expect(call!.args["p_to"]).toBe("cancelled");
@@ -595,7 +599,7 @@ describe("Test 7: confirmed -> cancelled releases exactly what was consumed", ()
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx));
         const call = calls.find((c) => c.fn === "transition_order_status_v1");
         expect(call!.args["p_expected_from"]).toBe("confirmed");
         expect(call!.args["p_to"]).toBe("cancelled");
@@ -619,7 +623,7 @@ describe("Test 8: duplicate cancellation cannot double-restock", () => {
       },
       async (calls) => {
         const err = await expectRejects(() =>
-          transitionLifecycleStatus(ctx, ORDER_ID, "cancelled"),
+          transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx)),
         );
         expect((err as { statusCode?: number }).statusCode).toBe(409);
         expect(calls.filter((c) => c.fn === "transition_order_status_v1")).toHaveLength(0);
@@ -705,7 +709,7 @@ describe("Test 10: the transition and its movements are one transaction", () => 
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx));
         expect(calls).toHaveLength(1);
         expect(calls[0]!.fn).toBe("transition_order_status_v1");
       },
@@ -737,7 +741,7 @@ describe("Test 10: the transition and its movements are one transaction", () => 
       },
       async (calls) => {
         const err = await expectRejects(() =>
-          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
+          transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
         );
         expect(err.message).toContain("cross_tenant_variant");
         // No compensating second call: there is nothing to compensate, because
@@ -776,7 +780,7 @@ describe("Test 11: cross-org orders, lines, products and locations", () => {
 
     await withOrderDb({ tables: { orders: noRow } }, async (calls) => {
       const err = await expectRejects(() =>
-        transitionLifecycleStatus(ctx, ORG_B_ORDER_ID, "confirmed"),
+        transitionLifecycleStatus(ctx, ORG_B_ORDER_ID, "confirmed", null, principalOf(ctx)),
       );
       expect((err as { statusCode?: number }).statusCode).toBe(404);
       expect(err.message).toBe("Order not found");
@@ -855,7 +859,7 @@ describe("Test 12: order permissions alone authorize the stock consequence", () 
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx));
         expect(calls).toHaveLength(1);
       },
     );
@@ -880,7 +884,7 @@ describe("Test 12: order permissions alone authorize the stock consequence", () 
         },
       },
       async (calls) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx));
         expect(calls).toHaveLength(1);
       },
     );
@@ -898,8 +902,12 @@ describe("Test 12: order permissions alone authorize the stock consequence", () 
     ]);
 
     await withOrderDb({ tables: { orders: orderRow() } }, async (calls) => {
-      await expectForbidden(() => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"));
-      await expectForbidden(() => transitionLifecycleStatus(ctx, ORDER_ID, "cancelled"));
+      await expectForbidden(() =>
+        transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
+      );
+      await expectForbidden(() =>
+        transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx)),
+      );
       expect(calls).toHaveLength(0);
     });
   });

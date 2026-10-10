@@ -38,6 +38,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 type Json = Record<string, any>;
 
@@ -329,7 +330,7 @@ mock.module("@/api/orders", () => ({
       deliveryMinor: data.deliveryMinor,
       idempotencyKey: data.idempotencyKey,
       ...(data.shipping ? { shipping: data.shipping } : {}),
-      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+      expectedPrincipal: data.expectedPrincipal,
     });
   },
   // src/api/orders.ts transitionOrderLifecycleFn's handler, field for field.
@@ -361,7 +362,7 @@ mock.module("@/api/payments", () => ({
         reference: data.reference ?? null,
         idempotencyKey: data.idempotencyKey ?? null,
         note: data.note ?? null,
-        ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+        expectedPrincipal: data.expectedPrincipal,
       } as any);
     }),
   listPaymentsFn: async ({ data }: { data?: Json } = {}) => {
@@ -641,6 +642,7 @@ let orderSeq = 0;
 async function seedDraft(): Promise<string> {
   orderSeq += 1;
   const detail = await createOrder(contextFor(USER_A, ORG_A), {
+    expectedPrincipal: principalOf(contextFor(USER_A, ORG_A)),
     source: "MANUAL",
     items: [{ variantId: WATER.variant, quantity: 2, productId: WATER.product }],
     customerId: null,
@@ -654,7 +656,13 @@ async function seedDraft(): Promise<string> {
 /** The same order, confirmed by member A — ready to take a payment. */
 async function seedConfirmed(): Promise<string> {
   const orderId = await seedDraft();
-  await transitionLifecycleStatus(contextFor(USER_A, ORG_A), orderId, "confirmed", null);
+  await transitionLifecycleStatus(
+    contextFor(USER_A, ORG_A),
+    orderId,
+    "confirmed",
+    null,
+    principalOf(contextFor(USER_A, ORG_A)),
+  );
   audits.length = 0;
   return orderId;
 }
@@ -965,7 +973,13 @@ describe("Order detail: a lifecycle change runs as the member who asked for it",
     await tapConfirmOrder(); // this tab, as A
     otherTab({ user: USER_B });
     // The other tab, signed in as B, cancels the draft — its own legitimate request.
-    await transitionLifecycleStatus(contextFor(USER_B, ORG_A), orderId, "cancelled", null);
+    await transitionLifecycleStatus(
+      contextFor(USER_B, ORG_A),
+      orderId,
+      "cancelled",
+      null,
+      principalOf(contextFor(USER_B, ORG_A)),
+    );
     await releaseDispatch(); // A's confirm arrives while the session is B's
     const after = await orderState(orderId);
     evidence("order detail: concurrent confirm (A) and cancel (B)", after);

@@ -5,6 +5,7 @@
 import { usd } from "@/lib/money";
 import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
 import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import {
   isIdempotencyKeyHolder,
   orderRequestFingerprint,
@@ -713,13 +714,17 @@ export async function resolveScan(raw: string): Promise<ScanResolutionResult> {
  * 047). The server requires orders.update and refuses once fulfillment is
  * terminal. Used by the "Confirm shipping address" flow that unblocks a
  * first-time parcel label on an order that had no destination snapshot.
+ * `principal`: the member + organization the edit was started as — a required,
+ * refuse-only precondition (CORRECTIONS.md, CORRECTION-004), exactly as for
+ * confirmRealOrder.
  */
 export async function updateOrderShipping(
   orderId: string,
   shipping: { name?: string | null; phone?: string | null; address?: string | null },
+  principal: InitiatingPrincipal,
 ): Promise<void> {
   const { updateOrderShippingFn } = await import("@/api/orders");
-  await updateOrderShippingFn({ data: { orderId, shipping } });
+  await updateOrderShippingFn({ data: { orderId, shipping, expectedPrincipal: principal } });
 }
 
 /**
@@ -1226,11 +1231,12 @@ export interface CreateRealOrderInput {
    * own server-derived route principal. Sent as `expectedPrincipal`, a
    * precondition: the server refuses (409 principal_changed, nothing written)
    * when the principal it derives from the session by the time it handles the
-   * request is a different one. Never authorization; omitting it skips only
-   * the check. Not part of the request fingerprint: the key holder is already
+   * request is a different one, and refuses a request without it (428
+   * principal_required). Never authorization. Required, so no caller can
+   * forget it. Not part of the request fingerprint: the key holder is already
    * scoped to one principal.
    */
-  principal?: { userId: string; organizationId: string };
+  principal: InitiatingPrincipal;
 }
 
 /**
@@ -1248,7 +1254,7 @@ export async function createRealOrder(input: CreateRealOrderInput): Promise<Real
   const idempotencyKey = claim.keyFor(orderRequestFingerprint(request));
   const { createOrderFn } = await import("@/api/orders");
   const detail = await createOrderFn({
-    data: { ...request, idempotencyKey, ...(principal ? { expectedPrincipal: principal } : {}) },
+    data: { ...request, idempotencyKey, expectedPrincipal: principal },
   });
   // The order exists now, and the next order must never reuse this key — but
   // only the caller can say whether this response is the one it still wants.
@@ -1273,7 +1279,7 @@ export async function createRealOrder(input: CreateRealOrderInput): Promise<Real
  */
 export async function confirmRealOrder(
   orderId: string,
-  principal: { userId: string; organizationId: string },
+  principal: InitiatingPrincipal,
 ): Promise<RealOrderDetail> {
   const { transitionOrderLifecycleFn } = await import("@/api/orders");
   const detail = await transitionOrderLifecycleFn({
@@ -1285,11 +1291,16 @@ export async function confirmRealOrder(
 /**
  * Recovery for a confirmed order left without its APSA Parcel — never a
  * lifecycle change. The server re-checks confirmed + no parcel under the order
- * lock and creates exactly one.
+ * lock and creates exactly one. `principal`: the member + organization the
+ * recovery was started as — a required, refuse-only precondition, exactly as
+ * for confirmRealOrder.
  */
-export async function recoverRealOrderParcel(orderId: string): Promise<RealOrderDetail> {
+export async function recoverRealOrderParcel(
+  orderId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealOrderDetail> {
   const { recoverOrderParcelFn } = await import("@/api/orders");
-  const detail = await recoverOrderParcelFn({ data: { orderId } });
+  const detail = await recoverOrderParcelFn({ data: { orderId, expectedPrincipal: principal } });
   return mapOrderDetailToUi(detail);
 }
 
@@ -1301,7 +1312,7 @@ export async function recoverRealOrderParcel(orderId: string): Promise<RealOrder
  */
 export async function cancelRealOrder(
   orderId: string,
-  principal: { userId: string; organizationId: string },
+  principal: InitiatingPrincipal,
   reason?: string,
 ): Promise<RealOrderDetail> {
   const { transitionOrderLifecycleFn } = await import("@/api/orders");
@@ -1961,7 +1972,7 @@ export interface RecordRealPaymentInput {
    * is a different one, so the key is still unused when this principal retries.
    * Never authorization, never the recorder. Required, so no caller can forget it.
    */
-  principal: { userId: string; organizationId: string };
+  principal: InitiatingPrincipal;
 }
 
 export async function recordRealPayment(input: RecordRealPaymentInput): Promise<UiPaymentDetail> {
@@ -1994,15 +2005,22 @@ export async function getRealPaymentDetail(paymentId: string): Promise<UiPayment
  * own derived consequence (state-machine.ts#resultingPaymentStatus) and is
  * never proposed from here — there is deliberately no way for this function
  * to ask for a status directly.
+ *
+ * `principal` — here and on refundRealPayment / reverseRealPayment — is the
+ * member + organization the action was started as, captured when the merchant
+ * tapped: a required, refuse-only precondition (CORRECTIONS.md,
+ * CORRECTION-004). The server refuses, writing nothing, when the principal it
+ * derives by the time it handles the request is a different one.
  */
 export async function verifyRealPayment(
   paymentId: string,
   to: PaymentVerificationState,
+  principal: InitiatingPrincipal,
   reason?: string,
 ): Promise<UiPaymentDetail> {
   const { verifyPaymentFn } = await import("@/api/payments");
   const detail = await verifyPaymentFn({
-    data: { paymentId, to, ...(reason ? { reason } : {}) },
+    data: { paymentId, to, ...(reason ? { reason } : {}), expectedPrincipal: principal },
   });
   return mapPaymentDetailToUi(detail);
 }
@@ -2014,21 +2032,27 @@ export async function verifyRealPayment(
  */
 export async function refundRealPayment(
   paymentId: string,
+  principal: InitiatingPrincipal,
   amountMinor: number,
   reason: string,
 ): Promise<UiPaymentDetail> {
   const { refundPaymentFn } = await import("@/api/payments");
-  const detail = await refundPaymentFn({ data: { paymentId, amountMinor, reason } });
+  const detail = await refundPaymentFn({
+    data: { paymentId, amountMinor, reason, expectedPrincipal: principal },
+  });
   return mapPaymentDetailToUi(detail);
 }
 
 /** Reverse a claimed or settled payment. Appends an event; never deletes the record. */
 export async function reverseRealPayment(
   paymentId: string,
+  principal: InitiatingPrincipal,
   reason: string,
 ): Promise<UiPaymentDetail> {
   const { reversePaymentFn } = await import("@/api/payments");
-  return mapPaymentDetailToUi(await reversePaymentFn({ data: { paymentId, reason } }));
+  return mapPaymentDetailToUi(
+    await reversePaymentFn({ data: { paymentId, reason, expectedPrincipal: principal } }),
+  );
 }
 
 /**

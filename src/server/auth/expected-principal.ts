@@ -9,8 +9,8 @@
  * used to execute member A's mutation as member B: B's permissions decided it,
  * and B became its recorded actor.
  *
- * So the protected mutations accept `expectedPrincipal` — the member and
- * organization the client STARTED the attempt as — and compare it with their
+ * So every protected mutation REQUIRES `expectedPrincipal` — the member and
+ * organization the client STARTED the attempt as — and compares it with its
  * own derivation before anything else touches the request: before the
  * permission check, any rate-limit token, any read of the target and any
  * write. It is a precondition, never a credential: it can only REFUSE. It is
@@ -18,9 +18,19 @@
  * attributes anything — authorization and every recorded actor and
  * organization stay the server's own derivation (`ctx`).
  *
- * Protected today (each documented in CORRECTION-004): order creation
- * (createOrder), order lifecycle transitions (transitionLifecycleStatus —
- * confirm, cancel, complete) and payment recording (recordPayment).
+ * FAIL CLOSED. A request without a well-formed principal is refused (428
+ * `principal_required`), never let through: an absent assertion is exactly what
+ * a browser bundle from before this rule sends, and treating it as "nothing to
+ * check" was a bypass (independent review, PR #121). The server functions also
+ * require the field in their validators, so such a request is refused before
+ * the handler runs; this check is the same rule for every in-process caller.
+ * A future server-initiated caller (a bank adapter, a job) has no browser
+ * principal and must get its own explicit entry point — never an omitted field.
+ *
+ * Protected (each listed in CORRECTION-004): order creation, order lifecycle
+ * transitions, order fulfillment transitions, parcel recovery and parcel
+ * creation, shipping-destination edits, and payment recording, evidence,
+ * verification, refund, reversal and correction.
  */
 import { publicError } from "@/server/public-domain-error";
 
@@ -30,16 +40,34 @@ export interface ExpectedPrincipal {
   organizationId: string;
 }
 
+function isExpectedPrincipal(value: unknown): value is ExpectedPrincipal {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2) return false;
+  const { userId, organizationId } = value as Record<string, unknown>;
+  return (
+    typeof userId === "string" &&
+    userId.length > 0 &&
+    typeof organizationId === "string" &&
+    organizationId.length > 0
+  );
+}
+
 /**
- * Refuse a mutation whose initiating principal is not the one handling it.
- * Absent `expected` skips only this check (an older client); a mismatch is a
- * 409 with its own code, carrying nothing about either principal.
+ * Refuse a mutation whose initiating principal is missing, malformed, or not
+ * the one handling it. Neither refusal carries anything about either principal.
  */
 export function assertExpectedPrincipal(
   actual: { userId: string; organizationId: string },
-  expected: ExpectedPrincipal | undefined,
+  expected: ExpectedPrincipal,
 ): void {
-  if (!expected) return;
+  if (!isExpectedPrincipal(expected)) {
+    throw publicError(
+      "This request did not say who started it — reload the page and try again",
+      428,
+      "principal_required",
+    );
+  }
   if (expected.userId === actual.userId && expected.organizationId === actual.organizationId) {
     return;
   }

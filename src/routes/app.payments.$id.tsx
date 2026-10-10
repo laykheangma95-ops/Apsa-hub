@@ -215,9 +215,25 @@ function PaymentDetailScreen() {
     notifyError(message);
   }
 
+  /*
+   * The member + organization this screen acts as. Each action hands it to its
+   * mutation as a VARIABLE at the tap (CORRECTIONS.md, CORRECTION-004): the
+   * request carries the principal it was started as, and the server refuses it
+   * — writing nothing — if a member or organization switch lands before it is
+   * handled. Never authorization; the server derives that itself.
+   */
+  const memberPrincipal = { userId, organizationId: routeOrganizationId };
+
   const verifyMutation = useMutation({
-    mutationFn: ({ to, reason }: { to: PaymentVerificationState; reason: string | undefined }) =>
-      verifyRealPayment(id, to, reason),
+    mutationFn: ({
+      to,
+      reason,
+      startedAs,
+    }: {
+      to: PaymentVerificationState;
+      reason: string | undefined;
+      startedAs: typeof memberPrincipal;
+    }) => verifyRealPayment(id, to, startedAs, reason),
     onSuccess: (_detail, variables) => {
       setVerifyTarget(null);
       setActionError(null);
@@ -228,8 +244,15 @@ function PaymentDetailScreen() {
   });
 
   const refundMutation = useMutation({
-    mutationFn: ({ amountMinor, reason }: { amountMinor: number; reason: string }) =>
-      refundRealPayment(id, amountMinor, reason),
+    mutationFn: ({
+      amountMinor,
+      reason,
+      startedAs,
+    }: {
+      amountMinor: number;
+      reason: string;
+      startedAs: typeof memberPrincipal;
+    }) => refundRealPayment(id, startedAs, amountMinor, reason),
     onSuccess: () => {
       setRefundOpen(false);
       setActionError(null);
@@ -240,7 +263,8 @@ function PaymentDetailScreen() {
   });
 
   const reverseMutation = useMutation({
-    mutationFn: (reason: string) => reverseRealPayment(id, reason),
+    mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof memberPrincipal }) =>
+      reverseRealPayment(id, startedAs, reason),
     onSuccess: () => {
       setReverseOpen(false);
       setActionError(null);
@@ -654,7 +678,7 @@ function PaymentDetailScreen() {
         error={actionError}
         onConfirm={(reason) => {
           if (!verifyTarget) return;
-          verifyMutation.mutate({ to: verifyTarget, reason });
+          verifyMutation.mutate({ to: verifyTarget, reason, startedAs: memberPrincipal });
         }}
       />
 
@@ -664,7 +688,9 @@ function PaymentDetailScreen() {
         principal={payment.amount}
         pending={refundMutation.isPending}
         error={actionError}
-        onConfirm={(amountMinor, reason) => refundMutation.mutate({ amountMinor, reason })}
+        onConfirm={(amountMinor, reason) =>
+          refundMutation.mutate({ amountMinor, reason, startedAs: memberPrincipal })
+        }
       />
 
       <PaymentReverseSheet
@@ -672,7 +698,7 @@ function PaymentDetailScreen() {
         onOpenChange={setReverseOpen}
         pending={reverseMutation.isPending}
         error={actionError}
-        onConfirm={(reason) => reverseMutation.mutate(reason)}
+        onConfirm={(reason) => reverseMutation.mutate({ reason, startedAs: memberPrincipal })}
       />
     </ScreenBleed>
   );

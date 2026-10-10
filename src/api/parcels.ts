@@ -32,16 +32,31 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
+// The member + organization the client STARTED this request as (CORRECTIONS.md,
+// CORRECTION-004). A required precondition the service compares with the
+// principal it derives from the session — it can only refuse, never authorize
+// or attribute (src/server/auth/expected-principal.ts). The one identity field
+// this file's validators accept.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 // ── createParcelFn ────────────────────────────────────────────────────────────
 
 export const createParcelFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
-    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        // Refuse-only: the principal this request was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { createParcelForOrder } = await import("@/server/parcels/service");
-    return createParcelForOrder(authCtx, data.orderId);
+    return createParcelForOrder(authCtx, data.orderId, data.expectedPrincipal);
   });
 
 // ── resolveParcelCodeFn ───────────────────────────────────────────────────────

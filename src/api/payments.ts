@@ -7,10 +7,11 @@
  *     no organizationId parameter on any function here, so a caller has no way
  *     to name a tenant.
  *   - user_id comes from the validated session, never from input.
- *   - recordPaymentFn accepts one refuse-only `expectedPrincipal` (CORRECTION-004):
- *     the member + organization the client started the payment as, which the
- *     service compares with the session's own derivation and refuses on. It is
- *     never a credential, never the recorder, never a tenant.
+ *   - Every mutation REQUIRES one refuse-only `expectedPrincipal`
+ *     (CORRECTION-004): the member + organization the client started it as,
+ *     which the service compares with the session's own derivation and refuses
+ *     on (missing, malformed or different). It is never a credential, never the
+ *     recorder or actor, never a tenant.
  *   - All server-only modules (@/lib/supabase/server, @/server/payments/*) are
  *     dynamically imported inside handler bodies so they never enter the client
  *     bundle.
@@ -76,10 +77,11 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
 // CORRECTION-004). A precondition the service compares with the principal it
 // derives from the session — it can only refuse, never authorize or attribute
 // (src/server/auth/expected-principal.ts). The one identity field this file's
-// validators accept.
+// validators accept. REQUIRED on every mutation here: a request without it (a
+// browser bundle from before the rule) is refused before the handler runs.
 const expectedPrincipalSchema = z
   .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
-  .optional();
+  .strict();
 
 // ── recordPaymentFn ───────────────────────────────────────────────────────────
 
@@ -108,7 +110,7 @@ export const recordPaymentFn = createServerFn({ method: "POST" })
       reference: data.reference ?? null,
       idempotencyKey: data.idempotencyKey ?? null,
       note: data.note ?? null,
-      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+      expectedPrincipal: data.expectedPrincipal,
     });
   });
 
@@ -123,6 +125,8 @@ export const attachPaymentEvidenceFn = createServerFn({ method: "POST" })
         storageRef: z.string().trim().min(1).max(2000),
         extractedAmountMinor: z.number().int().min(0).nullish(),
         extractedReference: z.string().trim().min(1).max(200).nullish(),
+        // Refuse-only: the principal this attachment was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -135,6 +139,7 @@ export const attachPaymentEvidenceFn = createServerFn({ method: "POST" })
       storageRef: data.storageRef,
       extractedAmountMinor: data.extractedAmountMinor ?? null,
       extractedReference: data.extractedReference ?? null,
+      expectedPrincipal: data.expectedPrincipal,
     });
   });
 
@@ -150,13 +155,22 @@ export const verifyPaymentFn = createServerFn({ method: "POST" })
         paymentId: z.string().uuid("Invalid payment ID"),
         to: verificationStateSchema,
         reason: z.string().trim().max(1000).nullish(),
+        // Refuse-only: the principal this verification was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { verifyPayment } = await import("@/server/payments/service");
-    return verifyPayment(authCtx, data.paymentId, data.to, data.reason ?? null, null);
+    return verifyPayment(
+      authCtx,
+      data.paymentId,
+      data.to,
+      data.reason ?? null,
+      null,
+      data.expectedPrincipal,
+    );
   });
 
 // ── reversePaymentFn ──────────────────────────────────────────────────────────
@@ -167,13 +181,15 @@ export const reversePaymentFn = createServerFn({ method: "POST" })
       .object({
         paymentId: z.string().uuid("Invalid payment ID"),
         reason: z.string().trim().min(1, "A reversal reason is required").max(1000),
+        // Refuse-only: the principal this reversal was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { reversePayment } = await import("@/server/payments/service");
-    return reversePayment(authCtx, data.paymentId, data.reason);
+    return reversePayment(authCtx, data.paymentId, data.reason, data.expectedPrincipal);
   });
 
 // ── refundPaymentFn ───────────────────────────────────────────────────────────
@@ -186,6 +202,8 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
         amountMinor: z.number().int().positive("amountMinor must be a positive integer"),
         reason: z.string().trim().min(1, "A refund reason is required").max(1000),
         idempotencyKey: z.string().trim().min(1).max(200).nullish(),
+        // Refuse-only: the principal this refund was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -198,6 +216,7 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
       data.amountMinor,
       data.reason,
       data.idempotencyKey,
+      data.expectedPrincipal,
     );
   });
 
@@ -211,16 +230,21 @@ export const correctPaymentFn = createServerFn({ method: "POST" })
         reason: z.string().trim().min(1, "A correction reason is required").max(1000),
         reference: z.string().trim().min(1).max(200).nullish(),
         note: z.string().trim().max(1000).nullish(),
+        // Refuse-only: the principal this correction was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { correctPayment } = await import("@/server/payments/service");
-    return correctPayment(authCtx, data.paymentId, data.reason, {
-      reference: data.reference ?? null,
-      note: data.note ?? null,
-    });
+    return correctPayment(
+      authCtx,
+      data.paymentId,
+      data.reason,
+      { reference: data.reference ?? null, note: data.note ?? null },
+      data.expectedPrincipal,
+    );
   });
 
 // ── Reads ─────────────────────────────────────────────────────────────────────

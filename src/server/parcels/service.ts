@@ -14,6 +14,7 @@
  */
 import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { isValidParcelCode } from "@/lib/barcode/parcel-code";
 import * as ordersRepo from "@/server/orders/repository";
 import * as repo from "./repository";
@@ -61,7 +62,14 @@ function rowToParcel(row: repo.ParcelRow): Parcel {
 export async function createParcelForOrder(
   ctx: AuthorizationContext,
   orderId: string,
+  /**
+   * Refuse-only (assertExpectedPrincipal, CORRECTION-004): who started this
+   * request. It reaches the same parcel write as Order detail's recovery.
+   */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<Parcel> {
+  // Refused before the permission, the order lock and the parcel write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("fulfillment.create_parcel");
 
   const result = await ordersRepo.recoverOrderParcel(ctx.organizationId, orderId, ctx.userId);

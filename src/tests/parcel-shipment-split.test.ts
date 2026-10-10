@@ -32,6 +32,7 @@ import {
   verifyFreshLabels,
 } from "../lib/labels/shipping-print-guard";
 import { returnLookupFor } from "../lib/returns";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 const ORG_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const ORG_B = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -434,7 +435,7 @@ const activeParcels = () => parcels().filter((p) => p["status"] !== "void");
 
 async function confirm() {
   const { transitionLifecycleStatus } = await import("../server/orders/service");
-  return transitionLifecycleStatus(ctx(STAFF), ORDER_A, "confirmed");
+  return transitionLifecycleStatus(ctx(STAFF), ORDER_A, "confirmed", null, principalOf(ctx(STAFF)));
 }
 
 async function arrange(provider = "VET Express", tracking = "VET-42") {
@@ -588,7 +589,11 @@ async function readDetail(perms = STAFF, organizationId = ORG_A) {
 
 async function recover(perms = STAFF, organizationId = ORG_A) {
   const { recoverOrderParcel } = await import("../server/orders/service");
-  return recoverOrderParcel(ctx(perms, organizationId), ORDER_A);
+  return recoverOrderParcel(
+    ctx(perms, organizationId),
+    ORDER_A,
+    principalOf(ctx(perms, organizationId)),
+  );
 }
 
 describe("a confirmed order stranded without its parcel is recoverable after a refresh", () => {
@@ -675,7 +680,13 @@ describe("a confirmed order stranded without its parcel is recoverable after a r
   it("a cancelled order is refused and gets no parcel", async () => {
     await strand();
     const { transitionLifecycleStatus } = await import("../server/orders/service");
-    await transitionLifecycleStatus(ctx([...STAFF, "orders.cancel"]), ORDER_A, "cancelled");
+    await transitionLifecycleStatus(
+      ctx([...STAFF, "orders.cancel"]),
+      ORDER_A,
+      "cancelled",
+      null,
+      principalOf(ctx([...STAFF, "orders.cancel"])),
+    );
     expect(lifecycle()).toBe("cancelled");
     expect((await readDetail()).parcelMissing).toBe(false);
     await expect(recover()).rejects.toThrow(/changed concurrently \(now cancelled\)/);

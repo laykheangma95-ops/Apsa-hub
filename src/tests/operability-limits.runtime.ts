@@ -9,6 +9,7 @@
  * operability-sql.runtime.ts). Time is driven with setSystemTime.
  */
 import { afterAll, beforeEach, describe, expect, it, mock, setSystemTime } from "bun:test";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 function createServerFnMock() {
   return () => ({
@@ -393,6 +394,7 @@ const newKey = () => `test-key-${String(++keySeq).padStart(12, "0")}`;
 async function create(ctx: ReturnType<typeof ctxFor>, key = newKey()) {
   try {
     await orders.createOrder(ctx, {
+      expectedPrincipal: principalOf(ctx),
       source: "POS",
       items: [{ variantId: VARIANT, quantity: 1 }],
       idempotencyKey: key,
@@ -469,6 +471,7 @@ describe("order-creation limits", () => {
     } as never);
     await expect(
       orders.createOrder(noPermission, {
+        expectedPrincipal: principalOf(noPermission),
         source: "POS",
         items: [{ variantId: VARIANT, quantity: 1 }],
         idempotencyKey: newKey(),
@@ -483,6 +486,7 @@ describe("payment mutation limits", () => {
   const record = (ctx: ReturnType<typeof ctxFor>) =>
     payments
       .recordPayment(ctx, {
+        expectedPrincipal: principalOf(ctx),
         orderId: "00000000-0000-4000-8000-0000000000c1",
         method: "cash",
         amountMinor: 100,
@@ -493,7 +497,12 @@ describe("payment mutation limits", () => {
       );
   const reverse = (ctx: ReturnType<typeof ctxFor>) =>
     payments
-      .reversePayment(ctx, "00000000-0000-4000-8000-0000000000d1", "customer returned goods")
+      .reversePayment(
+        ctx,
+        "00000000-0000-4000-8000-0000000000d1",
+        "customer returned goods",
+        principalOf(ctx),
+      )
       .then(
         () => "ok",
         (e: unknown) => (e instanceof RateLimitedError ? "rate_limited" : "reached_repo"),
@@ -552,12 +561,29 @@ describe("financial mutations FAIL CLOSED when the durable limiter is unavailabl
     [
       "REFUND",
       (ctx) =>
-        payments.refundPayment(ctx, PAYMENT, 100, "customer refund", "idem-key-refund-000001"),
+        payments.refundPayment(
+          ctx,
+          PAYMENT,
+          100,
+          "customer refund",
+          "idem-key-refund-000001",
+          principalOf(ctx),
+        ),
     ],
-    ["REVERSAL", (ctx) => payments.reversePayment(ctx, PAYMENT, "customer returned goods")],
+    [
+      "REVERSAL",
+      (ctx) => payments.reversePayment(ctx, PAYMENT, "customer returned goods", principalOf(ctx)),
+    ],
     [
       "CORRECTION",
-      (ctx) => payments.correctPayment(ctx, PAYMENT, "typo in reference", { reference: "ABA-1" }),
+      (ctx) =>
+        payments.correctPayment(
+          ctx,
+          PAYMENT,
+          "typo in reference",
+          { reference: "ABA-1" },
+          principalOf(ctx),
+        ),
     ],
   ];
 
@@ -593,6 +619,7 @@ describe("financial mutations FAIL CLOSED when the durable limiter is unavailabl
     const ctx = ctxFor(ORG_A, "aaaaaaaa-0000-4000-8000-0000000000f2");
     const result = await outcome(
       payments.recordPayment(ctx, {
+        expectedPrincipal: principalOf(ctx),
         orderId: "00000000-0000-4000-8000-0000000000c9",
         method: "cash",
         amountMinor: 100,

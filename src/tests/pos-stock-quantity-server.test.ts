@@ -22,6 +22,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError } from "../server/auth/authorization";
 import type { AuthorizationContext } from "../server/auth/authorization";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 const ORG_A_ID = "aaaaaaaa-0000-0000-0000-0000000000a1";
 const ORG_B_ID = "bbbbbbbb-0000-0000-0000-0000000000b2";
@@ -174,6 +175,7 @@ describe("B. a POS quantity > 1 survives order creation (server)", () => {
         async (recorded) => ({
           recorded,
           detail: await createOrder(ctxFor(ORG_A_ID), {
+            expectedPrincipal: principalOf(ctxFor(ORG_A_ID)),
             idempotencyKey: IDEMPOTENCY_KEY,
             source: "POS",
             items: [{ variantId: VARIANT_ID, quantity: 5, productId: PRODUCT_ID }],
@@ -199,6 +201,7 @@ describe("B. a POS quantity > 1 survives order creation (server)", () => {
       { product_variants: variantIn(ORG_A_ID), ...persisted(40) },
       async (recorded) => {
         await createOrder(ctxFor(ORG_A_ID), {
+          expectedPrincipal: principalOf(ctxFor(ORG_A_ID)),
           idempotencyKey: IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 40 }],
@@ -217,6 +220,7 @@ describe("B. a POS quantity > 1 survives order creation (server)", () => {
       const recorded = await withDb({ product_variants: variantIn(ORG_A_ID) }, async (rec) => {
         await expect(
           createOrder(ctxFor(ORG_A_ID), {
+            expectedPrincipal: principalOf(ctxFor(ORG_A_ID)),
             idempotencyKey: IDEMPOTENCY_KEY,
             source: "POS",
             items: [{ variantId: VARIANT_ID, quantity }],
@@ -236,6 +240,7 @@ describe("J. organization isolation is unchanged", () => {
     const recorded = await withDb({ product_variants: NO_ROW }, async (rec) => {
       await expect(
         createOrder(ctxFor(ORG_B_ID), {
+          expectedPrincipal: principalOf(ctxFor(ORG_B_ID)),
           idempotencyKey: IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 5 }],

@@ -23,6 +23,7 @@ import {
   shippingDestinationPayload,
 } from "@/lib/shipping-destination";
 import { updateOrderShipping } from "@/lib/api";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { classifyOrderError } from "@/lib/orders";
 
 export interface ShippingDestinationSheetProps {
@@ -37,6 +38,13 @@ export interface ShippingDestinationSheetProps {
   editing?: boolean;
   /** Fires after a successful save, so the caller can evict the label cache and refetch. */
   onSaved: () => void;
+  /**
+   * The member + organization the host screen acts as. Captured when Save is
+   * tapped and sent as a refuse-only precondition (CORRECTIONS.md,
+   * CORRECTION-004): the server refuses the edit, writing nothing, if a member
+   * or organization switch lands before it is handled. Never authorization.
+   */
+  principal: InitiatingPrincipal;
 }
 
 export function ShippingDestinationSheet({
@@ -47,6 +55,7 @@ export function ShippingDestinationSheet({
   initial,
   editing = false,
   onSaved,
+  principal,
 }: ShippingDestinationSheetProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState<ShippingDestinationValue>({
@@ -77,6 +86,7 @@ export function ShippingDestinationSheet({
 
   async function save() {
     if (submittingRef.current) return;
+    const startedAs = principal;
     const payload = shippingDestinationPayload(value);
     if (!payload || !payload.name || !payload.address) {
       setFailure("validation");
@@ -86,7 +96,7 @@ export function ShippingDestinationSheet({
     setSubmitting(true);
     setFailure(null);
     try {
-      await updateOrderShipping(orderId, payload);
+      await updateOrderShipping(orderId, payload, startedAs);
       onSaved();
       onOpenChange(false);
     } catch (error) {

@@ -28,6 +28,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 type Json = Record<string, any>;
 
@@ -268,7 +269,7 @@ mock.module("@/api/orders", () => ({
           deliveryMinor: data.deliveryMinor,
           idempotencyKey: data.idempotencyKey,
           ...(data.shipping ? { shipping: data.shipping } : {}),
-          ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+          expectedPrincipal: data.expectedPrincipal,
         });
         outcome = { detail };
       } catch (error) {
@@ -933,6 +934,7 @@ describe("C. several same-currency lines", () => {
     activeOrg = org;
     const { createOrder } = await import("@/server/orders/service");
     return createOrder(context(), {
+      expectedPrincipal: principalOf(context()),
       source: "MANUAL",
       items,
       idempotencyKey: crypto.randomUUID(),

@@ -480,10 +480,10 @@ export interface RecordPaymentServiceInput {
   note?: string | null | undefined;
   /**
    * The member + organization the client started this payment as — a
-   * refuse-only precondition (assertExpectedPrincipal), never a credential.
-   * The recorder, the ledger actor and the audit actor stay `ctx`.
+   * required, refuse-only precondition (assertExpectedPrincipal), never a
+   * credential. The recorder, the ledger actor and the audit actor stay `ctx`.
    */
-  expectedPrincipal?: ExpectedPrincipal | undefined;
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 // ── Abuse limits ──────────────────────────────────────────────────────────────
@@ -600,6 +600,8 @@ export interface AttachEvidenceServiceInput {
   storageRef: string;
   extractedAmountMinor?: number | null | undefined;
   extractedReference?: string | null | undefined;
+  /** Refuse-only (assertExpectedPrincipal): who started this attachment. */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 /**
@@ -611,6 +613,9 @@ export async function attachEvidence(
   ctx: AuthorizationContext,
   input: AttachEvidenceServiceInput,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the rate limit, the payment read and the
+  // evidence / event / audit write.
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("payments.record");
   await enforcePaymentMutationLimit(ctx);
 
@@ -692,9 +697,14 @@ export async function verifyPayment(
   ctx: AuthorizationContext,
   paymentId: string,
   to: PaymentVerificationState,
-  reason?: string | null,
-  metadata?: Record<string, unknown> | null,
+  reason: string | null | undefined,
+  metadata: Record<string, unknown> | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this verification. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Started as another member or organization: refused before the target's
+  // permission, the rate limit, the payment read and every write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   const permission = VERIFICATION_TRANSITION_PERMISSIONS[to];
   // Permission is checked before the payment is loaded, so an unauthorized
   // caller cannot use timing or error shape to learn whether a payment id is real.
@@ -737,7 +747,12 @@ export async function reversePayment(
   ctx: AuthorizationContext,
   paymentId: string,
   reason: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this reversal. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (status, event, order state, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("payments.reverse");
   await enforcePaymentReversalLimit(ctx);
 
@@ -775,8 +790,13 @@ export async function refundPayment(
   paymentId: string,
   amountMinor: number,
   reason: string,
-  idempotencyKey?: string | null,
+  idempotencyKey: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this refund. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (refund event, status, order state, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("payments.refund");
   await enforcePaymentReversalLimit(ctx);
 
@@ -826,7 +846,12 @@ export async function correctPayment(
   paymentId: string,
   reason: string,
   updates: { reference?: string | null; note?: string | null },
+  /** Refuse-only (assertExpectedPrincipal): who started this correction. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<PaymentDetail> {
+  // Refused before the permission, the fail-closed rate limit, the payment
+  // read and every write (reference / note, event, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("payments.override_status");
   await enforcePaymentReversalLimit(ctx);
 

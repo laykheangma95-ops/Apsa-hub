@@ -1,9 +1,12 @@
 /**
  * The ONE sanctioned crossing of a member/organization identity into the
- * protected order and payment mutations: the refuse-only `expectedPrincipal`
- * (CORRECTIONS.md, CORRECTION-004) — order creation (POS checkout, Orders → New
- * Order, Inbox → Prepare Order), order lifecycle transitions (confirm, cancel)
- * and payment recording.
+ * protected order, fulfillment and payment mutations: the REQUIRED, refuse-only
+ * `expectedPrincipal` (CORRECTIONS.md, CORRECTION-004) — order creation (POS
+ * checkout, Orders → New Order, Inbox → Prepare Order), order lifecycle and
+ * fulfillment transitions, parcel recovery / creation, shipping-destination
+ * edits, and payment recording, evidence, verification, refund, reversal and
+ * correction. The client spells the shape once (src/lib/initiating-principal.ts)
+ * and every adapter names that type.
  *
  * The invariant tests forbid any tenant or actor field on the client → server
  * order and payment paths, because such a field could be mistaken for
@@ -25,14 +28,14 @@ import { expect } from "bun:test";
  */
 export const SANCTIONED_ORDER_FN_SCHEMA = `const expectedPrincipalSchema = z
   .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
-  .optional();`;
+  .strict();`;
 export const SANCTIONED_PAYMENT_FN_SCHEMA = SANCTIONED_ORDER_FN_SCHEMA;
 
-/** src/lib/api/index.ts — CreateRealOrderInput. */
-export const SANCTIONED_CREATE_INPUT_FIELD = `principal?: { userId: string; organizationId: string };`;
+/** src/lib/api/index.ts — CreateRealOrderInput (required: no caller can omit it). */
+export const SANCTIONED_CREATE_INPUT_FIELD = `principal: InitiatingPrincipal;`;
 
 /** src/lib/api/index.ts — RecordRealPaymentInput (required: no caller can omit it). */
-export const SANCTIONED_PAYMENT_INPUT_FIELD = `principal: { userId: string; organizationId: string };`;
+export const SANCTIONED_PAYMENT_INPUT_FIELD = `principal: InitiatingPrincipal;`;
 
 /**
  * src/components/pos/PosCheckoutSheet.tsx — completeReal: the attempt's one
@@ -45,6 +48,19 @@ export const SANCTIONED_NEW_ORDER_CALL_ARG = `principal: { userId: token.userId,
 
 /** src/components/inbox/PrepareOrderSheet.tsx — submit's createRealOrder call (the replay scope's principal). */
 export const SANCTIONED_INBOX_CALL_ARG = `principal: { userId, organizationId },`;
+
+/**
+ * The principal a test context would have STARTED a request as — what a real
+ * screen sends for the member it shows. Direct service calls pass it so they
+ * meet the required, refuse-only check exactly as a screen request does; it
+ * changes nothing about what the call is then authorized or attributed as.
+ */
+export function principalOf(ctx: { userId: string; organizationId: string }): {
+  userId: string;
+  organizationId: string;
+} {
+  return { userId: ctx.userId, organizationId: ctx.organizationId };
+}
 
 /** `source` with `snippet` removed — which must occur in it exactly once. */
 export function withoutSanctioned(source: string, snippet: string): string {

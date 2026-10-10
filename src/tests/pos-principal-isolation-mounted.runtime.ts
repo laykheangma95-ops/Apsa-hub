@@ -317,7 +317,7 @@ mock.module("@/api/orders", () => ({
           deliveryMinor: data.deliveryMinor,
           idempotencyKey: data.idempotencyKey,
           // Forwarded exactly as createOrderFn's handler forwards it.
-          ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+          expectedPrincipal: data.expectedPrincipal,
         } as any),
       };
     } catch (error) {
@@ -355,7 +355,7 @@ mock.module("@/api/payments", () => ({
       idempotencyKey: data.idempotencyKey ?? null,
       note: data.note ?? null,
       // Forwarded exactly as recordPaymentFn's handler forwards it.
-      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
+      expectedPrincipal: data.expectedPrincipal,
     });
   },
 }));

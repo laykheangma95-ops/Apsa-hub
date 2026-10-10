@@ -59,7 +59,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
-import { SANCTIONED_PAYMENT_FN_SCHEMA, withoutSanctioned } from "./helpers/refuse-only-principal";
+import {
+  SANCTIONED_PAYMENT_FN_SCHEMA,
+  withoutSanctioned,
+  principalOf,
+} from "./helpers/refuse-only-principal";
 
 // ── Default audit mock ──────────────────────────────────────────────────────
 //
@@ -311,7 +315,12 @@ describe("Test 2: Foreign Order UUID", () => {
 
     await withPaymentDb({ tables: { orders: noRow } }, async () => {
       const err = await expectRejects(() =>
-        recordPayment(ctx, { orderId: "org-b-order-id", method: "cash", amountMinor: 1000 }),
+        recordPayment(ctx, {
+          expectedPrincipal: principalOf(ctx),
+          orderId: "org-b-order-id",
+          method: "cash",
+          amountMinor: 1000,
+        }),
       );
       expect(err.message).toMatch(/order not found/i);
       expect((err as Error & { statusCode?: number }).statusCode).toBe(404);
@@ -327,6 +336,7 @@ describe("Test 3: Foreign evidence attachment", () => {
     await withPaymentDb({ tables: { payments: noRow } }, async () => {
       const err = await expectRejects(() =>
         attachEvidence(ctx, {
+          expectedPrincipal: principalOf(ctx),
           paymentId: "org-b-payment-id",
           evidenceType: "screenshot",
           storageRef: "evidence/1.png",
@@ -425,7 +435,14 @@ describe("Test 6: Authorized staff confirmation", () => {
         },
       },
       async (recorded) => {
-        await verifyPayment(ctx, PAYMENT_ID, "staff_confirmed", "Cash at counter");
+        await verifyPayment(
+          ctx,
+          PAYMENT_ID,
+          "staff_confirmed",
+          "Cash at counter",
+          null,
+          principalOf(ctx),
+        );
         return recorded;
       },
     );
@@ -441,7 +458,9 @@ describe("Test 7: Unauthorized staff confirmation rejected", () => {
   it("a caller without payments.manual_confirm cannot move a payment to staff_confirmed", async () => {
     const { verifyPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"]);
-    await expectForbidden(() => verifyPayment(ctx, PAYMENT_ID, "staff_confirmed"));
+    await expectForbidden(() =>
+      verifyPayment(ctx, PAYMENT_ID, "staff_confirmed", null, null, principalOf(ctx)),
+    );
   });
 
   it("a caller with only payments.manual_confirm cannot escalate to manager_verified", async () => {
@@ -450,7 +469,9 @@ describe("Test 7: Unauthorized staff confirmation rejected", () => {
       "payments.read",
       "payments.manual_confirm",
     ]);
-    await expectForbidden(() => verifyPayment(ctx, PAYMENT_ID, "manager_verified"));
+    await expectForbidden(() =>
+      verifyPayment(ctx, PAYMENT_ID, "manager_verified", null, null, principalOf(ctx)),
+    );
   });
 });
 
@@ -471,7 +492,7 @@ describe("Test 8: Actor is always server-derived", () => {
         },
       },
       async (recorded) => {
-        await verifyPayment(ctx, PAYMENT_ID, "staff_confirmed");
+        await verifyPayment(ctx, PAYMENT_ID, "staff_confirmed", null, null, principalOf(ctx));
         return recorded;
       },
     );
@@ -505,7 +526,12 @@ describe("Test 8: Actor is always server-derived", () => {
         },
       },
       async (recorded) => {
-        await recordPayment(ctx, { orderId: ORDER_ID, method: "cash", amountMinor: 1000 });
+        await recordPayment(ctx, {
+          expectedPrincipal: principalOf(ctx),
+          orderId: ORDER_ID,
+          method: "cash",
+          amountMinor: 1000,
+        });
         return recorded;
       },
     );
@@ -546,6 +572,7 @@ describe("Test 9: Amount / method / reference captured exactly", () => {
       },
       async (recorded) => {
         await recordPayment(ctx, {
+          expectedPrincipal: principalOf(ctx),
           orderId: ORDER_ID,
           method: "bank_transfer",
           amountMinor: 4500,
@@ -565,7 +592,12 @@ describe("Test 9: Amount / method / reference captured exactly", () => {
     const { recordPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
     const err = await expectRejects(() =>
-      recordPayment(ctx, { orderId: ORDER_ID, method: "cash", amountMinor: 0 }),
+      recordPayment(ctx, {
+        expectedPrincipal: principalOf(ctx),
+        orderId: ORDER_ID,
+        method: "cash",
+        amountMinor: 0,
+      }),
     );
     expect(err.message).toMatch(/positive integer/i);
   });
@@ -592,6 +624,7 @@ describe("Test 10: Evidence attachment never marks a payment paid", () => {
       },
       async (recorded) => {
         const d = await attachEvidence(ctx, {
+          expectedPrincipal: principalOf(ctx),
           paymentId: PAYMENT_ID,
           evidenceType: "screenshot",
           storageRef: "evidence/screenshot-1.png",
@@ -660,7 +693,13 @@ describe("Test 12: Correction appends, never rewrites directly", () => {
         rpc: { correct_payment_v1: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
-        await correctPayment(ctx, PAYMENT_ID, "Typo in reference", { reference: "NEW-REF" });
+        await correctPayment(
+          ctx,
+          PAYMENT_ID,
+          "Typo in reference",
+          { reference: "NEW-REF" },
+          principalOf(ctx),
+        );
         return recorded;
       },
     );
@@ -674,7 +713,9 @@ describe("Test 12: Correction appends, never rewrites directly", () => {
   it("requires payments.override_status", async () => {
     const { correctPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"]);
-    await expectForbidden(() => correctPayment(ctx, PAYMENT_ID, "reason", { note: "x" }));
+    await expectForbidden(() =>
+      correctPayment(ctx, PAYMENT_ID, "reason", { note: "x" }, principalOf(ctx)),
+    );
   });
 
   it("SQL: correct_payment_v1 only ever sets reference/note, and always inserts a correction event", () => {
@@ -702,7 +743,7 @@ describe("Test 13: Reversal appends an event", () => {
         rpc: { reverse_payment_v1: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
-        await reversePayment(ctx, PAYMENT_ID, "Customer disputed the charge");
+        await reversePayment(ctx, PAYMENT_ID, "Customer disputed the charge", principalOf(ctx));
         return recorded;
       },
     );
@@ -714,14 +755,14 @@ describe("Test 13: Reversal appends an event", () => {
   it("requires a non-empty reason before calling the database", async () => {
     const { reversePayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
-    const err = await expectRejects(() => reversePayment(ctx, PAYMENT_ID, "   "));
+    const err = await expectRejects(() => reversePayment(ctx, PAYMENT_ID, "   ", principalOf(ctx)));
     expect(err.message).toMatch(/reversal reason is required/i);
   });
 
   it("requires payments.reverse", async () => {
     const { reversePayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read"]);
-    await expectForbidden(() => reversePayment(ctx, PAYMENT_ID, "reason"));
+    await expectForbidden(() => reversePayment(ctx, PAYMENT_ID, "reason", principalOf(ctx)));
   });
 });
 
@@ -745,7 +786,14 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
         },
       },
       async (recorded) => {
-        await refundPayment(ctx, PAYMENT_ID, 400, "Partial refund — damaged item");
+        await refundPayment(
+          ctx,
+          PAYMENT_ID,
+          400,
+          "Partial refund — damaged item",
+          null,
+          principalOf(ctx),
+        );
         return recorded;
       },
     );
@@ -773,7 +821,7 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
           },
         },
       },
-      () => refundPayment(ctx, PAYMENT_ID, 400, "Partial refund"),
+      () => refundPayment(ctx, PAYMENT_ID, 400, "Partial refund", null, principalOf(ctx)),
     );
 
     // The service never writes payments.status itself — it always re-reads the
@@ -802,7 +850,9 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
         },
       },
       async () => {
-        const err = await expectRejects(() => refundPayment(ctx, PAYMENT_ID, 500, "Too much"));
+        const err = await expectRejects(() =>
+          refundPayment(ctx, PAYMENT_ID, 500, "Too much", null, principalOf(ctx)),
+        );
         expect(err.message).toMatch(/exceeds what remains/i);
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
       },
@@ -832,9 +882,9 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
         },
       },
       async () => {
-        await expect(refundPayment(ctx, PAYMENT_ID, 1000, "Full refund")).rejects.toThrow(
-          /could not be persisted/i,
-        );
+        await expect(
+          refundPayment(ctx, PAYMENT_ID, 1000, "Full refund", null, principalOf(ctx)),
+        ).rejects.toThrow(/could not be persisted/i);
       },
     );
 
@@ -872,7 +922,14 @@ describe("Test 14: Refund appends an event; audit is fail-closed", () => {
             },
           },
           async (calls) => {
-            const result = refundPayment(ctx, PAYMENT_ID, 400, "Partial refund", "refund-retry");
+            const result = refundPayment(
+              ctx,
+              PAYMENT_ID,
+              400,
+              "Partial refund",
+              "refund-retry",
+              principalOf(ctx),
+            );
             if (replayed) await expect(result).resolves.toBeDefined();
             else await expect(result).rejects.toThrow("could not be persisted");
             expect(calls.find((c) => c.fn === "refund_payment_v1")?.args["p_idempotency_key"]).toBe(
@@ -952,6 +1009,7 @@ describe("Test 16: Duplicate reference is flagged, not rejected", () => {
       },
       () =>
         recordPayment(ctx, {
+          expectedPrincipal: principalOf(ctx),
           orderId: ORDER_ID,
           method: "bank_transfer",
           amountMinor: 1000,
@@ -1009,6 +1067,7 @@ describe("Test 17: Idempotency key replay returns the same payment", () => {
       },
       () =>
         recordPaymentFresh(ctx, {
+          expectedPrincipal: principalOf(ctx),
           orderId: ORDER_ID,
           method: "cash",
           amountMinor: 1000,
@@ -1051,7 +1110,9 @@ describe("Test 18: Concurrent verification is a conflict, not a silent overwrite
         },
       },
       async () => {
-        const err = await expectRejects(() => verifyPayment(ctx, PAYMENT_ID, "staff_confirmed"));
+        const err = await expectRejects(() =>
+          verifyPayment(ctx, PAYMENT_ID, "staff_confirmed", null, null, principalOf(ctx)),
+        );
         expect(err.message).toMatch(/changed concurrently/i);
         expect((err as Error & { statusCode?: number }).statusCode).toBe(409);
       },
@@ -1095,7 +1156,9 @@ describe("Test 19: Verification transition table", () => {
     await withPaymentDb(
       { tables: { payments: paymentRow({ verification_state: "bank_verified" }) } },
       async (calls) => {
-        const err = await expectRejects(() => verifyPayment(ctx, PAYMENT_ID, "staff_confirmed"));
+        const err = await expectRejects(() =>
+          verifyPayment(ctx, PAYMENT_ID, "staff_confirmed", null, null, principalOf(ctx)),
+        );
         expect(err.message).toMatch(/Cannot move payment verification/);
         expect(calls.some((c) => c.fn === "verify_payment_v1")).toBe(false);
       },
@@ -1107,7 +1170,9 @@ describe("Test 19: Verification transition table", () => {
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
     await withPaymentDb({ tables: { payments: paymentRow({ status: "reversed" }) } }, async () => {
-      const err = await expectRejects(() => verifyPayment(ctx, PAYMENT_ID, "mismatch"));
+      const err = await expectRejects(() =>
+        verifyPayment(ctx, PAYMENT_ID, "mismatch", null, null, principalOf(ctx)),
+      );
       expect(err.message).toMatch(/reversed/i);
     });
   });
@@ -1217,7 +1282,12 @@ describe("Test 24: COD settlement requires payments.mark_cod, not payments.recor
     const { recordPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read", "payments.record"]);
     await expectForbidden(() =>
-      recordPayment(ctx, { orderId: ORDER_ID, method: "cod", amountMinor: 1000 }),
+      recordPayment(ctx, {
+        expectedPrincipal: principalOf(ctx),
+        orderId: ORDER_ID,
+        method: "cod",
+        amountMinor: 1000,
+      }),
     );
   });
 
@@ -1225,7 +1295,12 @@ describe("Test 24: COD settlement requires payments.mark_cod, not payments.recor
     const { recordPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["payments.read", "payments.mark_cod"]);
     await expectForbidden(() =>
-      recordPayment(ctx, { orderId: ORDER_ID, method: "cash", amountMinor: 1000 }),
+      recordPayment(ctx, {
+        expectedPrincipal: principalOf(ctx),
+        orderId: ORDER_ID,
+        method: "cash",
+        amountMinor: 1000,
+      }),
     );
   });
 
@@ -1253,7 +1328,13 @@ describe("Test 24: COD settlement requires payments.mark_cod, not payments.recor
           },
         },
       },
-      () => recordPayment(ctx, { orderId: ORDER_ID, method: "cod", amountMinor: 1000 }),
+      () =>
+        recordPayment(ctx, {
+          expectedPrincipal: principalOf(ctx),
+          orderId: ORDER_ID,
+          method: "cod",
+          amountMinor: 1000,
+        }),
     );
 
     expect(detail.method).toBe("cod");
