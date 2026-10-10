@@ -161,7 +161,14 @@ function sqlTransport() {
   }
   return {
     from(table: string) {
-      if (table === "audit_logs") return { insert: async () => ({ error: null }) };
+      if (table === "audit_logs") {
+        return {
+          insert: async (row: unknown) => {
+            audits.push(row);
+            return { error: null };
+          },
+        };
+      }
       return select(identifier(table));
     },
     async rpc(name: string, input: Record<string, unknown>) {
@@ -193,6 +200,8 @@ interface SentCreate {
   data: Json;
 }
 const sent: SentCreate[] = [];
+/** Audit rows the services wrote (the admin client's audit_logs inserts). */
+const audits: unknown[] = [];
 /** The next create commits server-side, then its response is lost. */
 let loseNextResponse = false;
 /** The next create commits server-side, then its response waits for release(). */
@@ -200,11 +209,27 @@ let holdNext = false;
 const held: (() => void)[] = [];
 /** The next create is refused before it reaches the database. */
 let refuseNext = false;
+/**
+ * The next create has left the sheet but has NOT reached the server yet — the
+ * lazily imported server-function module and the transport are still pending
+ * — until releaseDispatch(). The server derives the principal only when it
+ * HANDLES the request (the session cookie and the member's active
+ * organization at that moment), so a switch inside this window is what the
+ * server sees.
+ */
+let holdDispatchNext = false;
+const dispatchGates: (() => void)[] = [];
+/** The server's answer to each request, in order: "ok" or "refused:<code>". */
+const outcomes: string[] = [];
 const confirms: string[] = [];
 
 mock.module("@/api/orders", () => ({
   createOrderFn: async ({ data }: { data: Json }) => {
-    const ctx = context(); // fixed when SENT
+    if (holdDispatchNext) {
+      holdDispatchNext = false;
+      await new Promise<void>((go) => dispatchGates.push(go));
+    }
+    const ctx = context(); // derived when the server HANDLES it, as resolveAuthContext() does
     const index =
       sent.push({
         idempotencyKey: data.idempotencyKey,
@@ -236,10 +261,14 @@ mock.module("@/api/orders", () => ({
         deliveryMinor: data.deliveryMinor,
         idempotencyKey: data.idempotencyKey,
         ...(data.shipping ? { shipping: data.shipping } : {}),
+        // Forwarded exactly as createOrderFn's handler forwards it.
+        ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
       } as any);
       outcome = { detail };
+      outcomes[index] = "ok";
     } catch (error) {
       outcome = { error };
+      outcomes[index] = `refused:${(error as Json).code ?? (error as Json).statusCode ?? "error"}`;
     }
     if (hold) await new Promise<void>((release) => (held[index] = release));
     if (lose) throw new TypeError("Failed to fetch");
@@ -393,6 +422,11 @@ afterEach(async () => {
   loseNextResponse = false;
   holdNext = false;
   refuseNext = false;
+  holdDispatchNext = false;
+  for (const go of dispatchGates) go();
+  dispatchGates.length = 0;
+  outcomes.length = 0;
+  audits.length = 0;
   routeContext.session.userId = USER_A;
   routeContext.organizationId = ORG_A;
 });
@@ -536,7 +570,9 @@ function evidence(label: string, p: Persisted) {
   console.log(
     `[evidence] ${label}: requests=${sent.length} uniqueKeys=${new Set(keys()).size} ` +
       `orders=${p.orders.length} [${p.orders.map((o) => o.lifecycle_status).join(",")}] ` +
-      `movements=${p.movements.length} payments=${p.payments.length}`,
+      `movements=${p.movements.length} payments=${p.payments.length} ` +
+      `creators=[${p.orders.map((o) => (o.created_by === USER_A ? "A" : o.created_by === USER_B ? "B" : "?")).join(",")}] ` +
+      `server=[${outcomes.join(",")}]`,
   );
 }
 
@@ -993,5 +1029,192 @@ describe("Refusals, completed sales and isolation", () => {
     evidence("many switches", p);
     expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
     expectOneConfirmedSale(p);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A checkout runs as the principal that started it — or not at all
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Between the tap and the server there is a window: createRealOrder lazily
+// imports the server-function module, then the request travels. The server
+// derives the principal only when it HANDLES the request — the session
+// cookie's member and that member's active organization at that moment. A
+// switch inside the window therefore used to execute member A's checkout AS
+// member B (B became the order's creator, under A's replay key), and A's
+// identical retry then met a creator mismatch on that key: refused, and the
+// sale left unreconciled. The request now carries the principal that started
+// it, and the server refuses — before any write — when its own derivation
+// differs. That assertion can only refuse; it never authorizes anything.
+
+/** Everything a create can write, for an exact before/after comparison. */
+async function writeSurface() {
+  const q = async (sql: string) => JSON.stringify((await f.db.query(sql)).rows);
+  return {
+    orders: await q("select id from orders order by id"),
+    items: await q("select id from order_items order by id"),
+    movements: await q("select id from inventory_movements order by id"),
+    payments: await q("select id from payments order by id"),
+    rateLimits: await q("select * from rate_limit_buckets order by 1"),
+    audits: audits.length,
+  };
+}
+
+async function releaseDispatch(index = 0) {
+  for (let i = 0; i < 200 && !dispatchGates[index]; i++) await settle(1);
+  if (!dispatchGates[index]) throw new Error(`request ${index} was never dispatched`);
+  await act(async () => dispatchGates[index]!());
+  await settle(10);
+}
+
+describe("A checkout runs as the principal that started it", () => {
+  it("member A → B while the checkout is still being dispatched: never executes as B; A's retry is one order, created by A", async () => {
+    await mount();
+    await setCart(["Serum"]);
+    await openCheckout();
+    holdDispatchNext = true;
+    await confirmSale(); // A's checkout has left the sheet, not reached the server
+    await switchTo({ user: USER_B });
+    const before = await writeSurface();
+    await releaseDispatch(); // it arrives while the session is member B's
+    // Refused before anything: no order, line, movement, payment, audit row or
+    // rate-limit token — exactly the database it found.
+    expect(await writeSurface()).toEqual(before);
+
+    const during = await persisted();
+    evidence("member race, dispatched under B", during);
+    expect(sent[0]!.userId).toBe(USER_B); // what the server derived
+    expect(outcomes[0]).toBe("refused:principal_changed");
+    expect(during.orders).toHaveLength(0);
+    expect(during.movements).toHaveLength(0);
+
+    await switchTo({ user: USER_A });
+    await ensureCart(["Serum"]);
+    await openCheckout();
+    await confirmSale();
+
+    const p = await persisted();
+    evidence("member race, A's retry", p);
+    // The same measure moves for a create that IS executed (so it is not blind).
+    const after = await writeSurface();
+    expect(after.orders).not.toBe(before.orders);
+    expect(after.movements).not.toBe(before.movements);
+    expect(after.rateLimits).not.toBe(before.rateLimits); // A's create spent a token
+    expect(after.audits).toBeGreaterThan(before.audits); // and wrote its audit row
+    expect(sent[1]!.userId).toBe(USER_A);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(outcomes[1]).toBe("ok");
+    expect(successShown()).toBe(true);
+    expectOneConfirmedSale(p);
+    expect(p.orders[0]!.created_by).toBe(USER_A);
+    expect(p.payments).toHaveLength(0);
+  });
+
+  it("organization A → B while the checkout is still being dispatched: never executes in B; A's retry is one order in A", async () => {
+    await mount();
+    await setCart(["Serum"]);
+    await openCheckout();
+    holdDispatchNext = true;
+    await confirmSale();
+    await switchTo({ org: ORG_B });
+    const before = await writeSurface();
+    await releaseDispatch();
+    expect(await writeSurface()).toEqual(before);
+
+    const during = await persisted();
+    evidence("org race, dispatched under B", during);
+    expect(sent[0]!.organizationId).toBe(ORG_B);
+    expect(outcomes[0]).toBe("refused:principal_changed");
+    expect(during.orders).toHaveLength(0);
+
+    await switchTo({ org: ORG_A });
+    await ensureCart(["Serum"]);
+    await openCheckout();
+    await confirmSale();
+
+    const p = await persisted();
+    evidence("org race, A's retry", p);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(outcomes[1]).toBe("ok");
+    expectOneConfirmedSale(p, ORG_A);
+    expect(p.orders[0]!.created_by).toBe(USER_A);
+    expect(inOrg(p.orders, ORG_B)).toHaveLength(0);
+  });
+
+  it("rapid A → B → A while dispatching: the request lands as A (its own principal), is never accepted by a newer till, and A's retry is replayed — one order", async () => {
+    await mount();
+    await setCart(["Serum"]);
+    await openCheckout();
+    holdDispatchNext = true;
+    await confirmSale();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await releaseDispatch(); // late completion: the session is A's again
+
+    expect(sent[0]!.userId).toBe(USER_A);
+    expect(outcomes[0]).toBe("ok"); // A's own request, A's own session
+    expect(successShown()).toBe(false); // but the till that sent it is gone
+    expect(confirms).toHaveLength(0);
+    expect((await persisted()).orders.map((o) => o.lifecycle_status)).toEqual(["draft"]);
+
+    await ensureCart(["Serum"]);
+    await openCheckout();
+    await confirmSale();
+    const p = await persisted();
+    evidence("rapid A→B→A, late completion then retry", p);
+    expect(sent[1]!.idempotencyKey).toBe(sent[0]!.idempotencyKey);
+    expect(successShown()).toBe(true);
+    expectOneConfirmedSale(p);
+    expect(p.orders[0]!.created_by).toBe(USER_A);
+  });
+
+  it("pending dispatch refused under B, then a lost response in A, then a retry: one order, created by A", async () => {
+    await mount();
+    await setCart(["Serum"]);
+    await openCheckout();
+    holdDispatchNext = true;
+    await confirmSale();
+    await switchTo({ user: USER_B });
+    await releaseDispatch();
+    expect(outcomes[0]).toBe("refused:principal_changed");
+
+    await switchTo({ user: USER_A });
+    await ensureCart(["Serum"]);
+    await openCheckout();
+    loseNextResponse = true;
+    await confirmSale(); // committed as A, response lost
+    expect(dialog()?.textContent).toContain(en.pos.orderError.title);
+    await retrySale();
+
+    const p = await persisted();
+    evidence("refused, lost, retried", p);
+    expect(new Set(keys()).size).toBe(1);
+    expect(outcomes).toEqual(["refused:principal_changed", "ok", "ok"]);
+    expect(successShown()).toBe(true);
+    expectOneConfirmedSale(p);
+    expect(p.orders[0]!.created_by).toBe(USER_A);
+  });
+
+  it("a dispatch that completes late, after A's retry already completed the sale, is a replay — not a second order", async () => {
+    await mount();
+    await setCart(["Serum"]);
+    await openCheckout();
+    holdDispatchNext = true;
+    await confirmSale(); // 0: held before the server
+    await switchTo({ org: ORG_B });
+    await switchTo({ org: ORG_A });
+    await ensureCart(["Serum"]);
+    await openCheckout();
+    await confirmSale(); // 1: same key, reaches the server first, accepted
+    expect(successShown()).toBe(true);
+
+    await releaseDispatch(); // 0 finally arrives — as A, same key, same request
+    const p = await persisted();
+    evidence("late dispatch after completed retry", p);
+    expect(sent[0]!.idempotencyKey).toBe(sent[1]!.idempotencyKey);
+    expect(outcomes).toEqual(["ok", "ok"]);
+    expect(successShown()).toBe(true); // the late answer changed nothing on screen
+    expectOneConfirmedSale(p);
+    expect(p.orders[0]!.created_by).toBe(USER_A);
   });
 });

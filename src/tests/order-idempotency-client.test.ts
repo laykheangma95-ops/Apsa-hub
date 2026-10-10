@@ -97,6 +97,67 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
 });
 
 /*
+ * POS checkout is bound to the principal that started it (PR #121 review P2):
+ * the server derives who is acting only when it handles the request, so the
+ * create carries the attempt's own principal and the server refuses — before
+ * any limit or write — when its derivation differs. Behaviour, against the
+ * database: pos-checkout-replay-mounted "A checkout runs as the principal that
+ * started it".
+ */
+it("POS create carries its attempt's principal, and the server checks it before anything else", () => {
+  const pos = readFileSync(resolve("src/components/pos/PosCheckoutSheet.tsx"), "utf8");
+  expect(pos).toMatch(
+    /principal: \{ userId: token\.userId, organizationId: token\.organizationId \}/,
+  );
+
+  const fn = readFileSync(resolve("src/api/orders.ts"), "utf8");
+  const createFn = fn.slice(
+    fn.indexOf("export const createOrderFn"),
+    fn.indexOf("// ── updateOrderShippingFn"),
+  );
+  expect(createFn).toMatch(
+    /expectedPrincipal: z\s*\.object\(\{ userId: z\.string\(\)\.uuid\(\), organizationId: z\.string\(\)\.uuid\(\) \}\)/,
+  );
+  expect(createFn).toMatch(
+    /\.\.\.\(data\.expectedPrincipal \? \{ expectedPrincipal: data\.expectedPrincipal \} : \{\}\)/,
+  );
+  // The acting principal is still the server's own derivation.
+  expect(createFn).toMatch(/const authCtx = await resolveAuthContext\(\);/);
+
+  const service = readFileSync(resolve("src/server/orders/service.ts"), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
+  const body = service.slice(service.indexOf("export async function createOrder("));
+  const check = body.indexOf("assertExpectedPrincipal(ctx, input.expectedPrincipal);");
+  expect(check).toBeGreaterThan(0);
+  expect(check).toBeLessThan(body.indexOf('ctx.require("orders.create")'));
+  expect(check).toBeLessThan(body.indexOf("enforceOrderCreateLimit("));
+  expect(check).toBeLessThan(body.indexOf("repo.createOrder("));
+  // Refuse-only: the field is read in ONE place — the equality check — and
+  // never reaches the repository, an RPC, an audit row or the response.
+  expect(service.split("input.expectedPrincipal").length - 1).toBe(1);
+  const helper = service.slice(
+    service.indexOf("function assertExpectedPrincipal("),
+    service.indexOf("/** Provenance identifiers"),
+  );
+  expect(helper).toContain(
+    "if (expected.userId === ctx.userId && expected.organizationId === ctx.organizationId) return;",
+  );
+  // Read exactly twice — both sides of that one equality.
+  expect(helper.match(/expected\.(userId|organizationId)/g)).toHaveLength(2);
+  expect(helper).toContain('code: "principal_changed"');
+  // Ownership stays server-derived: the create is written as ctx, never as the claim.
+  expect(body).toMatch(/repo\.createOrder\(ctx\.organizationId, ctx\.userId,/);
+  const createOrderBody = body.slice(0, body.indexOf("\n}\n"));
+  expect(createOrderBody).not.toMatch(/expected(Principal)?\.(userId|organizationId)/);
+
+  const api = readFileSync(resolve("src/lib/api/index.ts"), "utf8");
+  // Outside the fingerprint: the key holder is already scoped to one principal.
+  expect(api).toMatch(/const \{ idempotency, principal, \.\.\.request \} = input;/);
+});
+
+/*
  * One holder per member + organization for a component that stays mounted
  * across identity switches (Orders → New Order; PR #120 review P2). The
  * mounted, database-backed proof is orders-new-order-money-mounted.

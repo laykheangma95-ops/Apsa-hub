@@ -471,6 +471,45 @@ export interface CreateOrderServiceInput {
         address?: string | null | undefined;
       }
     | undefined;
+  /**
+   * The member and organization the CLIENT started this order as — a
+   * precondition, never a credential. The server still derives the acting
+   * principal from the session and the member's active organization
+   * (`ctx`), and authorizes only that. This can only REFUSE: when present and
+   * different from `ctx`, the request was started by one principal and is
+   * being handled as another (the session or the active organization changed
+   * between the tap and the server), so nothing is written — see
+   * assertExpectedPrincipal.
+   */
+  expectedPrincipal?: { userId: string; organizationId: string } | undefined;
+}
+
+/**
+ * Refuse an order whose initiating principal is not the one handling it.
+ *
+ * The server derives who is acting when it HANDLES a request: the session's
+ * member and that member's active organization at that moment. A client
+ * request can outlive the principal that sent it — the checkout lazily loads
+ * its server function, then travels — and a member or organization switch in
+ * that window used to execute member A's order as member B: B became its
+ * creator under A's replay key, and A's identical retry then met a creator
+ * mismatch on that key (idempotency_conflict), leaving the sale unreconciled.
+ *
+ * Checked before anything else touches the request — no rate-limit token is
+ * spent and nothing is written, so the initiating principal's replay key is
+ * still unused when it retries as itself. A mismatch is a 409 with its own
+ * code, carrying nothing about either principal.
+ */
+function assertExpectedPrincipal(
+  ctx: AuthorizationContext,
+  expected: CreateOrderServiceInput["expectedPrincipal"],
+): void {
+  if (!expected) return;
+  if (expected.userId === ctx.userId && expected.organizationId === ctx.organizationId) return;
+  throw Object.assign(
+    conflict("The signed-in member or organization changed before this order was sent"),
+    { code: "principal_changed" },
+  );
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
@@ -538,6 +577,7 @@ export async function createOrder(
   ctx: AuthorizationContext,
   input: CreateOrderServiceInput,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("orders.create");
 
   if (

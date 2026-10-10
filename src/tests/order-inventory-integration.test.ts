@@ -47,6 +47,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import { SANCTIONED_ORDER_FN_SCHEMA, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 // ── Context factory ───────────────────────────────────────────────────────────
 
@@ -819,7 +820,9 @@ describe("Test 11: cross-org orders, lines, products and locations", () => {
   });
 
   it("the API surface has no organizationId or userId parameter to abuse", () => {
-    const api = readSource("src/api/orders.ts");
+    // CORRECTION-004: strip only the one sanctioned, refuse-only expectedPrincipal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const api = withoutSanctioned(readSource("src/api/orders.ts"), SANCTIONED_ORDER_FN_SCHEMA);
     expect(api).not.toMatch(/organizationId:\s*z\./);
     expect(api).not.toMatch(/userId:\s*z\./);
     expect(api).not.toMatch(/organization_id:\s*z\./);

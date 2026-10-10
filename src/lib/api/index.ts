@@ -1221,6 +1221,16 @@ export interface CreateRealOrderInput {
    *     newer identical call has since taken the key.
    */
   idempotency: IdempotencyKeyHolder | IdempotencyClaim;
+  /**
+   * The member + organization this order is being started as — the caller's
+   * own server-derived route principal. Sent as `expectedPrincipal`, a
+   * precondition: the server refuses (409 principal_changed, nothing written)
+   * when the principal it derives from the session by the time it handles the
+   * request is a different one. Never authorization; omitting it skips only
+   * the check. Not part of the request fingerprint: the key holder is already
+   * scoped to one principal.
+   */
+  principal?: { userId: string; organizationId: string };
 }
 
 /**
@@ -1229,7 +1239,7 @@ export interface CreateRealOrderInput {
  * src/api/orders.ts's own comment on why one must never be added).
  */
 export async function createRealOrder(input: CreateRealOrderInput): Promise<RealOrderDetail> {
-  const { idempotency, ...request } = input;
+  const { idempotency, principal, ...request } = input;
   const acceptsOnArrival = isIdempotencyKeyHolder(idempotency);
   const claim = acceptsOnArrival ? idempotency.claim() : idempotency;
   // Taken before the request and kept if it fails: a retry of this exact
@@ -1237,7 +1247,9 @@ export async function createRealOrder(input: CreateRealOrderInput): Promise<Real
   // first attempt created if it reached the server).
   const idempotencyKey = claim.keyFor(orderRequestFingerprint(request));
   const { createOrderFn } = await import("@/api/orders");
-  const detail = await createOrderFn({ data: { ...request, idempotencyKey } });
+  const detail = await createOrderFn({
+    data: { ...request, idempotencyKey, ...(principal ? { expectedPrincipal: principal } : {}) },
+  });
   // The order exists now, and the next order must never reuse this key — but
   // only the caller can say whether this response is the one it still wants.
   // A claim is left for the caller to retire after that check; a holder's

@@ -39,6 +39,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import { SANCTIONED_ORDER_FN_SCHEMA, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 // ── Environment check ─────────────────────────────────────────────────────────
 
@@ -659,7 +660,9 @@ describe("Test 5: Client cannot inject totals", () => {
 
 describe("Test 6: Client cannot inject organization_id or user_id", () => {
   it("no API function accepts an organizationId or userId parameter", () => {
-    const src = readSource("src/api/orders.ts");
+    // CORRECTION-004: strip only the one sanctioned, refuse-only expectedPrincipal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const src = withoutSanctioned(readSource("src/api/orders.ts"), SANCTIONED_ORDER_FN_SCHEMA);
     // A zod validator is the only way input reaches a handler, so it is enough
     // to prove no validator declares a tenant or actor field.
     expect(src).not.toMatch(/organizationId:\s*z\./);
@@ -1592,7 +1595,9 @@ describe("Test 20: Order number strategy", () => {
     expect(findByCode).toContain("ctx.organizationId");
     // No organization may be named by the caller, here or at the API boundary.
     expect(findByCode).not.toMatch(/organizationId:\s*(?!ctx)/);
-    expect(readSource("src/api/orders.ts")).not.toMatch(/organizationId:\s*z\./);
+    expect(
+      withoutSanctioned(readSource("src/api/orders.ts"), SANCTIONED_ORDER_FN_SCHEMA),
+    ).not.toMatch(/organizationId:\s*z\./); // CORRECTION-004: only the refuse-only precondition
   });
 });
 

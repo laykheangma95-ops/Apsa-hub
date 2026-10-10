@@ -528,6 +528,15 @@ export function PosCheckoutSheet({
           // totals, and bounds this to 0 ≤ discount ≤ subtotal.
           ...(priced.discount.amount > 0 ? { discountMinor: priced.discount.amount } : {}),
           idempotency: claim,
+          /*
+           * The principal this attempt was started as — the same one its
+           * token and its replay claim are bound to. The server derives who is
+           * acting only when it handles the request, after the lazy import and
+           * the trip; if the member or organization changed in between, it
+           * refuses instead of executing this cart as someone else, and
+           * nothing is written — so this principal's retry still owns the key.
+           */
+          principal: { userId: token.userId, organizationId: token.organizationId },
         });
         // Abandoned (sheet closed, cart changed, another attempt began, or a
         // different member/organization): the order may exist server-side,

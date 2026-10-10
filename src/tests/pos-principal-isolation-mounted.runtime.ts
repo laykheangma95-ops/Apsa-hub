@@ -316,6 +316,8 @@ mock.module("@/api/orders", () => ({
           sourceConversationRef: data.sourceConversationRef ?? null,
           deliveryMinor: data.deliveryMinor,
           idempotencyKey: data.idempotencyKey,
+          // Forwarded exactly as createOrderFn's handler forwards it.
+          ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
         } as any),
       };
     } catch (error) {

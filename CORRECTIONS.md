@@ -41,6 +41,17 @@ Corrections are listed newest first.
 
 ---
 
+### CORRECTION-004
+
+**Date:** 2026-10-10
+**Affects:** src/api/orders.ts (`createOrderFn`), src/server/orders/service.ts (`createOrder`, `assertExpectedPrincipal`), src/lib/api/index.ts (`CreateRealOrderInput`, `createRealOrder`), src/components/pos/PosCheckoutSheet.tsx (`completeReal`), and the order-API invariant tests (order-domain Tests 6 and 20, order-inventory-integration Test 11, order-ui-integration, pos-order-integration, merchant-sale-journey) via src/tests/helpers/refuse-only-principal.ts
+**Section:** Order creation — no tenant or actor identity on the client → server order path (SECURITY.md §9 "Never trust organization_id sent by client", §105)
+**Original:** No `organizationId` / `userId` field of any kind may cross the order-creation API, and the invariant tests forbade the names outright, so the server learned nothing about who STARTED a request.
+**Correction:** Project owner decision (PR #121 review P2) — POS checkout sends exactly one refuse-only precondition, `expectedPrincipal: { userId, organizationId }`: the principal the checkout attempt was started as. The server still derives the acting principal from the session and the member's active organization, and authorizes and records ownership (`created_by`, `organization_id`) from that derivation only. `expectedPrincipal` is compared for equality with it before anything else (before the permission check, the rate limit and any write); on a mismatch the request is refused with 409 `principal_changed` and nothing is written. It can never grant, select, scope or attribute anything. No other identity field is allowed on the order path; the invariant tests strip exactly the sanctioned snippets (each must occur exactly once) and still assert the invariant over everything else.
+**Reason:** The server derives the principal when it HANDLES a request. A member or organization switch between the tap and that moment (the lazily imported server function, the trip, another tab signing in, or an active-organization write landing before the route updates) executed member A's checkout as member B under A's replay key; A's identical retry then met an idempotency creator mismatch and the sale was left unreconciled. No client-side check can see that window; only the server can, and only if it knows who started the request.
+
+---
+
 ### CORRECTION-003
 
 **Date:** 2026-10-03 (revised 2026-10-03: the shipping label carries a small, secondary APSA Parcel QR — see **Shipping label**)

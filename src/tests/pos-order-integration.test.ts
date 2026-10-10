@@ -57,6 +57,7 @@ import * as path from "path";
 import { addToCart, calculateCartTotals, lineKey, removeLine, setQuantity } from "@/lib/pos-cart";
 import type { CartLine } from "@/lib/pos-cart";
 import { usd } from "@/lib/money";
+import { SANCTIONED_POS_CALL_ARG, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 
@@ -192,9 +193,14 @@ describe("PosCheckoutSheet's production path reuses createRealOrder + confirmRea
       source.indexOf("async function completeReal"),
       source.indexOf("const realConfirmed"),
     );
-    const createCallBlock = completeReal.slice(
-      completeReal.indexOf("createRealOrder({"),
-      completeReal.indexOf("});", completeReal.indexOf("createRealOrder({")),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const createCallBlock = withoutSanctioned(
+      completeReal.slice(
+        completeReal.indexOf("createRealOrder({"),
+        completeReal.indexOf("});", completeReal.indexOf("createRealOrder({")),
+      ),
+      SANCTIONED_POS_CALL_ARG,
     );
     for (const forbidden of [
       "organizationId",

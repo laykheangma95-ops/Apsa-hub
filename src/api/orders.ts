@@ -114,6 +114,13 @@ export const createOrderFn = createServerFn({ method: "POST" })
         // Optional order shipping destination — snapshotted onto the order and
         // folded into the idempotency fingerprint server-side (migration 047).
         shipping: shippingSnapshotSchema.optional(),
+        // The member + organization the client started this order as. A
+        // precondition the service checks against the principal it derives
+        // from the session — it can only refuse, never authorize (see
+        // assertExpectedPrincipal in src/server/orders/service.ts).
+        expectedPrincipal: z
+          .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+          .optional(),
       })
       .parse(data),
   )
@@ -134,6 +141,7 @@ export const createOrderFn = createServerFn({ method: "POST" })
       deliveryMinor: data.deliveryMinor,
       idempotencyKey: data.idempotencyKey,
       ...(data.shipping ? { shipping: data.shipping } : {}),
+      ...(data.expectedPrincipal ? { expectedPrincipal: data.expectedPrincipal } : {}),
     });
   });
 

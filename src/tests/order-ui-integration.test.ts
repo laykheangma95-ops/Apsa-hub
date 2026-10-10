@@ -23,6 +23,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
+import { SANCTIONED_CREATE_INPUT_FIELD, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 
@@ -133,9 +134,14 @@ describe("Create flow calls createOrderFn, never a client-computed price/total",
 
   it("CreateRealOrderInput / the sheet's payload has no organizationId, userId, price, subtotal or total field", () => {
     const apiIndex = readSource(API_INDEX);
-    const createInputBlock = apiIndex.slice(
-      apiIndex.indexOf("export interface CreateRealOrderInput"),
-      apiIndex.indexOf("export async function createRealOrder"),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const createInputBlock = withoutSanctioned(
+      apiIndex.slice(
+        apiIndex.indexOf("export interface CreateRealOrderInput"),
+        apiIndex.indexOf("export async function createRealOrder"),
+      ),
+      SANCTIONED_CREATE_INPUT_FIELD,
     );
     for (const forbidden of [
       "organizationId",
