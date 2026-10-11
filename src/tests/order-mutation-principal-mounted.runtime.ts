@@ -640,12 +640,33 @@ async function typeInto(input: HTMLInputElement | null, value: string) {
   });
   await settle();
 }
+/**
+ * At least 80 rounds, and at least 5 s of real time: a count of event-loop
+ * turns alone made every wait depend on how fast the in-process database
+ * answered on the machine running the suite.
+ */
 async function waitFor(check: () => unknown, label: string) {
-  for (let i = 0; i < 80; i++) {
+  const deadline = Date.now() + 5000;
+  for (let i = 0; i < 80 || Date.now() < deadline; i++) {
     if (check()) return;
     await settle(2);
   }
   throw new Error(`timed out waiting for ${label}; page: ${text().slice(0, 500)}`);
+}
+/**
+ * Every read the screen has started has answered. A comparison of what a
+ * principal sees "before" and "after" a late response is only meaningful once
+ * that principal's own legitimate reads are not still landing in between.
+ */
+async function readsSettled() {
+  // Idle across several consecutive rounds: one read finishing can enable the
+  // next (capabilities → pack state, detail → deliveries), so a single idle
+  // instant between them is not "settled".
+  let idleRounds = 0;
+  await waitFor(() => {
+    idleRounds = client.isFetching() === 0 ? idleRounds + 1 : 0;
+    return idleRounds >= 4;
+  }, "the screen's own reads to settle");
 }
 async function releaseDispatch(index = 0) {
   for (let i = 0; i < 200 && !dispatchGates[index]; i++) await settle(1);
@@ -1295,9 +1316,11 @@ describe("Order detail: a late confirm / cancel response stays with the principa
             () => cachedLifecycle(to.user, to.org, orderId) === action.to,
             "B's own read",
           );
+        await readsSettled();
         const bBefore = partitionOf(to.user, to.org);
         const shownBefore = text();
         await releaseResponse(); // A's response lands while B is shown
+        await readsSettled();
         lateEvidence(`late ${action.name}, ${to.label}`, orderId, to);
 
         // The server's act is A's, and only A's.
@@ -1385,9 +1408,11 @@ describe("Order detail: a late confirm / cancel response stays with the principa
             () => cachedLifecycle(to.user, to.org, orderId) === action.to,
             "B's own read",
           );
+        await readsSettled();
         const bBefore = partitionOf(to.user, to.org);
         const shownBefore = text();
         await releaseResponse();
+        await readsSettled();
         lateEvidence(`late ${action.name} failure, ${to.label}`, orderId, to);
         expect(partitionOf(to.user, to.org)).toEqual(bBefore);
         expect(writesInto(to.user, to.org)).toEqual([]);
@@ -1432,8 +1457,10 @@ describe("Order detail: a late confirm / cancel response stays with the principa
       await committedAsA();
       grants.get(USER_B)!.delete("orders.read");
       await remountAs({ user: USER_B, org: ORG_B });
+      await readsSettled();
       const shownBefore = text();
       await releaseResponse();
+      await readsSettled();
       lateEvidence(`late ${action.name}, remount as B`, orderId, { user: USER_B, org: ORG_B });
       action.expectDoneByA(await orderState(orderId));
       expect(writesInto(USER_B, ORG_B)).toEqual([]);
@@ -1776,8 +1803,10 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
         await switchTo({ user: to.user, org: to.org });
         const atSwitch = draftOnScreen();
         const sheetAtSwitch = dialog() !== null;
+        await readsSettled();
         const shownBefore = text();
         await releaseResponse();
+        await readsSettled();
         console.log(
           `[evidence] payment draft, ${to.label}, delayed ${outcome}: atSwitch=${JSON.stringify(atSwitch)} ` +
             `sheetOpenForB=${sheetAtSwitch} afterRelease=${JSON.stringify(draftOnScreen())} ` +
