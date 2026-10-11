@@ -16,6 +16,20 @@ it("Order lifecycle and payment recording run as the principal that started them
     ["test", resolve("src/tests/order-mutation-principal-mounted.runtime.ts")],
     { cwd: process.cwd(), encoding: "utf8", timeout: 300000 },
   );
-  if (result.status !== 0) console.error(result.stdout, result.stderr);
+  if (result.status !== 0) {
+    // Bun truncates a long console argument, which hid WHICH case failed in
+    // CI. Write each failing case and the lines before it (its error and
+    // diff), in full and without React's stack-frame noise.
+    const lines = `${result.stdout}\n${result.stderr}`
+      .split("\n")
+      .filter((line) => !line.includes("react-stack-top-frame"));
+    const keep = new Set<number>();
+    lines.forEach((line, i) => {
+      if (/^\(fail\)/.test(line)) for (let j = Math.max(0, i - 60); j <= i; j++) keep.add(j);
+    });
+    process.stderr.write(
+      `${[...keep].map((i) => lines[i]).join("\n")}\n${String(result.error ?? "")}\n`,
+    );
+  }
   expect(result.status).toBe(0);
 }, 310000);
