@@ -60,10 +60,11 @@ describe("migration 062: one transaction for a financial change and its mandator
     });
   }
 
-  it("refund_payment_v2: key and refunded total required; replay bound to member, payment, amount and reason", () => {
+  it("refund_payment_v2: key, refunded total and acknowledgement of every earlier refund; replay bound to member, payment, amount and reason", () => {
     const body = sqlFunction("refund_payment_v2");
     expect(body).toContain("'idempotency_key_required'");
     expect(body).toContain("'expected_refunded_required'");
+    expect(body).toContain("p_acknowledged_refund_ids uuid[]");
     // One key, one logical refund in the organization: serialized before lookup.
     expect(body.indexOf("pg_advisory_xact_lock(")).toBeLessThan(
       body.indexOf("FROM public.payment_events"),
@@ -76,47 +77,106 @@ describe("migration 062: one transaction for a financial change and its mandator
     ]) {
       expect(body).toContain(bound);
     }
-    // The stale check runs only after a replay was ruled out, and before the write.
-    expect(body.indexOf("'stale'")).toBeGreaterThan(body.indexOf("'idempotency_conflict'"));
-    expect(body.indexOf("'stale'")).toBeLessThan(body.indexOf("public.refund_payment_v1("));
+    // A NEW key must acknowledge every refund already on the payment — after
+    // the replay was ruled out, before the ledger write. No time window, no
+    // "latest refund" ordering: the set itself.
+    const conflict = body.indexOf("'idempotency_conflict'");
+    const confirm = body.indexOf("'confirmation_required'");
+    const write = body.indexOf("public.refund_payment_v1(");
+    expect(confirm).toBeGreaterThan(conflict);
+    expect(confirm).toBeLessThan(write);
+    expect(body).toContain("AND e.id <> ALL (v_acknowledged)");
+    expect(body).not.toMatch(/ORDER BY created_at DESC/);
+    // The stale total runs after the replay check, and before the write.
+    expect(body.lastIndexOf("'stale'")).toBeGreaterThan(conflict);
+    expect(body.lastIndexOf("'stale'")).toBeLessThan(write);
   });
 
-  it("record_payment_v1: a key replays only the original member's original request, and a replay writes nothing", () => {
-    const body = sqlFunction("record_payment_v1");
+  it("the ORIGINAL recording request is identified by an immutable digest on its created event — never by corrections or mutable columns", () => {
+    // 043's body, stamping the digest on the append-only created event.
+    const recordBody = sqlFunction("record_payment_before_order_v1");
+    expect(recordBody).toMatch(
+      /'created', p_amount_minor, v_order\.currency,\s*v_initial_state, p_recorded_by, p_note,\s*jsonb_build_object\(\s*'request_reference_digest', public\.payment_request_digest_v1\(/,
+    );
+    const digest = sqlFunction("payment_request_digest_v1");
+    expect(digest).toContain("IMMUTABLE");
+    expect(digest).toContain("sha256(");
+    for (const part of ["organization_id", "order_id", "recorded_by", "method", "amount_minor"]) {
+      expect(digest).toContain(`'${part}', p_${part}`);
+    }
+    expect(digest).toContain("'reference', NULLIF(trim(p_reference), '')");
+    expect(digest).toContain("'note', NULLIF(trim(p_note), '')");
+
+    const matches = sqlFunction("payment_replay_matches_v1");
+    expect(matches).toContain("event_type = 'created'");
+    expect(matches).toContain("v_created.actor_user_id IS DISTINCT FROM p_recorded_by");
+    expect(matches).toContain(
+      "v_created.metadata ->> 'request_reference_digest' = public.payment_request_digest_v1(",
+    );
+    // Never the mutable columns, never the order of correction events.
+    expect(matches).not.toMatch(/v_payment\.(reference|note|recorded_by)/);
+    expect(matches).not.toContain("'correction'");
+    // A payment recorded before the digest existed is never replayed.
+    expect(matches).toMatch(
+      /NOT \(v_created\.metadata \? 'request_reference_digest'\) THEN\s+RETURN false;/,
+    );
+  });
+
+  it("record_payment_v2 replays only the original member's original request (nothing written); record_payment_v1 delegates to it", () => {
+    const body = sqlFunction("record_payment_v2");
     expect(body.match(/payment_replay_matches_v1\(/g)).toHaveLength(2);
     expect(body).toContain("'idempotency_conflict'");
-    const matches = sqlFunction("payment_replay_matches_v1");
-    for (const bound of [
-      "v_payment.order_id = p_order_id",
-      "v_payment.recorded_by IS NOT DISTINCT FROM p_recorded_by",
-      "v_payment.method::text = p_method",
-      "v_payment.amount_minor = p_amount_minor",
-      "v_original_reference IS NOT DISTINCT FROM",
-      "v_original_note IS NOT DISTINCT FROM",
-    ]) {
-      expect(matches).toContain(bound);
-    }
-    // The pre-check replay returns before any write (sync / insert).
     const replay = body.indexOf("'replayed', true");
     expect(replay).toBeGreaterThan(0);
     expect(replay).toBeLessThan(body.indexOf("record_payment_before_order_v1("));
+    const v1 = sqlFunction("record_payment_v1");
+    expect(v1).toMatch(
+      /RETURN public\.record_payment_v2\(p_organization_id, p_order_id, p_recorded_by, p_method,\s*p_amount_minor, p_reference, p_idempotency_key, p_note\);/,
+    );
+    expect(v1).not.toContain("record_payment_before_order_v1(");
   });
 
-  it("retires the non-atomic v1 RPCs and asserts the effective EXECUTE authority itself", () => {
-    for (const sig of [
-      "refund_payment_v1(uuid,uuid,uuid,bigint,text,text)",
-      "reverse_payment_v1(uuid,uuid,uuid,text)",
-      "correct_payment_v1(uuid,uuid,uuid,text,text,text)",
+  it("closes EVERY legacy and internal financial function by name — every overload, every schema, every grantee — and asserts EFFECTIVE authority", () => {
+    for (const name of [
+      "refund_payment_v1",
+      "reverse_payment_v1",
+      "correct_payment_v1",
+      "record_payment_before_order_v1",
+      "verify_payment_before_order_v1",
+      "reverse_payment_before_order_v1",
+      "refund_payment_before_order_v1",
+      "lock_payment_order",
+      "sync_order_payment_state",
+      "payment_replay_matches_v1",
+      "payment_request_digest_v1",
+      "transition_order_before_payment_authority_v1",
     ]) {
-      expect(MIGRATION).toContain(
-        `REVOKE ALL ON FUNCTION public.${sig}\n  FROM PUBLIC, anon, authenticated, service_role;`,
-      );
+      expect(MIGRATION.split(`'${name}'`).length - 1).toBe(2); // the revoke pass and the post-condition
     }
-    expect(MIGRATION).toContain("RAISE EXCEPTION '062: % is still executable by %'");
-    expect(MIGRATION).toContain("has_function_privilege('service_role', v_fn, 'EXECUTE')");
-    // Functions and grants only — no table, column, index, policy or data change.
+    // By name, in every schema — never a fixed list of signatures.
+    expect(MIGRATION).toContain("WHERE p.proname = ANY (c_entry || c_internal)");
     expect(MIGRATION).not.toMatch(
-      /\b(CREATE|ALTER|DROP) (TABLE|INDEX|POLICY|VIEW|TYPE)\b|\bINSERT INTO public\.(?!audit_logs)|\bUPDATE public\.|\bDELETE FROM\b/,
+      /WHERE p\.proname = ANY \(c_entry \|\| c_internal\)\s+AND p\.pronamespace/,
+    );
+    // Membership closure, any edge: SET-only and inherited memberships both count.
+    expect(
+      MIGRATION.match(/SELECT m\.roleid FROM pg_auth_members m JOIN r ON m\.member = r\.oid/g),
+    ).toHaveLength(3);
+    for (const condition of [
+      "'062: browser-reachable role % can execute %'",
+      "'062: server-reachable role % can execute internal %'",
+      "'062: unexpected financial entry-point overload(s): %'",
+      "'062: % can no longer execute %, which it calls'",
+      "'062: browser-reachable role % can CREATE in schema public'",
+      "'062: service_role can become the owner of %'",
+    ]) {
+      expect(MIGRATION).toContain(condition);
+    }
+    expect(MIGRATION).toContain("REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated;");
+    // Functions, function grants and schema CREATE only — no table, column,
+    // index, policy, view, type or data change.
+    expect(MIGRATION).not.toMatch(
+      /\b(CREATE|ALTER|DROP) (TABLE|INDEX|POLICY|VIEW|TYPE)\b|\bINSERT INTO public\.(?!audit_logs|payments \(|payment_events \()|\bUPDATE public\.|\bDELETE FROM\b/,
     );
   });
 });
@@ -125,11 +185,28 @@ describe("the server reaches only the atomic RPCs and never writes a second mand
   const repository = read("src/server/payments/repository.ts");
   const service = read("src/server/payments/service.ts");
 
-  it("the repository calls refund/reverse/correct v2 and maps the in-transaction audit failure to 503", () => {
-    for (const rpc of ["refund_payment_v2", "reverse_payment_v2", "correct_payment_v2"]) {
+  it("the repository calls record_payment_v2 and refund/reverse/correct v2 — never their v1 — and maps an in-transaction audit failure to 503", () => {
+    for (const rpc of [
+      "record_payment_v2",
+      "refund_payment_v2",
+      "reverse_payment_v2",
+      "correct_payment_v2",
+    ]) {
       expect(repository).toContain(`db.rpc("${rpc}"`);
     }
+    expect(repository).not.toMatch(/db\.rpc\("(record|refund|reverse|correct)_payment_v1"/);
     expect(repository).toContain('includes("apsa_audit_unavailable")');
+  });
+
+  it("a release that reaches a database without 062 refuses those writes before any write (schema_upgrade_required)", () => {
+    expect(repository).toContain('return code === "PGRST202" || code === "42883";');
+    expect(repository).toContain('"schema_upgrade_required"');
+    // Every 062 write maps a missing function to the refusal, never a fallback.
+    expect(
+      repository.match(
+        /throw rpcError\("(recordPayment|refundPayment|reversePayment|correctPayment)"/g,
+      ),
+    ).toHaveLength(4);
   });
 
   it("no source calls a retired v1 refund / reverse / correct RPC", () => {
@@ -172,20 +249,55 @@ describe("a refund is one logical request, with one key, end to end", () => {
     expect(fn).toContain("idempotencyKey: refund.idempotencyKey,");
   });
 
-  it("Payment detail: one key per logical refund in a page-lifetime, principal-scoped holder, retired only on success", () => {
+  it("refundPaymentFn requires the acknowledged refunds too, and the service maps confirmation_required to its own 409", () => {
+    const fn = between(read("src/api/payments.ts"), "export const refundPaymentFn", "\n  });\n");
+    expect(fn).toContain("acknowledgedRefundIds: z.array(z.string().uuid()).max(100),");
+    expect(fn).not.toMatch(/acknowledgedRefundIds: [^\n]*\.(nullish|optional)\(/);
+    const service = read("src/server/payments/service.ts");
+    expect(service).toContain('"refund_confirmation_required"');
+    expect(read("src/lib/api/index.ts")).toContain(
+      "acknowledgedRefundIds: refund.acknowledgedRefundIds,",
+    );
+  });
+
+  it("Payment detail: the logical refund's key is DURABLE (src/lib/refund-intent.ts), principal + payment scoped, and a refused new key is reviewed explicitly", () => {
     const route = read("src/routes/app.payments.$id.tsx");
-    const confirm = between(route, "onConfirm={(amountMinor, reason) => {", "}}");
-    expect(confirm).toContain("const expectedRefundedMinor = refundedMinorOf(payment);");
-    expect(confirm).toMatch(
-      /sharedIdempotencyHolder\(\{\s*userId,\s*organizationId: routeOrganizationId,\s*flow: "payment-refund",\s*subject: id,\s*\}\)\.claim\(\)/,
+    expect(route).not.toContain("sharedIdempotencyHolder");
+    expect(route).toMatch(
+      /const refundScope: RefundIntentScope = \{\s*userId,\s*organizationId: routeOrganizationId,\s*paymentId: id,\s*\};/,
     );
-    // The key covers exactly what makes it the same refund — the total included.
-    expect(confirm).toContain("JSON.stringify([amountMinor, reason, expectedRefundedMinor])");
-    const mutation = between(route, "const refundMutation = useMutation({", "onError:");
-    expect(mutation).toContain("attempt.claim.retire();");
-    expect(mutation.indexOf("attempt.claim.retire();")).toBeGreaterThan(
-      mutation.indexOf("onSuccess:"),
+    const submit = between(route, "function submitRefund(", "\n  }\n");
+    expect(submit).toContain("const pending = beginRefund(refundScope, amountMinor, reason);");
+    expect(submit).toContain("idempotencyKey: pending.key,");
+    expect(submit).toContain("acknowledgedRefundIds: readRefundIntent(refundScope).acknowledged,");
+    expect(submit).toContain("expectedRefundedMinor: refundedMinorOf(current),");
+    const mutation = between(
+      route,
+      "const refundMutation = useMutation({",
+      "function submitRefund(",
     );
+    // Seen to succeed (made now or replayed): acknowledged, pending cleared.
+    expect(mutation).toContain("refundSucceeded(attempt.scope, made?.id ?? null);");
+    // Refused for confirmation: nothing written, the refunds are shown, nothing re-sent.
+    expect(mutation).toMatch(
+      /if \(isRefundConfirmationRequired\(err\)\) \{[\s\S]*setRefundReview\(true\);[\s\S]*return;/,
+    );
+    // Refunding more needs the merchant's explicit choice after seeing them.
+    const beyond = between(route, "onConfirmBeyond={(amountMinor, reason) => {", "}}");
+    expect(beyond.indexOf("acknowledgeRefunds(")).toBeLessThan(beyond.indexOf("submitRefund("));
+    expect(between(route, "onDecline={() => {", "}}")).toContain(
+      "abandonPendingRefund(refundScope);",
+    );
+    // The recovery notice recognises the screen's OWN committed refund by key.
+    expect(route).toContain("refunds.find((event) => event.idempotencyKey === pendingRefund.key)");
+  });
+
+  it("the server exposes a refund's key only to the member who made it", () => {
+    const service = read("src/server/payments/service.ts");
+    expect(service).toMatch(
+      /idempotencyKey:\s*row\.event_type === "refund" && row\.actor_user_id === viewerUserId\s*\?\s*\(row\.idempotency_key \?\? null\)\s*:\s*null,/,
+    );
+    expect(service).toContain("mapEvent(row, canViewReference, knownReferences, ctx.userId)");
   });
 
   it("the refunded total is the ledger's integer sum, never a float", () => {

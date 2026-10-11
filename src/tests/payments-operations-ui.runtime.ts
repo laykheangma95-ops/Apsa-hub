@@ -46,6 +46,8 @@ const NONEXISTENT_PAYMENT_ID = "30000000-0000-0000-0000-00000000dead";
  * credential, that secret scanners must not mistake for one.
  */
 const REFUND_IDEMPOTENCY_KEY = "fixture-bbbbbbbbbbbbbbbb";
+/** A refund already on the payment that the screen has seen. */
+const PRIOR_REFUND_ID = "40000000-0000-0000-0000-000000000001";
 
 function makeCtx(permissions: string[], organizationId = ORG_A_ID): AuthCtxType {
   const perms = new Set<string>(permissions);
@@ -347,6 +349,7 @@ describe("permission denial happens before any data is touched", () => {
           reason: "Damaged",
           idempotencyKey: REFUND_IDEMPOTENCY_KEY,
           expectedRefundedMinor: 0,
+          acknowledgedRefundIds: [],
           expectedPrincipal: principalOf(ctx),
         }),
       );
@@ -581,16 +584,19 @@ describe("the client boundary in src/lib/api", () => {
       reason: "Damaged item",
       expectedRefundedMinor: 500,
       idempotencyKey: REFUND_IDEMPOTENCY_KEY,
+      acknowledgedRefundIds: [PRIOR_REFUND_ID],
     });
 
     // The amount, the reason, the one logical refund's key, the refunded total
-    // it was started from (a precondition) and the refuse-only principal.
+    // it was started from (a precondition), the refunds already seen and the
+    // refuse-only principal.
     expect(seen[0]!.data).toEqual({
       paymentId: PAYMENT_ID,
       amountMinor: 2000,
       reason: "Damaged item",
       expectedRefundedMinor: 500,
       idempotencyKey: REFUND_IDEMPOTENCY_KEY,
+      acknowledgedRefundIds: [PRIOR_REFUND_ID],
       expectedPrincipal: STARTED_AS,
     });
     expect(Number.isInteger(seen[0]!.data!["amountMinor"])).toBe(true);

@@ -83,6 +83,13 @@ export interface PaymentEventDetail {
   toVerification: PaymentVerificationState | null;
   actorUserId: string | null;
   /**
+   * The idempotency key of the caller's OWN refund events — the key their
+   * screen sent — so a screen that lost a response can recognise the refund
+   * it already made (recovery after a reload). null on every other event, and
+   * on every other member's refund.
+   */
+  idempotencyKey: string | null;
+  /**
    * Free text. Withheld only where it literally contains a reference value
    * already known to belong to this payment, unless the caller holds
    * payments.view_provider_reference — see redactKnownReferencesFromText.
@@ -296,6 +303,7 @@ function mapEvent(
   row: PaymentEventRow,
   canViewReference: boolean,
   knownReferences: ReadonlySet<string>,
+  viewerUserId: string,
 ): PaymentEventDetail {
   // PostgREST already deserialized this from JSONB — it is JSON-safe by
   // construction; the DB row type just isn't narrowed that precisely.
@@ -311,6 +319,10 @@ function mapEvent(
     fromVerification: row.from_verification,
     toVerification: row.to_verification,
     actorUserId: row.actor_user_id,
+    idempotencyKey:
+      row.event_type === "refund" && row.actor_user_id === viewerUserId
+        ? (row.idempotency_key ?? null)
+        : null,
     // A manager/owner can freely type this payment's own raw reference into
     // a free-text reason ("confirmed via bank, ref ABA123...") — that must
     // not become a side door around the SAME field's own withholding.
@@ -475,6 +487,12 @@ function refundFailureToError(result: {
         "This payment's refunds changed after this refund was started — re-read it and try again",
         409,
         "refund_stale",
+      );
+    case "confirmation_required":
+      return publicError(
+        "This payment already has a refund this request did not acknowledge — review it before refunding again",
+        409,
+        "refund_confirmation_required",
       );
     case "idempotency_key_required":
       return badRequest("A refund idempotency key is required");
@@ -823,6 +841,15 @@ export interface RefundPaymentServiceInput {
    * idempotency.
    */
   expectedRefundedMinor: number;
+  /**
+   * Every refund already on this payment that the merchant has SEEN — a
+   * refund their own screen confirmed, or one they reviewed and explicitly
+   * chose to refund beyond. A new key must acknowledge all of them, or the
+   * request is refused as `refund_confirmation_required`: a retry that lost
+   * its key (reload, another tab) never silently becomes a second refund.
+   * Never an amount and never authority.
+   */
+  acknowledgedRefundIds: string[];
   /** Refuse-only (assertExpectedPrincipal): who started this refund. */
   expectedPrincipal: ExpectedPrincipal;
 }
@@ -859,6 +886,13 @@ export async function refundPayment(
   if (!Number.isInteger(input.expectedRefundedMinor) || input.expectedRefundedMinor < 0) {
     throw badRequest("The refunded total this refund was started from is required");
   }
+  if (
+    !Array.isArray(input.acknowledgedRefundIds) ||
+    input.acknowledgedRefundIds.length > 100 ||
+    input.acknowledgedRefundIds.some((id) => typeof id !== "string")
+  ) {
+    throw badRequest("The refunds this refund acknowledges are required");
+  }
 
   const payment = await repo.findPaymentById(ctx.organizationId, input.paymentId);
   if (!payment) throw notFound("Payment not found");
@@ -871,6 +905,7 @@ export async function refundPayment(
     input.reason.trim(),
     input.idempotencyKey.trim(),
     input.expectedRefundedMinor,
+    input.acknowledgedRefundIds,
   );
   if (result.status !== "success") throw refundFailureToError(result);
 
@@ -941,7 +976,7 @@ async function loadDetail(
 
   return {
     ...mapPayment(payment, canViewReference, "redact-known", extractedReferences),
-    events: events.map((row) => mapEvent(row, canViewReference, knownReferences)),
+    events: events.map((row) => mapEvent(row, canViewReference, knownReferences, ctx.userId)),
     evidence: evidence.map((row) => mapEvidence(row, canViewReference)),
   };
 }

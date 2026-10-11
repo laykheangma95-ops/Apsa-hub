@@ -514,7 +514,7 @@ describe("Test 8: Actor is always server-derived", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          record_payment_v1: {
+          record_payment_v2: {
             data: {
               status: "success",
               payment_id: PAYMENT_ID,
@@ -536,7 +536,7 @@ describe("Test 8: Actor is always server-derived", () => {
       },
     );
 
-    const call = calls.find((c) => c.fn === "record_payment_v1");
+    const call = calls.find((c) => c.fn === "record_payment_v2");
     expect(call?.args["p_recorded_by"]).toBe(USER_ORG_A);
   });
 });
@@ -559,7 +559,7 @@ describe("Test 9: Amount / method / reference captured exactly", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          record_payment_v1: {
+          record_payment_v2: {
             data: {
               status: "success",
               payment_id: PAYMENT_ID,
@@ -582,7 +582,7 @@ describe("Test 9: Amount / method / reference captured exactly", () => {
       },
     );
 
-    const call = calls.find((c) => c.fn === "record_payment_v1");
+    const call = calls.find((c) => c.fn === "record_payment_v2");
     expect(call?.args["p_method"]).toBe("bank_transfer");
     expect(call?.args["p_amount_minor"]).toBe(4500);
     expect(call?.args["p_reference"]).toBe("ABA-REF-123");
@@ -783,6 +783,7 @@ describe("Test 14: Refund appends an event; its mandatory audit is in the same t
     reason: "Partial refund — damaged item",
     idempotencyKey: REFUND_IDEMPOTENCY_KEY,
     expectedRefundedMinor: 0,
+    acknowledgedRefundIds: [],
     expectedPrincipal: principalOf(ctx),
     ...change,
   });
@@ -820,6 +821,7 @@ describe("Test 14: Refund appends an event; its mandatory audit is in the same t
       p_reason: "Partial refund — damaged item",
       p_idempotency_key: REFUND_IDEMPOTENCY_KEY,
       p_expected_refunded_minor: 0,
+      p_acknowledged_refund_ids: [],
     });
     // The retired, non-atomic RPC is never called.
     expect(calls.some((c) => c.fn === "refund_payment_v1")).toBe(false);
@@ -887,6 +889,7 @@ describe("Test 14: Refund appends an event; its mandatory audit is in the same t
     for (const [status, code] of [
       ["idempotency_conflict", "idempotency_conflict"],
       ["stale", "refund_stale"],
+      ["confirmation_required", "refund_confirmation_required"],
     ] as const) {
       await withPaymentDb(
         {
@@ -1018,7 +1021,7 @@ describe("Test 16: Duplicate reference is flagged, not rejected", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          record_payment_v1: {
+          record_payment_v2: {
             data: {
               status: "success",
               payment_id: PAYMENT_ID,
@@ -1052,7 +1055,7 @@ describe("Test 16: Duplicate reference is flagged, not rejected", () => {
 });
 
 describe("Test 17: Idempotency key replay returns the same payment", () => {
-  it("a replayed record_payment_v1 result produces no second audit entry", async () => {
+  it("a replayed record_payment_v2 result produces no second audit entry", async () => {
     const { recordPayment } = await import("../server/payments/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ALL_PAYMENT_PERMS);
 
@@ -1076,7 +1079,7 @@ describe("Test 17: Idempotency key replay returns the same payment", () => {
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          record_payment_v1: {
+          record_payment_v2: {
             data: {
               status: "success",
               payment_id: PAYMENT_ID,
@@ -1339,7 +1342,7 @@ describe("Test 24: COD settlement requires payments.mark_cod, not payments.recor
           payment_evidence: emptyEvidence,
         },
         rpc: {
-          record_payment_v1: {
+          record_payment_v2: {
             data: {
               status: "success",
               payment_id: PAYMENT_ID,

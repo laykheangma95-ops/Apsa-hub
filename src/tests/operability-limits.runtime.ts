@@ -567,6 +567,7 @@ describe("financial mutations FAIL CLOSED when the durable limiter is unavailabl
           reason: "customer refund",
           idempotencyKey: "idem-key-refund-000001",
           expectedRefundedMinor: 0,
+          acknowledgedRefundIds: [],
           expectedPrincipal: principalOf(ctx),
         }),
     ],

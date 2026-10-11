@@ -213,6 +213,9 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
         // The refunded total the refund was started from: a precondition,
         // never an amount (refused as stale when it no longer holds).
         expectedRefundedMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        // Every refund already on the payment the merchant has seen (possibly
+        // none). A new key that leaves one out is refused for confirmation.
+        acknowledgedRefundIds: z.array(z.string().uuid()).max(100),
         // Refuse-only: the principal this refund was started as.
         expectedPrincipal: expectedPrincipalSchema,
       })
@@ -227,6 +230,7 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
       reason: data.reason,
       idempotencyKey: data.idempotencyKey,
       expectedRefundedMinor: data.expectedRefundedMinor,
+      acknowledgedRefundIds: data.acknowledgedRefundIds,
       expectedPrincipal: data.expectedPrincipal,
     });
   });

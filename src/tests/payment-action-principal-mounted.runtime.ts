@@ -208,7 +208,11 @@ function sqlTransport() {
         .map(([key], i) => `${identifier(key)} => $${i + 1}`)
         .join(",")}) as result`;
       const params = entries.map(([, value]) =>
-        value !== null && typeof value === "object" ? JSON.stringify(value) : value,
+        Array.isArray(value)
+          ? value
+          : value !== null && typeof value === "object"
+            ? JSON.stringify(value)
+            : value,
       );
       try {
         const result = await db.query<{ result: unknown }>(sql, params);
@@ -488,6 +492,8 @@ afterEach(async () => {
   for (const go of dispatchGates) go();
   dispatchGates.length = 0;
   loseNextResponse.clear();
+  // A new tab: no remembered refund intents (src/lib/refund-intent.ts).
+  window.sessionStorage.clear();
   resetGrants();
   route.userId = server.userId = USER_A;
   route.organizationId = server.organizationId = ORG_A;
@@ -811,6 +817,165 @@ describe("Payment detail: verify / refund / reverse run as the member who tapped
     expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
     expect(refunds.map((e) => e.amount_minor)).toEqual([4000]);
     expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
+  /** A full page reload: a new page and cache; only this tab's sessionStorage survives. */
+  async function reload(paymentId: string) {
+    await unmount();
+    routeParams.id = paymentId;
+    await mount({ kind: "payment" });
+    await waitFor(() => containing(en.payments.actions.refund.label), "the payment actions");
+  }
+  const reviewDecline = () => button(en.payments.actions.refund.review.decline, dialog()!);
+  const reviewConfirm = () =>
+    [...dialog()!.querySelectorAll("button")].find((b) =>
+      b.textContent?.trim().endsWith(en.payments.actions.refund.review.confirm.split("}}").pop()!),
+    ) as HTMLButtonElement | undefined;
+  const recoveredNotice = () =>
+    text().includes(en.payments.actions.refund.recovered.split("{{amount}}")[0]!.trim());
+
+  it("RF4. response lost, FULL RELOAD (new page, new cache, key only in this tab's storage): the screen says it was made, and the same refund again refunds ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    await reload(paymentId);
+    const noticeShown = recoveredNotice();
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the retry");
+    const refunds = await events(paymentId, "refund");
+    console.log(
+      `[evidence] RF4 lost response + reload + same refund: notice=${noticeShown} server=[${outcomes()}] ` +
+        `sameKey=${sent[0]!.data.idempotencyKey === sent[1]!.data.idempotencyKey} refunds=[${refunds.map((e) => e.amount_minor)}] ` +
+        `audits=[${await auditsFor(paymentId, "payments.refund")}]`,
+    );
+    expect(noticeShown).toBe(true);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(outcomes()).toEqual(["ok", "ok"]);
+    expect(refunds.map((e) => e.amount_minor)).toEqual([4000]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
+  it("RF5. response lost, reload with the tab's storage LOST: the same refund is NOT made again silently — reviewed, declined, ONE refund", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    window.sessionStorage.clear(); // another tab, another device, cleared storage
+    await reload(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => reviewDecline(), "the review step");
+    const listed = dialog()!.textContent ?? "";
+    await click(reviewDecline(), "Don't refund again");
+    const refunds = await events(paymentId, "refund");
+    console.log(
+      `[evidence] RF5 lost response + reload without storage: server=[${outcomes()}] reviewListed40=${listed.includes("40")} ` +
+        `refunds=[${refunds.map((e) => e.amount_minor)}] audits=[${await auditsFor(paymentId, "payments.refund")}]`,
+    );
+    expect(outcomes()).toEqual(["ok", "refused:refund_confirmation_required"]);
+    expect(refunds.map((e) => e.amount_minor)).toEqual([4000]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+    expect(dialog()).toBeNull();
+  });
+
+  it("RF6. …and when the merchant reviews the refund already made and explicitly refunds more: TWO refunds, TWO audits", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    window.sessionStorage.clear();
+    await reload(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Second cup returned");
+    await submitRefund();
+    await waitFor(() => reviewConfirm(), "the review step");
+    await click(reviewConfirm(), "Refund more");
+    await waitFor(() => sent.length >= 3 && sent[2]!.outcome !== "pending", "the confirmed refund");
+    const refunds = await events(paymentId, "refund");
+    console.log(
+      `[evidence] RF6 reviewed and confirmed: server=[${outcomes()}] refunds=[${refunds.map((e) => e.amount_minor)}] ` +
+        `audits=[${await auditsFor(paymentId, "payments.refund")}]`,
+    );
+    expect(outcomes()).toEqual(["ok", "refused:refund_confirmation_required", "ok"]);
+    expect(refunds.map((e) => e.amount_minor)).toEqual([4000, 4000]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A", "A"]);
+  });
+
+  it("RF7. a second refund after the first one SUCCEEDED on this screen is simply applied — no review", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok" && !dialog(), "the first refund");
+    await openRefundSheet();
+    await fillRefund("40", "Second cup returned");
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the second refund");
+    expect(outcomes()).toEqual(["ok", "ok"]);
+    expect(sent[1]!.data.idempotencyKey).not.toBe(sent[0]!.data.idempotencyKey);
+    expect((await events(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([4000, 4000]);
+  });
+
+  it("RF8. member switch A → B → A with A's refund response lost: B never uses or sees A's key; A's same refund replays ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    await switchTo({ user: USER_B });
+    await reload(paymentId);
+    const bSawNotice = recoveredNotice();
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "B's attempt");
+    if (reviewDecline()) await click(reviewDecline(), "Don't refund again");
+    await switchTo({ user: USER_A });
+    await reload(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", "Customer returned one cup");
+    await submitRefund();
+    await waitFor(() => sent.length >= 3 && sent[2]!.outcome !== "pending", "A's retry");
+    const refunds = await events(paymentId, "refund");
+    console.log(
+      `[evidence] RF8 A→B→A after a lost refund: bSawNotice=${bSawNotice} server=[${outcomes()}] ` +
+        `bReusedAKey=${sent[1]!.data.idempotencyKey === sent[0]!.data.idempotencyKey} ` +
+        `aReplayedOwnKey=${sent[2]!.data.idempotencyKey === sent[0]!.data.idempotencyKey} refunds=[${refunds.map((e) => `${e.amount_minor}:${who(e.actor_user_id)}`)}]`,
+    );
+    expect(bSawNotice).toBe(false);
+    expect(sent[1]!.data.idempotencyKey).not.toBe(sent[0]!.data.idempotencyKey);
+    expect(sent[1]!.outcome).toBe("refused:refund_confirmation_required");
+    expect(sent[2]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(sent[2]!.outcome).toBe("ok");
+    expect(refunds.map((e) => [e.amount_minor, who(e.actor_user_id)])).toEqual([[4000, "A"]]);
   });
 
   it("RV1. organization A → B during Reverse: refused, nothing written in either organization", async () => {

@@ -34,6 +34,7 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import type { AuditAction } from "@/server/auth/audit";
 import { auditUnavailableError } from "@/server/auth/audit-unavailable";
+import { publicError } from "@/server/public-domain-error";
 import type {
   PaymentRow,
   PaymentEventRow,
@@ -76,19 +77,55 @@ function errMessage(error: unknown): string {
  * money included, has rolled back. Surfaced as the same public 503 as
  * auditLogRequired; any other database error stays an internal one.
  */
-function rpcError(fn: string, action: AuditAction, error: unknown): Error {
-  if (errMessage(error).includes("apsa_audit_unavailable")) return auditUnavailableError(action);
+function rpcError(fn: string, action: AuditAction | null, error: unknown): Error {
+  if (action && errMessage(error).includes("apsa_audit_unavailable")) {
+    return auditUnavailableError(action);
+  }
+  if (isMissingFunction(error)) return schemaUpgradeRequired();
   return new Error(`${fn}: ${errMessage(error)}`);
+}
+
+/**
+ * The financial write this release needs does not exist in this database:
+ * PostgREST's "function not in the schema cache" (PGRST202) or PostgreSQL's
+ * undefined_function (42883). The release reached the database before
+ * migration 062 — nothing was called, so nothing was written.
+ */
+function isMissingFunction(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === "PGRST202" || code === "42883";
+}
+
+/**
+ * Refused before any write: this release's recording, refund, reversal and
+ * correction run only on migration 062's functions (CORRECTION-005,
+ * deployment). Never a silent fallback to an older function with weaker
+ * replay rules.
+ */
+function schemaUpgradeRequired(): Error {
+  return publicError(
+    "This payment action needs a database upgrade that has not been applied yet. Nothing was changed.",
+    503,
+    "schema_upgrade_required",
+  );
 }
 
 // ── Writes (RPC only) ─────────────────────────────────────────────────────────
 
+/**
+ * record_payment_v2 (migration 062) — never record_payment_v1: a key replays
+ * only the original member's original request (its digest is stamped on the
+ * payment's append-only created event), anything else under it is
+ * idempotency_conflict. On a database without 062 the function does not
+ * exist and the payment is refused (schema_upgrade_required), never recorded
+ * under 040's replay rules.
+ */
 export async function recordPayment(
   organizationId: string,
   recordedBy: string | null,
   input: RecordPaymentInput,
 ): Promise<RecordPaymentRpcResult> {
-  const { data, error } = await db.rpc("record_payment_v1", {
+  const { data, error } = await db.rpc("record_payment_v2", {
     p_organization_id: organizationId,
     p_order_id: input.order_id,
     p_recorded_by: recordedBy,
@@ -99,7 +136,7 @@ export async function recordPayment(
     p_note: input.note ?? null,
   });
 
-  if (error) throw new Error(`recordPayment: ${errMessage(error)}`);
+  if (error) throw rpcError("recordPayment", null, error);
   return data as RecordPaymentRpcResult;
 }
 
@@ -167,10 +204,12 @@ export async function reversePayment(
 /**
  * refund_payment_v2 (migration 062): the key is required and names ONE
  * logical refund in the organization — replayed only for the same member,
- * payment, amount and reason; `expectedRefundedMinor` is the refunded total the
- * request was started from, refused as `stale` when it no longer holds. The
- * refund event, payment status, derived order state and the mandatory
- * `payments.refund` audit row commit in that one transaction.
+ * payment, amount and reason. A new key must acknowledge every refund already
+ * on the payment (`acknowledgedRefundIds`), or it is `confirmation_required`;
+ * `expectedRefundedMinor` is the refunded total the request was started from,
+ * refused as `stale` when it no longer holds. The refund event, payment
+ * status, derived order state and the mandatory `payments.refund` audit row
+ * commit in that one transaction.
  */
 export async function refundPayment(
   organizationId: string,
@@ -180,6 +219,7 @@ export async function refundPayment(
   reason: string,
   idempotencyKey: string,
   expectedRefundedMinor: number,
+  acknowledgedRefundIds: string[],
 ): Promise<RefundPaymentRpcResult> {
   const { data, error } = await db.rpc("refund_payment_v2", {
     p_organization_id: organizationId,
@@ -189,6 +229,7 @@ export async function refundPayment(
     p_reason: reason,
     p_idempotency_key: idempotencyKey,
     p_expected_refunded_minor: expectedRefundedMinor,
+    p_acknowledged_refund_ids: acknowledgedRefundIds,
   });
 
   if (error) throw rpcError("refundPayment", "payments.refund", error);

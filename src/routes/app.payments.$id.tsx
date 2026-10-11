@@ -71,8 +71,15 @@ import {
   verifyRealPayment,
 } from "@/lib/api";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
-import { sharedIdempotencyHolder, type IdempotencyClaim } from "@/lib/idempotency";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
+import {
+  abandonPendingRefund,
+  acknowledgeRefunds,
+  beginRefund,
+  readRefundIntent,
+  refundSucceeded,
+  type RefundIntentScope,
+} from "@/lib/refund-intent";
 import { ordersKeys } from "@/lib/orders-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { notifyError, notifySuccess } from "@/lib/feedback";
@@ -84,6 +91,7 @@ import {
   canReverseUiPayment,
   classifyPaymentError,
   isPaymentId,
+  isRefundConfirmationRequired,
   isTerminalUiPaymentStatus,
   paymentErrorKey,
   paymentNeedsReview,
@@ -137,9 +145,11 @@ interface RefundAttempt {
   reason: string;
   /** The refunded total on screen when it was started. */
   expectedRefundedMinor: number;
+  /** The logical refund's durable key (src/lib/refund-intent.ts). */
   idempotencyKey: string;
-  /** Retired only once the server accepted it, so a retry keeps the key. */
-  claim: IdempotencyClaim;
+  /** Every refund on this payment the merchant has seen. */
+  acknowledgedRefundIds: string[];
+  scope: RefundIntentScope;
   startedAs: InitiatingPrincipal;
 }
 
@@ -196,6 +206,19 @@ function PaymentDetailScreen() {
 
   const [verifyTarget, setVerifyTarget] = useState<PaymentVerificationState | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  /*
+   * The server refused a new refund because the payment already has refunds
+   * the merchant has not seen here (a retry after a reload, another tab,
+   * another member): the sheet then shows them and asks for an explicit
+   * decision instead of refunding again.
+   */
+  const [refundReview, setRefundReview] = useState(false);
+  /** Where this screen's logical refunds are remembered — this member, this organization, this payment. */
+  const refundScope: RefundIntentScope = {
+    userId,
+    organizationId: routeOrganizationId,
+    paymentId: id,
+  };
   const [reverseOpen, setReverseOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -265,17 +288,50 @@ function PaymentDetailScreen() {
         reason: attempt.reason,
         expectedRefundedMinor: attempt.expectedRefundedMinor,
         idempotencyKey: attempt.idempotencyKey,
+        acknowledgedRefundIds: attempt.acknowledgedRefundIds,
       }),
-    onSuccess: (_detail, attempt) => {
-      // Accepted: that logical refund is done — the next one gets a new key.
-      attempt.claim.retire();
+    onSuccess: (detail, attempt) => {
+      // Accepted — made now or replayed: that logical refund is done, the
+      // merchant has seen it succeed, and the next refund gets a new key.
+      const made = refundEventsOf(detail).find(
+        (event) => event.idempotencyKey === attempt.idempotencyKey,
+      );
+      refundSucceeded(attempt.scope, made?.id ?? null);
+      setRefundReview(false);
       setRefundOpen(false);
       setActionError(null);
       invalidatePayments();
       notifySuccess(t("payments.actions.refund.done"));
     },
-    onError: handleActionError,
+    onError: (err) => {
+      if (isRefundConfirmationRequired(err)) {
+        // Nothing was written. Show the refunds already made, re-read.
+        setActionError(null);
+        setRefundReview(true);
+        invalidatePayments();
+        return;
+      }
+      handleActionError(err);
+    },
   });
+
+  /**
+   * Submit one refund: the durable key of the logical refund the merchant is
+   * making (a retry of the same amount and reason reuses it, even after a
+   * reload), the refunded total on screen, and the refunds already seen.
+   */
+  function submitRefund(current: UiPaymentDetail, amountMinor: number, reason: string) {
+    const pending = beginRefund(refundScope, amountMinor, reason);
+    refundMutation.mutate({
+      amountMinor,
+      reason,
+      expectedRefundedMinor: refundedMinorOf(current),
+      idempotencyKey: pending.key,
+      acknowledgedRefundIds: readRefundIntent(refundScope).acknowledged,
+      scope: refundScope,
+      startedAs: memberPrincipal,
+    });
+  }
 
   const reverseMutation = useMutation({
     mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof memberPrincipal }) =>
@@ -362,6 +418,12 @@ function PaymentDetailScreen() {
   if (!payment) return shell(<DetailSkeleton />);
 
   const refunds = refundEventsOf(payment);
+  // A refund this screen started, whose response was lost, that the server
+  // did commit (recognised by its own key — after a reload too).
+  const pendingRefund = readRefundIntent(refundScope).pending;
+  const recoveredRefund = pendingRefund
+    ? (refunds.find((event) => event.idempotencyKey === pendingRefund.key) ?? null)
+    : null;
   const frozen = isTerminalUiPaymentStatus(payment.status);
   const verificationTargets = availableVerificationTargets(payment).filter((target) =>
     capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]),
@@ -534,6 +596,14 @@ function PaymentDetailScreen() {
 
         {/* ── Refunds on THIS payment, straight from the immutable ledger ── */}
         <Section title={t("payments.refunds.title")}>
+          {recoveredRefund?.amount ? (
+            <p className="text-body-sm mb-2 text-text-primary" role="status">
+              {t("payments.actions.refund.recovered", {
+                amount: formatMoney(recoveredRefund.amount),
+                time: fullTimestamp(recoveredRefund.createdAt),
+              })}
+            </p>
+          ) : null}
           {refunds.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("payments.refunds.empty")}</p>
           ) : (
@@ -699,37 +769,37 @@ function PaymentDetailScreen() {
 
       <PaymentRefundSheet
         open={refundOpen}
-        onOpenChange={setRefundOpen}
+        onOpenChange={(open) => {
+          setRefundOpen(open);
+          if (!open) setRefundReview(false);
+        }}
         principal={payment.amount}
         pending={refundMutation.isPending}
         error={actionError}
-        onConfirm={(amountMinor, reason) => {
-          /*
-           * One logical refund, one key — held for the page's lifetime in this
-           * member + organization's scope, so a retry after a lost response
-           * (from this sheet, or after leaving the payment and coming back)
-           * re-sends it and the server replays the refund it already made
-           * (migration 062). The refunded total on screen travels with it: a
-           * retry from a screen that has not seen the committed refund is
-           * refused as stale, never applied twice.
-           */
-          const expectedRefundedMinor = refundedMinorOf(payment);
-          const claim = sharedIdempotencyHolder({
-            userId,
-            organizationId: routeOrganizationId,
-            flow: "payment-refund",
-            subject: id,
-          }).claim();
-          refundMutation.mutate({
-            amountMinor,
-            reason,
-            expectedRefundedMinor,
-            idempotencyKey: claim.keyFor(
-              JSON.stringify([amountMinor, reason, expectedRefundedMinor]),
-            ),
-            claim,
-            startedAs: memberPrincipal,
-          });
+        review={
+          refundReview
+            ? refunds.map((event) => ({
+                id: event.id,
+                amount: event.amount,
+                createdAt: event.createdAt,
+                byYou: event.actorUserId === userId,
+              }))
+            : null
+        }
+        onConfirm={(amountMinor, reason) => submitRefund(payment, amountMinor, reason)}
+        onConfirmBeyond={(amountMinor, reason) => {
+          // An explicit decision, after seeing every refund listed: refund more.
+          acknowledgeRefunds(
+            refundScope,
+            refunds.map((event) => event.id),
+          );
+          submitRefund(payment, amountMinor, reason);
+        }}
+        onDecline={() => {
+          // The refund already made was the one intended: nothing more to do.
+          abandonPendingRefund(refundScope);
+          setRefundReview(false);
+          setRefundOpen(false);
         }}
       />
 

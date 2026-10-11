@@ -2041,11 +2041,17 @@ export interface RealRefundRequest {
    */
   expectedRefundedMinor: number;
   /**
-   * One logical refund's key — the same on every retry of it (the caller
-   * holds it; see app.payments.$id.tsx). The server replays the refund it
-   * already made under it instead of making a second one.
+   * One logical refund's key — the same on every retry of it, across reloads
+   * (src/lib/refund-intent.ts). The server replays the refund it already made
+   * under it instead of making a second one.
    */
   idempotencyKey: string;
+  /**
+   * Every refund already on this payment the merchant has seen — confirmed by
+   * this screen, or reviewed and explicitly refunded beyond. A new key that
+   * leaves one out is refused (refund_confirmation_required).
+   */
+  acknowledgedRefundIds: string[];
 }
 
 export async function refundRealPayment(
@@ -2061,6 +2067,7 @@ export async function refundRealPayment(
       reason: refund.reason,
       expectedRefundedMinor: refund.expectedRefundedMinor,
       idempotencyKey: refund.idempotencyKey,
+      acknowledgedRefundIds: refund.acknowledgedRefundIds,
       expectedPrincipal: principal,
     },
   });

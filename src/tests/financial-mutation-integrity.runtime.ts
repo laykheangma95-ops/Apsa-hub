@@ -254,7 +254,11 @@ function sqlTransport() {
         .map(([key], i) => `${identifier(key)} => $${i + 1}`)
         .join(",")}) as result`;
       const params = entries.map(([, value]) =>
-        value !== null && typeof value === "object" ? JSON.stringify(value) : value,
+        Array.isArray(value)
+          ? value
+          : value !== null && typeof value === "object"
+            ? JSON.stringify(value)
+            : value,
       );
       try {
         const result = await db.query<{ result: unknown }>(sql, params);
@@ -557,6 +561,7 @@ const PATHS: Path[] = [
       reason: "Customer returned one cup",
       idempotencyKey: t.key,
       expectedRefundedMinor: 0,
+      acknowledgedRefundIds: [],
     }),
     effect: async (t) => (await eventsOf(t.paymentId, "refund")).map((e) => who(e.actor_user_id)),
   },
@@ -900,6 +905,7 @@ function refundRequest(paymentId: string, change: Json = {}) {
     reason: "Customer returned one cup",
     idempotencyKey: freshKey("refund"),
     expectedRefundedMinor: 0,
+    acknowledgedRefundIds: [],
     expectedPrincipal: P_A,
     ...change,
   };
@@ -1041,28 +1047,36 @@ describe("P2#4 refunds: exactly one refund effect per logical refund", () => {
     expect(refunds).toEqual([]);
   });
 
-  it("D3. a retry with a fresh key but the refunded total it last saw is refused as stale", async () => {
+  it("D3. a retry with a fresh key that has not seen the committed refund is refused, nothing written", async () => {
     const { orderId, paymentId } = await seedPaidPayment();
     expect(codeOf(await call(payments.refundPaymentFn, refundRequest(paymentId)))).toBe("ok");
-    // The screen remounted and lost its key, but still shows "nothing refunded".
+    const [first] = await eventsOf(paymentId, "refund");
+    // The screen remounted and lost its key, still showing "nothing refunded".
     const before = await writeSurface();
-    const stale = await call(payments.refundPaymentFn, refundRequest(paymentId));
+    const unseen = await call(payments.refundPaymentFn, refundRequest(paymentId));
+    // Even acknowledging the refund, a request built on the old total is stale.
+    const staleTotal = await call(
+      payments.refundPaymentFn,
+      refundRequest(paymentId, { acknowledgedRefundIds: [first!.id] }),
+    );
     const wrote = ledgerWritesSince(before, await writeSurface());
     console.log(
-      `[evidence] refund retried under a new key, stale total: ${codeOf(stale)} wrote=[${wrote}]`,
+      `[evidence] refund retried under a new key: unacknowledged=${codeOf(unseen)} staleTotal=${codeOf(staleTotal)} wrote=[${wrote}]`,
     );
-    expect(codeOf(stale)).toBe("refund_stale");
+    expect(codeOf(unseen)).toBe("refund_confirmation_required");
+    expect(codeOf(staleTotal)).toBe("refund_stale");
     expect(wrote).toEqual([]);
     expect((await orderMoney(orderId)).refunded_minor).toBe(4000);
   });
 
-  it("D4. a deliberate second refund, made after re-reading the payment, is applied and audited", async () => {
+  it("D4. a deliberate second refund, acknowledging the first, is applied and audited", async () => {
     const { orderId, paymentId } = await seedPaidPayment();
     const before = await writeSurface();
     expect(codeOf(await call(payments.refundPaymentFn, refundRequest(paymentId)))).toBe("ok");
+    const [first] = await eventsOf(paymentId, "refund");
     const second = await call(
       payments.refundPaymentFn,
-      refundRequest(paymentId, { expectedRefundedMinor: 4000 }),
+      refundRequest(paymentId, { expectedRefundedMinor: 4000, acknowledgedRefundIds: [first!.id] }),
     );
     expect(codeOf(second)).toBe("ok");
     expect((await eventsOf(paymentId, "refund")).map((e) => e.amount_minor)).toEqual([4000, 4000]);
@@ -1086,13 +1100,13 @@ describe("P2#4 refunds: exactly one refund effect per logical refund", () => {
     });
   });
 
-  it("D6. two simultaneous refunds started from the same screen state: one is applied, the other is stale", async () => {
+  it("D6. two simultaneous refunds started from the same screen state: one is applied, the other must confirm", async () => {
     const { orderId, paymentId } = await seedPaidPayment();
     const [a, b] = await Promise.all([
       call(payments.refundPaymentFn, refundRequest(paymentId, { amountMinor: 6000 })),
       call(payments.refundPaymentFn, refundRequest(paymentId, { amountMinor: 6000 })),
     ]);
-    expect([codeOf(a), codeOf(b)].sort()).toEqual(["ok", "refund_stale"]);
+    expect([codeOf(a), codeOf(b)].sort()).toEqual(["ok", "refund_confirmation_required"]);
     expect((await orderMoney(orderId)).refunded_minor).toBe(6000);
   });
 
@@ -1275,7 +1289,7 @@ describe("Migration 062: effective EXECUTE on the retired and the replacement RP
     }
     for (const sig of RETIRED.map((s) => s.replace("_v1(", "_v2("))) {
       const v2 = sig.startsWith("refund_payment_v2")
-        ? "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)"
+        ? "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint,uuid[])"
         : sig;
       const m = await executeAuthority(db, v2);
       expect({ v2, ...m, grantees: undefined }).toEqual({
@@ -1319,10 +1333,11 @@ describe("Migration 062: effective EXECUTE on the retired and the replacement RP
         });
       }
       for (const v2 of [
-        "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint)",
+        "refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint,uuid[])",
         "reverse_payment_v2(uuid,uuid,uuid,text)",
         "correct_payment_v2(uuid,uuid,uuid,text,text,text)",
         "record_payment_v1(uuid,uuid,uuid,text,bigint,text,text,text)",
+        "record_payment_v2(uuid,uuid,uuid,text,bigint,text,text,text)",
       ]) {
         expect({ v2, ...(await executeAuthority(pg, v2)), grantees: undefined }).toEqual({
           v2,
