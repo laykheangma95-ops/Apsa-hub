@@ -294,8 +294,19 @@ describe("Error states are classified and mapped to translated copy, never raw e
     // confirmation can also commit and then fail on its APSA Parcel; only the
     // re-read shows the persisted (confirmed, parcel missing) order and its
     // recovery action.
+    //
+    // The re-read is the INITIATOR's own entry (the attempt's variable), never
+    // the render's query: a late failure must not refetch, or surface, for a
+    // principal the screen has switched to (PR #121 late-response P2).
     const onError = confirmBlock.slice(confirmBlock.indexOf("onError:"));
-    expect(onError).toMatch(/^onError: \(\) => \{[\s\S]*?void query\.refetch\(\);\s*\},/);
+    expect(onError).toMatch(
+      /^onError: \(_error, startedAs\) => \{[\s\S]*?rereadDetailOf\(startedAs\);\s*\},/,
+    );
+    expect(confirmBlock).not.toContain("query.refetch()");
+    const reread = route.slice(route.indexOf("function rereadDetailOf("));
+    expect(reread.slice(0, reread.indexOf("\n  }\n"))).toMatch(
+      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*exact: true,/,
+    );
   });
 
   it("no route or sheet in this phase interpolates a raw caught error's message into JSX", () => {
@@ -346,11 +357,24 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
       route.indexOf("const cancelMutation"),
       route.indexOf("const back ="),
     );
+    // Written only for the CURRENT attempt, into its initiator's own detail
+    // entry, keyed by the attempt's variable and never by the render's
+    // queryKey (PR #121 late-response P2).
     expect(confirmBlock).toMatch(
-      /onSuccess:\s*\(detail\)\s*=>\s*\{\s*queryClient\.setQueryData\(queryKey, detail\)/,
+      /onSuccess:\s*\(detail, startedAs, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(startedAs, attempt, detail\)\) return;/,
     );
     expect(cancelBlock).toMatch(
-      /onSuccess:\s*\(detail\)\s*=>\s*\{\s*queryClient\.setQueryData\(queryKey, detail\)/,
+      /onSuccess:\s*\(detail, \{ startedAs \}, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(startedAs, attempt, detail\)\) return;/,
+    );
+    for (const block of [confirmBlock, cancelBlock]) {
+      expect(block).not.toContain("setQueryData(queryKey");
+    }
+    const apply = route.slice(
+      route.indexOf("function applyLifecycleResponse("),
+      route.indexOf("const confirmMutation"),
+    );
+    expect(apply).toMatch(
+      /if \(!isCurrentLifecycleAttempt\(attempt\)\) \{\s*invalidateLifecycleOf\(startedAs\);\s*return false;\s*\}\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*detail,\s*\);/,
     );
   });
 

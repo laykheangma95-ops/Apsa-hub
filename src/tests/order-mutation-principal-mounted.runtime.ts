@@ -533,9 +533,26 @@ async function rerender() {
   await act(async () => root!.render(tree()));
   await settle(12);
 }
+/**
+ * Every setQueryData the screens made (TanStack marks those writes `manual`):
+ * the key written and the order lifecycle it carried. A fetch is not a manual
+ * write, so this separates "the server answered this principal's own read"
+ * from "a callback put a response here".
+ */
+const manualWrites: { key: readonly unknown[]; lifecycle: string | null }[] = [];
 async function mount(which: Screen) {
   screen = which;
-  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const own = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client = own;
+  own.getQueryCache().subscribe((event) => {
+    if (client !== own) return; // a previous case's client, settling late
+    if (event.type === "updated" && event.action.type === "success" && event.action.manual) {
+      manualWrites.push({
+        key: event.query.queryKey,
+        lifecycle: (event.action.data as any)?.order?.lifecycleStatus ?? null,
+      });
+    }
+  });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -566,6 +583,7 @@ afterEach(async () => {
   container?.remove();
   document.body.innerHTML = "";
   client?.clear();
+  manualWrites.length = 0;
   sent.length = 0;
   outcomes.length = 0;
   audits.length = 0;
@@ -1130,6 +1148,394 @@ describe("Order detail: a payment is recorded by the member who recorded it", ()
     expect(outcomes).toEqual(["ok"]);
     expect(after.payments.map((p) => p.recorded_by)).toEqual([USER_A]);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — a LATE lifecycle response: committed as A, answered after the switch
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The server commits A's confirm / cancel as A, and its response is held
+// before it reaches the browser. The screen — still mounted — switches to
+// another principal; then the response arrives. It belongs to A's attempt
+// only: never written into another principal's cache partition, never
+// rendered to them, never announced to them, and never laid over a newer
+// attempt.
+
+const { ordersKeys } = await import("@/lib/orders-query");
+
+/** Every cached entry in one principal's partitions (orders, payments, packing, inventory). */
+function partitionOf(user: string, org: string) {
+  return client
+    .getQueryCache()
+    .getAll()
+    .filter((q) => q.queryKey[1] === user && q.queryKey[2] === org)
+    .map((q) => ({
+      key: JSON.stringify(q.queryKey),
+      data: q.state.data === undefined ? undefined : JSON.stringify(q.state.data),
+    }));
+}
+/** The keys in that partition whose stored DATA holds this order. */
+const holdingOrder = (user: string, org: string, orderId: string) =>
+  partitionOf(user, org)
+    .filter((e) => e.data?.includes(orderId))
+    .map((e) => e.key);
+const writesInto = (user: string, org: string) =>
+  manualWrites
+    .filter((w) => w.key[1] === user && w.key[2] === org)
+    .map((w) => `${JSON.stringify(w.key)}=${w.lifecycle}`);
+const detailKeyOf = (user: string, org: string, orderId: string) =>
+  ordersKeys.detail(user, org, orderId);
+/** The screen's notices (role=status) — not its other copy, which may name a status too. */
+const notices = () =>
+  [...document.querySelectorAll("[role=status]")].map((el) => el.textContent ?? "").join(" | ");
+const cachedLifecycle = (user: string, org: string, orderId: string) =>
+  (client.getQueryData(detailKeyOf(user, org, orderId)) as any)?.order?.lifecycleStatus ?? null;
+async function committedAsA() {
+  await waitFor(() => outcomes[0] === "ok", "A's request committed server-side");
+}
+/** The screen is unmounted, then mounted again for `next` — the SAME query client. */
+async function remountAs(next: { user?: string; org?: string }) {
+  await act(async () => root!.unmount());
+  if (next.user) route.userId = server.userId = next.user;
+  if (next.org) route.organizationId = server.organizationId = next.org;
+  root = createRoot(container!);
+  await rerender();
+}
+function lateEvidence(label: string, orderId: string, other: { user: string; org: string }) {
+  console.log(
+    `[evidence] ${label}: server=[${outcomes.join(",")}] ` +
+      `A.detail=${cachedLifecycle(USER_A, ORG_A, orderId)} ` +
+      `A.writes=[${writesInto(USER_A, ORG_A).join(" ")}] ` +
+      `other.writes=[${writesInto(other.user, other.org).join(" ")}] ` +
+      `other.holdsOrder=[${holdingOrder(other.user, other.org, orderId).join(" ")}] ` +
+      `shows=${JSON.stringify(text().slice(0, 140))}`,
+  );
+}
+
+interface LifecycleAction {
+  name: "Confirm" | "Cancel";
+  seed: () => Promise<string>;
+  tap: () => Promise<void>;
+  from: string;
+  to: string;
+  notice: string;
+  expectDoneByA: (s: Awaited<ReturnType<typeof orderState>>) => void;
+}
+const LIFECYCLE_ACTIONS: LifecycleAction[] = [
+  {
+    name: "Confirm",
+    seed: seedDraft,
+    tap: tapConfirmOrder,
+    from: "draft",
+    to: "confirmed",
+    notice: en.order.confirmedNotice,
+    expectDoneByA: (s) => expectConfirmedBy(s, USER_A),
+  },
+  {
+    name: "Cancel",
+    seed: seedConfirmed,
+    tap: tapCancelOrder,
+    from: "confirmed",
+    to: "cancelled",
+    notice: en.order.cancelledNotice,
+    expectDoneByA: (s) => {
+      expect(s.lifecycle).toBe("cancelled");
+      const cancels = s.history.filter((h) => h.to_status === "cancelled");
+      expect(cancels.map((h) => [h.axis, h.changed_by])).toEqual([
+        ["lifecycle", USER_A],
+        ["fulfillment", USER_A],
+      ]);
+    },
+  },
+];
+
+describe("Order detail: a late confirm / cancel response stays with the principal that started it", () => {
+  for (const action of LIFECYCLE_ACTIONS) {
+    const switches = [
+      { label: "organization A → B, B lacks orders.read", user: USER_B, org: ORG_B, read: false },
+      {
+        label: "member A → B in the same organization, B lacks orders.read",
+        user: USER_B,
+        org: ORG_A,
+        read: false,
+      },
+      {
+        label:
+          "member A → B in the same organization, B reads orders but holds no lifecycle or payment grant",
+        user: USER_B,
+        org: ORG_A,
+        read: true,
+      },
+    ];
+    for (const to of switches) {
+      it(`${action.name}, ${to.label}: committed as A, never written, rendered or announced to B`, async () => {
+        const orderId = await action.seed();
+        await openOrderDetail(orderId);
+        holdResponseNext.add("lifecycle");
+        await action.tap();
+        await committedAsA();
+        const bGrants = grants.get(USER_B)!;
+        for (const key of [
+          "orders.confirm",
+          "orders.cancel",
+          "payments.read",
+          "payments.record",
+          "payments.mark_cod",
+        ]) {
+          bGrants.delete(key);
+        }
+        if (!to.read) bGrants.delete("orders.read");
+        await switchTo({ user: to.user, org: to.org });
+        if (to.read)
+          await waitFor(
+            () => cachedLifecycle(to.user, to.org, orderId) === action.to,
+            "B's own read",
+          );
+        const bBefore = partitionOf(to.user, to.org);
+        const shownBefore = text();
+        await releaseResponse(); // A's response lands while B is shown
+        lateEvidence(`late ${action.name}, ${to.label}`, orderId, to);
+
+        // The server's act is A's, and only A's.
+        expect(outcomes).toEqual(["ok"]);
+        expect(sent[0]!.server).toEqual({ userId: USER_A, organizationId: ORG_A });
+        action.expectDoneByA(await orderState(orderId));
+
+        // B's cache: no write from A's callback; every entry exactly as it was.
+        expect(writesInto(to.user, to.org)).toEqual([]);
+        expect(partitionOf(to.user, to.org)).toEqual(bBefore);
+        if (!to.read) {
+          expect(client.getQueryData(detailKeyOf(to.user, to.org, orderId))).toBeUndefined();
+          expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
+          expect(text()).not.toContain("Water");
+        }
+        // B's screen: unchanged by A's completion — no A order, no notice, no sheet.
+        expect(text()).toBe(shownBefore);
+        expect(notices()).not.toContain(action.notice);
+        expect(dialog()).toBeNull();
+
+        // A's partition: A's response is not cached after A switched away;
+        // A's entry is only marked stale, for a re-read under A's own authority.
+        expect(writesInto(USER_A, ORG_A)).toEqual([]);
+        expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe(action.from);
+        expect(client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))?.isInvalidated).toBe(true);
+
+        // A comes back: the committed result, read from the server as A.
+        await switchTo({ user: USER_A, org: ORG_A });
+        await waitFor(() => cachedLifecycle(USER_A, ORG_A, orderId) === action.to, "A's re-read");
+        expect(writesInto(USER_A, ORG_A)).toEqual([]);
+        expect(writesInto(to.user, to.org)).toEqual([]);
+      });
+    }
+
+    it(`${action.name}, A → B → A, then the late response: A sees its own committed order, B's partition untouched`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_B)!.delete("orders.read");
+      await switchTo({ user: USER_B, org: ORG_B });
+      await switchTo({ user: USER_A, org: ORG_A });
+      await releaseResponse();
+      await waitFor(
+        () => cachedLifecycle(USER_A, ORG_A, orderId) === action.to,
+        "A's committed order",
+      );
+      lateEvidence(`late ${action.name}, A→B→A`, orderId, { user: USER_B, org: ORG_B });
+      action.expectDoneByA(await orderState(orderId));
+      expect(writesInto(USER_B, ORG_B)).toEqual([]);
+      expect(holdingOrder(USER_B, ORG_B, orderId)).toEqual([]);
+      expect(text()).toContain("Water");
+    });
+
+    for (const to of [
+      { label: "organization A → B, B lacks orders.read", user: USER_B, org: ORG_B, read: false },
+      {
+        label: "member A → B in the same organization, B reads orders",
+        user: USER_B,
+        org: ORG_A,
+        read: true,
+      },
+    ])
+      it(`${action.name}, failure after the server committed, ${to.label}: nothing reaches B; A's recovery re-reads A's order`, async () => {
+        const orderId = await action.seed();
+        await openOrderDetail(orderId);
+        holdResponseNext.add("lifecycle");
+        loseNextResponse.add("lifecycle"); // committed, then the response fails
+        await action.tap();
+        await committedAsA();
+        for (const key of [
+          "orders.confirm",
+          "orders.cancel",
+          "payments.read",
+          "payments.record",
+          "payments.mark_cod",
+        ]) {
+          grants.get(USER_B)!.delete(key);
+        }
+        if (!to.read) grants.get(USER_B)!.delete("orders.read");
+        await switchTo({ user: to.user, org: to.org });
+        if (to.read)
+          await waitFor(
+            () => cachedLifecycle(to.user, to.org, orderId) === action.to,
+            "B's own read",
+          );
+        const bBefore = partitionOf(to.user, to.org);
+        const shownBefore = text();
+        await releaseResponse();
+        lateEvidence(`late ${action.name} failure, ${to.label}`, orderId, to);
+        expect(partitionOf(to.user, to.org)).toEqual(bBefore);
+        expect(writesInto(to.user, to.org)).toEqual([]);
+        action.expectDoneByA(await orderState(orderId));
+        expect(text()).toBe(shownBefore); // no A error banner, no A data, no notice
+        if (!to.read) expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
+
+        await switchTo({ user: USER_A, org: ORG_A });
+        await waitFor(
+          () => cachedLifecycle(USER_A, ORG_A, orderId) === action.to,
+          "A's recovery read",
+        );
+        expect(text()).toContain("Water");
+      });
+
+    it(`${action.name}, A's cache evicted after the switch: the late callback does not bring A's order back`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_B)!.delete("orders.read");
+      await switchTo({ user: USER_B, org: ORG_B });
+      client.removeQueries({
+        predicate: (q) => q.queryKey[1] === USER_A && q.queryKey[2] === ORG_A,
+      });
+      expect(partitionOf(USER_A, ORG_A)).toEqual([]);
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, A evicted`, orderId, { user: USER_B, org: ORG_B });
+      expect(client.getQueryData(detailKeyOf(USER_A, ORG_A, orderId))).toBeUndefined();
+      expect(holdingOrder(USER_A, ORG_A, orderId)).toEqual([]);
+      expect(writesInto(USER_A, ORG_A)).toEqual([]);
+      expect(writesInto(USER_B, ORG_B)).toEqual([]);
+      expect(text()).not.toContain("Water");
+    });
+
+    it(`${action.name}, the screen remounts for B before the response: written nowhere, shown to no one`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_B)!.delete("orders.read");
+      await remountAs({ user: USER_B, org: ORG_B });
+      const shownBefore = text();
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, remount as B`, orderId, { user: USER_B, org: ORG_B });
+      action.expectDoneByA(await orderState(orderId));
+      expect(writesInto(USER_B, ORG_B)).toEqual([]);
+      expect(writesInto(USER_A, ORG_A)).toEqual([]);
+      expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe(action.from);
+      expect(text()).toBe(shownBefore);
+      expect(text()).not.toContain("Water");
+    });
+
+    it(`${action.name}, A's orders.read is revoked while the response is held (A → B → A): the late response does not render it to A`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_A)!.delete("orders.read");
+      await switchTo({ user: USER_B, org: ORG_B });
+      await switchTo({ user: USER_A, org: ORG_A }); // A's re-read is now refused
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, A's read revoked`, orderId, { user: USER_B, org: ORG_B });
+      action.expectDoneByA(await orderState(orderId));
+      expect(writesInto(USER_A, ORG_A)).toEqual([]);
+      expect(cachedLifecycle(USER_A, ORG_A, orderId)).not.toBe(action.to);
+      expect(notices()).not.toContain(action.notice);
+    });
+  }
+
+  it("Confirm, A → B → A, then a NEWER attempt (Cancel) completes before the old Confirm response: the old response never overwrites it", async () => {
+    const orderId = await seedDraft();
+    await openOrderDetail(orderId);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder(); // attempt 1: committed as A, response held
+    await committedAsA();
+    await switchTo({ user: USER_B, org: ORG_B });
+    await switchTo({ user: USER_A, org: ORG_A });
+    await waitFor(() => cachedLifecycle(USER_A, ORG_A, orderId) === "confirmed", "A's re-read");
+    await tapCancelOrder(); // attempt 2, as A
+    await waitFor(() => cachedLifecycle(USER_A, ORG_A, orderId) === "cancelled", "the cancel");
+    expect(notices()).toContain(en.order.cancelledNotice);
+    await releaseResponse(); // attempt 1's answer: the CONFIRMED order
+    lateEvidence("late Confirm after a newer Cancel", orderId, { user: USER_B, org: ORG_B });
+    expect(outcomes).toEqual(["ok", "ok"]);
+    expect((await orderState(orderId)).lifecycle).toBe("cancelled");
+    expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe("cancelled");
+    expect(notices()).toContain(en.order.cancelledNotice);
+    expect(notices()).not.toContain(en.order.confirmedNotice);
+    expect(writesInto(USER_A, ORG_A).filter((w) => w.endsWith("=confirmed"))).toEqual([]);
+  });
+
+  it("A stays signed in: Confirm, then Cancel, are written into A's own detail entry and announced", async () => {
+    const orderId = await seedDraft();
+    await openOrderDetail(orderId);
+    await tapConfirmOrder();
+    await waitFor(() => notices().includes(en.order.confirmedNotice), "the confirmed notice");
+    expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe("confirmed");
+    await tapCancelOrder();
+    await waitFor(() => notices().includes(en.order.cancelledNotice), "the cancelled notice");
+    expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe("cancelled");
+    expect(dialog()).toBeNull();
+    const detailKey = JSON.stringify(detailKeyOf(USER_A, ORG_A, orderId));
+    expect(writesInto(USER_A, ORG_A)).toEqual([`${detailKey}=confirmed`, `${detailKey}=cancelled`]);
+    expect(manualWrites.filter((w) => w.key[1] !== USER_A || w.key[2] !== ORG_A)).toEqual([]);
+    expect(outcomes).toEqual(["ok", "ok"]);
+  });
+
+  // Adjacent: Record payment's completion has the same hook-level shape, but it
+  // only INVALIDATES (never writes a response into the cache). Measured here:
+  // nothing of A's reaches another principal's partition.
+  for (const to of [
+    {
+      label: "organization A → B, B reads neither orders nor payments",
+      user: USER_B,
+      org: ORG_B,
+      read: false,
+    },
+    {
+      label: "member A → B in the same organization, B reads payments",
+      user: USER_B,
+      org: ORG_A,
+      read: true,
+    },
+  ]) {
+    it(`Record payment, ${to.label}: A's late response writes nothing into B's cache`, async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("payment");
+      await tapRecordPayment("10000");
+      await waitFor(() => outcomesOf("payment")[0] === "ok", "A's payment committed");
+      if (!to.read) {
+        grants.get(USER_B)!.delete("orders.read");
+        grants.get(USER_B)!.delete("payments.read");
+      }
+      await switchTo({ user: to.user, org: to.org });
+      await releaseResponse();
+      const shownToB = notices();
+      console.log(
+        `[evidence] late Record payment, ${to.label}: B.writes=[${writesInto(to.user, to.org).join(" ")}] ` +
+          `B.holdsOrder=[${holdingOrder(to.user, to.org, orderId).join(" ")}] ` +
+          `B.notice=${JSON.stringify(shownToB)} sheetOpen=${dialog() !== null}`,
+      );
+      const s = await orderState(orderId);
+      expect(s.payments.map((p) => p.recorded_by)).toEqual([USER_A]);
+      expect(manualWrites).toEqual([]); // no callback wrote a response anywhere
+      if (!to.read) expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, PackageCheck, Printer, Truck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { ParcelLabelDialog } from "@/components/labels/ParcelLabelDialog";
@@ -225,6 +225,12 @@ function OrderSettlementRows({ settlement }: { settlement: UiOrderSettlement }) 
   );
 }
 
+/** One Confirm / Cancel tap: the screen's principal epoch and tap number at that moment. */
+interface LifecycleAttempt {
+  epoch: number;
+  attempt: number;
+}
+
 function RealOrderDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -262,6 +268,25 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * it with their permissions and in their name (CORRECTION-004).
    */
   const principal = { userId, organizationId: routeOrganizationId };
+
+  /*
+   * A Confirm or Cancel RESPONSE belongs to the attempt that asked for it — the
+   * principal it was tapped as and that tap's place in this screen's sequence —
+   * never to whoever the screen shows when it lands. TanStack hands a pending
+   * mutation every later render's callbacks, so a hook-level onSuccess runs
+   * with the CURRENT render's keys: written as-is, member A's late confirm
+   * would land in member B's detail partition and render A's order to B, with
+   * or without orders.read.
+   *
+   * `epoch` moves on every committed principal change and on unmount (layout
+   * effects, in the same commit: no response can resolve in between);
+   * `attempt` moves on every Confirm / Cancel tap. Only a completion whose epoch
+   * and attempt are both still current is applied. Any other is written
+   * nowhere and only marks the initiator's own entries stale, to be re-read
+   * under the initiator's own authority if it is shown again.
+   */
+  const principalScope = `${userId}\u0000${routeOrganizationId}`;
+  const lifecycleRef = useRef({ scope: principalScope, epoch: 0, attempt: 0 });
 
   /*
    * Fail closed rather than key a request under a placeholder: if the route's
@@ -382,37 +407,126 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     });
   }
 
+  /**
+   * Called from onMutate, which TanStack runs synchronously inside mutate() —
+   * at the tap, with the principal variable of that tap. A variable that does
+   * not name the principal this screen shows can never be current.
+   */
+  function beginLifecycleAttempt(startedAs: typeof principal): LifecycleAttempt {
+    const current = lifecycleRef.current;
+    current.attempt += 1;
+    const shown = `${startedAs.userId}\u0000${startedAs.organizationId}` === current.scope;
+    return { epoch: shown ? current.epoch : -1, attempt: current.attempt };
+  }
+  function isCurrentLifecycleAttempt(attempt: LifecycleAttempt | undefined) {
+    const current = lifecycleRef.current;
+    return attempt?.epoch === current.epoch && attempt.attempt === current.attempt;
+  }
+  /** The initiator's own detail entry — refetched only if it is the one shown. */
+  function rereadDetailOf(startedAs: typeof principal) {
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+      exact: true,
+    });
+  }
+  /**
+   * A lifecycle change committed for `startedAs` whose response is not applied
+   * (another principal is shown, the screen is gone, or a newer tap superseded
+   * it): nothing is written, and only the initiator's own entries are marked
+   * stale. An evicted entry stays evicted — invalidation creates nothing.
+   */
+  function invalidateLifecycleOf(startedAs: typeof principal) {
+    const { userId: startedBy, organizationId: startedIn } = startedAs;
+    rereadDetailOf(startedAs);
+    void queryClient.invalidateQueries({ queryKey: ordersKeys.list(startedBy, startedIn) });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    void queryClient.invalidateQueries({ queryKey: inventoryKeys.principal(startedBy, startedIn) });
+    void queryClient.invalidateQueries({
+      queryKey: packingKeys.orderState(startedBy, startedIn, id),
+      exact: true,
+    });
+  }
+
+  /**
+   * The response of the CURRENT attempt is written into its initiator's own
+   * detail entry — keyed by the attempt's variable, never by this render;
+   * any other response is written nowhere. Returns whether it was applied.
+   */
+  function applyLifecycleResponse(
+    startedAs: typeof principal,
+    attempt: LifecycleAttempt | undefined,
+    detail: Awaited<ReturnType<typeof confirmRealOrder>>,
+  ) {
+    if (!isCurrentLifecycleAttempt(attempt)) {
+      invalidateLifecycleOf(startedAs);
+      return false;
+    }
+    queryClient.setQueryData(
+      ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+      detail,
+    );
+    return true;
+  }
+
   const confirmMutation = useMutation({
     mutationFn: (startedAs: typeof principal) => confirmRealOrder(id, startedAs),
-    onSuccess: (detail) => {
-      queryClient.setQueryData(queryKey, detail);
+    onMutate: (startedAs) => beginLifecycleAttempt(startedAs),
+    onSuccess: (detail, startedAs, attempt) => {
+      if (!applyLifecycleResponse(startedAs, attempt, detail)) return;
       invalidateAfterLifecycleChange();
       // The pack state read while the order was a draft predates its APSA
       // Parcel; confirmation created it, so it is read again.
       void queryClient.invalidateQueries({ queryKey: packStateQueryKey, exact: true });
       setNotice(t("order.confirmedNotice"));
     },
-    onError: () => {
+    onError: (_error, startedAs) => {
       // Re-read on every failure: a confirmation can commit and still fail on
       // its APSA Parcel, and the persisted order (confirmed, parcel missing)
       // must replace the stale draft so the recovery action appears.
-      void query.refetch();
+      rereadDetailOf(startedAs);
     },
   });
 
   const cancelMutation = useMutation({
     mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof principal }) =>
       cancelRealOrder(id, startedAs, reason || undefined),
-    onSuccess: (detail) => {
-      queryClient.setQueryData(queryKey, detail);
+    onMutate: ({ startedAs }) => beginLifecycleAttempt(startedAs),
+    onSuccess: (detail, { startedAs }, attempt) => {
+      if (!applyLifecycleResponse(startedAs, attempt, detail)) return;
       invalidateAfterLifecycleChange();
       setCancelOpen(false);
       setNotice(t("order.cancelledNotice"));
     },
-    onError: (error) => {
-      if (classifyOrderError(error) === "stale") void query.refetch();
+    onError: (error, { startedAs }) => {
+      if (classifyOrderError(error) === "stale") rereadDetailOf(startedAs);
     },
   });
+
+  /*
+   * A principal change, committed: what the previous principal started or was
+   * told is not the next one's — no pending or failed Confirm / Cancel state, no
+   * notice and no open cancel sheet carries over, and every completion still in
+   * flight is stale (see lifecycleRef).
+   */
+  const { reset: resetConfirm } = confirmMutation;
+  const { reset: resetCancel } = cancelMutation;
+  useLayoutEffect(() => {
+    const current = lifecycleRef.current;
+    if (current.scope === principalScope) return;
+    current.scope = principalScope;
+    current.epoch += 1;
+    resetConfirm();
+    resetCancel();
+    setNotice(null);
+    setCancelOpen(false);
+  }, [principalScope, resetConfirm, resetCancel]);
+  useLayoutEffect(() => {
+    const current = lifecycleRef.current;
+    return () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      current.epoch += 1;
+    };
+  }, []);
 
   /**
    * Everything a recorded payment makes stale, and nothing more.
