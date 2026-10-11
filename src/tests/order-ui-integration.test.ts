@@ -374,8 +374,17 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
       route.indexOf("const confirmMutation"),
     );
     expect(apply).toMatch(
-      /if \(!isCurrentLifecycleAttempt\(attempt\)\) \{\s*invalidateLifecycleOf\(startedAs\);\s*return false;\s*\}\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*detail,\s*\);/,
+      /if \(!isCurrentLifecycleAttempt\(attempt\) \|\| !mayStillShowOrder\(startedAs\)\) \{\s*invalidateLifecycleOf\(startedAs\);\s*return false;\s*\}\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*detail,\s*\);/,
     );
+    // ...and only while the member may read the order NOW: the latest snapshot
+    // confirmed (canSensitive), and the order still held as a successful read —
+    // never an earlier read taken as proof (PR #121 in-place revocation P2).
+    const mayShow = route.slice(
+      route.indexOf("function mayStillShowOrder("),
+      route.indexOf("function applyLifecycleResponse("),
+    );
+    expect(mayShow).toContain('view.canSensitive("orders.read")');
+    expect(mayShow).toContain('entry?.status === "success"');
   });
 
   it("creating an order invalidates the order list query so the new order appears", () => {

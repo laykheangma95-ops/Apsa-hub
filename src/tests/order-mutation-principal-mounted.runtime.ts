@@ -388,9 +388,15 @@ mock.module("@/api/products", () => ({
   },
   lookupByBarcodeFn: async () => null,
 }));
+/** The next N capability refreshes fail (a network or server error), as a refresh can. */
+let failCapabilityRefreshes = 0;
 // The capability snapshot the server derives for the session's CURRENT principal.
 mock.module("@/api/capabilities", () => ({
   getActiveMemberCapabilitiesFn: async () => {
+    if (failCapabilityRefreshes > 0) {
+      failCapabilityRefreshes -= 1;
+      throw Object.assign(new Error("capability refresh failed"), { statusCode: 503 });
+    }
     const ctx = serverContext();
     return {
       status: "active",
@@ -598,6 +604,7 @@ afterEach(async () => {
   route.userId = server.userId = USER_A;
   route.organizationId = server.organizationId = ORG_A;
   server.signedIn = true;
+  failCapabilityRefreshes = 0;
 });
 afterAll(async () => {
   await f.close();
@@ -1029,22 +1036,19 @@ describe("Order detail: a payment is recorded by the member who recorded it", ()
     evidence("order detail: payment, member A→B while dispatching", during, wrote);
 
     await switchTo({ user: USER_A });
-    // A refused attempt leaves A's sheet open with the key it was opened with.
-    const sheetStillOpen = Boolean(dialog());
-    if (sheetStillOpen) {
-      // B's screen in between remounted the sheet (Order detail shows its
-      // skeleton while B's read loads), so A types the amount again.
-      const amount = document.querySelector("#order-payment-amount") as HTMLInputElement;
-      if (!amount.value) await typeInto(amount, "10000");
-      await click(button(en.order.recordPaymentSheet.submit, dialog()!), "Record payment (retry)");
-      await settle(10);
-    }
+    // The switch retired A's draft (the sheet is bound to its principal), but
+    // not A's unresolved key: A reopens the sheet, types the amount again, and
+    // the retry carries the key the first attempt was sent with.
+    const sheetAfterSwitchBack = Boolean(dialog());
+    await tapRecordPayment("10000");
+    await settle(10);
     const after = await orderState(orderId);
     evidence("order detail: payment, A's retry", after);
 
     expect(sent[0]!.server).toEqual({ userId: USER_B, organizationId: ORG_A });
     expect(outcomes[0]).toBe("refused:principal_changed");
-    expect(sheetStillOpen).toBe(true);
+    expect(sheetAfterSwitchBack).toBe(false);
+    expect(sent.at(-1)!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
     expect(wrote).toEqual([]); // no payment, payment event, rate-limit token or audit row
     expect(during.payments).toEqual([]);
     expect(sent[0]!.data.expectedPrincipal).toEqual({ userId: USER_A, organizationId: ORG_A });
@@ -1536,6 +1540,362 @@ describe("Order detail: a late confirm / cancel response stays with the principa
       if (!to.read) expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — IN-PLACE revocation: same member, same organization, read revoked
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// No principal switch: A's own orders.read is revoked while A's committed
+// confirm / cancel response is held, the screen learns of it (permissions and
+// the order are re-read; the server refuses the read), and only then does the
+// old response arrive. It must not put the denied order back.
+
+const { capabilityQueryKey } = await import("@/lib/capabilities");
+/** The screen's permissions are re-read from the server, as the provider would. */
+async function refreshPermissions() {
+  await act(async () => {
+    await client.refetchQueries({ queryKey: capabilityQueryKey(USER_A, ORG_A), exact: true });
+  });
+  await settle(6);
+}
+/** A's order detail is re-read from the server, as a focus or retry would. */
+async function rereadOrder(orderId: string) {
+  await act(async () => {
+    await client.refetchQueries({ queryKey: detailKeyOf(USER_A, ORG_A, orderId), exact: true });
+  });
+  await settle(6);
+}
+const detailStatus = (orderId: string) =>
+  client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))?.status ?? "absent";
+
+describe("Order detail: a late confirm / cancel response never restores an order A may no longer read", () => {
+  for (const action of LIFECYCLE_ACTIONS) {
+    it(`${action.name}: A's orders.read revoked in place, permissions and order re-read (denied), then the late response: nothing restored; an authorized re-read recovers`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_A)!.delete("orders.read");
+      await refreshPermissions();
+      await rereadOrder(orderId);
+      await waitFor(() => detailStatus(orderId) === "error", "the server's denied re-read");
+      expect(text()).not.toContain("Water");
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, A's read revoked in place`, orderId, {
+        user: USER_B,
+        org: ORG_B,
+      });
+      action.expectDoneByA(await orderState(orderId));
+      expect(sent[0]!.server).toEqual({ userId: USER_A, organizationId: ORG_A });
+      expect(writesInto(USER_A, ORG_A)).toEqual([]); // the response was written nowhere
+      expect(detailStatus(orderId)).toBe("error");
+      expect(text()).not.toContain("Water");
+      expect(notices()).not.toContain(action.notice);
+
+      // Legitimate recovery: the grant is restored, and a FRESH authorized read
+      // (never the old response) shows A the committed order.
+      grants.get(USER_A)!.add("orders.read");
+      await refreshPermissions();
+      await rereadOrder(orderId);
+      await waitFor(
+        () => cachedLifecycle(USER_A, ORG_A, orderId) === action.to,
+        "the authorized re-read",
+      );
+      expect(text()).toContain("Water");
+      expect(writesInto(USER_A, ORG_A)).toEqual([]);
+    });
+
+    it(`${action.name}: A's read revoked and A's order evicted before the late response: the response does not bring it back`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      grants.get(USER_A)!.delete("orders.read");
+      await refreshPermissions();
+      await act(async () => {
+        client.removeQueries({ queryKey: ordersKeys.principal(USER_A, ORG_A) });
+      });
+      await settle(6);
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, A's read revoked and evicted`, orderId, {
+        user: USER_B,
+        org: ORG_B,
+      });
+      action.expectDoneByA(await orderState(orderId));
+      expect(writesInto(USER_A, ORG_A)).toEqual([]);
+      expect(client.getQueryData(detailKeyOf(USER_A, ORG_A, orderId))).toBeUndefined();
+      expect(text()).not.toContain("Water");
+      expect(notices()).not.toContain(action.notice);
+    });
+
+    it(`${action.name}: the permission refresh FAILS before the late response (snapshot no longer trustworthy): not applied; a fresh authorized read recovers`, async () => {
+      const orderId = await action.seed();
+      await openOrderDetail(orderId);
+      holdResponseNext.add("lifecycle");
+      await action.tap();
+      await committedAsA();
+      failCapabilityRefreshes = 1;
+      await refreshPermissions();
+      expect(client.getQueryState(capabilityQueryKey(USER_A, ORG_A))?.status).toBe("error");
+      await releaseResponse();
+      lateEvidence(`late ${action.name}, permission refresh failed`, orderId, {
+        user: USER_B,
+        org: ORG_B,
+      });
+      action.expectDoneByA(await orderState(orderId));
+      expect(writesInto(USER_A, ORG_A)).toEqual([]); // fail closed: not written
+      expect(notices()).not.toContain(action.notice);
+      // A still holds orders.read server-side: the re-read the late response
+      // triggered is the authorized recovery.
+      await waitFor(
+        () => cachedLifecycle(USER_A, ORG_A, orderId) === action.to,
+        "the authorized re-read",
+      );
+      expect(text()).toContain("Water");
+    });
+  }
+
+  it("A's orders.read revoked in place and the permission refresh says so: the order already on screen is withdrawn at once — an earlier read is not proof of access now", async () => {
+    const orderId = await seedDraft();
+    await openOrderDetail(orderId);
+    expect(text()).toContain("Water");
+    grants.get(USER_A)!.delete("orders.read");
+    await refreshPermissions(); // the order itself has NOT been re-read yet
+    console.log(
+      `[evidence] in-place revocation, permissions refreshed only: detail=${detailStatus(orderId)} shows=${JSON.stringify(text().slice(0, 120))}`,
+    );
+    expect(text()).not.toContain("Water");
+    expect(text()).toContain(en.order.denied);
+    // A presentation gate: nothing was written or evicted to get there.
+    expect(manualWrites).toEqual([]);
+    // Restored: the order is shown again.
+    grants.get(USER_A)!.add("orders.read");
+    await refreshPermissions();
+    await waitFor(() => text().includes("Water"), "the order, readable again");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — Record payment's DRAFT and late outcome belong to the member who typed it
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A types an amount and a private bank reference, submits (committed as A),
+// and the response is held. The screen switches to another member whose order
+// detail is already cached — it renders at once, no skeleton, no remount. A's
+// draft must be gone from B's screen at that moment, never submittable as B,
+// and A's late outcome must not close, announce or alter anything of B's.
+// A's unresolved replay key stays A's: A's retry after returning lands on the
+// same payment.
+
+/** A private bank reference, its own per case (a repeated reference is flagged as a duplicate). */
+let PRIVATE_REF = "";
+let privateRefSeq = 0;
+const PRIVATE_AMOUNT = "12345"; // ៛12,345
+const paymentNotice = en.order.paymentRecordedNotice;
+async function typePaymentDraft(amount = PRIVATE_AMOUNT, reference = PRIVATE_REF) {
+  await waitFor(() => button(en.order.recordPayment), "Record payment");
+  await click(button(en.order.recordPayment), "Record payment");
+  await typeInto(document.querySelector("#order-payment-amount"), amount);
+  if (reference) await typeInto(document.querySelector("#order-payment-reference"), reference);
+}
+async function submitPaymentSheet(label = "Record payment (sheet)") {
+  await click(button(en.order.recordPaymentSheet.submit, dialog()!), label);
+}
+/**
+ * Anything of A's DRAFT on screen: a field value, the sheet's read-back of the
+ * typed amount, or the private reference anywhere on the page (no member here
+ * holds payments.view_provider_reference, so no server read can show it). A
+ * recorded payment's amount in the server-read payments list is not a draft.
+ */
+function draftOnScreen() {
+  const values = [...document.querySelectorAll("input")].map((i) => i.value);
+  const sheet = dialog()?.textContent ?? "";
+  return {
+    fields: values.filter((v) => v.includes(PRIVATE_REF) || v === PRIVATE_AMOUNT),
+    text: [
+      ...(text().includes(PRIVATE_REF) ? [PRIVATE_REF] : []),
+      ...(sheet.includes("12,345") ? ["12,345 (sheet)"] : []),
+    ],
+  };
+}
+const noDraft = { fields: [], text: [] };
+async function paymentCommittedAsA() {
+  await waitFor(() => outcomesOf("payment")[0] === "ok", "A's payment committed server-side");
+}
+const paymentKeys = () => sent.filter((s) => s.fn === "payment").map((s) => s.data.idempotencyKey);
+function expectOnePaymentByA(s: Awaited<ReturnType<typeof orderState>>, amount: number) {
+  expect(s.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, amount]]);
+  expect(s.paymentEvents.map((e) => [e.event_type, e.actor_user_id])).toEqual([
+    ["created", USER_A],
+  ]);
+  expect(audits.filter((a) => a.action === "payments.record").map((a) => a.actor_user_id)).toEqual([
+    USER_A,
+  ]);
+}
+
+describe("Order detail: Record payment's draft and late outcome stay with the member who typed it", () => {
+  beforeEach(() => {
+    privateRefSeq += 1;
+    PRIVATE_REF = `PRIVATE-BANK-REF-77${String(privateRefSeq).padStart(4, "0")}`;
+  });
+  const switches = [
+    {
+      label:
+        "member A → B in the same organization, B's detail already cached, B lacks payments.read and payments.view_provider_reference",
+      user: USER_B,
+      org: ORG_A,
+      revoke: ["payments.read", "payments.view_provider_reference"],
+    },
+    {
+      label:
+        "member A → B in the same organization, B's detail already cached, B lacks payments.view_provider_reference only",
+      user: USER_B,
+      org: ORG_A,
+      revoke: ["payments.view_provider_reference"],
+    },
+    { label: "organization A → B", user: USER_B, org: ORG_B, revoke: [] as string[] },
+  ];
+  for (const to of switches) {
+    for (const outcome of ["success", "failure"] as const) {
+      it(`${to.label}, delayed ${outcome}: A's amount and reference are gone from B's screen at once, and A's outcome changes nothing of B's`, async () => {
+        const orderId = await seedConfirmed();
+        await openOrderDetail(orderId);
+        // B's detail is already cached: B's screen will render without a skeleton.
+        await switchTo({ user: to.user, org: to.org });
+        await switchTo({ user: USER_A, org: ORG_A });
+        await typePaymentDraft();
+        expect(draftOnScreen().fields.length).toBeGreaterThan(0); // A sees A's own draft
+        holdResponseNext.add("payment");
+        if (outcome === "failure") loseNextResponse.add("payment");
+        await submitPaymentSheet();
+        await paymentCommittedAsA();
+        for (const key of to.revoke) grants.get(USER_B)!.delete(key);
+        await switchTo({ user: to.user, org: to.org });
+        const atSwitch = draftOnScreen();
+        const sheetAtSwitch = dialog() !== null;
+        const shownBefore = text();
+        await releaseResponse();
+        console.log(
+          `[evidence] payment draft, ${to.label}, delayed ${outcome}: atSwitch=${JSON.stringify(atSwitch)} ` +
+            `sheetOpenForB=${sheetAtSwitch} afterRelease=${JSON.stringify(draftOnScreen())} ` +
+            `notices=${JSON.stringify(notices())} B.writes=[${writesInto(to.user, to.org).join(" ")}]`,
+        );
+        expect(atSwitch).toEqual(noDraft);
+        expect(sheetAtSwitch).toBe(false);
+        expect(draftOnScreen()).toEqual(noDraft);
+        expect(dialog()).toBeNull();
+        expect(notices()).not.toContain(paymentNotice);
+        expect(text()).toBe(shownBefore); // A's outcome changed nothing on B's screen
+        expect(writesInto(to.user, to.org)).toEqual([]);
+        // The server's act: one payment, A's, under A's one key.
+        expect(outcomesOf("payment")).toEqual(["ok"]);
+        expect(sent.find((s) => s.fn === "payment")!.server).toEqual({
+          userId: USER_A,
+          organizationId: ORG_A,
+        });
+        expectOnePaymentByA(await orderState(orderId), 12345);
+      });
+    }
+  }
+
+  it("B opens B's own Record payment sheet before A's late success: A's outcome neither closes it nor announces itself", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await switchTo({ user: USER_B });
+    await typePaymentDraft("777", "");
+    await releaseResponse();
+    const fields = [...document.querySelectorAll("input")].map((i) => i.value);
+    console.log(
+      `[evidence] B's own sheet after A's late success: open=${dialog() !== null} fields=${JSON.stringify(fields)} notices=${JSON.stringify(notices())}`,
+    );
+    expect(dialog()).not.toBeNull();
+    expect(fields).toContain("777");
+    expect(notices()).not.toContain(paymentNotice);
+    expectOnePaymentByA(await orderState(orderId), 12345);
+  });
+
+  it("A → B → A after a delayed FAILURE: A's sheet comes back empty, and A's retry replays A's one payment under A's original key", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment"); // committed as A; the response is lost
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await releaseResponse();
+    expect(dialog()).toBeNull();
+    expect(draftOnScreen()).toEqual(noDraft);
+    await typePaymentDraft(PRIVATE_AMOUNT, PRIVATE_REF); // A re-enters A's own payment
+    await submitPaymentSheet("Record payment (A's retry)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const after = await orderState(orderId);
+    console.log(
+      `[evidence] A→B→A retry: outcomes=[${outcomesOf("payment")}] keys=${JSON.stringify(paymentKeys())} payments=${JSON.stringify(after.payments.map((p) => [who(p.recorded_by), p.amount_minor]))}`,
+    );
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1); // the same key: a replay, not a second payment
+    expectOnePaymentByA(after, 12345);
+  });
+
+  it("A → B → A after a delayed SUCCESS: A's sheet comes back empty and a new payment gets a new key", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await releaseResponse();
+    expect(dialog()).toBeNull();
+    expect(draftOnScreen()).toEqual(noDraft);
+    expectOnePaymentByA(await orderState(orderId), 12345);
+    await typePaymentDraft("500", "");
+    await submitPaymentSheet("a second payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
+    expect(new Set(paymentKeys()).size).toBe(2);
+    const after = await orderState(orderId);
+    expect(after.payments.map((p) => [who(p.recorded_by), p.amount_minor])).toEqual([
+      ["A", 12345],
+      ["A", 500],
+    ]);
+  });
+
+  it("the screen remounts as B before the delayed response: no draft, no sheet, no notice; one payment, A's", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await remountAs({ user: USER_B });
+    expect(draftOnScreen()).toEqual(noDraft);
+    expect(dialog()).toBeNull();
+    await releaseResponse();
+    expect(draftOnScreen()).toEqual(noDraft);
+    expect(dialog()).toBeNull();
+    expect(notices()).not.toContain(paymentNotice);
+    expectOnePaymentByA(await orderState(orderId), 12345);
+  });
+
+  it("A stays signed in: Record payment still records once, closes the sheet and says a claim was recorded", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    await submitPaymentSheet();
+    await waitFor(() => notices().includes(paymentNotice), "the recorded notice");
+    expect(dialog()).toBeNull();
+    expectOnePaymentByA(await orderState(orderId), 12345);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

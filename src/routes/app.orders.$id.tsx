@@ -286,7 +286,32 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * under the initiator's own authority if it is shown again.
    */
   const principalScope = `${userId}\u0000${routeOrganizationId}`;
-  const lifecycleRef = useRef({ scope: principalScope, epoch: 0, attempt: 0 });
+  const lifecycleRef = useRef({ scope: principalScope, epoch: 0, attempt: 0, paymentAttempt: 0 });
+
+  /*
+   * The capability snapshot as of the LATEST commit, for a completion that
+   * lands after it. A late Confirm / Cancel response is the server's answer to
+   * an ACTION, not a read: it may be shown only while the member can still
+   * read the order — confirmed now (canSensitive: resolved, its latest refresh
+   * did not fail, the key held), never inferred from an earlier successful read.
+   */
+  const capabilitiesRef = useRef(capabilities);
+  useLayoutEffect(() => {
+    capabilitiesRef.current = capabilities;
+  });
+
+  /*
+   * Record payment's replay identity, kept apart from its draft. The sheet's
+   * draft (method, amount, reference) is bound to the principal that typed it
+   * and is retired the moment another principal is shown. Its idempotency key
+   * is not displayed: if a submitted attempt is still unresolved when the
+   * sheet is retired, the key is parked for THAT principal only and handed back
+   * when that principal next opens the sheet, so a retry replays onto the same
+   * payment instead of recording a second one. A success resolves it.
+   */
+  const unresolvedPaymentRef = useRef<{ scope: string; key: string } | null>(null);
+  const parkedPaymentKeysRef = useRef(new Map<string, string>());
+  const [paymentReplayKey, setPaymentReplayKey] = useState<string | undefined>(undefined);
 
   /*
    * Fail closed rather than key a request under a placeholder: if the route's
@@ -448,16 +473,35 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
 
   /**
+   * Fail closed: the member must be able to read this order NOW — the latest
+   * snapshot resolved, not stale, holding orders.read — and the order must
+   * still be held as a successful read (not evicted, not refused by the
+   * server's latest read). An earlier successful read proves nothing.
+   */
+  function mayStillShowOrder(startedAs: typeof principal) {
+    const view = capabilitiesRef.current;
+    const entry = queryClient.getQueryState(
+      ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+    );
+    return (
+      view.canSensitive("orders.read") &&
+      view.organizationId === startedAs.organizationId &&
+      entry?.status === "success"
+    );
+  }
+
+  /**
    * The response of the CURRENT attempt is written into its initiator's own
-   * detail entry — keyed by the attempt's variable, never by this render;
-   * any other response is written nowhere. Returns whether it was applied.
+   * detail entry — keyed by the attempt's variable, never by this render —
+   * and only while that member may still read the order; any other response
+   * is written nowhere. Returns whether it was applied.
    */
   function applyLifecycleResponse(
     startedAs: typeof principal,
     attempt: LifecycleAttempt | undefined,
     detail: Awaited<ReturnType<typeof confirmRealOrder>>,
   ) {
-    if (!isCurrentLifecycleAttempt(attempt)) {
+    if (!isCurrentLifecycleAttempt(attempt) || !mayStillShowOrder(startedAs)) {
       invalidateLifecycleOf(startedAs);
       return false;
     }
@@ -502,31 +546,53 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     },
   });
 
-  /*
-   * A principal change, committed: what the previous principal started or was
-   * told is not the next one's — no pending or failed Confirm / Cancel state, no
-   * notice and no open cancel sheet carries over, and every completion still in
-   * flight is stale (see lifecycleRef).
+  /**
+   * Called from onMutate, at the tap (see beginLifecycleAttempt). The key the
+   * attempt carries is unresolved until a success answers it.
    */
-  const { reset: resetConfirm } = confirmMutation;
-  const { reset: resetCancel } = cancelMutation;
-  useLayoutEffect(() => {
+  function beginPaymentAttempt(
+    submit: RecordOrderPaymentSubmit & { startedAs: typeof principal },
+  ): LifecycleAttempt {
     const current = lifecycleRef.current;
-    if (current.scope === principalScope) return;
-    current.scope = principalScope;
-    current.epoch += 1;
-    resetConfirm();
-    resetCancel();
-    setNotice(null);
-    setCancelOpen(false);
-  }, [principalScope, resetConfirm, resetCancel]);
-  useLayoutEffect(() => {
+    current.paymentAttempt += 1;
+    const scope = `${submit.startedAs.userId}\u0000${submit.startedAs.organizationId}`;
+    unresolvedPaymentRef.current = { scope, key: submit.idempotencyKey };
+    return { epoch: scope === current.scope ? current.epoch : -1, attempt: current.paymentAttempt };
+  }
+  function isCurrentPaymentAttempt(attempt: LifecycleAttempt | undefined) {
     const current = lifecycleRef.current;
-    return () => {
-      // Unmounted: whatever is still in flight has no screen left to update.
-      current.epoch += 1;
-    };
-  }, []);
+    return attempt?.epoch === current.epoch && attempt.attempt === current.paymentAttempt;
+  }
+  /** A success: the key's payment exists, so nothing is left to replay under it. */
+  function resolvePaymentKey(submit: RecordOrderPaymentSubmit & { startedAs: typeof principal }) {
+    const scope = `${submit.startedAs.userId}\u0000${submit.startedAs.organizationId}`;
+    if (unresolvedPaymentRef.current?.key === submit.idempotencyKey) {
+      unresolvedPaymentRef.current = null;
+    }
+    if (parkedPaymentKeysRef.current.get(scope) === submit.idempotencyKey) {
+      parkedPaymentKeysRef.current.delete(scope);
+    }
+  }
+  /**
+   * A payment recorded for `startedAs` whose answer is not applied (another
+   * principal is shown, the screen is gone, or a newer submit superseded it):
+   * no sheet, notice or form of whoever is shown is touched; only the
+   * initiator's own entries are marked stale.
+   */
+  function invalidatePaymentOf(startedAs: typeof principal) {
+    const { userId: startedBy, organizationId: startedIn } = startedAs;
+    rereadDetailOf(startedAs);
+    evictShippingLabels(queryClient, startedBy, startedIn);
+    void queryClient.invalidateQueries({ queryKey: ["payments", startedBy, startedIn] });
+    void queryClient.invalidateQueries({ queryKey: ordersKeys.list(startedBy, startedIn) });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+  }
+  function openRecordPayment() {
+    const parked = parkedPaymentKeysRef.current;
+    setPaymentReplayKey(parked.get(principalScope));
+    parked.delete(principalScope);
+    setRecordPaymentOpen(true);
+  }
 
   /**
    * Everything a recorded payment makes stale, and nothing more.
@@ -564,7 +630,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         idempotencyKey: submit.idempotencyKey,
         principal: submit.startedAs,
       }),
-    onSuccess: () => {
+    onMutate: (submit) => beginPaymentAttempt(submit),
+    onSuccess: (_payment, submit, attempt) => {
+      resolvePaymentKey(submit);
+      if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit.startedAs);
       setRecordPaymentOpen(false);
       invalidateAfterPayment();
       /*
@@ -576,6 +645,44 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       setNotice(t("order.paymentRecordedNotice"));
     },
   });
+
+  /*
+   * A principal change, committed: what the previous principal started, typed
+   * or was told is not the next one's. No pending or failed Confirm / Cancel /
+   * Record payment state, no notice, no open cancel sheet and no payment draft
+   * carries over (the payment sheet is also keyed by principal, so its form
+   * state is gone in the same render), and every completion still in flight is
+   * stale (see lifecycleRef). An unresolved payment key is parked for the
+   * principal that submitted it, never handed to the next.
+   */
+  const { reset: resetConfirm } = confirmMutation;
+  const { reset: resetCancel } = cancelMutation;
+  const { reset: resetRecordPayment } = recordPaymentMutation;
+  useLayoutEffect(() => {
+    const current = lifecycleRef.current;
+    if (current.scope === principalScope) return;
+    const unresolved = unresolvedPaymentRef.current;
+    if (recordPaymentOpen && unresolved?.scope === current.scope) {
+      parkedPaymentKeysRef.current.set(unresolved.scope, unresolved.key);
+    }
+    unresolvedPaymentRef.current = null;
+    current.scope = principalScope;
+    current.epoch += 1;
+    resetConfirm();
+    resetCancel();
+    resetRecordPayment();
+    setNotice(null);
+    setCancelOpen(false);
+    setRecordPaymentOpen(false);
+    setPaymentReplayKey(undefined);
+  }, [principalScope, recordPaymentOpen, resetConfirm, resetCancel, resetRecordPayment]);
+  useLayoutEffect(() => {
+    const current = lifecycleRef.current;
+    return () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      current.epoch += 1;
+    };
+  }, []);
 
   const back = () => navigate({ to: "/app/orders" });
 
@@ -601,6 +708,23 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           body={copy.body}
           onRetry={() => query.refetch()}
         />
+      </Screen>
+    );
+  }
+
+  /*
+   * In-place revocation: once the server's capability snapshot for THIS
+   * principal says orders.read is gone, the order already on screen is
+   * withdrawn — an earlier successful read is not proof of access now. A
+   * presentation gate only: no cache entry is written or evicted, and a fresh
+   * authorized read shows the order again.
+   */
+  if (identityOk && capabilities.state === "ready" && !capabilities.can("orders.read")) {
+    const copy = errorCopy("forbidden");
+    return (
+      <Screen bottom="none" contentClassName="!px-0">
+        <AppHeader title={t("order.title")} onBack={back} />
+        <OperationalState tone="danger" title={copy.title} body={copy.body} />
       </Screen>
     );
   }
@@ -960,7 +1084,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                 <Button
                   variant="ghost"
                   className="tap-target text-label mt-3 h-11 w-full text-action-primary"
-                  onClick={() => setRecordPaymentOpen(true)}
+                  onClick={openRecordPayment}
                 >
                   {t("order.recordPayment")}
                 </Button>
@@ -1240,7 +1364,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         }}
       />
       <RecordOrderPaymentSheet
+        // Bound to the principal: another principal never inherits this draft.
+        key={principalScope}
         open={recordPaymentOpen}
+        replayKey={paymentReplayKey}
         onOpenChange={(next) => {
           setRecordPaymentOpen(next);
           /*
