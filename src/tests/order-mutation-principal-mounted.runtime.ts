@@ -1266,9 +1266,11 @@ const LIFECYCLE_ACTIONS: LifecycleAction[] = [
     expectDoneByA: (s) => {
       expect(s.lifecycle).toBe("cancelled");
       const cancels = s.history.filter((h) => h.to_status === "cancelled");
-      expect(cancels.map((h) => [h.axis, h.changed_by])).toEqual([
-        ["lifecycle", USER_A],
-        ["fulfillment", USER_A],
+      // Both rows are written in one transaction with the same changed_at, so
+      // their relative order is not defined: compare them as a set.
+      expect(cancels.map((h) => `${h.axis}:${who(h.changed_by)}`).sort()).toEqual([
+        "fulfillment:A",
+        "lifecycle:A",
       ]);
     },
   },
