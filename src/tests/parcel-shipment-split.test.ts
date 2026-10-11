@@ -441,6 +441,7 @@ async function confirm() {
 async function arrange(provider = "VET Express", tracking = "VET-42") {
   const { createDelivery } = await import("../server/deliveries/service");
   return createDelivery(ctx(STAFF), {
+    expectedPrincipal: principalOf(ctx(STAFF)),
     orderId: ORDER_A,
     providerName: provider,
     externalTrackingNumber: tracking,

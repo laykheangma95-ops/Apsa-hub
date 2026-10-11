@@ -1115,6 +1115,7 @@ describe("pack then arrange delivery", () => {
 
     const { createDelivery } = await import("../server/deliveries/service");
     const detail = await createDelivery(mockCtx(ORG_A, HANDOFF_PERMS), {
+      expectedPrincipal: principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1138,6 +1139,7 @@ describe("pack then arrange delivery", () => {
     rpcResponder = statefulRpc;
     const { createDelivery } = await import("../server/deliveries/service");
     const detail = await createDelivery(mockCtx(ORG_A, HANDOFF_PERMS), {
+      expectedPrincipal: principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1183,7 +1185,11 @@ describe("pack then courier handoff", () => {
     expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
 
     expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
-    await createDelivery(ctx, { orderId: ORDER_ID, providerName: "Local courier" } as any);
+    await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
+      orderId: ORDER_ID,
+      providerName: "Local courier",
+    } as any);
 
     const handoff = await confirmHandoff(ctx, PARCEL_CODE);
     expect(handoff.kind).toBe("success");
@@ -1490,6 +1496,7 @@ describe("retry delivery ready after packing", () => {
       fn === "ready_packed_delivery_v1" ? { status: "invalid_transition" } : failing(fn, args);
     const { createDelivery } = await import("../server/deliveries/service");
     const detail = await createDelivery(mockCtx(ORG_A, HANDOFF_PERMS), {
+      expectedPrincipal: principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1652,6 +1659,7 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     const { confirmHandoff } = await import("../server/handoff/service");
 
     const detail = await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1672,7 +1680,11 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
 
-    await createDelivery(ctx, { orderId: ORDER_ID, providerName: "Local courier" } as any);
+    await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
+      orderId: ORDER_ID,
+      providerName: "Local courier",
+    } as any);
     expect(mockDeliveries[0].status).toBe("pending");
 
     expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
@@ -1695,6 +1707,7 @@ describe("packed clears when the order's fulfillment is reopened", () => {
       deliveryId: null,
     });
     const detail = await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1746,6 +1759,7 @@ describe("reopening the order invalidates a ready delivery", () => {
     const { createDelivery } = await import("../server/deliveries/service");
     expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
     const detail = await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1801,6 +1815,7 @@ describe("reopening the order invalidates a ready delivery", () => {
 
     // Arrange Delivery: the new delivery waits for Pack Order.
     const arranged = await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -1984,6 +1999,7 @@ describe("readiness recovery races a reopen", () => {
     raceReopenWithReadying("before");
 
     const detail = await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -2046,6 +2062,7 @@ describe("generic delivery Ready transition enforces the current packed state", 
     // Pack → Arrange (auto-ready) → Ready.
     await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES);
     const first = await deliveries.createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
@@ -2063,6 +2080,7 @@ describe("generic delivery Ready transition enforces the current packed state", 
 
     // Replacement delivery, moved along through the GENERIC delivery API.
     const replacement = await deliveries.createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);

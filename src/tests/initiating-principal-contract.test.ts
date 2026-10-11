@@ -284,6 +284,16 @@ const SERVICE_CASES: ServiceCase[] = [
   },
 ];
 
+// Delivery creation (CORRECTION-004, delivery addendum): the shipment is
+// written as ctx — its created_by is the server's derivation, never the input.
+SERVICE_CASES.push({
+  name: "createDelivery",
+  file: "src/server/deliveries/service.ts",
+  check: "assertExpectedPrincipal(ctx, input.expectedPrincipal);",
+  later: ['ctx.require("delivery.create")', "repo.findOrderForOrg(", "repo.createDelivery("],
+  writesAs: /repo\.createDelivery\(ctx\.organizationId, ctx\.userId,/,
+});
+
 describe("each protected service checks it before anything else and records only ctx", () => {
   for (const c of SERVICE_CASES) {
     const body = between(read(c.file), `export async function ${c.name}(`, "\n}\n");
@@ -327,6 +337,13 @@ describe("each protected service checks it before anything else and records only
     expect(between(payments, "export interface AttachEvidenceServiceInput", "\n}\n")).toContain(
       "expectedPrincipal: ExpectedPrincipal;",
     );
+    expect(
+      between(
+        read("src/server/deliveries/service.ts"),
+        "export interface CreateDeliveryServiceInput",
+        "\n}\n",
+      ),
+    ).toContain("expectedPrincipal: ExpectedPrincipal;");
     expect(between(payments, "export interface RefundPaymentServiceInput", "\n}\n")).toContain(
       "expectedPrincipal: ExpectedPrincipal;",
     );
@@ -360,11 +377,20 @@ const PROTECTED_FNS: [string, string[]][] = [
     ],
   ],
   ["src/api/parcels.ts", ["createParcelFn"]],
+  ["src/api/deliveries.ts", ["createDeliveryFn"]],
 ];
 /** POST functions in those files that are deliberately outside the contract. */
 const EXEMPT_POST_FNS: Record<string, string> = {
   // Always refuses (409 after the permission check) and writes nothing.
   transitionOrderPaymentFn: "deprecated; never mutates",
+  // CORRECTION-004's delivery addendum covers delivery CREATION only; these
+  // transitions stay on its "Not protected" list.
+  startPreparingDeliveryFn: "delivery transition; not covered by CORRECTION-004",
+  markDeliveryReadyFn: "delivery transition; not covered by CORRECTION-004",
+  markDeliveryInTransitFn: "delivery transition; not covered by CORRECTION-004",
+  markDeliveryDeliveredFn: "delivery transition; not covered by CORRECTION-004",
+  markDeliveryFailedFn: "delivery transition; not covered by CORRECTION-004",
+  cancelDeliveryFn: "delivery transition; not covered by CORRECTION-004",
 };
 
 describe("each protected server function requires it through its file's one schema and forwards it", () => {
@@ -419,6 +445,7 @@ const ADAPTERS = [
   "verifyRealPayment",
   "refundRealPayment",
   "reverseRealPayment",
+  "createRealDelivery",
 ];
 
 describe("each client adapter requires the principal and sends it", () => {
@@ -436,9 +463,17 @@ describe("each client adapter requires the principal and sends it", () => {
   for (const name of ADAPTERS) {
     it(`${name}: a REQUIRED principal, sent as expectedPrincipal`, () => {
       const fn = between(api, `export async function ${name}(`, "\n}\n");
-      if (name === "createRealOrder" || name === "recordRealPayment") {
+      if (
+        name === "createRealOrder" ||
+        name === "recordRealPayment" ||
+        name === "createRealDelivery"
+      ) {
         const input =
-          name === "createRealOrder" ? "CreateRealOrderInput" : "RecordRealPaymentInput";
+          name === "createRealOrder"
+            ? "CreateRealOrderInput"
+            : name === "recordRealPayment"
+              ? "RecordRealPaymentInput"
+              : "CreateRealDeliveryInput";
         expect(between(api, `export interface ${input}`, "\n}\n")).toContain(
           "principal: InitiatingPrincipal;",
         );
@@ -618,6 +653,7 @@ describe("no call site anywhere in the app omits it", () => {
       }
     }
     for (const site of [
+      "src/components/delivery/CreateDeliverySheet.tsx: createRealDelivery",
       "src/components/pos/PosCheckoutSheet.tsx: createRealOrder",
       "src/components/pos/PosCheckoutSheet.tsx: confirmRealOrder",
       "src/components/pos/PosCheckoutSheet.tsx: recordRealPayment",

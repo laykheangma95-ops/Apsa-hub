@@ -14,6 +14,16 @@ const deliveryStatusSchema = z.enum([
   "cancelled",
 ]);
 
+// The member + organization the client STARTED a delivery creation as
+// (CORRECTIONS.md, CORRECTION-004, delivery addendum). A refuse-only
+// precondition the service compares with the principal it derives from the
+// session — never authorization, never a tenant selector, never an actor
+// (src/server/auth/expected-principal.ts). REQUIRED: a request without it is
+// refused here, before the handler runs.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 const deliveryIdSchema = z.object({
   deliveryId: z.string().uuid("Invalid delivery ID"),
   reason: z.string().trim().max(1000).nullish(),
@@ -50,6 +60,7 @@ export const createDeliveryFn = createServerFn({ method: "POST" })
         providerName: z.string().trim().min(1).max(200).nullish(),
         externalTrackingNumber: z.string().trim().min(1).max(200).nullish(),
         codAmountMinor: z.number().int().min(0).nullish(),
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -57,6 +68,7 @@ export const createDeliveryFn = createServerFn({ method: "POST" })
     const authCtx = await resolveAuthContext();
     const { createDelivery } = await import("@/server/deliveries/service");
     return createDelivery(authCtx, {
+      expectedPrincipal: data.expectedPrincipal,
       orderId: data.orderId,
       locationId: data.locationId ?? null,
       providerId: data.providerId ?? null,

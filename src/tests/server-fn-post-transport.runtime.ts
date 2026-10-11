@@ -236,7 +236,12 @@ const cases: Case[] = [
     fn: createDeliveryFn,
     service: "createDelivery",
     permission: "deliveries.create",
-    valid: { orderId: ORDER, externalTrackingNumber: TRACKING, codAmountMinor: 2500 },
+    valid: {
+      orderId: ORDER,
+      externalTrackingNumber: TRACKING,
+      codAmountMinor: 2500,
+      expectedPrincipal: STARTED_AS,
+    },
     invalid: { orderId: "not-a-uuid" },
     sensitive: [ORDER, TRACKING, "2500"],
   },

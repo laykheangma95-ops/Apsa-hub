@@ -673,6 +673,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     resetRecordPayment();
     setNotice(null);
     setCancelOpen(false);
+    setCreateDeliveryOpen(false);
     setRecordPaymentOpen(false);
     setPaymentReplayKey(undefined);
   }, [principalScope, recordPaymentOpen, resetConfirm, resetCancel, resetRecordPayment]);
@@ -1342,10 +1343,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         onConfirm={(reason) => cancelMutation.mutate({ reason, startedAs: principal })}
       />
       <CreateDeliverySheet
+        // Bound to the principal: another principal never inherits this draft.
+        // (Sibling keys must differ: the payment sheet is keyed by principal too.)
+        key={`delivery:${principalScope}`}
         open={createDeliveryOpen}
         onOpenChange={setCreateDeliveryOpen}
         orderId={order.id}
         orderTotal={order.total}
+        principal={principal}
         onCreated={(detail) => {
           void queryClient.invalidateQueries({ queryKey: deliveriesQueryKey });
           void queryClient.invalidateQueries({ queryKey: packStateQueryKey });
@@ -1365,7 +1370,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       />
       <RecordOrderPaymentSheet
         // Bound to the principal: another principal never inherits this draft.
-        key={principalScope}
+        key={`payment:${principalScope}`}
         open={recordPaymentOpen}
         replayKey={paymentReplayKey}
         onOpenChange={(next) => {

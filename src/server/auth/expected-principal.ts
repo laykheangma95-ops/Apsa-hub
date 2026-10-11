@@ -29,8 +29,8 @@
  *
  * Protected (each listed in CORRECTION-004): order creation, order lifecycle
  * transitions, order fulfillment transitions, parcel recovery and parcel
- * creation, shipping-destination edits, and payment recording, evidence,
- * verification, refund, reversal and correction.
+ * creation, shipping-destination edits, payment recording, evidence,
+ * verification, refund, reversal and correction, and delivery creation.
  */
 import { publicError } from "@/server/public-domain-error";
 

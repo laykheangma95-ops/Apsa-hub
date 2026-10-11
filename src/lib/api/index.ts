@@ -1417,15 +1417,25 @@ export interface CreateRealDeliveryInput {
   externalTrackingNumber?: string;
   /** Integer minor units, operational only — never marks the order as paid. */
   codAmountMinor?: number;
+  /**
+   * The member + organization the delivery was started as — a REQUIRED,
+   * refuse-only precondition (CORRECTION-004): the server refuses it, writing
+   * nothing, if anyone else is signed in when it handles the request.
+   */
+  principal: InitiatingPrincipal;
 }
 
 /** Create a delivery for an eligible confirmed order. The server re-validates eligibility independently. */
 export async function createRealDelivery(
   input: CreateRealDeliveryInput,
 ): Promise<RealDeliveryDetail> {
+  // Taken before the lazy import below: the principal is the tap's, never
+  // whoever is signed in once the module has loaded.
+  const { principal } = input;
   const { createDeliveryFn } = await import("@/api/deliveries");
   const detail = await createDeliveryFn({
     data: {
+      expectedPrincipal: principal,
       orderId: input.orderId,
       providerName: input.providerName,
       ...(input.providerKey ? { providerKey: input.providerKey } : {}),

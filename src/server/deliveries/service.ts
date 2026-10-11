@@ -1,6 +1,7 @@
 import { publicError } from "@/server/public-domain-error";
 import type { Money } from "@/types";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import * as repo from "./repository";
 import * as parcelsRepo from "@/server/parcels/repository";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
@@ -57,6 +58,12 @@ export interface CreatedDelivery extends DeliveryDetail {
 }
 
 export interface CreateDeliveryServiceInput {
+  /**
+   * The member + organization the request was STARTED as — a required,
+   * refuse-only precondition (CORRECTIONS.md, CORRECTION-004). Never
+   * authorization and never the recorded actor: both stay `ctx`.
+   */
+  expectedPrincipal: ExpectedPrincipal;
   orderId: string;
   locationId?: string | null;
   providerId?: string | null;
@@ -148,6 +155,9 @@ export async function createDelivery(
   ctx: AuthorizationContext,
   input: CreateDeliveryServiceInput,
 ): Promise<CreatedDelivery> {
+  // First: a request started as another member or organization is refused
+  // before the permission check, any read and any write.
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("delivery.create");
 
   const order = await repo.findOrderForOrg(ctx.organizationId, input.orderId);

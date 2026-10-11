@@ -149,6 +149,9 @@ function sqlTransport() {
     const ordering: string[] = [];
     let columns = "*";
     let single = false;
+    // maybeSingle(): no row is data null with NO error, as in Supabase; only
+    // single() reports PGRST116.
+    let maybe = false;
     let max: number | undefined;
     let skip: number | undefined;
     const chain: any = {
@@ -197,6 +200,7 @@ function sqlTransport() {
       },
       maybeSingle() {
         single = true;
+        maybe = true;
         return chain;
       },
       async execute() {
@@ -210,7 +214,9 @@ function sqlTransport() {
           if (single) {
             return rows.length
               ? { data: rows[0], error: null }
-              : { data: null, error: { code: "PGRST116" } };
+              : maybe
+                ? { data: null, error: null }
+                : { data: null, error: { code: "PGRST116" } };
           }
           return { data: rows, error: null };
         } catch (error) {
@@ -256,7 +262,7 @@ mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: sqlTransport() }));
 
 // ── The server-function boundary: gates, outcomes, the derived principal ─────
 
-type Gated = "lifecycle" | "payment";
+type Gated = "lifecycle" | "payment" | "delivery";
 interface SentMutation {
   fn: Gated;
   /** Exactly what the browser sent. */
@@ -380,7 +386,24 @@ mock.module("@/api/packing", () => ({
     return getOrderPackState(serverContext(), data.orderId);
   },
 }));
-mock.module("@/api/deliveries", () => ({ listDeliveriesFn: async () => [] }));
+mock.module("@/api/deliveries", () => ({
+  listDeliveriesFn: async () => [],
+  // src/api/deliveries.ts createDeliveryFn's handler, field for field.
+  createDeliveryFn: async ({ data }: { data: Json }) =>
+    serve("delivery", data, async (ctx) => {
+      const { createDelivery } = await import("@/server/deliveries/service");
+      return (createDelivery as any)(ctx, {
+        orderId: data.orderId,
+        locationId: data.locationId ?? null,
+        providerId: data.providerId ?? null,
+        providerKey: data.providerKey ?? null,
+        providerName: data.providerName ?? null,
+        externalTrackingNumber: data.externalTrackingNumber ?? null,
+        codAmountMinor: data.codAmountMinor ?? null,
+        expectedPrincipal: data.expectedPrincipal,
+      });
+    }),
+}));
 mock.module("@/api/products", () => ({
   listProductsFn: async ({ data }: { data?: Json } = {}) => {
     const { getProductCatalog } = await import("@/server/products/service");
@@ -450,6 +473,8 @@ mock.module("@/lib/api", () => ({
 // ── Router hooks ─────────────────────────────────────────────────────────────
 
 const routeParams = { id: "" };
+/** Every navigation a screen asked for (the router's own navigate is not mounted). */
+const navigations: Json[] = [];
 const { createElement } = await import("react");
 const realRouter = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({
@@ -465,7 +490,9 @@ mock.module("@tanstack/react-router", () => ({
   }),
   Link: ({ children, to: _to, params: _params, ...rest }: any) =>
     createElement("a", rest, children),
-  useNavigate: () => () => {},
+  useNavigate: () => (options: Json) => {
+    navigations.push(options);
+  },
   useRouterState: ({ select }: any = {}) => {
     const state = { location: { pathname: "/app" } };
     return select ? select(state) : state;
@@ -591,6 +618,7 @@ afterEach(async () => {
   client?.clear();
   manualWrites.length = 0;
   sent.length = 0;
+  navigations.length = 0;
   outcomes.length = 0;
   audits.length = 0;
   holdDispatchNext.clear();
@@ -1926,6 +1954,238 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     await waitFor(() => notices().includes(paymentNotice), "the recorded notice");
     expect(dialog()).toBeNull();
     expectOnePaymentByA(await orderState(orderId), 12345);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — Arrange delivery: created by, and its draft kept for, the member who started it
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A types a courier and a tracking number. Two windows: (1) the screen
+// switches to another member while A's draft is open — it must be gone, not
+// submittable as B; (2) A's request left the screen as A and the server
+// handles it after the switch — it must be refused, never executed with B's
+// permissions or recorded as B's. A late answer must not navigate, close or
+// announce anything on B's screen.
+
+const PRIVATE_COURIER = "Private Courier A";
+let PRIVATE_TRACKING = "";
+let trackingSeq = 0;
+async function openArrangeDelivery() {
+  await waitFor(() => buttonContaining(en.order.arrangeDelivery), "Arrange delivery");
+  await click(buttonContaining(en.order.arrangeDelivery), "Arrange delivery");
+}
+async function typeDeliveryDraft() {
+  await openArrangeDelivery();
+  await typeInto(document.querySelector("#delivery-provider-name"), PRIVATE_COURIER);
+  await typeInto(document.querySelector("#delivery-tracking-number"), PRIVATE_TRACKING);
+}
+async function submitDeliverySheet(label = "Create delivery") {
+  await click(button(en.delivery.create.submit, dialog()!), label);
+}
+function deliveryDraftOnScreen() {
+  const values = [...document.querySelectorAll("input")].map((i) => i.value);
+  return {
+    fields: values.filter((v) => v === PRIVATE_COURIER || v === PRIVATE_TRACKING),
+    text: [PRIVATE_COURIER, PRIVATE_TRACKING].filter((s) => text().includes(s)),
+  };
+}
+const noDeliveryDraft = { fields: [], text: [] };
+async function deliveriesOf(orderId: string) {
+  return (
+    await f.db.query<Json>(
+      `select created_by, organization_id, provider_name, external_tracking_number, status
+         from deliveries where order_id = $1 order by created_at`,
+      [orderId],
+    )
+  ).rows.map((d) => ({
+    by: who(d.created_by),
+    org: d.organization_id === ORG_A ? "ORG_A" : d.organization_id,
+    courier: d.provider_name,
+    tracking: d.external_tracking_number,
+  }));
+}
+const outcomesOfDelivery = () => outcomesOf("delivery");
+const deliveryNavigations = () =>
+  navigations.filter((n) => n.to === "/app/deliveries/$id").map((n) => n.params?.id);
+
+describe("Order detail: Arrange delivery is created by, and its draft kept for, the member who started it", () => {
+  beforeEach(() => {
+    trackingSeq += 1;
+    PRIVATE_TRACKING = `TRK-PRIVATE-${String(trackingSeq).padStart(4, "0")}`;
+    grants.get(USER_A)!.add("delivery.create");
+    grants.get(USER_B)!.add("delivery.create");
+  });
+
+  for (const to of [
+    {
+      label: "member A → B in the same organization, B's detail already cached",
+      user: USER_B,
+      org: ORG_A,
+    },
+    { label: "organization A → B", user: USER_B, org: ORG_B },
+  ]) {
+    it(`${to.label}: A's open draft is gone at once — B can neither see nor submit it`, async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await switchTo({ user: to.user, org: to.org }); // B's detail is cached
+      await switchTo({ user: USER_A, org: ORG_A });
+      await typeDeliveryDraft();
+      expect(deliveryDraftOnScreen().fields.length).toBe(2); // A sees A's draft
+      await switchTo({ user: to.user, org: to.org });
+      const atSwitch = deliveryDraftOnScreen();
+      const sheet = dialog();
+      const submitAsB = sheet ? button(en.delivery.create.submit, sheet) : undefined;
+      const submittable = Boolean(submitAsB && !submitAsB.disabled);
+      if (submittable) await submitDeliverySheet("B presses Create delivery on A's draft");
+      await settle(10);
+      const rows = await deliveriesOf(orderId);
+      console.log(
+        `[evidence] delivery draft, ${to.label}: atSwitch=${JSON.stringify(atSwitch)} sheetOpenForB=${sheet !== null} ` +
+          `submittableAsB=${submittable} server=[${outcomesOfDelivery()}] deliveries=${JSON.stringify(rows)}`,
+      );
+      expect(atSwitch).toEqual(noDeliveryDraft);
+      expect(sheet).toBeNull();
+      expect(submittable).toBe(false);
+      expect(rows).toEqual([]);
+      expect(sent.filter((s) => s.fn === "delivery")).toEqual([]);
+    });
+  }
+
+  it("A's request leaves the screen as A and the server handles it after a switch to B (same organization): refused, nothing written; A's retry is A's", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    holdDispatchNext.add("delivery");
+    await submitDeliverySheet(); // left the screen as A
+    await switchTo({ user: USER_B });
+    const before = await writeSurface();
+    await releaseDispatch(); // handled while the session is B's
+    const rowsDuring = await deliveriesOf(orderId);
+    const deliveriesWritten = (await f.db.query<Json>("select count(*)::int n from deliveries"))
+      .rows[0]!.n;
+    console.log(
+      `[evidence] delivery dispatch, A→B: server=[${outcomesOfDelivery()}] handledAs=${JSON.stringify(sent.find((s) => s.fn === "delivery")?.server)} deliveries=${JSON.stringify(rowsDuring)} navigations=${JSON.stringify(deliveryNavigations())}`,
+    );
+    expect(sent.find((s) => s.fn === "delivery")!.server).toEqual({
+      userId: USER_B,
+      organizationId: ORG_A,
+    });
+    expect(sent.find((s) => s.fn === "delivery")!.data.expectedPrincipal).toEqual({
+      userId: USER_A,
+      organizationId: ORG_A,
+    });
+    expect(outcomesOfDelivery()).toEqual(["refused:principal_changed"]);
+    expect(rowsDuring).toEqual([]);
+    expect(wroteSince(before, await writeSurface())).toEqual([]);
+    expect(deliveryNavigations()).toEqual([]);
+    void deliveriesWritten;
+
+    await switchTo({ user: USER_A });
+    await typeDeliveryDraft();
+    await submitDeliverySheet("A's retry");
+    await waitFor(() => outcomesOfDelivery().length === 2, "A's retry");
+    expect(outcomesOfDelivery()).toEqual(["refused:principal_changed", "ok"]);
+    expect(await deliveriesOf(orderId)).toEqual([
+      { by: "A", org: "ORG_A", courier: PRIVATE_COURIER, tracking: PRIVATE_TRACKING },
+    ]);
+  });
+
+  it("A lacks delivery.create, B holds it: B's grant never creates A's delivery", async () => {
+    const orderId = await seedConfirmed();
+    grants.get(USER_A)!.delete("delivery.create");
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    holdDispatchNext.add("delivery");
+    await submitDeliverySheet();
+    await switchTo({ user: USER_B });
+    await releaseDispatch();
+    const rows = await deliveriesOf(orderId);
+    console.log(
+      `[evidence] delivery, A unauthorized / B authorized: server=[${outcomesOfDelivery()}] deliveries=${JSON.stringify(rows)}`,
+    );
+    expect(outcomesOfDelivery()).toEqual(["refused:principal_changed"]);
+    expect(rows).toEqual([]);
+  });
+
+  it("organization A → B while A's request is dispatching: refused as principal_changed — not a misleading 404 — nothing written", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    holdDispatchNext.add("delivery");
+    await submitDeliverySheet();
+    await switchTo({ user: USER_B, org: ORG_B });
+    await releaseDispatch();
+    console.log(`[evidence] delivery, org A→B: server=[${outcomesOfDelivery()}]`);
+    expect(outcomesOfDelivery()).toEqual(["refused:principal_changed"]);
+    expect(await deliveriesOf(orderId)).toEqual([]);
+  });
+
+  it("committed as A, the response held, then B is shown: B's screen is not navigated, closed or announced to; the delivery is A's", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    holdResponseNext.add("delivery");
+    await submitDeliverySheet();
+    await waitFor(() => outcomesOfDelivery()[0] === "ok", "A's delivery committed");
+    await switchTo({ user: USER_B });
+    await readsSettled();
+    const shownBefore = text();
+    await releaseResponse();
+    await readsSettled();
+    console.log(
+      `[evidence] delivery late success, A→B: navigations=${JSON.stringify(deliveryNavigations())} B.writes=[${writesInto(USER_B, ORG_A).join(" ")}]`,
+    );
+    expect(deliveryNavigations()).toEqual([]);
+    expect(text()).toBe(shownBefore);
+    expect(writesInto(USER_B, ORG_A)).toEqual([]);
+    expect(await deliveriesOf(orderId)).toEqual([
+      { by: "A", org: "ORG_A", courier: PRIVATE_COURIER, tracking: PRIVATE_TRACKING },
+    ]);
+  });
+
+  it("the screen remounts as B before the response: no draft, no navigation", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    holdResponseNext.add("delivery");
+    await submitDeliverySheet();
+    await waitFor(() => outcomesOfDelivery()[0] === "ok", "A's delivery committed");
+    await remountAs({ user: USER_B });
+    expect(deliveryDraftOnScreen()).toEqual(noDeliveryDraft);
+    await releaseResponse();
+    expect(deliveryNavigations()).toEqual([]);
+    expect(deliveryDraftOnScreen()).toEqual(noDeliveryDraft);
+    expect((await deliveriesOf(orderId)).map((d) => d.by)).toEqual(["A"]);
+  });
+
+  it("A → B → A: A's draft does not come back; A arranges the delivery again from an empty sheet", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    expect(dialog()).toBeNull();
+    expect(deliveryDraftOnScreen()).toEqual(noDeliveryDraft);
+    await openArrangeDelivery();
+    expect(deliveryDraftOnScreen()).toEqual(noDeliveryDraft);
+  });
+
+  it("A stays signed in: Arrange delivery creates A's delivery once, closes the sheet and opens it", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typeDeliveryDraft();
+    await submitDeliverySheet();
+    await waitFor(() => deliveryNavigations().length === 1, "the new delivery opened");
+    expect(outcomesOfDelivery()).toEqual(["ok"]);
+    expect(sent.find((s) => s.fn === "delivery")!.data.expectedPrincipal).toEqual({
+      userId: USER_A,
+      organizationId: ORG_A,
+    });
+    expect(dialog()).toBeNull();
+    expect(await deliveriesOf(orderId)).toEqual([
+      { by: "A", org: "ORG_A", courier: PRIVATE_COURIER, tracking: PRIVATE_TRACKING },
+    ]);
   });
 });
 
