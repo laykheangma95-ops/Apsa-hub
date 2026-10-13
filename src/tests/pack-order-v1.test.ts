@@ -1229,7 +1229,12 @@ describe("packed state", () => {
     const { cancelDelivery } = await import("../server/deliveries/service");
     await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
     // Through the real cancel path: the RPC also moves the order to unfulfilled.
-    await cancelDelivery(mockCtx(ORG_A, HANDOFF_PERMS), "delivery-1", "Customer cancelled");
+    await cancelDelivery(
+      mockCtx(ORG_A, HANDOFF_PERMS),
+      "delivery-1",
+      "Customer cancelled",
+      principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
+    );
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect(mockOrders[0].fulfillment_status).toBe("unfulfilled");
     expect((await getOrderPackState(mockCtx(ORG_A), ORDER_ID))?.packed).toBe(true);
@@ -1406,10 +1411,10 @@ describe("operational history marker cannot be forged through generic APIs", () 
     const ctx = mockCtx(ORG_A, GENERIC_PERMS);
     for (const reason of FORGED) {
       for (const call of [
-        () => deliveries.startPreparingDelivery(ctx, "delivery-1", reason),
-        () => deliveries.markDeliveryReady(ctx, "delivery-1", reason),
-        () => deliveries.markDeliveryFailed(ctx, "delivery-1", reason),
-        () => deliveries.cancelDelivery(ctx, "delivery-1", reason),
+        () => deliveries.startPreparingDelivery(ctx, "delivery-1", reason, principalOf(ctx)),
+        () => deliveries.markDeliveryReady(ctx, "delivery-1", reason, principalOf(ctx)),
+        () => deliveries.markDeliveryFailed(ctx, "delivery-1", reason, principalOf(ctx)),
+        () => deliveries.cancelDelivery(ctx, "delivery-1", reason, principalOf(ctx)),
       ]) {
         const error = await call().catch((e: unknown) => e as { statusCode?: number });
         expect(error).toMatchObject({ statusCode: 400 });
@@ -1437,7 +1442,8 @@ describe("operational history marker cannot be forged through generic APIs", () 
           PACK_ORDER_PACKED_REASON_CODE,
           principalOf(reader),
         ),
-      () => markDeliveryReady(reader, "delivery-1", PACK_ORDER_PACKED_REASON_CODE),
+      () =>
+        markDeliveryReady(reader, "delivery-1", PACK_ORDER_PACKED_REASON_CODE, principalOf(reader)),
       () => markOrderPacked(reader, ORDER_ID, COMPLETE_LINES),
     ]) {
       const error = await call().catch((e: unknown) => e as { statusCode?: number });
@@ -2085,11 +2091,11 @@ describe("generic delivery Ready transition enforces the current packed state", 
       providerName: "Local courier",
     } as any);
     expect(replacement.status).toBe("pending");
-    await deliveries.startPreparingDelivery(ctx, replacement.id, null);
+    await deliveries.startPreparingDelivery(ctx, replacement.id, null, principalOf(ctx));
     expect(mockDeliveries[1].status).toBe("preparing");
 
     const refused = await deliveries
-      .markDeliveryReady(ctx, replacement.id, null)
+      .markDeliveryReady(ctx, replacement.id, null, principalOf(ctx))
       .catch((e: unknown) => e as { statusCode?: number; message?: string });
     expect(refused).toMatchObject({ statusCode: 409 });
     expect((refused as { message: string }).message).toContain("Pack Order");
@@ -2117,9 +2123,12 @@ describe("generic delivery Ready transition enforces the current packed state", 
     rpcResponder = statefulRpc;
     const { markDeliveryReady } = await import("../server/deliveries/service");
     const { confirmHandoff } = await import("../server/handoff/service");
-    const error = await markDeliveryReady(mockCtx(ORG_A, HANDOFF_PERMS), "delivery-1", null).catch(
-      (e: unknown) => e as { statusCode?: number },
-    );
+    const error = await markDeliveryReady(
+      mockCtx(ORG_A, HANDOFF_PERMS),
+      "delivery-1",
+      null,
+      principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
+    ).catch((e: unknown) => e as { statusCode?: number });
     expect(error).toMatchObject({ statusCode: 409 });
     expect(mockDeliveries[0].status).toBe("preparing");
     expect(mockDeliveryHistory).toHaveLength(0);
@@ -2138,7 +2147,7 @@ describe("generic delivery Ready transition enforces the current packed state", 
       { id: "delivery-1", organization_id: ORG_A, order_id: ORDER_ID, status: "preparing" },
     ];
     const { markDeliveryReady } = await import("../server/deliveries/service");
-    await markDeliveryReady(ctx, "delivery-1", null);
+    await markDeliveryReady(ctx, "delivery-1", null, principalOf(ctx));
     expect(mockDeliveries[0].status).toBe("ready");
   });
 });

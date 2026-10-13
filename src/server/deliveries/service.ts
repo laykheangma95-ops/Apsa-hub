@@ -264,6 +264,13 @@ function transitionFailure(status: string, current?: string): Error {
   }
 }
 
+/**
+ * The one writer of a delivery transition. Reached only from the six exported
+ * transitions below, each of which has already refused a request started as
+ * another member or organization (CORRECTIONS.md, CORRECTION-004, delivery
+ * transition addendum) — so the permission, every read and every write here
+ * are this request's own principal's, and the history row is ctx's.
+ */
 async function transition(
   ctx: AuthorizationContext,
   deliveryId: string,
@@ -296,44 +303,77 @@ async function transition(
   return requireDetail(ctx.organizationId, deliveryId);
 }
 
-export const startPreparingDelivery = (
+/*
+ * Each transition is refused before the permission check, the delivery read
+ * and every write (status, delivery history, order fulfillment and its
+ * history) when the request was started as another member or organization —
+ * 428 principal_required / 409 principal_changed, nothing written.
+ */
+
+export async function startPreparingDelivery(
   ctx: AuthorizationContext,
   deliveryId: string,
-  reason?: string | null,
-): Promise<DeliveryDetail> => transition(ctx, deliveryId, "preparing", reason);
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
+): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
+  return transition(ctx, deliveryId, "preparing", reason);
+}
 
-export const markDeliveryReady = (
+export async function markDeliveryReady(
   ctx: AuthorizationContext,
   deliveryId: string,
-  reason?: string | null,
-): Promise<DeliveryDetail> => transition(ctx, deliveryId, "ready", reason);
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
+): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
+  return transition(ctx, deliveryId, "ready", reason);
+}
 
-export const markDeliveryInTransit = (
+export async function markDeliveryInTransit(
   ctx: AuthorizationContext,
   deliveryId: string,
-  reason?: string | null,
-): Promise<DeliveryDetail> => transition(ctx, deliveryId, "in_transit", reason);
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
+): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
+  return transition(ctx, deliveryId, "in_transit", reason);
+}
 
-export const markDeliveryDelivered = (
+export async function markDeliveryDelivered(
   ctx: AuthorizationContext,
   deliveryId: string,
-  reason?: string | null,
-): Promise<DeliveryDetail> => transition(ctx, deliveryId, "delivered", reason);
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
+): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
+  return transition(ctx, deliveryId, "delivered", reason);
+}
 
-export function markDeliveryFailed(
+export async function markDeliveryFailed(
   ctx: AuthorizationContext,
   deliveryId: string,
   reason: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   if (!reason.trim()) throw badRequest("A failure reason is required");
   return transition(ctx, deliveryId, "failed", reason);
 }
 
-export function cancelDelivery(
+export async function cancelDelivery(
   ctx: AuthorizationContext,
   deliveryId: string,
   reason: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<DeliveryDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   if (!reason.trim()) throw badRequest("A cancellation reason is required");
   return transition(ctx, deliveryId, "cancelled", reason);
 }

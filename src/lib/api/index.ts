@@ -1448,42 +1448,77 @@ export async function createRealDelivery(
   return mapDeliveryDetailToUi(detail);
 }
 
-export async function startPreparingRealDelivery(deliveryId: string): Promise<RealDeliveryDetail> {
+/*
+ * The six delivery transitions. Each REQUIRES the member + organization the
+ * transition was started as — a refuse-only precondition (CORRECTION-004,
+ * delivery transition addendum): the server refuses it, writing nothing, if
+ * anyone else is signed in when it handles the request. A parameter, so it is
+ * the caller's value at the tap — never whoever is signed in once the lazily
+ * imported module has loaded.
+ */
+
+export async function startPreparingRealDelivery(
+  deliveryId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealDeliveryDetail> {
   const { startPreparingDeliveryFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await startPreparingDeliveryFn({ data: { deliveryId } }));
+  return mapDeliveryDetailToUi(
+    await startPreparingDeliveryFn({ data: { deliveryId, expectedPrincipal: principal } }),
+  );
 }
 
-export async function markRealDeliveryReady(deliveryId: string): Promise<RealDeliveryDetail> {
+export async function markRealDeliveryReady(
+  deliveryId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealDeliveryDetail> {
   const { markDeliveryReadyFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await markDeliveryReadyFn({ data: { deliveryId } }));
+  return mapDeliveryDetailToUi(
+    await markDeliveryReadyFn({ data: { deliveryId, expectedPrincipal: principal } }),
+  );
 }
 
-export async function markRealDeliveryInTransit(deliveryId: string): Promise<RealDeliveryDetail> {
+export async function markRealDeliveryInTransit(
+  deliveryId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealDeliveryDetail> {
   const { markDeliveryInTransitFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await markDeliveryInTransitFn({ data: { deliveryId } }));
+  return mapDeliveryDetailToUi(
+    await markDeliveryInTransitFn({ data: { deliveryId, expectedPrincipal: principal } }),
+  );
 }
 
 /** Terminal success. Never touches order payment — COD settlement is a separate Payment-domain decision. */
-export async function markRealDeliveryDelivered(deliveryId: string): Promise<RealDeliveryDetail> {
+export async function markRealDeliveryDelivered(
+  deliveryId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealDeliveryDetail> {
   const { markDeliveryDeliveredFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await markDeliveryDeliveredFn({ data: { deliveryId } }));
+  return mapDeliveryDetailToUi(
+    await markDeliveryDeliveredFn({ data: { deliveryId, expectedPrincipal: principal } }),
+  );
 }
 
 export async function markRealDeliveryFailed(
   deliveryId: string,
+  principal: InitiatingPrincipal,
   reason: string,
 ): Promise<RealDeliveryDetail> {
   const { markDeliveryFailedFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await markDeliveryFailedFn({ data: { deliveryId, reason } }));
+  return mapDeliveryDetailToUi(
+    await markDeliveryFailedFn({ data: { deliveryId, reason, expectedPrincipal: principal } }),
+  );
 }
 
 /** Cancellation: server drives the order's fulfillment back to unfulfilled; a replacement delivery can be created afterwards. */
 export async function cancelRealDelivery(
   deliveryId: string,
+  principal: InitiatingPrincipal,
   reason: string,
 ): Promise<RealDeliveryDetail> {
   const { cancelDeliveryFn } = await import("@/api/deliveries");
-  return mapDeliveryDetailToUi(await cancelDeliveryFn({ data: { deliveryId, reason } }));
+  return mapDeliveryDetailToUi(
+    await cancelDeliveryFn({ data: { deliveryId, reason, expectedPrincipal: principal } }),
+  );
 }
 
 export interface DeliveryDetail {

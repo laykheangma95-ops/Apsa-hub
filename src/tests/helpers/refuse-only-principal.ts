@@ -30,7 +30,10 @@ export const SANCTIONED_ORDER_FN_SCHEMA = `const expectedPrincipalSchema = z
   .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
   .strict();`;
 export const SANCTIONED_PAYMENT_FN_SCHEMA = SANCTIONED_ORDER_FN_SCHEMA;
-/** src/api/deliveries.ts — createDeliveryFn's validator (CORRECTION-004, delivery addendum). */
+/**
+ * src/api/deliveries.ts — the one schema delivery creation and the six delivery
+ * transitions share (CORRECTION-004, delivery addenda).
+ */
 export const SANCTIONED_DELIVERY_FN_SCHEMA = SANCTIONED_ORDER_FN_SCHEMA;
 
 /** src/lib/api/index.ts — CreateRealOrderInput (required: no caller can omit it). */

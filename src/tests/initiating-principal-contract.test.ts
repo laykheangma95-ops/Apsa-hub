@@ -17,6 +17,11 @@
  *   refund                   refundPaymentFn → refundPayment (Payment detail)
  *   reversal                 reversePaymentFn → reversePayment (Payment detail)
  *   correction               correctPaymentFn → correctPayment
+ *   delivery creation        createDeliveryFn → createDelivery (Order detail → Arrange delivery)
+ *   delivery transitions     startPreparingDeliveryFn, markDeliveryReadyFn,
+ *                            markDeliveryInTransitFn, markDeliveryDeliveredFn,
+ *                            markDeliveryFailedFn, cancelDeliveryFn → the matching
+ *                            service (Delivery detail)
  *
  * The server derives who is acting only when it HANDLES a request. Each of these
  * REQUIRES the member + organization it was STARTED as, and the server refuses —
@@ -24,7 +29,8 @@
  * malformed, or different from its own derivation. Behaviour, against the
  * database and the real server functions: financial-mutation-integrity,
  * payment-action-principal-mounted, order-mutation-principal-mounted,
- * order-entry-principal-mounted and pos-checkout-replay-mounted. This file
+ * order-entry-principal-mounted, pos-checkout-replay-mounted and
+ * delivery-transition-principal-mounted. This file
  * stops the wiring coming apart silently: a validator that makes the field
  * optional again, a handler that stops forwarding it (or forwards it only when
  * present), a service that checks it after a write or reads it for anything
@@ -32,7 +38,7 @@
  * passes one, or a new mutation in these files that skips it.
  *
  * Not covered (CORRECTION-004 lists them): mutations outside these files —
- * deliveries, packing, handoff, inventory, returns, customers, team, products,
+ * packing, handoff, inventory, returns, customers, team, products,
  * conversations — and the deprecated transitionOrderPaymentFn, which always
  * refuses and writes nothing.
  */
@@ -117,6 +123,7 @@ describe("the refuse-only check", () => {
       "src/server/orders/service.ts",
       "src/server/payments/service.ts",
       "src/server/parcels/service.ts",
+      "src/server/deliveries/service.ts",
     ]) {
       const source = read(file);
       expect(source).toContain('from "@/server/auth/expected-principal"');
@@ -294,6 +301,29 @@ SERVICE_CASES.push({
   writesAs: /repo\.createDelivery\(ctx\.organizationId, ctx\.userId,/,
 });
 
+// Delivery transitions (CORRECTION-004, delivery transition addendum): each is
+// checked, then handed to the one private writer, `transition` (pinned below).
+const DELIVERY_TRANSITIONS: [name: string, to: string, reasonRequired: boolean][] = [
+  ["startPreparingDelivery", "preparing", false],
+  ["markDeliveryReady", "ready", false],
+  ["markDeliveryInTransit", "in_transit", false],
+  ["markDeliveryDelivered", "delivered", false],
+  ["markDeliveryFailed", "failed", true],
+  ["cancelDelivery", "cancelled", true],
+];
+for (const [name, to, reasonRequired] of DELIVERY_TRANSITIONS) {
+  SERVICE_CASES.push({
+    name,
+    file: "src/server/deliveries/service.ts",
+    check: "assertExpectedPrincipal(ctx, expectedPrincipal);",
+    later: [
+      ...(reasonRequired ? ["if (!reason.trim())"] : []),
+      "return transition(ctx, deliveryId,",
+    ],
+    writesAs: new RegExp(`return transition\\(ctx, deliveryId, "${to}", reason\\);`),
+  });
+}
+
 describe("each protected service checks it before anything else and records only ctx", () => {
   for (const c of SERVICE_CASES) {
     const body = between(read(c.file), `export async function ${c.name}(`, "\n}\n");
@@ -348,6 +378,25 @@ describe("each protected service checks it before anything else and records only
       "expectedPrincipal: ExpectedPrincipal;",
     );
   });
+
+  it("delivery transitions: one private writer, reached only from the six checked transitions, writing as ctx", () => {
+    const source = read("src/server/deliveries/service.ts");
+    // Never exported: no caller can reach the write without a checked entry point.
+    expect(source).not.toMatch(/export (async )?function transition\(/);
+    expect(source).not.toMatch(/export \{[^}]*\btransition\b/);
+    const writer = between(source, "async function transition(", "\n}\n");
+    expect(writer).toContain('ctx.require("delivery.update")');
+    expect(writer).toMatch(
+      /repo\.transitionDelivery\(\s*ctx\.organizationId,\s*deliveryId,\s*delivery\.status,\s*to,\s*ctx\.userId,/,
+    );
+    expect(writer).not.toMatch(/expectedPrincipal/);
+    // Called exactly once from each of the six, and from nowhere else.
+    expect(count(source, "transition(ctx, deliveryId,")).toBe(DELIVERY_TRANSITIONS.length);
+    for (const [name] of DELIVERY_TRANSITIONS) {
+      const body = between(source, `export async function ${name}(`, "\n}\n");
+      expect(count(body, "transition(ctx, deliveryId,")).toBe(1);
+    }
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -377,20 +426,23 @@ const PROTECTED_FNS: [string, string[]][] = [
     ],
   ],
   ["src/api/parcels.ts", ["createParcelFn"]],
-  ["src/api/deliveries.ts", ["createDeliveryFn"]],
+  [
+    "src/api/deliveries.ts",
+    [
+      "createDeliveryFn",
+      "startPreparingDeliveryFn",
+      "markDeliveryReadyFn",
+      "markDeliveryInTransitFn",
+      "markDeliveryDeliveredFn",
+      "markDeliveryFailedFn",
+      "cancelDeliveryFn",
+    ],
+  ],
 ];
 /** POST functions in those files that are deliberately outside the contract. */
 const EXEMPT_POST_FNS: Record<string, string> = {
   // Always refuses (409 after the permission check) and writes nothing.
   transitionOrderPaymentFn: "deprecated; never mutates",
-  // CORRECTION-004's delivery addendum covers delivery CREATION only; these
-  // transitions stay on its "Not protected" list.
-  startPreparingDeliveryFn: "delivery transition; not covered by CORRECTION-004",
-  markDeliveryReadyFn: "delivery transition; not covered by CORRECTION-004",
-  markDeliveryInTransitFn: "delivery transition; not covered by CORRECTION-004",
-  markDeliveryDeliveredFn: "delivery transition; not covered by CORRECTION-004",
-  markDeliveryFailedFn: "delivery transition; not covered by CORRECTION-004",
-  cancelDeliveryFn: "delivery transition; not covered by CORRECTION-004",
 };
 
 describe("each protected server function requires it through its file's one schema and forwards it", () => {
@@ -446,6 +498,12 @@ const ADAPTERS = [
   "refundRealPayment",
   "reverseRealPayment",
   "createRealDelivery",
+  "startPreparingRealDelivery",
+  "markRealDeliveryReady",
+  "markRealDeliveryInTransit",
+  "markRealDeliveryDelivered",
+  "markRealDeliveryFailed",
+  "cancelRealDelivery",
 ];
 
 describe("each client adapter requires the principal and sends it", () => {
@@ -578,6 +636,43 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(count(route, "startedAs: memberPrincipal")).toBe(3);
   });
 
+  it("Delivery detail: the route's principal and the delivery shown, handed to each transition as a variable at the tap", () => {
+    const route = read("src/routes/app.deliveries.$id.tsx");
+    expect(count(route, "const principal = { userId, organizationId: routeOrganizationId };")).toBe(
+      1,
+    );
+    expect(route).toContain(
+      "const start: TransitionStart = { deliveryId: id, startedAs: principal };",
+    );
+    // Each transition is sent for the delivery and principal of ITS tap.
+    for (const call of [
+      "startPreparingRealDelivery(deliveryId, startedAs)",
+      "markRealDeliveryReady(deliveryId, startedAs)",
+      "markRealDeliveryInTransit(deliveryId, startedAs)",
+      "markRealDeliveryDelivered(deliveryId, startedAs)",
+      "markRealDeliveryFailed(deliveryId, startedAs, reason)",
+      "cancelRealDelivery(deliveryId, startedAs, reason)",
+    ]) {
+      expect(route).toContain(call);
+    }
+    for (const tap of [
+      "startPreparingMutation.mutate(start)",
+      "markReadyMutation.mutate(start)",
+      "markInTransitMutation.mutate(start)",
+      "markDeliveredMutation.mutate(start)",
+      "markFailedMutation.mutate({ ...start, reason })",
+      "cancelMutation.mutate({ ...start, reason })",
+    ]) {
+      expect(route).toContain(tap);
+    }
+    // Never the id of whatever delivery is shown when the request is made.
+    expect(route).not.toMatch(/RealDelivery(?:Ready|InTransit|Delivered|Failed)?\(id\b/);
+    expect(route).not.toMatch(/startPreparingRealDelivery\(id\b|cancelRealDelivery\(id\b/);
+    // A typed reason is bound to the member, organization and delivery.
+    expect(route).toContain("key={`fail:${transitionScope}`}");
+    expect(route).toContain("key={`cancel:${transitionScope}`}");
+  });
+
   it("APSA Parcel recovery: captured at the tap, as a mutation variable", () => {
     const action = read("src/components/fulfillment/ParcelRecoveryAction.tsx");
     expect(action).toContain("recoverRealOrderParcel(orderId, startedAs)");
@@ -669,6 +764,12 @@ describe("no call site anywhere in the app omits it", () => {
       "src/routes/app.payments.$id.tsx: reverseRealPayment",
       "src/components/fulfillment/ParcelRecoveryAction.tsx: recoverRealOrderParcel",
       "src/components/orders/ShippingDestinationSheet.tsx: updateOrderShipping",
+      "src/routes/app.deliveries.$id.tsx: startPreparingRealDelivery",
+      "src/routes/app.deliveries.$id.tsx: markRealDeliveryReady",
+      "src/routes/app.deliveries.$id.tsx: markRealDeliveryInTransit",
+      "src/routes/app.deliveries.$id.tsx: markRealDeliveryDelivered",
+      "src/routes/app.deliveries.$id.tsx: markRealDeliveryFailed",
+      "src/routes/app.deliveries.$id.tsx: cancelRealDelivery",
     ]) {
       expect(calls.map((c) => c.replace(/\\/g, "/"))).toContain(site);
     }

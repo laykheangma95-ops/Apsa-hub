@@ -250,7 +250,7 @@ const cases: Case[] = [
     fn: markDeliveryInTransitFn,
     service: "markDeliveryInTransit",
     permission: "deliveries.update",
-    valid: { deliveryId: DELIVERY, reason: "picked up" },
+    valid: { deliveryId: DELIVERY, reason: "picked up", expectedPrincipal: STARTED_AS },
     invalid: { deliveryId: "x" },
     sensitive: [DELIVERY, "picked up"],
   },
