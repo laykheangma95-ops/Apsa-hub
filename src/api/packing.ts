@@ -35,6 +35,16 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
+// The member + organization the client STARTED Mark Packed or Retry delivery
+// ready as (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum). A
+// refuse-only precondition the service compares with the principal it derives
+// from the session — never authorization, never a tenant selector, never an
+// actor (src/server/auth/expected-principal.ts). REQUIRED: a request without it
+// is refused here, before the handler runs.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 // ── getPackRequirementsFn ────────────────────────────────────────────────────
 
 export const getPackRequirementsFn = createServerFn()
@@ -97,13 +107,15 @@ export const markOrderPackedFn = createServerFn({ method: "POST" })
           )
           .min(1)
           .max(500),
+        // Refuse-only: the principal this Mark Packed was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markOrderPacked } = await import("@/server/packing/service");
-    return markOrderPacked(authCtx, data.orderId, data.packedLines);
+    return markOrderPacked(authCtx, data.orderId, data.packedLines, data.expectedPrincipal);
   });
 
 // ── getOrderPackStateFn ──────────────────────────────────────────────────────
@@ -122,10 +134,16 @@ export const getOrderPackStateFn = createServerFn()
 
 export const retryPackedDeliveryReadyFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
-    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        // Refuse-only: the principal this retry was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { retryPackedDeliveryReady } = await import("@/server/packing/service");
-    return retryPackedDeliveryReady(authCtx, data.orderId);
+    return retryPackedDeliveryReady(authCtx, data.orderId, data.expectedPrincipal);
   });

@@ -108,6 +108,8 @@ let mockDeliveries: any[] = [];
 let mockOrderHistory: any[] = [];
 let mockDeliveryHistory: any[] = [];
 let rpcCalls: { fn: string; args: any }[] = [];
+/** Every table read, in order (the record of reads; rpcCalls is the record of writes). */
+let tableReads: string[] = [];
 let rpcResponder: (fn: string, args: any) => any = () => ({ status: "success" });
 
 function makeChain(rows: any[]) {
@@ -169,6 +171,7 @@ function makeMockDb() {
   };
   return {
     from(table: string) {
+      tableReads.push(table);
       return { select: () => makeChain(tables[table]?.() ?? []) };
     },
     rpc(fn: string, args: any) {
@@ -339,6 +342,7 @@ beforeEach(async () => {
   mockOrderHistory = [];
   mockDeliveryHistory = [];
   rpcCalls = [];
+  tableReads = [];
   rpcResponder = () => ({ status: "success" });
   const db = makeMockDb();
   restores.push(
@@ -601,7 +605,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedOrder();
     seedDelivery("pending");
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result).toEqual({ kind: "packed", deliveryId: "delivery-1" });
     expect(rpcCalls.map((c) => [c.args.p_expected_from, c.args.p_to])).toEqual([
       ["pending", "preparing"],
@@ -619,7 +628,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedOrder();
     seedDelivery("preparing");
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result.kind).toBe("packed");
     expect(rpcCalls).toHaveLength(1);
   });
@@ -628,7 +642,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedOrder();
     seedDelivery("ready");
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result.kind).toBe("already_packed");
     expect(rpcCalls).toHaveLength(0);
     expect(isPackedDeliveryStatus("ready")).toBe(true);
@@ -641,7 +660,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedDelivery("preparing");
     rpcResponder = () => ({ status: "stale", current: "ready" });
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result.kind).toBe("already_packed");
   });
 
@@ -653,10 +677,19 @@ describe("markOrderPacked — server re-validates completion", () => {
       { orderItemId: "item-shirt", quantity: 3 },
       { orderItemId: "item-mug", quantity: 1 },
     ];
-    expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, partial)).kind).toBe("incomplete");
-    expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES.slice(0, 1))).kind).toBe(
-      "incomplete",
-    );
+    expect(
+      (await markOrderPacked(mockCtx(ORG_A), ORDER_ID, partial, principalOf(mockCtx(ORG_A)))).kind,
+    ).toBe("incomplete");
+    expect(
+      (
+        await markOrderPacked(
+          mockCtx(ORG_A),
+          ORDER_ID,
+          COMPLETE_LINES.slice(0, 1),
+          principalOf(mockCtx(ORG_A)),
+        )
+      ).kind,
+    ).toBe("incomplete");
     expect(rpcCalls).toHaveLength(0);
   });
 
@@ -673,7 +706,9 @@ describe("markOrderPacked — server re-validates completion", () => {
       [...COMPLETE_LINES, { orderItemId: "item-other-order", quantity: 1 }],
     ];
     for (const lines of cases) {
-      expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, lines)).kind).toBe("incomplete");
+      expect(
+        (await markOrderPacked(mockCtx(ORG_A), ORDER_ID, lines, principalOf(mockCtx(ORG_A)))).kind,
+      ).toBe("incomplete");
     }
     expect(rpcCalls).toHaveLength(0);
   });
@@ -683,9 +718,10 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedDelivery("pending");
     mockParcels = [];
     const { markOrderPacked } = await import("../server/packing/service");
-    expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES)).kind).toBe(
-      "no_parcel",
-    );
+    expect(
+      (await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A))))
+        .kind,
+    ).toBe("no_parcel");
   });
 
   it("requires delivery.handoff", async () => {
@@ -693,7 +729,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedDelivery("pending");
     const { markOrderPacked } = await import("../server/packing/service");
     await expect(
-      markOrderPacked(mockCtx(ORG_A, ["orders.read"]), ORDER_ID, COMPLETE_LINES),
+      markOrderPacked(
+        mockCtx(ORG_A, ["orders.read"]),
+        ORDER_ID,
+        COMPLETE_LINES,
+        principalOf(mockCtx(ORG_A, ["orders.read"])),
+      ),
     ).rejects.toThrow("delivery.handoff");
     expect(rpcCalls).toHaveLength(0);
   });
@@ -702,7 +743,12 @@ describe("markOrderPacked — server re-validates completion", () => {
     seedOrder(ORG_B);
     seedDelivery("pending", ORG_B);
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result.kind).toBe("invalid_order");
     expect(rpcCalls).toHaveLength(0);
   });
@@ -1009,7 +1055,12 @@ describe("pack without delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result).toEqual({ kind: "packed", deliveryId: null });
     // Fulfillment state only — no delivery created, assigned, started or handed off.
     expect(mockDeliveries).toHaveLength(0);
@@ -1035,7 +1086,7 @@ describe("pack without delivery", () => {
     expect(before?.deliveryStatus).toBeNull();
     expect(before?.packed).toBe(false);
 
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
 
     const after = await getPackRequirements(mockCtx(ORG_A), ORDER_ID);
     expect(after?.packed).toBe(true);
@@ -1049,9 +1100,14 @@ describe("pack without delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
     rpcCalls = [];
-    const again = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const again = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(again).toEqual({ kind: "already_packed", deliveryId: null });
     expect(rpcCalls).toHaveLength(0);
   });
@@ -1061,7 +1117,12 @@ describe("pack without delivery", () => {
     mockOrders[0].fulfillment_status = "processing";
     rpcResponder = statefulRpc;
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result.kind).toBe("packed");
     expect(mockOrders[0].fulfillment_status).toBe("processing");
     expect(mockOrderHistory.every((h) => h.reason === PACK_ORDER_PACKED_REASON_CODE)).toBe(true);
@@ -1073,7 +1134,12 @@ describe("pack without delivery", () => {
     seedOrder();
     rpcResponder = () => ({ status: "stale", current: "cancelled" });
     const { markOrderPacked } = await import("../server/packing/service");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result).toEqual({ kind: "transition_failed", reason: "stale" });
   });
 
@@ -1081,13 +1147,21 @@ describe("pack without delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES.slice(0, 1))).kind).toBe(
-      "incomplete",
-    );
+    expect(
+      (
+        await markOrderPacked(
+          mockCtx(ORG_A),
+          ORDER_ID,
+          COMPLETE_LINES.slice(0, 1),
+          principalOf(mockCtx(ORG_A)),
+        )
+      ).kind,
+    ).toBe("incomplete");
     mockParcels = [];
-    expect((await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES)).kind).toBe(
-      "no_parcel",
-    );
+    expect(
+      (await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A))))
+        .kind,
+    ).toBe("no_parcel");
     expect(rpcCalls).toHaveLength(0);
   });
 
@@ -1111,7 +1185,7 @@ describe("pack then arrange delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
 
     const { createDelivery } = await import("../server/deliveries/service");
     const detail = await createDelivery(mockCtx(ORG_A, HANDOFF_PERMS), {
@@ -1163,10 +1237,15 @@ describe("pack then arrange delivery", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
     // Simulate a delivery arranged without the best-effort readying.
     seedDelivery("pending");
-    const result = await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    const result = await markOrderPacked(
+      mockCtx(ORG_A),
+      ORDER_ID,
+      COMPLETE_LINES,
+      principalOf(mockCtx(ORG_A)),
+    );
     expect(result).toEqual({ kind: "already_packed", deliveryId: "delivery-1" });
     expect(mockDeliveries[0].status).toBe("ready");
   });
@@ -1182,16 +1261,20 @@ describe("pack then courier handoff", () => {
     const { confirmHandoff } = await import("../server/handoff/service");
 
     // Courier Handoff still requires a valid delivery.
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe(
+      "no_active_delivery",
+    );
 
-    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
+    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).kind).toBe(
+      "packed",
+    );
     await createDelivery(ctx, {
       expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
       providerName: "Local courier",
     } as any);
 
-    const handoff = await confirmHandoff(ctx, PARCEL_CODE);
+    const handoff = await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx));
     expect(handoff.kind).toBe("success");
     expect(mockDeliveries[0].status).toBe("in_transit");
   });
@@ -1201,7 +1284,11 @@ describe("pack then courier handoff", () => {
     seedDelivery("pending");
     rpcResponder = statefulRpc;
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A, HANDOFF_PERMS), PARCEL_CODE);
+    const result = await confirmHandoff(
+      mockCtx(ORG_A, HANDOFF_PERMS),
+      PARCEL_CODE,
+      principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
+    );
     expect(result).toEqual({ kind: "delivery_not_ready", currentStatus: "pending" });
   });
 
@@ -1212,11 +1299,11 @@ describe("pack then courier handoff", () => {
     const ctx = mockCtx(ORG_A, HANDOFF_PERMS);
     const { markOrderPacked } = await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: "delivery-1",
     });
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("success");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe("success");
   });
 });
 
@@ -1227,7 +1314,7 @@ describe("packed state", () => {
     rpcResponder = statefulRpc;
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
     // Through the real cancel path: the RPC also moves the order to unfulfilled.
     await cancelDelivery(
       mockCtx(ORG_A, HANDOFF_PERMS),
@@ -1444,7 +1531,7 @@ describe("operational history marker cannot be forged through generic APIs", () 
         ),
       () =>
         markDeliveryReady(reader, "delivery-1", PACK_ORDER_PACKED_REASON_CODE, principalOf(reader)),
-      () => markOrderPacked(reader, ORDER_ID, COMPLETE_LINES),
+      () => markOrderPacked(reader, ORDER_ID, COMPLETE_LINES, principalOf(reader)),
     ]) {
       const error = await call().catch((e: unknown) => e as { statusCode?: number });
       expect(error).toMatchObject({ statusCode: 403 });
@@ -1475,7 +1562,9 @@ describe("operational history marker cannot be forged through generic APIs", () 
     seedDelivery("pending");
     rpcResponder = statefulRpc;
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
-    expect(await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(
+      await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "packed",
       deliveryId: "delivery-1",
     });
@@ -1495,7 +1584,7 @@ describe("retry delivery ready after packing", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
     // Arrange Delivery's best-effort readying failed: delivery left pending.
     const failing = rpcResponder;
     rpcResponder = (fn, args) =>
@@ -1515,7 +1604,9 @@ describe("retry delivery ready after packing", () => {
     const orderHistoryBefore = mockOrderHistory.length;
     rpcCalls = [];
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "ready",
       deliveryId: "delivery-1",
     });
@@ -1529,10 +1620,12 @@ describe("retry delivery ready after packing", () => {
   it("is idempotent: a second retry writes nothing and reports already_ready", async () => {
     await packThenArrangeWithFailedReadying();
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID);
+    await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A)));
     const historyAfterFirst = mockDeliveryHistory.length;
     rpcCalls = [];
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "already_ready",
       deliveryId: "delivery-1",
     });
@@ -1545,7 +1638,9 @@ describe("retry delivery ready after packing", () => {
     mockDeliveries[0].status = "preparing";
     const historyBefore = mockDeliveryHistory.length;
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    expect((await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).kind).toBe("ready");
+    expect(
+      (await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A)))).kind,
+    ).toBe("ready");
     expect(
       mockDeliveryHistory.slice(historyBefore).map((h) => [h.from_status, h.to_status]),
     ).toEqual([["preparing", "ready"]]);
@@ -1555,7 +1650,9 @@ describe("retry delivery ready after packing", () => {
     await packThenArrangeWithFailedReadying();
     rpcResponder = () => ({ status: "already_ready", current: "ready" });
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "already_ready",
       deliveryId: "delivery-1",
     });
@@ -1565,7 +1662,9 @@ describe("retry delivery ready after packing", () => {
     await packThenArrangeWithFailedReadying();
     rpcResponder = () => ({ status: "invalid_transition" });
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "transition_failed",
       reason: "invalid_transition",
     });
@@ -1575,27 +1674,43 @@ describe("retry delivery ready after packing", () => {
     await packThenArrangeWithFailedReadying();
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
-    await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID);
-    expect((await confirmHandoff(mockCtx(ORG_A, HANDOFF_PERMS), PARCEL_CODE)).kind).toBe("success");
+    await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A)));
+    expect(
+      (
+        await confirmHandoff(
+          mockCtx(ORG_A, HANDOFF_PERMS),
+          PARCEL_CODE,
+          principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
+        )
+      ).kind,
+    ).toBe("success");
   });
 
   it("refuses an unpacked order, a missing delivery, another org, and missing grants", async () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "no_delivery",
     });
     seedDelivery("pending");
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "not_packed",
     });
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_B), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_B), ORDER_ID, principalOf(mockCtx(ORG_B))),
+    ).toEqual({
       kind: "invalid_order",
     });
-    const error = await retryPackedDeliveryReady(mockCtx(ORG_A, ["orders.read"]), ORDER_ID).catch(
-      (e: unknown) => e as { statusCode?: number },
-    );
+    const error = await retryPackedDeliveryReady(
+      mockCtx(ORG_A, ["orders.read"]),
+      ORDER_ID,
+      principalOf(mockCtx(ORG_A, ["orders.read"])),
+    ).catch((e: unknown) => e as { statusCode?: number });
     expect(error).toMatchObject({ statusCode: 403 });
     // Only the unpacked case reached the RPC, which refused without writing.
     expect(rpcCalls.map((c) => c.fn)).toEqual(["ready_packed_delivery_v1"]);
@@ -1636,7 +1751,9 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
 
-    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
+    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).kind).toBe(
+      "packed",
+    );
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(true);
 
     await transitionFulfillmentStatus(
@@ -1672,8 +1789,10 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     expect(detail.status).toBe("pending");
     expect(mockDeliveries[0].status).toBe("pending");
     expect(await readyPackedOrderDelivery(ORG_A, "user-packer", ORDER_ID)).toBe("not_packed");
-    expect(await retryPackedDeliveryReady(ctx, ORDER_ID)).toEqual({ kind: "not_packed" });
-    expect(await confirmHandoff(ctx, PARCEL_CODE)).toEqual({
+    expect(await retryPackedDeliveryReady(ctx, ORDER_ID, principalOf(ctx))).toEqual({
+      kind: "not_packed",
+    });
+    expect(await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).toEqual({
       kind: "delivery_not_ready",
       currentStatus: "pending",
     });
@@ -1693,13 +1812,13 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     } as any);
     expect(mockDeliveries[0].status).toBe("pending");
 
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: "delivery-1",
     });
     expect(mockDeliveries[0].status).toBe("ready");
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(true);
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("success");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe("success");
   });
 
   it("pack → unpack → pack again (no delivery) → arrange delivery: the new delivery is ready", async () => {
@@ -1708,7 +1827,7 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     const { markOrderPacked } = await import("../server/packing/service");
 
     // Not already_packed: the reopened order really is packed again.
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: null,
     });
@@ -1735,7 +1854,9 @@ describe("packed clears when the order's fulfillment is reopened", () => {
       fn === "transition_delivery_status_v1" && args.p_to === "ready"
         ? { status: "invalid_transition" }
         : stateful(fn, args);
-    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("transition_failed");
+    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).kind).toBe(
+      "transition_failed",
+    );
     rpcResponder = stateful;
     expect(mockDeliveries[0].status).toBe("preparing");
 
@@ -1746,7 +1867,9 @@ describe("packed clears when the order's fulfillment is reopened", () => {
       "Repack needed",
       principalOf(ctx),
     );
-    expect(await retryPackedDeliveryReady(ctx, ORDER_ID)).toEqual({ kind: "not_packed" });
+    expect(await retryPackedDeliveryReady(ctx, ORDER_ID, principalOf(ctx))).toEqual({
+      kind: "not_packed",
+    });
     expect(mockDeliveries[0].status).toBe("preparing");
   });
 });
@@ -1763,7 +1886,9 @@ describe("reopening the order invalidates a ready delivery", () => {
     const ctx = mockCtx(ORG_A, OPS_PERMS);
     const { markOrderPacked } = await import("../server/packing/service");
     const { createDelivery } = await import("../server/deliveries/service");
-    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
+    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).kind).toBe(
+      "packed",
+    );
     const detail = await createDelivery(ctx, {
       expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
@@ -1800,7 +1925,9 @@ describe("reopening the order invalidates a ready delivery", () => {
     // retired delivery attempt.
     expect(cancel.created_at).toBe(mockOrderHistory.at(-1).changed_at);
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(false);
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe(
+      "no_active_delivery",
+    );
   });
 
   it("pack → ready → reopen → arrange → pending → pack again → ready → courier handoff", async () => {
@@ -1828,21 +1955,23 @@ describe("reopening the order invalidates a ready delivery", () => {
     expect(arranged.status).toBe("pending");
     expect(mockDeliveries).toHaveLength(2);
     expect(mockDeliveries[1].status).toBe("pending");
-    expect(await retryPackedDeliveryReady(ctx, ORDER_ID)).toEqual({ kind: "not_packed" });
-    expect(await confirmHandoff(ctx, PARCEL_CODE)).toEqual({
+    expect(await retryPackedDeliveryReady(ctx, ORDER_ID, principalOf(ctx))).toEqual({
+      kind: "not_packed",
+    });
+    expect(await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).toEqual({
       kind: "delivery_not_ready",
       currentStatus: "pending",
     });
 
     // Pack again — a real pack, not "already packed".
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: mockDeliveries[1].id,
     });
     expect(mockDeliveries[1].status).toBe("ready");
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(true);
 
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("success");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe("success");
     expect(mockDeliveries[1].status).toBe("in_transit");
   });
 
@@ -1857,7 +1986,7 @@ describe("reopening the order invalidates a ready delivery", () => {
       "Repack needed",
       principalOf(ctx),
     );
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: null,
     });
@@ -1872,7 +2001,9 @@ describe("reopening the order invalidates a ready delivery", () => {
     const { markOrderPacked } = await import("../server/packing/service");
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
     const { confirmHandoff } = await import("../server/handoff/service");
-    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).kind).toBe("packed");
+    expect((await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).kind).toBe(
+      "packed",
+    );
     expect(mockDeliveries[0].status).toBe("ready");
 
     await transitionFulfillmentStatus(
@@ -1883,7 +2014,9 @@ describe("reopening the order invalidates a ready delivery", () => {
       principalOf(ctx),
     );
     expect(mockDeliveries[0].status).toBe("cancelled");
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe(
+      "no_active_delivery",
+    );
   });
 
   it("a pending delivery is left in place by a reopen (it was never ready)", async () => {
@@ -1956,7 +2089,7 @@ describe("readiness recovery races a reopen", () => {
     seedOrder();
     rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(mockCtx(ORG_A), ORDER_ID, COMPLETE_LINES, principalOf(mockCtx(ORG_A)));
     mockDeliveries = [
       { id: "delivery-1", organization_id: ORG_A, order_id: ORDER_ID, status: "pending" },
     ];
@@ -1969,15 +2102,23 @@ describe("readiness recovery races a reopen", () => {
       await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
 
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "not_packed",
     });
     expect(mockDeliveries[0].status).toBe("pending");
     expect(mockDeliveryHistory).toHaveLength(0);
     expect((await getOrderPackState(mockCtx(ORG_A), ORDER_ID))?.packed).toBe(false);
-    expect((await confirmHandoff(mockCtx(ORG_A, OPS_PERMS), PARCEL_CODE)).kind).toBe(
-      "delivery_not_ready",
-    );
+    expect(
+      (
+        await confirmHandoff(
+          mockCtx(ORG_A, OPS_PERMS),
+          PARCEL_CODE,
+          principalOf(mockCtx(ORG_A, OPS_PERMS)),
+        )
+      ).kind,
+    ).toBe("delivery_not_ready");
   });
 
   it("retry: a reopen right after readying cancels that readiness", async () => {
@@ -1987,12 +2128,20 @@ describe("readiness recovery races a reopen", () => {
       await import("../server/packing/service");
     const { confirmHandoff } = await import("../server/handoff/service");
 
-    expect((await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).kind).toBe("ready");
+    expect(
+      (await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A)))).kind,
+    ).toBe("ready");
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect((await getOrderPackState(mockCtx(ORG_A), ORDER_ID))?.packed).toBe(false);
-    expect((await confirmHandoff(mockCtx(ORG_A, OPS_PERMS), PARCEL_CODE)).kind).toBe(
-      "no_active_delivery",
-    );
+    expect(
+      (
+        await confirmHandoff(
+          mockCtx(ORG_A, OPS_PERMS),
+          PARCEL_CODE,
+          principalOf(mockCtx(ORG_A, OPS_PERMS)),
+        )
+      ).kind,
+    ).toBe("no_active_delivery");
   });
 
   it("auto-ready after Arrange Delivery: a racing reopen leaves the new delivery pending", async () => {
@@ -2001,7 +2150,7 @@ describe("readiness recovery races a reopen", () => {
     const ctx = mockCtx(ORG_A, OPS_PERMS);
     const { markOrderPacked } = await import("../server/packing/service");
     const { createDelivery } = await import("../server/deliveries/service");
-    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
     raceReopenWithReadying("before");
 
     const detail = await createDelivery(ctx, {
@@ -2019,7 +2168,9 @@ describe("readiness recovery races a reopen", () => {
     const { retryPackedDeliveryReady, getOrderPackState } =
       await import("../server/packing/service");
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
-    expect((await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).kind).toBe("ready");
+    expect(
+      (await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A)))).kind,
+    ).toBe("ready");
     expect(mockDeliveryHistory.some((h) => h.reason === PACK_ORDER_PACKED_REASON_CODE)).toBe(false);
 
     await transitionFulfillmentStatus(
@@ -2031,7 +2182,9 @@ describe("readiness recovery races a reopen", () => {
     );
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect((await getOrderPackState(mockCtx(ORG_A), ORDER_ID))?.packed).toBe(false);
-    expect(await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID)).toEqual({
+    expect(
+      await retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+    ).toEqual({
       kind: "no_delivery",
     });
   });
@@ -2040,8 +2193,8 @@ describe("readiness recovery races a reopen", () => {
     await packedWithPendingDelivery();
     const { retryPackedDeliveryReady } = await import("../server/packing/service");
     const [a, b] = await Promise.all([
-      retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID),
-      retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID),
+      retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
+      retryPackedDeliveryReady(mockCtx(ORG_A), ORDER_ID, principalOf(mockCtx(ORG_A))),
     ]);
     expect([a.kind, b.kind].sort()).toEqual(["already_ready", "ready"]);
     // pending → preparing → ready, written exactly once.
@@ -2066,7 +2219,7 @@ describe("generic delivery Ready transition enforces the current packed state", 
     const { confirmHandoff } = await import("../server/handoff/service");
 
     // Pack → Arrange (auto-ready) → Ready.
-    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
     const first = await deliveries.createDelivery(ctx, {
       expectedPrincipal: principalOf(ctx),
       orderId: ORDER_ID,
@@ -2102,18 +2255,18 @@ describe("generic delivery Ready transition enforces the current packed state", 
     expect(mockDeliveries[1].status).toBe("preparing");
 
     // Courier Handoff is impossible until the order is packed again.
-    expect(await confirmHandoff(ctx, PARCEL_CODE)).toEqual({
+    expect(await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).toEqual({
       kind: "delivery_not_ready",
       currentStatus: "preparing",
     });
 
     // Pack Order again → ready → handoff.
-    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES)).toEqual({
+    expect(await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx))).toEqual({
       kind: "packed",
       deliveryId: replacement.id,
     });
     expect(mockDeliveries[1].status).toBe("ready");
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("success");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe("success");
   });
 
   it("an order that was never packed cannot be readied through the generic API", async () => {
@@ -2132,9 +2285,15 @@ describe("generic delivery Ready transition enforces the current packed state", 
     expect(error).toMatchObject({ statusCode: 409 });
     expect(mockDeliveries[0].status).toBe("preparing");
     expect(mockDeliveryHistory).toHaveLength(0);
-    expect((await confirmHandoff(mockCtx(ORG_A, HANDOFF_PERMS), PARCEL_CODE)).kind).toBe(
-      "delivery_not_ready",
-    );
+    expect(
+      (
+        await confirmHandoff(
+          mockCtx(ORG_A, HANDOFF_PERMS),
+          PARCEL_CODE,
+          principalOf(mockCtx(ORG_A, HANDOFF_PERMS)),
+        )
+      ).kind,
+    ).toBe("delivery_not_ready");
   });
 
   it("a currently packed order's delivery may be readied through the generic API (same rule)", async () => {
@@ -2142,7 +2301,7 @@ describe("generic delivery Ready transition enforces the current packed state", 
     rpcResponder = statefulRpc;
     const ctx = mockCtx(ORG_A, HANDOFF_PERMS);
     const { markOrderPacked } = await import("../server/packing/service");
-    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
     mockDeliveries = [
       { id: "delivery-1", organization_id: ORG_A, order_id: ORDER_ID, status: "preparing" },
     ];
@@ -2164,7 +2323,7 @@ describe("reopen races a delivery created or readied before its order lock", () 
     const { markOrderPacked, getOrderPackState } = await import("../server/packing/service");
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
     const { confirmHandoff } = await import("../server/handoff/service");
-    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES);
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
 
     // The first reopen attempt looks up "no active delivery"; before it takes the
     // order lock, a delivery is arranged and auto-readied. The re-read under the
@@ -2203,7 +2362,9 @@ describe("reopen races a delivery created or readied before its order lock", () 
     expect(mockDeliveries[0].status).toBe("cancelled");
     expect(mockOrders[0].fulfillment_status).toBe("unfulfilled");
     expect((await getOrderPackState(ctx, ORDER_ID))?.packed).toBe(false);
-    expect((await confirmHandoff(ctx, PARCEL_CODE)).kind).toBe("no_active_delivery");
+    expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe(
+      "no_active_delivery",
+    );
   });
 
   it("a delivery that keeps changing ends in a retryable 409 and nothing is written", async () => {
@@ -2366,5 +2527,79 @@ describe("migration 054 — one packed rule guards every readiness path", () => 
       "utf8",
     );
     expect(repository).toContain('db.rpc("order_currently_packed_v1"');
+  });
+});
+
+// ── Initiating principal (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum)
+
+describe("Mark Packed, Retry delivery ready and Courier Handoff refuse a request started as someone else", () => {
+  type Call = (ctx: any, expectedPrincipal: unknown) => Promise<unknown>;
+  async function operations(): Promise<[string, Call][]> {
+    const { markOrderPacked, retryPackedDeliveryReady } = await import("../server/packing/service");
+    const { confirmHandoff } = await import("../server/handoff/service");
+    return [
+      ["markOrderPacked", (ctx, p) => markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, p as any)],
+      ["retryPackedDeliveryReady", (ctx, p) => retryPackedDeliveryReady(ctx, ORDER_ID, p as any)],
+      ["confirmHandoff", (ctx, p) => confirmHandoff(ctx, PARCEL_CODE, p as any)],
+    ];
+  }
+  /** Each operation's normal starting state, so a request that got through would write. */
+  function seedReady() {
+    seedOrder();
+    seedDelivery("ready");
+    rpcResponder = statefulRpc;
+  }
+
+  it("a missing or malformed principal is refused (428) before the permission checks, any read and any write", async () => {
+    for (const [name, call] of await operations()) {
+      for (const missing of [undefined, null, {}, { userId: "user-packer" }, ["user-packer"]]) {
+        // Held by a member WITHOUT the grants, and by one with them.
+        for (const permissions of [[], ["orders.read", "delivery.handoff"]]) {
+          seedReady();
+          tableReads = [];
+          rpcCalls = [];
+          const error = await call(mockCtx(ORG_A, permissions), missing).catch((e) => e);
+          expect({
+            name,
+            missing,
+            error: { statusCode: error?.statusCode, code: error?.code },
+          }).toEqual({ name, missing, error: { statusCode: 428, code: "principal_required" } });
+          expect({ name, tableReads, rpcCalls }).toEqual({ name, tableReads: [], rpcCalls: [] });
+        }
+      }
+    }
+  });
+
+  it("a request started as another member or organization is refused (409 principal_changed) before the permission checks, any read and any write", async () => {
+    for (const [name, call] of await operations()) {
+      for (const startedAs of [
+        { userId: "user-other", organizationId: ORG_A }, // another member, same organization
+        { userId: "user-packer", organizationId: ORG_B }, // the same member, another organization
+      ]) {
+        // The handling member's grant never decides another principal's request.
+        for (const permissions of [["orders.read", "delivery.handoff"], []]) {
+          seedReady();
+          tableReads = [];
+          rpcCalls = [];
+          const error = await call(mockCtx(ORG_A, permissions), startedAs).catch((e) => e);
+          expect({
+            name,
+            startedAs,
+            error: { statusCode: error?.statusCode, code: error?.code },
+          }).toEqual({ name, startedAs, error: { statusCode: 409, code: "principal_changed" } });
+          expect({ name, tableReads, rpcCalls }).toEqual({ name, tableReads: [], rpcCalls: [] });
+        }
+      }
+    }
+  });
+
+  it("the principal it was started as passes the check and changes nothing about authorization", async () => {
+    const { confirmHandoff } = await import("../server/handoff/service");
+    seedReady();
+    const ctx = mockCtx(ORG_A, ["orders.read"]); // lacks delivery.handoff
+    await expect(confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(rpcCalls).toEqual([]);
   });
 });

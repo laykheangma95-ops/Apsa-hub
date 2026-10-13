@@ -30,9 +30,9 @@
  * Protected (each listed in CORRECTION-004): order creation, order lifecycle
  * transitions, order fulfillment transitions, parcel recovery and parcel
  * creation, shipping-destination edits, payment recording, evidence,
- * verification, refund, reversal and correction, delivery creation, and the
- * six delivery transitions (start preparing, ready, in transit, delivered,
- * failed, cancel).
+ * verification, refund, reversal and correction, delivery creation, the six
+ * delivery transitions (start preparing, ready, in transit, delivered, failed,
+ * cancel), Mark Packed, Retry delivery ready, and courier handoff.
  */
 import { publicError } from "@/server/public-domain-error";
 

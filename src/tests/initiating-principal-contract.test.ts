@@ -22,6 +22,10 @@
  *                            markDeliveryInTransitFn, markDeliveryDeliveredFn,
  *                            markDeliveryFailedFn, cancelDeliveryFn → the matching
  *                            service (Delivery detail)
+ *   Mark Packed              markOrderPackedFn → markOrderPacked (Pack Order)
+ *   retry delivery ready     retryPackedDeliveryReadyFn → retryPackedDeliveryReady
+ *                            (Order detail)
+ *   courier handoff          confirmHandoffFn → confirmHandoff (Courier Handoff)
  *
  * The server derives who is acting only when it HANDLES a request. Each of these
  * REQUIRES the member + organization it was STARTED as, and the server refuses —
@@ -29,8 +33,8 @@
  * malformed, or different from its own derivation. Behaviour, against the
  * database and the real server functions: financial-mutation-integrity,
  * payment-action-principal-mounted, order-mutation-principal-mounted,
- * order-entry-principal-mounted, pos-checkout-replay-mounted and
- * delivery-transition-principal-mounted. This file
+ * order-entry-principal-mounted, pos-checkout-replay-mounted,
+ * delivery-transition-principal-mounted and pack-handoff-principal-mounted. This file
  * stops the wiring coming apart silently: a validator that makes the field
  * optional again, a handler that stops forwarding it (or forwards it only when
  * present), a service that checks it after a write or reads it for anything
@@ -38,9 +42,8 @@
  * passes one, or a new mutation in these files that skips it.
  *
  * Not covered (CORRECTION-004 lists them): mutations outside these files —
- * packing, handoff, inventory, returns, customers, team, products,
- * conversations — and the deprecated transitionOrderPaymentFn, which always
- * refuses and writes nothing.
+ * inventory, returns, customers, team, products, conversations — and the
+ * deprecated transitionOrderPaymentFn, which always refuses and writes nothing.
  */
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -124,6 +127,8 @@ describe("the refuse-only check", () => {
       "src/server/payments/service.ts",
       "src/server/parcels/service.ts",
       "src/server/deliveries/service.ts",
+      "src/server/packing/service.ts",
+      "src/server/handoff/service.ts",
     ]) {
       const source = read(file);
       expect(source).toContain('from "@/server/auth/expected-principal"');
@@ -324,6 +329,50 @@ for (const [name, to, reasonRequired] of DELIVERY_TRANSITIONS) {
   });
 }
 
+// Packing and courier handoff (CORRECTION-004, packing and handoff addendum):
+// the packed marker and the handoff's history row are ctx's.
+SERVICE_CASES.push(
+  {
+    name: "markOrderPacked",
+    file: "src/server/packing/service.ts",
+    check: "assertExpectedPrincipal(ctx, expectedPrincipal);",
+    later: [
+      'ctx.require("orders.read")',
+      'ctx.require("delivery.handoff")',
+      "ordersRepo.findOrderById(",
+      "moveDeliveryToReady(",
+      "ordersRepo.recordOrderPacked(",
+    ],
+    writesAs:
+      /moveDeliveryToReady\(ctx\.organizationId, ctx\.userId, delivery\)[\s\S]*ordersRepo\.recordOrderPacked\(ctx\.organizationId, orderId, ctx\.userId\)/,
+  },
+  {
+    name: "retryPackedDeliveryReady",
+    file: "src/server/packing/service.ts",
+    check: "assertExpectedPrincipal(ctx, expectedPrincipal);",
+    later: [
+      'ctx.require("orders.read")',
+      'ctx.require("delivery.handoff")',
+      "ordersRepo.findOrderById(",
+      "deliveriesRepo.readyPackedDelivery(",
+    ],
+    writesAs:
+      /deliveriesRepo\.readyPackedDelivery\(\s*ctx\.organizationId,\s*orderId,\s*delivery\.id,\s*ctx\.userId,?\s*\)/,
+  },
+  {
+    name: "confirmHandoff",
+    file: "src/server/handoff/service.ts",
+    check: "assertExpectedPrincipal(ctx, expectedPrincipal);",
+    later: [
+      'ctx.require("delivery.handoff")',
+      "parcelsRepo.findParcelByCode(",
+      "deliveriesRepo.transitionDelivery(",
+    ],
+    writesAs:
+      /deliveriesRepo\.transitionDelivery\(\s*ctx\.organizationId,\s*delivery\.id,\s*"ready",\s*"in_transit",\s*ctx\.userId,/,
+  },
+);
+
 describe("each protected service checks it before anything else and records only ctx", () => {
   for (const c of SERVICE_CASES) {
     const body = between(read(c.file), `export async function ${c.name}(`, "\n}\n");
@@ -438,6 +487,8 @@ const PROTECTED_FNS: [string, string[]][] = [
       "cancelDeliveryFn",
     ],
   ],
+  ["src/api/packing.ts", ["markOrderPackedFn", "retryPackedDeliveryReadyFn"]],
+  ["src/api/handoff.ts", ["confirmHandoffFn"]],
 ];
 /** POST functions in those files that are deliberately outside the contract. */
 const EXEMPT_POST_FNS: Record<string, string> = {
@@ -673,6 +724,34 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(route).toContain("key={`cancel:${transitionScope}`}");
   });
 
+  it("Pack Order, Retry delivery ready and Courier Handoff: the screen's principal, handed to the mutation as a variable at the tap", () => {
+    // Each screen is keyed by member + organization (+ order / parcel), so the
+    // instance's principal is the one it shows; the tap hands it over.
+    const pack = read("src/routes/app.pack.$orderId.tsx");
+    expect(pack).toContain("onClick={() => markPacked.mutate({ userId, organizationId })}");
+    expect(pack).toContain("mutationFn: async (startedAs: InitiatingPrincipal)");
+    expect(pack).toMatch(
+      /markOrderPackedFn\(\{\s*data: \{ orderId, packedLines: buildPackedLines\(current\), expectedPrincipal: startedAs \},\s*\}\)/,
+    );
+    expect(pack).toMatch(/key=\{identity\}/);
+
+    const retry = read("src/components/fulfillment/RetryDeliveryReadyAction.tsx");
+    expect(retry).toContain("retry.mutate({ userId, organizationId });");
+    expect(retry).toContain(
+      "retryPackedDeliveryReadyFn({ data: { orderId, expectedPrincipal: startedAs } })",
+    );
+    expect(retry).toMatch(/key=\{identity\}/);
+
+    const handoff = read("src/routes/app.handoff.$parcelCode.tsx");
+    expect(handoff).toContain(
+      "onConfirm={() => confirmMutation.mutate({ userId, organizationId })}",
+    );
+    expect(handoff).toContain(
+      "confirmHandoffFn({ data: { parcelCode, expectedPrincipal: startedAs } })",
+    );
+    expect(handoff).toMatch(/key=\{identity\}/);
+  });
+
   it("APSA Parcel recovery: captured at the tap, as a mutation variable", () => {
     const action = read("src/components/fulfillment/ParcelRecoveryAction.tsx");
     expect(action).toContain("recoverRealOrderParcel(orderId, startedAs)");
@@ -773,5 +852,29 @@ describe("no call site anywhere in the app omits it", () => {
     ]) {
       expect(calls.map((c) => c.replace(/\\/g, "/"))).toContain(site);
     }
+  });
+
+  it("every direct call of a protected packing or handoff server function sends expectedPrincipal", () => {
+    // These screens call the server function itself (no src/lib/api adapter).
+    const DIRECT = ["markOrderPackedFn", "retryPackedDeliveryReadyFn", "confirmHandoffFn"];
+    const calls: string[] = [];
+    for (const file of sources("src")) {
+      const source = read(file);
+      for (const name of DIRECT) {
+        for (const match of source.matchAll(new RegExp(`(?<![\\w.])${name}\\(`, "g"))) {
+          const at = match.index!;
+          const line = source.slice(source.lastIndexOf("\n", at) + 1, at);
+          if (/^\s*(\*|\/\/)/.test(line)) continue;
+          const args = argumentsAt(source, at + name.length);
+          calls.push(`${file.replace(/\\/g, "/")}: ${name}`);
+          expect(/\bexpectedPrincipal: startedAs\b/.test(args), `${file}: ${name}(…)`).toBe(true);
+        }
+      }
+    }
+    expect(calls.sort()).toEqual([
+      "src/components/fulfillment/RetryDeliveryReadyAction.tsx: retryPackedDeliveryReadyFn",
+      "src/routes/app.handoff.$parcelCode.tsx: confirmHandoffFn",
+      "src/routes/app.pack.$orderId.tsx: markOrderPackedFn",
+    ]);
   });
 });
