@@ -330,3 +330,34 @@ production. Do not continue past a failure; do not downgrade `PENDING`/
 Only when all 17 pass is a PR eligible for `STAGING VERIFIED`, and only after
 a **separate**, explicitly authorized production deploy step is it eligible
 for `PRODUCTION VERIFIED`.
+
+---
+
+## 8a. Migration 062 rollout (financial replay, refund intent, audit atomicity)
+
+Decision and rationale: `CORRECTIONS.md`, CORRECTION-005. No stage of this
+rollout permits unsafe financial replay; the order below is the intended one.
+
+1. **Before anything:** real multi-connection PostgreSQL concurrency testing
+   of refund, reversal, correction and recording (concurrent same-key and
+   different-key requests against one payment and one order) — a required
+   gate; the repository's proofs run on single-connection PGlite.
+2. **Apply `062_financial_replay_refund_audit_atomicity.sql`** to the target
+   database. It runs as one transaction and ends with post-conditions that
+   ABORT it (nothing applied) on unsafe financial-RPC authority: a role
+   reachable from `anon` / `authenticated` that can execute or owns a financial
+   RPC, a role reachable from `service_role` that can execute or owns a legacy
+   or internal one, an entry-point overload, a superuser among those roles, a
+   broken definer chain, or CREATE on schema `public` for a browser-reachable
+   role. On an abort: read the message, fix that privilege or overload, re-run.
+3. **Deploy the application release.**
+
+Between 2 and 3 the previous release keeps recording payments with the safe
+replay rules (`record_payment_v1` delegates to `record_payment_v2`), and its
+refunds, reversals and corrections are refused (their v1 functions are
+closed). If 3 happens before 2, the release refuses recording, refunds,
+reversals and corrections with 503 `schema_upgrade_required` before any write,
+while every other workflow keeps working, until 062 is applied.
+
+Never roll 062 back by re-granting a retired or internal function. A database
+that applied an earlier draft of 062 must be rebuilt, not patched.

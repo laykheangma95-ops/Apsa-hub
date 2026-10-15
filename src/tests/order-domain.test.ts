@@ -39,6 +39,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { ForbiddenError, UnauthorizedError } from "../server/auth/authorization";
 import type { AuthorizationContext as AuthCtxType } from "../server/auth/authorization";
+import {
+  SANCTIONED_ORDER_FN_SCHEMA,
+  withoutSanctioned,
+  principalOf,
+} from "./helpers/refuse-only-principal";
 
 // ── Environment check ─────────────────────────────────────────────────────────
 
@@ -386,6 +391,7 @@ describe("Test 1: Successful order creation", () => {
       },
       () =>
         createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -419,6 +425,7 @@ describe("Test 1: Successful order creation", () => {
       },
       () =>
         createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -435,6 +442,7 @@ describe("Test 1: Successful order creation", () => {
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read"]);
     await expectForbidden(() =>
       createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
         idempotencyKey: TEST_IDEMPOTENCY_KEY,
         source: "POS",
         items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -464,6 +472,7 @@ describe("Test 2: Multi-item order", () => {
       },
       async (recorded) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [
@@ -495,6 +504,7 @@ describe("Test 3: Quantity must be a positive integer", () => {
       const calls = await withOrderDb({}, async (recorded) => {
         const err = await expectRejects(() =>
           createOrder(ctx, {
+            expectedPrincipal: principalOf(ctx),
             idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "POS",
             items: [{ variantId: VARIANT_ID, quantity }],
@@ -535,6 +545,7 @@ describe("Test 4: Server-authoritative pricing", () => {
       },
       async (recorded) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 2 }],
@@ -631,6 +642,7 @@ describe("Test 5: Client cannot inject totals", () => {
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.create", "orders.read"]);
     await expectForbidden(() =>
       createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
         idempotencyKey: TEST_IDEMPOTENCY_KEY,
         source: "POS",
         items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -659,7 +671,9 @@ describe("Test 5: Client cannot inject totals", () => {
 
 describe("Test 6: Client cannot inject organization_id or user_id", () => {
   it("no API function accepts an organizationId or userId parameter", () => {
-    const src = readSource("src/api/orders.ts");
+    // CORRECTION-004: strip only the one sanctioned, refuse-only expectedPrincipal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const src = withoutSanctioned(readSource("src/api/orders.ts"), SANCTIONED_ORDER_FN_SCHEMA);
     // A zod validator is the only way input reaches a handler, so it is enough
     // to prove no validator declares a tenant or actor field.
     expect(src).not.toMatch(/organizationId:\s*z\./);
@@ -694,6 +708,7 @@ describe("Test 6: Client cannot inject organization_id or user_id", () => {
       },
       async (recorded) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -736,6 +751,7 @@ describe("Test 7: Cross-org customer rejected", () => {
       async (recorded) => {
         const err = await expectRejects(() =>
           createOrder(ctx, {
+            expectedPrincipal: principalOf(ctx),
             idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "FACEBOOK",
             items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -773,6 +789,7 @@ describe("Test 8: Cross-org product rejected", () => {
       async (recorded) => {
         const err = await expectRejects(() =>
           createOrder(ctx, {
+            expectedPrincipal: principalOf(ctx),
             idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "POS",
             // The variant really belongs to PRODUCT_ID; claiming another product
@@ -806,6 +823,7 @@ describe("Test 9: Cross-org variant rejected", () => {
     const calls = await withOrderDb({ tables: { product_variants: noRow } }, async (recorded) => {
       const err = await expectRejects(() =>
         createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -874,6 +892,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
         },
         () =>
           createOrder(ctx, {
+            expectedPrincipal: principalOf(ctx),
             idempotencyKey: TEST_IDEMPOTENCY_KEY,
             source: "POS",
             items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -899,6 +918,7 @@ describe("Test 10: Atomic failure leaves no partial order", () => {
       },
       async (recorded) => {
         await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "POS",
           items: [
@@ -1035,7 +1055,7 @@ describe("Test 12: Fulfillment transitions", () => {
       { tables: { orders: orderRow({ fulfillment_status: "fulfilled" }) } },
       async () => {
         const err = await expectRejects(() =>
-          transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
+          transitionFulfillmentStatus(ctx, ORDER_ID, "processing", null, principalOf(ctx)),
         );
         expect(err.message).toContain("Cannot move fulfillment status from 'fulfilled'");
       },
@@ -1045,7 +1065,9 @@ describe("Test 12: Fulfillment transitions", () => {
   it("cancelling fulfillment requires orders.cancel, not orders.update", async () => {
     const { transitionFulfillmentStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read", "orders.update"]);
-    await expectForbidden(() => transitionFulfillmentStatus(ctx, ORDER_ID, "cancelled"));
+    await expectForbidden(() =>
+      transitionFulfillmentStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx)),
+    );
   });
 });
 
@@ -1076,8 +1098,8 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       },
       async () => {
         for (const call of [
-          () => transitionFulfillmentStatus(ctx, ORDER_ID, "processing"),
-          () => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"),
+          () => transitionFulfillmentStatus(ctx, ORDER_ID, "processing", null, principalOf(ctx)),
+          () => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
         ]) {
           const err = await expectRejects(call);
           expect(err.message).toContain("cancelled");
@@ -1108,13 +1130,17 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
       "orders.update",
       "orders.cancel",
     ]);
-    await expectForbidden(() => transitionLifecycleStatus(ctx, ORDER_ID, "confirmed"));
+    await expectForbidden(() =>
+      transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx)),
+    );
   });
 
   it("cancelling requires orders.cancel specifically", async () => {
     const { transitionLifecycleStatus } = await import("../server/orders/service");
     const ctx = makeCtxWithPerms(USER_ORG_A, ORG_A_ID, ["orders.read", "orders.confirm"]);
-    await expectForbidden(() => transitionLifecycleStatus(ctx, ORDER_ID, "cancelled"));
+    await expectForbidden(() =>
+      transitionLifecycleStatus(ctx, ORDER_ID, "cancelled", null, principalOf(ctx)),
+    );
   });
 
   it("permission is checked before the order is loaded, so ids do not leak", async () => {
@@ -1125,7 +1151,9 @@ describe("Test 13: Lifecycle transitions and terminal behavior", () => {
     // before checking the permission, this would fail with "Order not found"
     // rather than Forbidden — telling an attacker the id was checked at all.
     await withOrderDb({}, async () => {
-      await expectForbidden(() => transitionLifecycleStatus(ctx, ORG_B_ORDER_ID, "confirmed"));
+      await expectForbidden(() =>
+        transitionLifecycleStatus(ctx, ORG_B_ORDER_ID, "confirmed", null, principalOf(ctx)),
+      );
     });
   });
 
@@ -1443,6 +1471,7 @@ describe("Test 18: Server-authorized write path", () => {
       },
       async () => {
         const created = await createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           idempotencyKey: TEST_IDEMPOTENCY_KEY,
           source: "FACEBOOK",
           items: [{ variantId: VARIANT_ID, quantity: 1 }],
@@ -1464,7 +1493,7 @@ describe("Test 18: Server-authorized write path", () => {
         rpc: { transition_order_status_v1: { data: { status: "success" }, error: null } },
       },
       async (recorded) => {
-        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed");
+        await transitionLifecycleStatus(ctx, ORDER_ID, "confirmed", null, principalOf(ctx));
         return recorded;
       },
     );
@@ -1592,7 +1621,9 @@ describe("Test 20: Order number strategy", () => {
     expect(findByCode).toContain("ctx.organizationId");
     // No organization may be named by the caller, here or at the API boundary.
     expect(findByCode).not.toMatch(/organizationId:\s*(?!ctx)/);
-    expect(readSource("src/api/orders.ts")).not.toMatch(/organizationId:\s*z\./);
+    expect(
+      withoutSanctioned(readSource("src/api/orders.ts"), SANCTIONED_ORDER_FN_SCHEMA),
+    ).not.toMatch(/organizationId:\s*z\./); // CORRECTION-004: only the refuse-only precondition
   });
 });
 

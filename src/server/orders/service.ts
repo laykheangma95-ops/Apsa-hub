@@ -53,6 +53,7 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { auditLog } from "@/server/auth/audit";
 import { RateLimitedError } from "@/server/rate-limit/errors";
 import { checkRateLimits } from "@/server/rate-limit/limiter";
@@ -471,6 +472,16 @@ export interface CreateOrderServiceInput {
         address?: string | null | undefined;
       }
     | undefined;
+  /**
+   * The member and organization the CLIENT started this order as — a
+   * REQUIRED precondition, never a credential. The server still derives the
+   * acting principal from the session and the member's active organization
+   * (`ctx`), and authorizes only that. This can only REFUSE: when missing,
+   * malformed, or different from `ctx` (the session or the active
+   * organization changed between the tap and the server), nothing is written —
+   * see assertExpectedPrincipal.
+   */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
@@ -538,6 +549,7 @@ export async function createOrder(
   ctx: AuthorizationContext,
   input: CreateOrderServiceInput,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("orders.create");
 
   if (
@@ -781,7 +793,12 @@ async function auditParcelRecovered(
 export async function recoverOrderParcel(
   ctx: AuthorizationContext,
   orderId: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this recovery. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  // Started as another member or organization: refused before the permission,
+  // the order lock and the parcel / audit write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.confirm");
   const result = await recoverParcelAtomically(ctx, orderId);
   if (result.status === "not_found" || result.status === "not_confirmed") {
@@ -813,8 +830,16 @@ export async function transitionLifecycleStatus(
   ctx: AuthorizationContext,
   orderId: string,
   to: OrderLifecycleStatus,
-  reason?: string | null,
+  reason: string | null | undefined,
+  /**
+   * The member + organization the client started this transition as — a
+   * required, refuse-only precondition (assertExpectedPrincipal). Checked
+   * before the permission, the order read and every write (status, history,
+   * stock, parcel, audit); it never authorizes or attributes anything.
+   */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   const permission = LIFECYCLE_TRANSITION_PERMISSIONS[to];
   if (!permission) {
     throw badRequest(`Orders cannot be moved to lifecycle status '${to}'`);
@@ -935,8 +960,13 @@ export async function transitionFulfillmentStatus(
   ctx: AuthorizationContext,
   orderId: string,
   to: OrderFulfillmentStatus,
-  reason?: string | null,
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  // Refused before the permission, the order read and every write (status,
+  // history, delivery reopen, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require(FULFILLMENT_TRANSITION_PERMISSIONS[to]);
   rejectReservedReason(reason);
 
@@ -1029,7 +1059,11 @@ export async function updateOrderShippingSnapshot(
     phone?: string | null | undefined;
     address?: string | null | undefined;
   },
+  /** Refuse-only (assertExpectedPrincipal): who started this edit. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<{ ok: true }> {
+  // Refused before the permission, the order lock and the snapshot / audit write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.update");
 
   const shipping = normalizeShippingSnapshot(input);

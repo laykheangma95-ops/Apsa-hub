@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { recoverRealOrderParcel } from "@/lib/api";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { notifySuccess } from "@/lib/feedback";
 import { classifyOrderError } from "@/lib/orders";
 import { ordersKeys } from "@/lib/orders-query";
@@ -102,8 +103,13 @@ export function ParcelRecoveryAction({
   const detailKey = ordersKeys.detail(userId, organizationId, orderId);
 
   const recover = useMutation({
-    mutationFn: (_token: number) => recoverRealOrderParcel(orderId),
-    onSuccess: async (detail, token) => {
+    // The principal is captured at the tap and sent as a refuse-only
+    // precondition (CORRECTION-004): the instance is keyed by member +
+    // organization, but a request already in flight is decided by the server,
+    // which refuses it if the principal changed before it was handled.
+    mutationFn: ({ startedAs }: { token: number; startedAs: InitiatingPrincipal }) =>
+      recoverRealOrderParcel(orderId, startedAs),
+    onSuccess: async (detail, { token }) => {
       if (!isCurrent(token)) return;
       setNotice(null);
       // The server's own answer: parcel present, so this action disappears.
@@ -117,7 +123,7 @@ export function ParcelRecoveryAction({
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
       );
     },
-    onError: async (error, token) => {
+    onError: async (error, { token }) => {
       if (!isCurrent(token)) return;
       const kind = classifyOrderError(error);
       // Cancelled (or otherwise moved) meanwhile: say so and re-read the order.
@@ -153,7 +159,10 @@ export function ParcelRecoveryAction({
           onClick={() => {
             setNotice(null);
             latestRequestRef.current += 1;
-            recover.mutate(latestRequestRef.current);
+            recover.mutate({
+              token: latestRequestRef.current,
+              startedAs: { userId, organizationId },
+            });
           }}
         >
           <PackagePlus className="size-4" aria-hidden />

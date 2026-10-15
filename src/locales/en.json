@@ -2247,7 +2247,17 @@
         "amountHint": "This payment is {{amount}}. Refunds are always in the payment's own currency.",
         "note": "How much is still refundable is worked out from this payment's history. A refund larger than that is refused.",
         "submit": "Record refund",
-        "done": "Refund recorded."
+        "done": "Refund recorded.",
+        "recovered": "Your refund of {{amount}} was completed at {{time}}.",
+        "review": {
+          "title": "This payment already has a refund:",
+          "item": "{{amount}} · {{time}} · {{who}}",
+          "byYou": "by you",
+          "byOther": "by another member",
+          "body": "If you were retrying a refund that seemed to fail, it was already made — do not refund again. Continue only if you mean to refund more.",
+          "confirm": "Refund {{amount}} more",
+          "decline": "Don't refund again"
+        }
       },
       "reverse": {
         "label": "Reverse",

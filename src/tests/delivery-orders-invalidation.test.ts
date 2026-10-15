@@ -199,24 +199,39 @@ describe("C. invalidation stays inside the acting principal", () => {
 describe("D. the Delivery screen delegates to the audited contract", () => {
   const detail = code("src/routes/app.deliveries.$id.tsx");
 
+  /** One function of the screen, from its declaration to its closing brace. */
+  const fnOf = (name: string) => {
+    const at = detail.indexOf(`function ${name}(`);
+    expect(at).toBeGreaterThan(-1);
+    const body = detail.slice(at);
+    return body.slice(0, body.indexOf("\n  }\n"));
+  };
+
   it("calls deliveryTransitionInvalidationKeys on a successful transition", () => {
-    const body = detail.slice(detail.indexOf("function onTransitionSuccess("));
-    const fn = body.slice(0, body.indexOf("\n  }\n"));
+    const fn = fnOf("invalidateAfterTransitionOf");
     expect(fn).toContain("deliveryTransitionInvalidationKeys(");
+    // For the principal the transition was STARTED as, never this render's.
+    expect(fn).toMatch(/startedAs\.userId,\s*startedAs\.organizationId,/);
     // A blanket clear would drop other principals' entries and is reserved for
     // sign-out.
     expect(fn).not.toContain("queryClient.clear()");
+    // Applied or not, every answer marks its initiator's entries stale.
+    expect(
+      fnOf("applyTransitionAnswer").split("invalidateAfterTransitionOf(started, detail.orderId)"),
+    ).toHaveLength(3);
   });
 
   it("keeps the fresh detail written straight into the cache", () => {
     // Preserved from PR #75: the transition response is the newest truth for
-    // this delivery, so it is written rather than refetched.
-    expect(detail).toContain("queryClient.setQueryData(queryKey, detail)");
+    // this delivery, so it is written rather than refetched — into the
+    // initiator's own entry for the delivery it tapped.
+    expect(fnOf("applyTransitionAnswer")).toMatch(
+      /queryClient\.setQueryData\(\s*deliveryKeys\.detail\(startedAs\.userId, startedAs\.organizationId, deliveryId\),\s*detail,\s*\)/,
+    );
   });
 
   it("does not re-derive its own invalidation list beside the contract", () => {
-    const body = detail.slice(detail.indexOf("function onTransitionSuccess("));
-    const fn = body.slice(0, body.indexOf("\n  }\n"));
+    const fn = fnOf("invalidateAfterTransitionOf");
     // One source of truth: a second hand-written invalidate here is how the
     // Orders-list entry went missing in the first place.
     expect(fn).not.toContain("HOME_QUERY_PREFIX");

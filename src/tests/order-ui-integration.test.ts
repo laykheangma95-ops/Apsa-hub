@@ -23,6 +23,12 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  SANCTIONED_CREATE_INPUT_FIELD,
+  SANCTIONED_INBOX_CALL_ARG,
+  SANCTIONED_NEW_ORDER_CALL_ARG,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 
@@ -34,6 +40,7 @@ const API_INDEX = "src/lib/api/index.ts";
 const ORDER_LIST_ROUTE = "src/routes/app.orders.tsx";
 const ORDER_DETAIL_ROUTE = "src/routes/app.orders.$id.tsx";
 const CREATE_SHEET = "src/components/orders/CreateRealOrderSheet.tsx";
+const PREPARE_SHEET = "src/components/inbox/PrepareOrderSheet.tsx";
 const CANCEL_SHEET = "src/components/orders/CancelOrderSheet.tsx";
 const ORDERS_LIB = "src/lib/orders.ts";
 
@@ -131,11 +138,16 @@ describe("Create flow calls createOrderFn, never a client-computed price/total",
     expect(fn).not.toMatch(/transitionOrderLifecycleFn|recordMovementFn/);
   });
 
-  it("CreateRealOrderInput / the sheet's payload has no organizationId, userId, price, subtotal or total field", () => {
+  it("CreateRealOrderInput / the sheets' payloads have no organizationId, userId, price, subtotal or total field", () => {
     const apiIndex = readSource(API_INDEX);
-    const createInputBlock = apiIndex.slice(
-      apiIndex.indexOf("export interface CreateRealOrderInput"),
-      apiIndex.indexOf("export async function createRealOrder"),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const createInputBlock = withoutSanctioned(
+      apiIndex.slice(
+        apiIndex.indexOf("export interface CreateRealOrderInput"),
+        apiIndex.indexOf("export async function createRealOrder"),
+      ),
+      SANCTIONED_CREATE_INPUT_FIELD,
     );
     for (const forbidden of [
       "organizationId",
@@ -149,20 +161,26 @@ describe("Create flow calls createOrderFn, never a client-computed price/total",
       expect(createInputBlock).not.toContain(forbidden);
     }
 
-    const sheet = readSource(CREATE_SHEET);
-    const call = sheet.slice(
-      sheet.indexOf("createRealOrder({"),
-      sheet.indexOf("});", sheet.indexOf("createRealOrder({")),
-    );
-    for (const forbidden of [
-      "organizationId",
-      "organization_id",
-      "userId",
-      "user_id",
-      "price",
-      "total:",
-    ]) {
-      expect(call).not.toContain(forbidden);
+    // Both sheets' create calls, each minus only its own sanctioned principal.
+    const IDENTITY = ["organizationId", "organization_id", "userId", "user_id"];
+    for (const [file, sanctioned, money] of [
+      [CREATE_SHEET, SANCTIONED_NEW_ORDER_CALL_ARG, ["price", "total:"]],
+      // The Inbox call sends its delivery fee from the draft preview
+      // (`priced.deliveryFee.amount`, an integer minor-unit INPUT), so its
+      // money guard is on price/total FIELDS rather than on the bare word.
+      [PREPARE_SHEET, SANCTIONED_INBOX_CALL_ARG, ["price:", "unitPrice", "subtotal:", "total:"]],
+    ] as const) {
+      const sheet = readSource(file);
+      const call = withoutSanctioned(
+        sheet.slice(
+          sheet.indexOf("createRealOrder({"),
+          sheet.indexOf("});", sheet.indexOf("createRealOrder({")),
+        ),
+        sanctioned,
+      );
+      for (const forbidden of [...IDENTITY, ...money]) {
+        expect(call).not.toContain(forbidden);
+      }
     }
   });
 
@@ -235,8 +253,14 @@ describe("Confirm and cancel call transitionOrderLifecycleFn only", () => {
     const route = readSource(ORDER_DETAIL_ROUTE);
     expect(route).toMatch(/canConfirmOrder\(order\.lifecycleStatus\)/);
     expect(route).toMatch(/canCancelOrder\(order\.lifecycleStatus\)/);
-    expect(route).toMatch(/confirmMutation\.mutate\(\)/);
-    expect(route).toMatch(/cancelMutation\.mutate\(reason\)/);
+    // Each carries the principal it was started as (CORRECTION-004, refuse-only).
+    // ...and the order SHOWN, which is the order acted on.
+    expect(route).toMatch(
+      /confirmMutation\.mutate\(\{ orderId: order\.id, startedAs: principal \}\)/,
+    );
+    expect(route).toMatch(
+      /cancelMutation\.mutate\(\{ orderId: order\.id, reason, startedAs: principal \}\)/,
+    );
   });
 });
 
@@ -275,8 +299,23 @@ describe("Error states are classified and mapped to translated copy, never raw e
     // confirmation can also commit and then fail on its APSA Parcel; only the
     // re-read shows the persisted (confirmed, parcel missing) order and its
     // recovery action.
+    //
+    // The re-read is the INITIATOR's own entry (the attempt's variable), never
+    // the render's query: a late failure must not refetch, or surface, for a
+    // principal the screen has switched to (PR #121 late-response P2).
     const onError = confirmBlock.slice(confirmBlock.indexOf("onError:"));
-    expect(onError).toMatch(/^onError: \(\) => \{[\s\S]*?void query\.refetch\(\);\s*\},/);
+    // ...and for the ORDER the attempt was started on, never the one shown now.
+    expect(onError).toMatch(
+      /^onError: \(_error, started\) => \{[\s\S]*?rereadDetailOf\(started\);\s*\},/,
+    );
+    expect(confirmBlock).not.toContain("query.refetch()");
+    const reread = route.slice(route.indexOf("function rereadDetailOf("));
+    expect(reread.slice(0, reread.indexOf("\n  }\n"))).toMatch(
+      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, orderId\),\s*exact: true,/,
+    );
+    expect(reread.slice(0, reread.indexOf("\n  }\n"))).toContain(
+      "function rereadDetailOf({ orderId, startedAs }: OrderActionStart)",
+    );
   });
 
   it("no route or sheet in this phase interpolates a raw caught error's message into JSX", () => {
@@ -327,12 +366,37 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
       route.indexOf("const cancelMutation"),
       route.indexOf("const back ="),
     );
-    expect(confirmBlock).toMatch(
-      /onSuccess:\s*\(detail\)\s*=>\s*\{\s*queryClient\.setQueryData\(queryKey, detail\)/,
+    // Written only for the CURRENT attempt, into its initiator's own detail
+    // entry, keyed by the attempt's variable and never by the render's
+    // queryKey (PR #121 late-response P2).
+    // The variable names the principal AND the order (PR #121: O1's answer
+    // landed in O2's entry when it was keyed by the render's order id).
+    for (const block of [confirmBlock, cancelBlock]) {
+      expect(block).toMatch(
+        /onSuccess:\s*\(detail, started, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(started, attempt, detail\)\) return;/,
+      );
+      expect(block).not.toContain("setQueryData(queryKey");
+    }
+    const apply = route.slice(
+      route.indexOf("function applyLifecycleResponse("),
+      route.indexOf("const confirmMutation"),
     );
-    expect(cancelBlock).toMatch(
-      /onSuccess:\s*\(detail\)\s*=>\s*\{\s*queryClient\.setQueryData\(queryKey, detail\)/,
+    expect(apply).toMatch(
+      /if \(\s*!isCurrentLifecycleAttempt\(attempt\) \|\|\s*!mayStillShowOrder\(started\) \|\|\s*detail\.order\.id !== started\.orderId\s*\) \{\s*invalidateLifecycleOf\(started\);\s*return false;\s*\}\s*const \{ orderId, startedAs \} = started;\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, orderId\),\s*detail,\s*\);/,
     );
+    // The attempt is current only for the principal AND order this screen shows.
+    expect(route).toContain(
+      "`${startedAs.userId}\\u0000${startedAs.organizationId}\\u0000${orderId}`",
+    );
+    // ...and only while the member may read the order NOW: the latest snapshot
+    // confirmed (canSensitive), and the order still held as a successful read —
+    // never an earlier read taken as proof (PR #121 in-place revocation P2).
+    const mayShow = route.slice(
+      route.indexOf("function mayStillShowOrder("),
+      route.indexOf("function applyLifecycleResponse("),
+    );
+    expect(mayShow).toContain('view.canSensitive("orders.read")');
+    expect(mayShow).toContain('entry?.status === "success"');
   });
 
   it("creating an order invalidates the order list query so the new order appears", () => {

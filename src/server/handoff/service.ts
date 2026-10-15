@@ -18,6 +18,7 @@
  * Never import this file from browser-bundled code.
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { COURIER_HANDOFF_CONFIRMED_REASON_CODE } from "@/lib/handoff";
 import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
@@ -120,11 +121,20 @@ export async function getHandoffPreview(
  *
  * Transitions the parcel's order's active delivery from 'ready' to 'in_transit'.
  * Every precondition is re-validated at execution time — the preview is advisory.
+ *
+ * Refused first — before the permission check, the parcel lookup and the
+ * transition — when the request was started as another member or organization
+ * (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum): 428
+ * principal_required / 409 principal_changed, nothing written. The delivery
+ * history row is ctx's.
  */
 export async function confirmHandoff(
   ctx: AuthorizationContext,
   parcelCode: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this handoff. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<HandoffResult> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("delivery.handoff");
 
   const parcel = await parcelsRepo.findParcelByCode(ctx.organizationId, parcelCode);

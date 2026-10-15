@@ -63,6 +63,16 @@ const shippingSnapshotSchema = z.object({
   address: z.string().max(2000).nullish(),
 });
 
+// The member + organization the client STARTED this mutation as (CORRECTIONS.md,
+// CORRECTION-004). A precondition the service compares with the principal it
+// derives from the session — it can only refuse, never authorize or attribute
+// (src/server/auth/expected-principal.ts). The one identity field this file's
+// validators accept. REQUIRED: a request without it (a browser bundle from
+// before the rule) is refused here, before the handler runs.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 // ── Internal helper: resolve session + organization ────────────────────────────
 // organizationId is NEVER accepted from the caller — always derived from DB membership.
 
@@ -114,6 +124,8 @@ export const createOrderFn = createServerFn({ method: "POST" })
         // Optional order shipping destination — snapshotted onto the order and
         // folded into the idempotency fingerprint server-side (migration 047).
         shipping: shippingSnapshotSchema.optional(),
+        // Refuse-only: the principal this order was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -134,6 +146,7 @@ export const createOrderFn = createServerFn({ method: "POST" })
       deliveryMinor: data.deliveryMinor,
       idempotencyKey: data.idempotencyKey,
       ...(data.shipping ? { shipping: data.shipping } : {}),
+      expectedPrincipal: data.expectedPrincipal,
     });
   });
 
@@ -150,13 +163,20 @@ export const updateOrderShippingFn = createServerFn({ method: "POST" })
       .object({
         orderId: z.string().uuid("Invalid order ID"),
         shipping: shippingSnapshotSchema,
+        // Refuse-only: the principal this edit was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { updateOrderShippingSnapshot } = await import("@/server/orders/service");
-    return updateOrderShippingSnapshot(authCtx, data.orderId, data.shipping);
+    return updateOrderShippingSnapshot(
+      authCtx,
+      data.orderId,
+      data.shipping,
+      data.expectedPrincipal,
+    );
   });
 
 // ── Transitions ───────────────────────────────────────────────────────────────
@@ -172,13 +192,21 @@ export const transitionOrderLifecycleFn = createServerFn({ method: "POST" })
         orderId: z.string().uuid("Invalid order ID"),
         to: lifecycleStatusSchema,
         reason: z.string().max(1000).nullish(),
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { transitionLifecycleStatus } = await import("@/server/orders/service");
-    return transitionLifecycleStatus(authCtx, data.orderId, data.to, data.reason ?? null);
+    return transitionLifecycleStatus(
+      authCtx,
+      data.orderId,
+      data.to,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 /**
@@ -188,12 +216,18 @@ export const transitionOrderLifecycleFn = createServerFn({ method: "POST" })
  */
 export const recoverOrderParcelFn = createServerFn({ method: "POST" })
   .validator((data: unknown) =>
-    z.object({ orderId: z.string().uuid("Invalid order ID") }).parse(data),
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        // Refuse-only: the principal this recovery was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { recoverOrderParcel } = await import("@/server/orders/service");
-    return recoverOrderParcel(authCtx, data.orderId);
+    return recoverOrderParcel(authCtx, data.orderId, data.expectedPrincipal);
   });
 
 /** @deprecated Always rejects; callers must use Payment recording/verification. */
@@ -220,13 +254,21 @@ export const transitionOrderFulfillmentFn = createServerFn({ method: "POST" })
         orderId: z.string().uuid("Invalid order ID"),
         to: fulfillmentStatusSchema,
         reason: z.string().max(1000).nullish(),
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { transitionFulfillmentStatus } = await import("@/server/orders/service");
-    return transitionFulfillmentStatus(authCtx, data.orderId, data.to, data.reason ?? null);
+    return transitionFulfillmentStatus(
+      authCtx,
+      data.orderId,
+      data.to,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 // ── Reads ─────────────────────────────────────────────────────────────────────
