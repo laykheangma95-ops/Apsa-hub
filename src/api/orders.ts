@@ -31,6 +31,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSessionFn } from "@/api/auth";
 import { ORDER_CODE_MAX_LENGTH } from "@/lib/order-code";
+import { ORDER_LIST_FILTERS } from "@/lib/order-list-filters";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 
 const orderSourceSchema = z.enum(["POS", "FACEBOOK", "INSTAGRAM", "TELEGRAM", "MANUAL"]);
@@ -317,6 +318,9 @@ const CURSOR_TIMESTAMP_RE =
  * name is a cursor the previous page handed out. A cursor is a place in the
  * caller's OWN list — the repository filters on the server-resolved
  * organization before it applies one.
+ *
+ * `filter` is one of the eight names in src/lib/order-list-filters.ts and
+ * nothing else; the server turns it into SQL. Omitted → all orders.
  */
 export const listOrdersPageFn = createServerFn()
   .validator((data: unknown) =>
@@ -334,6 +338,7 @@ export const listOrdersPageFn = createServerFn()
           })
           .strict()
           .optional(),
+        filter: z.enum(ORDER_LIST_FILTERS).optional(),
       })
       .strict()
       .optional()
@@ -342,5 +347,9 @@ export const listOrdersPageFn = createServerFn()
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { listOrdersPage } = await import("@/server/orders/service");
-    return listOrdersPage(authCtx, { limit: data?.limit, before: data?.before });
+    return listOrdersPage(authCtx, {
+      limit: data?.limit,
+      before: data?.before,
+      filter: data?.filter,
+    });
   });

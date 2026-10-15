@@ -63,7 +63,10 @@ describe("Order list uses the production API", () => {
   it("the Orders screen pages through listRealOrdersPage → listOrdersPageFn, with no mock fallback", () => {
     const route = readSource(ORDER_LIST_ROUTE);
     expect(route).toMatch(/useInfiniteQuery\(/);
-    expect(route).toMatch(/queryKey: ordersKeys\.listPages\(userId, routeOrganizationId\)/);
+    // One entry per principal AND filter: a page never crosses either.
+    expect(route).toMatch(
+      /queryKey: ordersKeys\.listPagesFor\(userId, routeOrganizationId, filter\)/,
+    );
     expect(route).toMatch(/listRealOrdersPage\(\{/);
 
     const apiIndex = readSource(API_INDEX);
@@ -72,8 +75,9 @@ describe("Order list uses the production API", () => {
     const fn = apiIndex.slice(start, apiIndex.indexOf("export async function getRealOrderDetail"));
     expect(fn).toMatch(/await import\(["']@\/api\/orders["']\)/);
     expect(fn).toMatch(/listOrdersPageFn/);
-    // Every page is checked against the principal it will be cached under.
-    expect(fn).toMatch(/acceptOrderListPage\(page, input\.expected\)/);
+    // Every page is checked against the principal and the filter it will be
+    // cached under.
+    expect(fn).toMatch(/acceptOrderListPage\(page, input\.expected, input\.filter\)/);
     expect(fn).not.toMatch(/isDemoModeError|catch|mock/);
   });
 

@@ -42,6 +42,7 @@ import type {
   OrderListCursor,
   OrderStatusAxis,
 } from "./types";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db = supabaseAdmin as any;
@@ -336,6 +337,7 @@ export async function listOrders(
     if (opts.fulfillment_statuses && opts.fulfillment_statuses.length > 0) {
       query = query.in("fulfillment_status", opts.fulfillment_statuses);
     }
+    if (opts.list_filter) query = applyOrderListFilter(query, opts.list_filter);
     return query;
   };
 
@@ -358,6 +360,45 @@ export async function listOrders(
   const { data, error } = await query;
   if (error) throw new Error(`listOrders: ${errMessage(error)}`);
   return (data ?? []) as OrderRow[];
+}
+
+/**
+ * One Orders-screen filter as SQL. The meaning of each filter, and why, is in
+ * src/lib/order-list-filters.ts; orderMatchesListFilter there is the
+ * specification this is tested against over every combination of the three
+ * status columns.
+ *
+ * Every value below is a constant of this file: a filter crosses the network
+ * only as one of the eight names, validated by the server function, and the
+ * one `.or()` group is a fixed string. The predicate is ANDed with the
+ * organization and with the cursor's bounds, so it can only narrow the
+ * caller's own list.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the untyped `db` chain, see the file header
+function applyOrderListFilter(query: any, filter: OrderListFilter): any {
+  switch (filter) {
+    case "all":
+      return query;
+    case "awaiting_payment":
+      return query.neq("lifecycle_status", "cancelled").in("payment_status", ["unpaid", "pending"]);
+    case "draft":
+      return query.eq("lifecycle_status", "draft").neq("fulfillment_status", "cancelled");
+    case "to_pack":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "unfulfilled");
+    case "processing":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "processing");
+    case "fulfilled":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "fulfilled");
+    case "completed":
+      return query.eq("lifecycle_status", "completed").neq("fulfillment_status", "cancelled");
+    case "cancelled":
+      return query.or("lifecycle_status.eq.cancelled,fulfillment_status.eq.cancelled");
+    default: {
+      // A name outside the eight is a programming error, never "everything".
+      const unknown: never = filter;
+      throw new Error(`listOrders: unknown list filter ${String(unknown)}`);
+    }
+  }
 }
 
 /**
