@@ -114,6 +114,7 @@ export function ParcelRecoveryAction({
           ordersKeys.detailDeliveries(userId, organizationId, orderId),
           packingKeys.orderState(userId, organizationId, orderId),
           ordersKeys.list(userId, organizationId),
+          ordersKeys.listPages(userId, organizationId),
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
       );
     },

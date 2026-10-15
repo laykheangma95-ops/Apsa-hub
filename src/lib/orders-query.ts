@@ -40,9 +40,22 @@ export const ordersKeys = {
    */
   principal: (userId: string, organizationId: string) =>
     partition.principal(userId, organizationId),
-  /** The production Order list for one principal. */
+  /**
+   * The production Order list for one principal — the prefix every list
+   * invalidation targets. Its own entry holds the bottom nav's recent orders.
+   */
   list: (userId: string, organizationId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "list"] as const,
+  /**
+   * The Orders screen's paged list (an infinite query: pages plus the cursor
+   * that continues them). A SUB-KEY of `list`, so every invalidation of the
+   * list reaches it, while the bottom nav's plain array never shares an entry
+   * with this differently shaped one. Partitioning the key partitions the
+   * cursor with it: a position walked through one principal's orders can never
+   * continue a request made for another.
+   */
+  listPages: (userId: string, organizationId: string) =>
+    [ORDERS_QUERY_ROOT, userId, organizationId, "list", "pages"] as const,
   /** One production Order's detail. */
   detail: (userId: string, organizationId: string, orderId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "detail", orderId] as const,

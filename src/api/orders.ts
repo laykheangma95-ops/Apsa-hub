@@ -300,3 +300,47 @@ export const listOrdersFn = createServerFn()
       offset: data?.offset,
     });
   });
+
+/**
+ * A timestamptz exactly as PostgREST renders it ("2026-10-15T09:30:00.123456+00:00").
+ * Strict on purpose: the cursor is echoed back from a previous page, never typed
+ * by a person, so anything else is a malformed or tampered request.
+ */
+const CURSOR_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:\d{2})?)$/;
+
+/**
+ * The Orders screen's paged read (src/routes/app.orders.tsx).
+ *
+ * No organization, no user and no offset: the tenant and the member come from
+ * the session exactly as for listOrdersFn, and the only position a caller can
+ * name is a cursor the previous page handed out. A cursor is a place in the
+ * caller's OWN list — the repository filters on the server-resolved
+ * organization before it applies one.
+ */
+export const listOrdersPageFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        // ORDER_LIST_PAGE_MAX in the service; omitted → ORDER_LIST_PAGE_SIZE.
+        limit: z.number().int().min(1).max(100).optional(),
+        before: z
+          .object({
+            createdAt: z
+              .string()
+              .regex(CURSOR_TIMESTAMP_RE, "Invalid cursor")
+              .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid cursor"),
+            id: z.string().uuid("Invalid cursor"),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listOrdersPage } = await import("@/server/orders/service");
+    return listOrdersPage(authCtx, { limit: data?.limit, before: data?.before });
+  });
