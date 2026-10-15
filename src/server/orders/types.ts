@@ -228,4 +228,24 @@ export interface ListOrdersOptions {
   fulfillment_statuses?: readonly OrderFulfillmentStatus[] | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
+  /**
+   * Keyset continuation: only orders strictly AFTER this one in the list's
+   * (created_at DESC, id DESC) order. Never combined with `offset`.
+   */
+  before?: OrderListCursor | undefined;
+}
+
+/**
+ * A position in the Orders list: the (created_at, id) of the last order a page
+ * returned. `createdAt` is the database's own timestamptz text, passed back
+ * untouched — a JavaScript Date would drop the microseconds, and two orders a
+ * few microseconds apart would then compare as one.
+ *
+ * A position, not a credential. The repository still filters on the caller's
+ * server-resolved organization, so a forged cursor can only move within the
+ * caller's own orders.
+ */
+export interface OrderListCursor {
+  createdAt: string;
+  id: string;
 }

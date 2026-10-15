@@ -1164,7 +1164,28 @@
       "body": "Check your connection and try again."
     },
     "hasCustomer": "Linked customer",
-    "noCustomer": "No customer"
+    "noCustomer": "No customer",
+    "loadMore": "Load more orders",
+    "loadingMore": "Loading more orders…",
+    "showing_one": "Showing {{count}} order",
+    "showing_other": "Showing {{count}} orders",
+    "end": {
+      "title": "You've reached your oldest order",
+      "body_one": "{{count}} order shown. New orders appear at the top when the list refreshes.",
+      "body_other": "{{count}} orders shown. New orders appear at the top when the list refreshes."
+    },
+    "moreError": {
+      "title": "More orders didn't load",
+      "body": "This list isn't complete yet. Check your connection and try again."
+    },
+    "refreshError": "This list couldn't refresh, so it may be out of date.",
+    "denied": "You can't view orders",
+    "deniedBody": "Ask the shop owner for permission to view orders.",
+    "principalChanged": {
+      "title": "You switched account or business",
+      "body": "Another tab signed in as someone else or changed business. Reload to see the right orders.",
+      "reload": "Reload"
+    }
   },
   "orderCreate": {
     "title": "New order",

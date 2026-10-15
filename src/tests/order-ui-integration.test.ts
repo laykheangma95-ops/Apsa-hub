@@ -60,6 +60,23 @@ describe("Order list uses the production API", () => {
     expect(fn).not.toMatch(/\.\.\.orders\]/);
   });
 
+  it("the Orders screen pages through listRealOrdersPage → listOrdersPageFn, with no mock fallback", () => {
+    const route = readSource(ORDER_LIST_ROUTE);
+    expect(route).toMatch(/useInfiniteQuery\(/);
+    expect(route).toMatch(/queryKey: ordersKeys\.listPages\(userId, routeOrganizationId\)/);
+    expect(route).toMatch(/listRealOrdersPage\(\{/);
+
+    const apiIndex = readSource(API_INDEX);
+    const start = apiIndex.indexOf("export async function listRealOrdersPage");
+    expect(start).toBeGreaterThan(-1);
+    const fn = apiIndex.slice(start, apiIndex.indexOf("export async function getRealOrderDetail"));
+    expect(fn).toMatch(/await import\(["']@\/api\/orders["']\)/);
+    expect(fn).toMatch(/listOrdersPageFn/);
+    // Every page is checked against the principal it will be cached under.
+    expect(fn).toMatch(/acceptOrderListPage\(page, input\.expected\)/);
+    expect(fn).not.toMatch(/isDemoModeError|catch|mock/);
+  });
+
   it("the list route never reads mock organization/customer arrays directly", () => {
     const route = readSource(ORDER_LIST_ROUTE);
     expect(route).not.toMatch(/from ["']@\/lib\/mock\//);
