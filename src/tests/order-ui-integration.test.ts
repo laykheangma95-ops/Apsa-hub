@@ -254,8 +254,13 @@ describe("Confirm and cancel call transitionOrderLifecycleFn only", () => {
     expect(route).toMatch(/canConfirmOrder\(order\.lifecycleStatus\)/);
     expect(route).toMatch(/canCancelOrder\(order\.lifecycleStatus\)/);
     // Each carries the principal it was started as (CORRECTION-004, refuse-only).
-    expect(route).toMatch(/confirmMutation\.mutate\(principal\)/);
-    expect(route).toMatch(/cancelMutation\.mutate\(\{ reason, startedAs: principal \}\)/);
+    // ...and the order SHOWN, which is the order acted on.
+    expect(route).toMatch(
+      /confirmMutation\.mutate\(\{ orderId: order\.id, startedAs: principal \}\)/,
+    );
+    expect(route).toMatch(
+      /cancelMutation\.mutate\(\{ orderId: order\.id, reason, startedAs: principal \}\)/,
+    );
   });
 });
 
@@ -299,13 +304,17 @@ describe("Error states are classified and mapped to translated copy, never raw e
     // the render's query: a late failure must not refetch, or surface, for a
     // principal the screen has switched to (PR #121 late-response P2).
     const onError = confirmBlock.slice(confirmBlock.indexOf("onError:"));
+    // ...and for the ORDER the attempt was started on, never the one shown now.
     expect(onError).toMatch(
-      /^onError: \(_error, startedAs\) => \{[\s\S]*?rereadDetailOf\(startedAs\);\s*\},/,
+      /^onError: \(_error, started\) => \{[\s\S]*?rereadDetailOf\(started\);\s*\},/,
     );
     expect(confirmBlock).not.toContain("query.refetch()");
     const reread = route.slice(route.indexOf("function rereadDetailOf("));
     expect(reread.slice(0, reread.indexOf("\n  }\n"))).toMatch(
-      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*exact: true,/,
+      /invalidateQueries\(\{\s*queryKey: ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, orderId\),\s*exact: true,/,
+    );
+    expect(reread.slice(0, reread.indexOf("\n  }\n"))).toContain(
+      "function rereadDetailOf({ orderId, startedAs }: OrderActionStart)",
     );
   });
 
@@ -360,13 +369,12 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
     // Written only for the CURRENT attempt, into its initiator's own detail
     // entry, keyed by the attempt's variable and never by the render's
     // queryKey (PR #121 late-response P2).
-    expect(confirmBlock).toMatch(
-      /onSuccess:\s*\(detail, startedAs, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(startedAs, attempt, detail\)\) return;/,
-    );
-    expect(cancelBlock).toMatch(
-      /onSuccess:\s*\(detail, \{ startedAs \}, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(startedAs, attempt, detail\)\) return;/,
-    );
+    // The variable names the principal AND the order (PR #121: O1's answer
+    // landed in O2's entry when it was keyed by the render's order id).
     for (const block of [confirmBlock, cancelBlock]) {
+      expect(block).toMatch(
+        /onSuccess:\s*\(detail, started, attempt\)\s*=>\s*\{\s*if \(!applyLifecycleResponse\(started, attempt, detail\)\) return;/,
+      );
       expect(block).not.toContain("setQueryData(queryKey");
     }
     const apply = route.slice(
@@ -374,7 +382,11 @@ describe("Successful confirm/cancel refreshes the on-screen order", () => {
       route.indexOf("const confirmMutation"),
     );
     expect(apply).toMatch(
-      /if \(!isCurrentLifecycleAttempt\(attempt\) \|\| !mayStillShowOrder\(startedAs\)\) \{\s*invalidateLifecycleOf\(startedAs\);\s*return false;\s*\}\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, id\),\s*detail,\s*\);/,
+      /if \(\s*!isCurrentLifecycleAttempt\(attempt\) \|\|\s*!mayStillShowOrder\(started\) \|\|\s*detail\.order\.id !== started\.orderId\s*\) \{\s*invalidateLifecycleOf\(started\);\s*return false;\s*\}\s*const \{ orderId, startedAs \} = started;\s*queryClient\.setQueryData\(\s*ordersKeys\.detail\(startedAs\.userId, startedAs\.organizationId, orderId\),\s*detail,\s*\);/,
+    );
+    // The attempt is current only for the principal AND order this screen shows.
+    expect(route).toContain(
+      "`${startedAs.userId}\\u0000${startedAs.organizationId}\\u0000${orderId}`",
     );
     // ...and only while the member may read the order NOW: the latest snapshot
     // confirmed (canSensitive), and the order still held as a successful read —

@@ -62,9 +62,7 @@ describe("Order detail wiring for a confirmed order missing its APSA Parcel", ()
     const block = confirm.slice(0, confirm.indexOf("const cancelMutation"));
     // The initiator's own entry (PR #121 late-response P2): re-read while it is
     // shown, never a refetch for whichever principal the screen shows now.
-    expect(block).toMatch(
-      /onError: \(_error, startedAs\) => \{[\s\S]*?rereadDetailOf\(startedAs\);/,
-    );
+    expect(block).toMatch(/onError: \(_error, started\) => \{[\s\S]*?rereadDetailOf\(started\);/);
     expect(block).not.toContain("query.refetch()");
   });
 });

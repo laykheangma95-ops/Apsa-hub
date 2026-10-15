@@ -85,6 +85,7 @@ import {
   type UiOrderSettlement,
 } from "@/lib/payments";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { ordersKeys } from "@/lib/orders-query";
 import { inventoryKeys } from "@/lib/inventory";
 import { fullTimestamp, localName } from "@/lib/format";
@@ -225,11 +226,20 @@ function OrderSettlementRows({ settlement }: { settlement: UiOrderSettlement }) 
   );
 }
 
-/** One Confirm / Cancel tap: the screen's principal epoch and tap number at that moment. */
+/** One Confirm / Cancel tap: the screen's scope epoch and tap number at that moment. */
 interface LifecycleAttempt {
   epoch: number;
   attempt: number;
 }
+
+/** What every order action on this screen is started for: the order shown, as the member shown. */
+interface OrderActionStart {
+  orderId: string;
+  startedAs: InitiatingPrincipal;
+}
+
+const orderActionScopeOf = ({ orderId, startedAs }: OrderActionStart) =>
+  `${startedAs.userId}\u0000${startedAs.organizationId}\u0000${orderId}`;
 
 function RealOrderDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
@@ -271,22 +281,26 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   /*
    * A Confirm or Cancel RESPONSE belongs to the attempt that asked for it — the
-   * principal it was tapped as and that tap's place in this screen's sequence —
-   * never to whoever the screen shows when it lands. TanStack hands a pending
-   * mutation every later render's callbacks, so a hook-level onSuccess runs
-   * with the CURRENT render's keys: written as-is, member A's late confirm
-   * would land in member B's detail partition and render A's order to B, with
-   * or without orders.read.
+   * principal it was tapped as, the ORDER it was tapped on, and that tap's
+   * place in this screen's sequence — never to whoever or whatever the screen
+   * shows when it lands. TanStack hands a pending mutation every later
+   * render's callbacks, so a hook-level onSuccess runs with the CURRENT
+   * render's keys: written as-is, member A's late confirm would land in member
+   * B's detail partition and render A's order to B, with or without
+   * orders.read; and after a move from order O1 to O2 on this same mounted
+   * route, O1's confirmed detail landed in O2's entry, O2's screen showed O1,
+   * and a Cancel tapped there cancelled O2.
    *
-   * `epoch` moves on every committed principal change and on unmount (layout
-   * effects, in the same commit: no response can resolve in between);
-   * `attempt` moves on every Confirm / Cancel tap. Only a completion whose epoch
-   * and attempt are both still current is applied. Any other is written
-   * nowhere and only marks the initiator's own entries stale, to be re-read
+   * `epoch` moves on every committed change of principal or order and on
+   * unmount (layout effects, in the same commit: no response can resolve in
+   * between); `attempt` moves on every Confirm / Cancel tap. Only a completion
+   * whose epoch and attempt are both still current is applied, into the entry
+   * of the order its variable names. Any other is written nowhere and only
+   * marks the initiator's own entries for that order stale, to be re-read
    * under the initiator's own authority if it is shown again.
    */
-  const principalScope = `${userId}\u0000${routeOrganizationId}`;
-  const lifecycleRef = useRef({ scope: principalScope, epoch: 0, attempt: 0, paymentAttempt: 0 });
+  const actionScope = orderActionScopeOf({ orderId: id, startedAs: principal });
+  const lifecycleRef = useRef({ scope: actionScope, epoch: 0, attempt: 0, paymentAttempt: 0 });
 
   /*
    * The capability snapshot as of the LATEST commit, for a completion that
@@ -303,11 +317,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   /*
    * Record payment's replay identity, kept apart from its draft. The sheet's
    * draft (method, amount, reference) is bound to the principal that typed it
-   * and is retired the moment another principal is shown. Its idempotency key
-   * is not displayed: if a submitted attempt is still unresolved when the
-   * sheet is retired, the key is parked for THAT principal only and handed back
-   * when that principal next opens the sheet, so a retry replays onto the same
-   * payment instead of recording a second one. A success resolves it.
+   * and the order it was typed for, and is retired the moment another
+   * principal or order is shown. Its idempotency key is not displayed: if a
+   * submitted attempt is still unresolved when the sheet is retired, the key
+   * is parked for THAT principal and order only and handed back when that
+   * principal next opens the sheet on that order, so a retry replays onto the
+   * same payment instead of recording a second one. A success resolves it.
    */
   const unresolvedPaymentRef = useRef<{ scope: string; key: string } | null>(null);
   const parkedPaymentKeysRef = useRef(new Map<string, string>());
@@ -434,40 +449,42 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   /**
    * Called from onMutate, which TanStack runs synchronously inside mutate() —
-   * at the tap, with the principal variable of that tap. A variable that does
-   * not name the principal this screen shows can never be current.
+   * at the tap, with the principal and order variable of that tap. A variable
+   * that does not name the principal and order this screen shows can never be
+   * current.
    */
-  function beginLifecycleAttempt(startedAs: typeof principal): LifecycleAttempt {
+  function beginLifecycleAttempt(started: OrderActionStart): LifecycleAttempt {
     const current = lifecycleRef.current;
     current.attempt += 1;
-    const shown = `${startedAs.userId}\u0000${startedAs.organizationId}` === current.scope;
+    const shown = orderActionScopeOf(started) === current.scope;
     return { epoch: shown ? current.epoch : -1, attempt: current.attempt };
   }
   function isCurrentLifecycleAttempt(attempt: LifecycleAttempt | undefined) {
     const current = lifecycleRef.current;
     return attempt?.epoch === current.epoch && attempt.attempt === current.attempt;
   }
-  /** The initiator's own detail entry — refetched only if it is the one shown. */
-  function rereadDetailOf(startedAs: typeof principal) {
+  /** The initiator's own detail entry for that order — refetched only if it is the one shown. */
+  function rereadDetailOf({ orderId, startedAs }: OrderActionStart) {
     void queryClient.invalidateQueries({
-      queryKey: ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+      queryKey: ordersKeys.detail(startedAs.userId, startedAs.organizationId, orderId),
       exact: true,
     });
   }
   /**
-   * A lifecycle change committed for `startedAs` whose response is not applied
-   * (another principal is shown, the screen is gone, or a newer tap superseded
-   * it): nothing is written, and only the initiator's own entries are marked
-   * stale. An evicted entry stays evicted — invalidation creates nothing.
+   * A lifecycle change committed for `started` whose response is not applied
+   * (another principal or order is shown, the screen is gone, or a newer tap
+   * superseded it): nothing is written, and only the initiator's own entries
+   * are marked stale. An evicted entry stays evicted — invalidation creates
+   * nothing.
    */
-  function invalidateLifecycleOf(startedAs: typeof principal) {
-    const { userId: startedBy, organizationId: startedIn } = startedAs;
-    rereadDetailOf(startedAs);
+  function invalidateLifecycleOf(started: OrderActionStart) {
+    const { userId: startedBy, organizationId: startedIn } = started.startedAs;
+    rereadDetailOf(started);
     void queryClient.invalidateQueries({ queryKey: ordersKeys.list(startedBy, startedIn) });
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
     void queryClient.invalidateQueries({ queryKey: inventoryKeys.principal(startedBy, startedIn) });
     void queryClient.invalidateQueries({
-      queryKey: packingKeys.orderState(startedBy, startedIn, id),
+      queryKey: packingKeys.orderState(startedBy, startedIn, started.orderId),
       exact: true,
     });
   }
@@ -478,10 +495,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * still be held as a successful read (not evicted, not refused by the
    * server's latest read). An earlier successful read proves nothing.
    */
-  function mayStillShowOrder(startedAs: typeof principal) {
+  function mayStillShowOrder({ orderId, startedAs }: OrderActionStart) {
     const view = capabilitiesRef.current;
     const entry = queryClient.getQueryState(
-      ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+      ordersKeys.detail(startedAs.userId, startedAs.organizationId, orderId),
     );
     return (
       view.canSensitive("orders.read") &&
@@ -492,57 +509,69 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   /**
    * The response of the CURRENT attempt is written into its initiator's own
-   * detail entry — keyed by the attempt's variable, never by this render —
-   * and only while that member may still read the order; any other response
-   * is written nowhere. Returns whether it was applied.
+   * detail entry for the order it was tapped on — keyed by the attempt's
+   * variable, never by this render — and only while that member may still
+   * read the order; any other response is written nowhere. Returns whether it
+   * was applied.
    */
   function applyLifecycleResponse(
-    startedAs: typeof principal,
+    started: OrderActionStart,
     attempt: LifecycleAttempt | undefined,
     detail: Awaited<ReturnType<typeof confirmRealOrder>>,
   ) {
-    if (!isCurrentLifecycleAttempt(attempt) || !mayStillShowOrder(startedAs)) {
-      invalidateLifecycleOf(startedAs);
+    if (
+      !isCurrentLifecycleAttempt(attempt) ||
+      !mayStillShowOrder(started) ||
+      detail.order.id !== started.orderId
+    ) {
+      invalidateLifecycleOf(started);
       return false;
     }
+    const { orderId, startedAs } = started;
     queryClient.setQueryData(
-      ordersKeys.detail(startedAs.userId, startedAs.organizationId, id),
+      ordersKeys.detail(startedAs.userId, startedAs.organizationId, orderId),
       detail,
     );
     return true;
   }
 
   const confirmMutation = useMutation({
-    mutationFn: (startedAs: typeof principal) => confirmRealOrder(id, startedAs),
-    onMutate: (startedAs) => beginLifecycleAttempt(startedAs),
-    onSuccess: (detail, startedAs, attempt) => {
-      if (!applyLifecycleResponse(startedAs, attempt, detail)) return;
+    mutationFn: ({ orderId, startedAs }: OrderActionStart) => confirmRealOrder(orderId, startedAs),
+    onMutate: beginLifecycleAttempt,
+    onSuccess: (detail, started, attempt) => {
+      if (!applyLifecycleResponse(started, attempt, detail)) return;
       invalidateAfterLifecycleChange();
       // The pack state read while the order was a draft predates its APSA
       // Parcel; confirmation created it, so it is read again.
-      void queryClient.invalidateQueries({ queryKey: packStateQueryKey, exact: true });
+      const { orderId, startedAs } = started;
+      void queryClient.invalidateQueries({
+        queryKey: packingKeys.orderState(startedAs.userId, startedAs.organizationId, orderId),
+        exact: true,
+      });
       setNotice(t("order.confirmedNotice"));
     },
-    onError: (_error, startedAs) => {
+    onError: (_error, started) => {
       // Re-read on every failure: a confirmation can commit and still fail on
       // its APSA Parcel, and the persisted order (confirmed, parcel missing)
-      // must replace the stale draft so the recovery action appears.
-      rereadDetailOf(startedAs);
+      // must replace the stale draft so the recovery action appears. Only the
+      // initiator's own entry for that order: if another one is shown it is
+      // only marked stale.
+      rereadDetailOf(started);
     },
   });
 
   const cancelMutation = useMutation({
-    mutationFn: ({ reason, startedAs }: { reason: string; startedAs: typeof principal }) =>
-      cancelRealOrder(id, startedAs, reason || undefined),
-    onMutate: ({ startedAs }) => beginLifecycleAttempt(startedAs),
-    onSuccess: (detail, { startedAs }, attempt) => {
-      if (!applyLifecycleResponse(startedAs, attempt, detail)) return;
+    mutationFn: ({ orderId, reason, startedAs }: OrderActionStart & { reason: string }) =>
+      cancelRealOrder(orderId, startedAs, reason || undefined),
+    onMutate: beginLifecycleAttempt,
+    onSuccess: (detail, started, attempt) => {
+      if (!applyLifecycleResponse(started, attempt, detail)) return;
       invalidateAfterLifecycleChange();
       setCancelOpen(false);
       setNotice(t("order.cancelledNotice"));
     },
-    onError: (error, { startedAs }) => {
-      if (classifyOrderError(error) === "stale") rereadDetailOf(startedAs);
+    onError: (error, started) => {
+      if (classifyOrderError(error) === "stale") rereadDetailOf(started);
     },
   });
 
@@ -551,11 +580,11 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * attempt carries is unresolved until a success answers it.
    */
   function beginPaymentAttempt(
-    submit: RecordOrderPaymentSubmit & { startedAs: typeof principal },
+    submit: RecordOrderPaymentSubmit & OrderActionStart,
   ): LifecycleAttempt {
     const current = lifecycleRef.current;
     current.paymentAttempt += 1;
-    const scope = `${submit.startedAs.userId}\u0000${submit.startedAs.organizationId}`;
+    const scope = orderActionScopeOf(submit);
     unresolvedPaymentRef.current = { scope, key: submit.idempotencyKey };
     return { epoch: scope === current.scope ? current.epoch : -1, attempt: current.paymentAttempt };
   }
@@ -564,8 +593,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     return attempt?.epoch === current.epoch && attempt.attempt === current.paymentAttempt;
   }
   /** A success: the key's payment exists, so nothing is left to replay under it. */
-  function resolvePaymentKey(submit: RecordOrderPaymentSubmit & { startedAs: typeof principal }) {
-    const scope = `${submit.startedAs.userId}\u0000${submit.startedAs.organizationId}`;
+  function resolvePaymentKey(submit: RecordOrderPaymentSubmit & OrderActionStart) {
+    const scope = orderActionScopeOf(submit);
     if (unresolvedPaymentRef.current?.key === submit.idempotencyKey) {
       unresolvedPaymentRef.current = null;
     }
@@ -574,14 +603,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     }
   }
   /**
-   * A payment recorded for `startedAs` whose answer is not applied (another
-   * principal is shown, the screen is gone, or a newer submit superseded it):
-   * no sheet, notice or form of whoever is shown is touched; only the
-   * initiator's own entries are marked stale.
+   * A payment recorded for `started` whose answer is not applied (another
+   * principal or order is shown, the screen is gone, or a newer submit
+   * superseded it): no sheet, notice or form of whatever is shown is touched;
+   * only the initiator's own entries are marked stale.
    */
-  function invalidatePaymentOf(startedAs: typeof principal) {
-    const { userId: startedBy, organizationId: startedIn } = startedAs;
-    rereadDetailOf(startedAs);
+  function invalidatePaymentOf(started: OrderActionStart) {
+    const { userId: startedBy, organizationId: startedIn } = started.startedAs;
+    rereadDetailOf(started);
     evictShippingLabels(queryClient, startedBy, startedIn);
     void queryClient.invalidateQueries({ queryKey: ["payments", startedBy, startedIn] });
     void queryClient.invalidateQueries({ queryKey: ordersKeys.list(startedBy, startedIn) });
@@ -589,8 +618,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
   function openRecordPayment() {
     const parked = parkedPaymentKeysRef.current;
-    setPaymentReplayKey(parked.get(principalScope));
-    parked.delete(principalScope);
+    setPaymentReplayKey(parked.get(actionScope));
+    parked.delete(actionScope);
     setRecordPaymentOpen(true);
   }
 
@@ -621,9 +650,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
 
   const recordPaymentMutation = useMutation({
-    mutationFn: (submit: RecordOrderPaymentSubmit & { startedAs: typeof principal }) =>
+    mutationFn: (submit: RecordOrderPaymentSubmit & OrderActionStart) =>
       recordRealPayment({
-        orderId: id,
+        orderId: submit.orderId,
         method: submit.method,
         amountMinor: submit.amountMinor,
         ...(submit.reference ? { reference: submit.reference } : {}),
@@ -633,7 +662,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     onMutate: (submit) => beginPaymentAttempt(submit),
     onSuccess: (_payment, submit, attempt) => {
       resolvePaymentKey(submit);
-      if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit.startedAs);
+      if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
       setRecordPaymentOpen(false);
       invalidateAfterPayment();
       /*
@@ -647,26 +676,27 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   });
 
   /*
-   * A principal change, committed: what the previous principal started, typed
-   * or was told is not the next one's. No pending or failed Confirm / Cancel /
-   * Record payment state, no notice, no open cancel sheet and no payment draft
-   * carries over (the payment sheet is also keyed by principal, so its form
-   * state is gone in the same render), and every completion still in flight is
-   * stale (see lifecycleRef). An unresolved payment key is parked for the
-   * principal that submitted it, never handed to the next.
+   * A principal or order change, committed: what was started, typed or told
+   * for the previous principal or order is not the next one's. No pending or
+   * failed Confirm / Cancel / Record payment state, no notice, no open cancel
+   * or delivery sheet and no payment draft carries over (the sheets are also
+   * keyed by principal and order, so their form state is gone in the same
+   * render), and every completion still in flight is stale (see
+   * lifecycleRef). An unresolved payment key is parked for the principal and
+   * order it was submitted for, never handed to the next.
    */
   const { reset: resetConfirm } = confirmMutation;
   const { reset: resetCancel } = cancelMutation;
   const { reset: resetRecordPayment } = recordPaymentMutation;
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
-    if (current.scope === principalScope) return;
+    if (current.scope === actionScope) return;
     const unresolved = unresolvedPaymentRef.current;
     if (recordPaymentOpen && unresolved?.scope === current.scope) {
       parkedPaymentKeysRef.current.set(unresolved.scope, unresolved.key);
     }
     unresolvedPaymentRef.current = null;
-    current.scope = principalScope;
+    current.scope = actionScope;
     current.epoch += 1;
     resetConfirm();
     resetCancel();
@@ -676,7 +706,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     setCreateDeliveryOpen(false);
     setRecordPaymentOpen(false);
     setPaymentReplayKey(undefined);
-  }, [principalScope, recordPaymentOpen, resetConfirm, resetCancel, resetRecordPayment]);
+  }, [actionScope, recordPaymentOpen, resetConfirm, resetCancel, resetRecordPayment]);
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
     return () => {
@@ -1327,7 +1357,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
               className="press-tactile tap-target elevation-action h-12 w-full rounded-2xl"
               disabled={confirmMutation.isPending}
               aria-busy={confirmMutation.isPending}
-              onClick={() => confirmMutation.mutate(principal)}
+              // The order SHOWN is the order acted on.
+              onClick={() => confirmMutation.mutate({ orderId: order.id, startedAs: principal })}
             >
               {confirmMutation.isPending ? <Spinner /> : null}
               {confirmMutation.isPending ? t("order.confirming") : t("order.confirmOrder")}
@@ -1337,15 +1368,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       ) : null}
 
       <CancelOrderSheet
+        // Bound to the principal and order: a typed reason never carries over.
+        // (Sibling keys must differ: the other sheets are keyed by scope too.)
+        key={`cancel:${actionScope}`}
         open={cancelOpen}
         onOpenChange={setCancelOpen}
         pending={cancelMutation.isPending}
-        onConfirm={(reason) => cancelMutation.mutate({ reason, startedAs: principal })}
+        onConfirm={(reason) =>
+          cancelMutation.mutate({ orderId: order.id, reason, startedAs: principal })
+        }
       />
       <CreateDeliverySheet
-        // Bound to the principal: another principal never inherits this draft.
-        // (Sibling keys must differ: the payment sheet is keyed by principal too.)
-        key={`delivery:${principalScope}`}
+        // Bound to the principal and order: neither another principal nor
+        // another order ever inherits this draft or its answer.
+        key={`delivery:${actionScope}`}
         open={createDeliveryOpen}
         onOpenChange={setCreateDeliveryOpen}
         orderId={order.id}
@@ -1369,8 +1405,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         }}
       />
       <RecordOrderPaymentSheet
-        // Bound to the principal: another principal never inherits this draft.
-        key={`payment:${principalScope}`}
+        // Bound to the principal and order: neither inherits this draft.
+        key={`payment:${actionScope}`}
         open={recordPaymentOpen}
         replayKey={paymentReplayKey}
         onOpenChange={(next) => {
@@ -1389,7 +1425,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         canMarkCod={canMarkCod}
         pending={recordPaymentMutation.isPending}
         error={recordPaymentError}
-        onConfirm={(submit) => recordPaymentMutation.mutate({ ...submit, startedAs: principal })}
+        onConfirm={(submit) =>
+          recordPaymentMutation.mutate({ ...submit, orderId: order.id, startedAs: principal })
+        }
       />
       <InternalParcelLabelDialog
         open={parcelLabelOpen}

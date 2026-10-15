@@ -300,6 +300,13 @@ interface Sent {
 const sent: Sent[] = [];
 /** The next request of this kind commits server-side, then its response is lost. */
 const loseNextResponse = new Set<Gated>();
+/**
+ * The next request of this kind is handled (committed or refused) server-side,
+ * then its answer waits for releaseResponse() before it reaches the browser.
+ */
+const holdResponseNext = new Set<Gated>();
+const heldResponses: (() => void)[] = [];
+const awaitRelease = () => new Promise<void>((release) => heldResponses.push(release));
 
 /** Wraps a REAL server function: gate, record what the server derived and answered, maybe lose the response. */
 function wrap(name: string, real: (args: { data: unknown }) => Promise<unknown>) {
@@ -308,6 +315,7 @@ function wrap(name: string, real: (args: { data: unknown }) => Promise<unknown>)
   return async (args: { data: unknown }) => {
     if (holdDispatchNext.delete(kind)) pendingGate = kind;
     const lose = loseNextResponse.delete(kind);
+    const holdResponse = holdResponseNext.delete(kind);
     const entry: Sent = {
       fn: kind,
       data: JSON.parse(JSON.stringify(args.data ?? {})),
@@ -319,6 +327,7 @@ function wrap(name: string, real: (args: { data: unknown }) => Promise<unknown>)
       const value = await real(args);
       entry.server = { userId: server.userId, organizationId: server.organizationId };
       entry.outcome = "ok";
+      if (holdResponse) await awaitRelease();
       if (lose) throw new TypeError("Failed to fetch");
       return value;
     } catch (error) {
@@ -326,6 +335,7 @@ function wrap(name: string, real: (args: { data: unknown }) => Promise<unknown>)
       entry.server = { userId: server.userId, organizationId: server.organizationId };
       const e = error as Json;
       entry.outcome = `refused:${e.code ?? (e.name === "ZodError" ? "invalid_request" : e.statusCode)}`;
+      if (holdResponse) await awaitRelease();
       throw error;
     }
   };
@@ -342,6 +352,22 @@ mock.module("@/api/orders", () =>
   Object.fromEntries(Object.entries(realOrders).map(([k, v]) => [k, wrap(k, v as any)])),
 );
 mock.module("@/api/deliveries", () => ({ listDeliveriesFn: async () => [] }));
+
+/** Every toast the screens raised, with the member and payment the route showed at that moment. */
+interface Toast {
+  kind: "success" | "error";
+  message: string;
+  user: string;
+  paymentId: string;
+}
+const toasts: Toast[] = [];
+const toastOf = (kind: Toast["kind"]) => (message: string) =>
+  toasts.push({ kind, message, user: route.userId, paymentId: routeParams.id });
+mock.module("@/lib/feedback", () => ({
+  notifySuccess: toastOf("success"),
+  notifyError: toastOf("error"),
+  notifyInfo: () => {},
+}));
 
 // ── Router hooks ─────────────────────────────────────────────────────────────
 
@@ -492,6 +518,10 @@ afterEach(async () => {
   for (const go of dispatchGates) go();
   dispatchGates.length = 0;
   loseNextResponse.clear();
+  holdResponseNext.clear();
+  for (const release of heldResponses) release();
+  heldResponses.length = 0;
+  toasts.length = 0;
   // A new tab: no remembered refund intents (src/lib/refund-intent.ts).
   window.sessionStorage.clear();
   resetGrants();
@@ -1012,6 +1042,439 @@ describe("Payment detail: verify / refund / reverse run as the member who tapped
     await tapReverse("Recorded against the wrong order");
     expect((await events(paymentId, "reversal")).map((e) => who(e.actor_user_id))).toEqual(["A"]);
     expect(await auditsFor(paymentId, "payments.reverse")).toEqual(["A"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A refund's ANSWER belongs to the member, payment and attempt that started it
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The screen stays mounted across a member switch and across a move to another
+// payment. A success that lands after either was never SEEN by the member who
+// started the refund: it must not clear that member's pending refund or
+// acknowledge the refund it made — otherwise that member's identical retry
+// gets a NEW key, acknowledges the refund it never saw, and refunds twice.
+
+const { readRefundIntent } = await import("@/lib/refund-intent");
+const REASON = "Customer returned one cup";
+const intentOf = (user: string, paymentId: string) =>
+  readRefundIntent({ userId: user, organizationId: ORG_A, paymentId });
+async function releaseResponse(index = 0) {
+  for (let i = 0; i < 200 && !heldResponses[index]; i++) await settle(1);
+  if (!heldResponses[index]) throw new Error(`response ${index} was never held`);
+  await act(async () => heldResponses[index]!());
+  await settle(12);
+}
+/** The same mounted screen moves to another payment (the route param changes). */
+async function navigatePayment(paymentId: string) {
+  routeParams.id = paymentId;
+  await rerender();
+  // Rendered only once the payment itself is (whatever actions this member has).
+  await waitFor(() => text().includes(en.payments.actions.serverNote), "the payment");
+}
+/** Load `user`'s view of the payment(s) once, so a later switch renders from a warm cache. */
+async function warmCachesFor(user: string, paymentIds: string[] = [routeParams.id]) {
+  const shown = routeParams.id;
+  await switchTo({ user });
+  for (const paymentId of paymentIds) await navigatePayment(paymentId);
+  await switchTo({ user: USER_A });
+  await navigatePayment(shown);
+}
+const refundRows = async (paymentId: string) =>
+  (await events(paymentId, "refund")).map((e) => ({
+    amount: e.amount_minor,
+    by: who(e.actor_user_id),
+    key: e.idempotency_key,
+  }));
+const toastsFor = (user: string) => toasts.filter((t) => t.user === user);
+/** What another member could read or submit of A's typed refund draft. */
+function draftOnScreen() {
+  const fields = [...document.querySelectorAll("input, textarea")] as HTMLInputElement[];
+  return {
+    sheetOpen: dialog() !== null,
+    typed: fields.map((field) => field.value).filter((value) => value !== ""),
+    reasonInText: text().includes(REASON),
+  };
+}
+const recoveredShown = () =>
+  text().includes(en.payments.actions.refund.recovered.split("{{amount}}")[0]!.trim());
+
+describe("Payment detail: a refund's answer belongs to the member and payment that started it", () => {
+  it("RS0. same member, same payment: the success is applied — acknowledged, announced, the next refund is a new one", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok" && !dialog(), "the refund");
+    const intent = intentOf(USER_A, paymentId);
+    const [made] = await db
+      .query<Json>(
+        "select id from payment_events where payment_id = $1 and event_type = 'refund'",
+        [paymentId],
+      )
+      .then((r) => r.rows);
+    expect(intent.pending).toBeNull();
+    expect(intent.acknowledged).toEqual([made!.id]);
+    expect(toastsFor(USER_A).map((t) => t.message)).toEqual([en.payments.actions.refund.done]);
+  });
+
+  it("RS1. A's refund commits, its success lands while B is shown, A retries the same refund: ONE refund, ONE audit, A's key replayed", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await switchTo({ user: USER_B });
+    await releaseResponse(); // A's success, while B is shown
+    const intentWhileB = intentOf(USER_A, paymentId);
+    const bToasts = toastsFor(USER_B).map((t) => `${t.kind}:${t.message}`);
+    await switchTo({ user: USER_A });
+    await waitFor(() => containing(en.payments.actions.refund.label), "A's payment");
+    await settle(12);
+    const recovered = recoveredShown();
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "A's retry");
+    const refunds = await refundRows(paymentId);
+    const audits = await auditsFor(paymentId, "payments.refund");
+    console.log(
+      `[evidence] RS1 A→B late success, A retries: server=[${outcomes()}] ` +
+        `pendingKeptWhileB=${intentWhileB.pending?.key === sent[0]!.data.idempotencyKey} ` +
+        `ackedWhileB=${intentWhileB.acknowledged.length} bToasts=[${bToasts}] recoveredShownToA=${recovered} ` +
+        `sameKey=${sent[1]!.data.idempotencyKey === sent[0]!.data.idempotencyKey} ` +
+        `refunds=[${refunds.map((r) => `${r.amount}:${r.by}:${r.key === sent[0]!.data.idempotencyKey ? "k1" : "other"}`)}] ` +
+        `audits=[${audits}]`,
+    );
+    expect(intentWhileB.pending?.key).toBe(sent[0]!.data.idempotencyKey);
+    expect(intentWhileB.acknowledged).toEqual([]);
+    expect(bToasts).toEqual([]);
+    expect(recovered).toBe(true);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(outcomes()).toEqual(["ok", "ok"]); // the retry is the original refund, replayed
+    expect(refunds).toEqual([{ amount: 4000, by: "A", key: sent[0]!.data.idempotencyKey }]);
+    expect(audits).toEqual(["A"]);
+  });
+
+  it("RS2. A's refund commits, its response is LOST while B is shown: B sees no error; A's same retry replays ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await switchTo({ user: USER_B });
+    await releaseResponse(); // "Failed to fetch", while B is shown
+    const bToasts = toastsFor(USER_B).map((t) => `${t.kind}:${t.message}`);
+    const bAlerts = [...document.querySelectorAll("[role=alert]")].map((el) => el.textContent);
+    await switchTo({ user: USER_A });
+    await waitFor(() => containing(en.payments.actions.refund.label), "A's payment");
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "A's retry");
+    const refunds = await refundRows(paymentId);
+    console.log(
+      `[evidence] RS2 A→B lost response, A retries: server=[${outcomes()}] bToasts=[${bToasts}] ` +
+        `bAlerts=[${bAlerts}] sameKey=${sent[1]!.data.idempotencyKey === sent[0]!.data.idempotencyKey} ` +
+        `refunds=[${refunds.map((r) => `${r.amount}:${r.by}`)}]`,
+    );
+    expect(bToasts).toEqual([]);
+    expect(bAlerts).toEqual([]);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(outcomes()).toEqual(["ok", "ok"]);
+    expect(refunds.map((r) => `${r.amount}:${r.by}`)).toEqual(["4000:A"]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
+  it("RS3. A → B → A, then A's held success lands: still not counted as seen; A's same retry replays ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await releaseResponse(); // the obsolete attempt's success, after A is back
+    const intentAfter = intentOf(USER_A, paymentId);
+    await waitFor(() => recoveredShown(), "the screen reporting A's committed refund");
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "A's retry");
+    const refunds = await refundRows(paymentId);
+    console.log(
+      `[evidence] RS3 A→B→A then late success: server=[${outcomes()}] pendingKept=${intentAfter.pending !== null} ` +
+        `refunds=[${refunds.map((r) => `${r.amount}:${r.by}`)}] audits=[${await auditsFor(paymentId, "payments.refund")}]`,
+    );
+    expect(intentAfter.pending?.key).toBe(sent[0]!.data.idempotencyKey);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(refunds.map((r) => `${r.amount}:${r.by}`)).toEqual(["4000:A"]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
+  it("RS4. payment P1 → P2 while P1's success is held: nothing is acknowledged or announced on P2; back on P1 the same refund replays ONCE; P2 untouched", async () => {
+    const { paymentId: p1 } = await seedPayment(true);
+    const { paymentId: p2 } = await seedPayment(true);
+    await openPayment(p1);
+    await navigatePayment(p2);
+    await navigatePayment(p1);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "P1's refund committed");
+    await navigatePayment(p2);
+    await releaseResponse(); // P1's success, while P2 is shown
+    const p2Toasts = toasts.filter((t) => t.paymentId === p2).map((t) => t.message);
+    const p1Intent = intentOf(USER_A, p1);
+    const p2Draft = draftOnScreen();
+    await navigatePayment(p1);
+    await settle(12);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the retry on P1");
+    const p1Refunds = await refundRows(p1);
+    const p2Refunds = await refundRows(p2);
+    console.log(
+      `[evidence] RS4 P1→P2 late success: server=[${outcomes()}] p2Toasts=[${p2Toasts}] ` +
+        `p1PendingKept=${p1Intent.pending !== null} p1Acked=${p1Intent.acknowledged.length} p2Draft=${JSON.stringify(p2Draft)} ` +
+        `p1Refunds=[${p1Refunds.map((r) => `${r.amount}:${r.by}`)}] p2Refunds=[${p2Refunds.map((r) => r.amount)}]`,
+    );
+    expect(p2Toasts).toEqual([]);
+    expect(p1Intent.pending?.key).toBe(sent[0]!.data.idempotencyKey);
+    expect(p1Intent.acknowledged).toEqual([]);
+    expect(p2Draft).toEqual({ sheetOpen: false, typed: [], reasonInText: false });
+    expect(sent.map((s) => s.data.paymentId)).toEqual([p1, p1]);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(p1Refunds.map((r) => `${r.amount}:${r.by}`)).toEqual(["4000:A"]);
+    expect(p2Refunds).toEqual([]);
+    expect(await auditsFor(p1, "payments.refund")).toEqual(["A"]);
+    expect(await auditsFor(p2, "payments.refund")).toEqual([]);
+  });
+
+  it("RS5. the screen unmounts before A's success lands, then mounts again: the refund is reported as made and the same refund replays ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await unmount();
+    await releaseResponse(); // no screen left to see it
+    const intentAfter = intentOf(USER_A, paymentId);
+    await mount({ kind: "payment" }, true);
+    await waitFor(() => containing(en.payments.actions.refund.label), "the payment actions");
+    await waitFor(() => recoveredShown(), "the screen reporting the committed refund");
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "the retry");
+    const refunds = await refundRows(paymentId);
+    console.log(
+      `[evidence] RS5 unmount before success, remount, retry: server=[${outcomes()}] ` +
+        `pendingKept=${intentAfter.pending !== null} refunds=[${refunds.map((r) => `${r.amount}:${r.by}`)}]`,
+    );
+    expect(intentAfter.pending?.key).toBe(sent[0]!.data.idempotencyKey);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(refunds.map((r) => `${r.amount}:${r.by}`)).toEqual(["4000:A"]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A"]);
+  });
+
+  it("RS6. after an obsolete success, a DIFFERENT refund is never made silently: the server asks for review", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await switchTo({ user: USER_B });
+    await releaseResponse();
+    await switchTo({ user: USER_A });
+    await waitFor(() => containing(en.payments.actions.refund.label), "A's payment");
+    await openRefundSheet();
+    await fillRefund("30", "A different reason");
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "A's new refund");
+    const refunds = await refundRows(paymentId);
+    console.log(
+      `[evidence] RS6 obsolete success, then a different refund: server=[${outcomes()}] ` +
+        `ackSent=${JSON.stringify(sent[1]!.data.acknowledgedRefundIds)} refunds=[${refunds.map((r) => r.amount)}]`,
+    );
+    expect(sent[1]!.data.acknowledgedRefundIds).toEqual([]);
+    expect(outcomes()).toEqual(["ok", "refused:refund_confirmation_required"]);
+    expect(refunds.map((r) => r.amount)).toEqual([4000]);
+  });
+
+  it("RS7. a genuine second refund stays possible: after the recovered refund replays, a deliberate further refund is applied — TWO refunds, TWO audits", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    holdResponseNext.add("refund");
+    await submitRefund();
+    await waitFor(() => sent[0]?.outcome === "ok", "A's refund committed");
+    await switchTo({ user: USER_B });
+    await releaseResponse();
+    await switchTo({ user: USER_A });
+    await waitFor(() => containing(en.payments.actions.refund.label), "A's payment");
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await submitRefund(); // the same refund: replayed, and now seen
+    await waitFor(
+      () => sent.length >= 2 && sent[1]!.outcome !== "pending" && !dialog(),
+      "the replay",
+    );
+    await openRefundSheet();
+    await fillRefund("40", "Second cup returned");
+    await submitRefund(); // a deliberate further refund
+    await waitFor(() => sent.length >= 3 && sent[2]!.outcome !== "pending", "the second refund");
+    const refunds = await refundRows(paymentId);
+    console.log(
+      `[evidence] RS7 recovered then a further refund: server=[${outcomes()}] ` +
+        `refunds=[${refunds.map((r) => `${r.amount}:${r.by}`)}] audits=[${await auditsFor(paymentId, "payments.refund")}]`,
+    );
+    expect(outcomes()).toEqual(["ok", "ok", "ok"]);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect(sent[2]!.data.idempotencyKey).not.toBe(sent[0]!.data.idempotencyKey);
+    expect(refunds.map((r) => `${r.amount}:${r.by}`)).toEqual(["4000:A", "4000:A"]);
+    expect(await auditsFor(paymentId, "payments.refund")).toEqual(["A", "A"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A typed refund (or reversal / verification) draft never survives a switch
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Payment detail: an open action sheet and its typed draft belong to the member and payment it was opened for", () => {
+  const switches = [
+    { label: "member A → B, same organization, B's caches warm", user: USER_B, org: undefined },
+    { label: "organization A → B", user: USER_B, org: ORG_B },
+    {
+      label: "member A → B, B's caches warm, B may NOT refund",
+      user: USER_B,
+      org: undefined,
+      revoke: "payments.refund",
+    },
+  ];
+  for (const to of switches) {
+    it(`RD. Refund draft, ${to.label}: B can neither see nor submit A's amount and reason`, async () => {
+      const { paymentId } = await seedPayment(true);
+      await openPayment(paymentId);
+      if (to.revoke) grants.get(USER_B)!.delete(to.revoke);
+      if (!to.org) await warmCachesFor(USER_B);
+      await openRefundSheet();
+      await fillRefund("40", REASON);
+      await switchTo({ user: to.user, ...(to.org ? { org: to.org } : {}) });
+      await settle(12);
+      const shown = draftOnScreen();
+      const submit = dialog() ? button(en.payments.actions.refund.submit, dialog()!) : undefined;
+      if (submit && !submit.disabled) await click(submit, "B submitting A's draft");
+      console.log(
+        `[evidence] refund draft, ${to.label}: shown=${JSON.stringify(shown)} sent=${sent.length}`,
+      );
+      expect(shown).toEqual({ sheetOpen: false, typed: [], reasonInText: false });
+      expect(sent).toEqual([]);
+      expect(await refundRows(paymentId)).toEqual([]);
+    });
+  }
+
+  it("RD. A → B → A: A's typed draft does not come back, but A's unresolved refund key does — the same refund replays ONCE", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await warmCachesFor(USER_B);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    loseNextResponse.add("refund");
+    await submitRefund();
+    await waitFor(
+      () => sent[0]?.outcome === "ok" && !button(en.payments.actions.working),
+      "the lost refund",
+    );
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await settle(12);
+    const afterReturn = draftOnScreen();
+    await openRefundSheet();
+    const reopened = draftOnScreen();
+    await fillRefund("40", REASON);
+    await submitRefund();
+    await waitFor(() => sent.length >= 2 && sent[1]!.outcome !== "pending", "A's retry");
+    console.log(
+      `[evidence] refund draft A→B→A: afterReturn=${JSON.stringify(afterReturn)} reopened=${JSON.stringify(reopened)} ` +
+        `server=[${outcomes()}] refunds=[${(await refundRows(paymentId)).map((r) => r.amount)}]`,
+    );
+    // (The reason IS on A's screen now — in the server's ledger of the refund
+    // that committed, which A may read — but no longer as a draft.)
+    expect([afterReturn.sheetOpen, afterReturn.typed]).toEqual([false, []]);
+    expect(reopened.typed).toEqual([]);
+    expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+    expect((await refundRows(paymentId)).map((r) => r.amount)).toEqual([4000]);
+  });
+
+  it("RD. payment P1 → P2 (P2 cached): P1's typed refund draft is neither shown on nor submittable against P2", async () => {
+    const { paymentId: p1 } = await seedPayment(true);
+    const { paymentId: p2 } = await seedPayment(true);
+    await openPayment(p1);
+    await navigatePayment(p2);
+    await navigatePayment(p1);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await navigatePayment(p2);
+    const shown = draftOnScreen();
+    console.log(`[evidence] refund draft P1→P2: shown=${JSON.stringify(shown)}`);
+    expect(shown).toEqual({ sheetOpen: false, typed: [], reasonInText: false });
+    expect(sent).toEqual([]);
+  });
+
+  it("RD. the screen remounts: no sheet and no draft", async () => {
+    const { paymentId } = await seedPayment(true);
+    await openPayment(paymentId);
+    await openRefundSheet();
+    await fillRefund("40", REASON);
+    await unmount();
+    await mount({ kind: "payment" }, true);
+    await waitFor(() => containing(en.payments.actions.refund.label), "the payment actions");
+    expect(draftOnScreen()).toEqual({ sheetOpen: false, typed: [], reasonInText: false });
+  });
+
+  it("RD. Reverse and Confirm-received reasons, member A → B with warm caches: neither sheet nor its typed reason survives", async () => {
+    const paid = await seedPayment(true);
+    const unpaid = await seedPayment(false);
+    for (const [paymentId, open] of [
+      [paid.paymentId, en.payments.actions.reverse.label],
+      [unpaid.paymentId, en.payments.actions.verify.staff_confirmed.label],
+    ] as const) {
+      routeParams.id = paymentId;
+      await mount({ kind: "payment" });
+      await waitFor(() => containing(open), "the action");
+      await warmCachesFor(USER_B);
+      await click(containing(open), open);
+      await typeInto(dialog()!.querySelector("input, textarea") as HTMLInputElement, REASON);
+      await switchTo({ user: USER_B });
+      await settle(12);
+      const shown = draftOnScreen();
+      console.log(`[evidence] ${open} reason, A→B: shown=${JSON.stringify(shown)}`);
+      expect(shown).toEqual({ sheetOpen: false, typed: [], reasonInText: false });
+      await unmount();
+      route.userId = server.userId = USER_A;
+    }
+    expect(sent).toEqual([]);
   });
 });
 

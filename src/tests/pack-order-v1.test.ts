@@ -1418,7 +1418,10 @@ describe("Order detail action visibility", () => {
     expect(src).toContain('case "pack_pending":');
     // Confirmation re-reads the pack state (it now has an APSA Parcel).
     const confirm = src.slice(src.indexOf("const confirmMutation"));
-    expect(confirm.slice(0, confirm.indexOf("});"))).toContain("queryKey: packStateQueryKey");
+    // For the order the confirmation was started on (PR #121), not the one shown now.
+    expect(confirm.slice(0, confirm.indexOf("});"))).toContain(
+      "queryKey: packingKeys.orderState(startedAs.userId, startedAs.organizationId, orderId),",
+    );
   });
 });
 

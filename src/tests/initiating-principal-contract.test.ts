@@ -659,20 +659,25 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(count(route, "const principal = { userId, organizationId: routeOrganizationId };")).toBe(
       1,
     );
-    expect(route).toContain("onClick={() => confirmMutation.mutate(principal)}");
+    // Each tap sends the principal AND the order shown at that tap (PR #121:
+    // an answer for O1 must never land on O2).
     expect(route).toContain(
-      "onConfirm={(reason) => cancelMutation.mutate({ reason, startedAs: principal })}",
-    );
-    expect(route).toContain(
-      "onConfirm={(submit) => recordPaymentMutation.mutate({ ...submit, startedAs: principal })}",
+      "onClick={() => confirmMutation.mutate({ orderId: order.id, startedAs: principal })}",
     );
     expect(route).toContain(
-      "mutationFn: (startedAs: typeof principal) => confirmRealOrder(id, startedAs),",
+      "cancelMutation.mutate({ orderId: order.id, reason, startedAs: principal })",
     );
-    expect(route).toContain("cancelRealOrder(id, startedAs, reason || undefined),");
-    expect(between(route, "const recordPaymentMutation = useMutation({", "onSuccess:")).toContain(
-      "principal: submit.startedAs,",
+    expect(route).toContain(
+      "recordPaymentMutation.mutate({ ...submit, orderId: order.id, startedAs: principal })",
     );
+    expect(route).toContain(
+      "mutationFn: ({ orderId, startedAs }: OrderActionStart) => confirmRealOrder(orderId, startedAs),",
+    );
+    expect(route).toContain("cancelRealOrder(orderId, startedAs, reason || undefined),");
+    const record = between(route, "const recordPaymentMutation = useMutation({", "onSuccess:");
+    expect(record).toContain("orderId: submit.orderId,");
+    expect(record).toContain("principal: submit.startedAs,");
+    expect(record).not.toContain("orderId: id,");
   });
 
   it("Payment detail: the route's principal, handed to verify / refund / reverse as a variable at the tap", () => {
@@ -680,11 +685,18 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(
       count(route, "const memberPrincipal = { userId, organizationId: routeOrganizationId };"),
     ).toBe(1);
-    expect(route).toContain("verifyRealPayment(id, to, startedAs, reason)");
-    expect(route).toMatch(/refundRealPayment\(id, attempt\.startedAs, \{/);
-    expect(route).toContain("reverseRealPayment(id, startedAs, reason)");
-    // Each tap passes the principal it was made as — never one re-read later.
-    expect(count(route, "startedAs: memberPrincipal")).toBe(3);
+    // Each action is sent for the payment and principal of ITS tap.
+    expect(route).toContain(
+      "const start: PaymentActionStart = { paymentId: id, startedAs: memberPrincipal };",
+    );
+    expect(route).toContain("verifyRealPayment(paymentId, to, startedAs, reason)");
+    expect(route).toMatch(/refundRealPayment\(attempt\.paymentId, attempt\.startedAs, \{/);
+    expect(route).toContain("reverseRealPayment(paymentId, startedAs, reason)");
+    // Each tap passes the start it was made with — never one re-read later.
+    expect(route).toContain("verifyMutation.mutate({ ...start, to: verifyTarget, reason })");
+    expect(route).toContain("reverseMutation.mutate({ ...start, reason })");
+    expect(between(route, "refundMutation.mutate({", "});")).toContain("...start,");
+    expect(count(route, "startedAs: memberPrincipal")).toBe(1);
   });
 
   it("Delivery detail: the route's principal and the delivery shown, handed to each transition as a variable at the tap", () => {

@@ -2329,3 +2329,275 @@ describe("POS: confirming a sale and recording its payment run as the cashier wh
     ]);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — a late answer stays with the ORDER it was started on
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Same member, same organization: the mounted Order detail moves from order O1
+// to order O2 (the route param changes; the screen is not remounted) while
+// O1's Confirm / Cancel / Record payment is in flight. O1's answer must never
+// be written into O2's entry or shown under O2's URL — a merchant reading O1's
+// detail on O2's screen and tapping Cancel would cancel O2.
+
+const orderNumberOf = async (orderId: string) =>
+  (await f.db.query<Json>("select order_number from orders where id = $1", [orderId])).rows[0]!
+    .order_number as string;
+const cachedOrderIdAt = (orderId: string) =>
+  (client.getQueryData(detailKeyOf(USER_A, ORG_A, orderId)) as any)?.order?.id ?? null;
+/** The same mounted screen moves to another order (the route param changes). */
+async function navigateOrder(orderId: string) {
+  routeParams.id = orderId;
+  await rerender();
+  await waitFor(() => cachedOrderIdAt(orderId) !== null && text().includes("Water"), "the order");
+  await readsSettled();
+}
+/** Which of the two orders' numbers the screen shows. */
+async function showing(o1: string, o2: string) {
+  const [n1, n2] = [await orderNumberOf(o1), await orderNumberOf(o2)];
+  return { o1: text().includes(n1), o2: text().includes(n2) };
+}
+/** The lifecycle carried by every callback write into one order's own detail entry. */
+function writesIntoDetailOf(orderId: string) {
+  const key = JSON.stringify(detailKeyOf(USER_A, ORG_A, orderId));
+  return manualWrites.filter((w) => JSON.stringify(w.key) === key).map((w) => w.lifecycle);
+}
+const lifecycleOf = async (orderId: string) => (await orderState(orderId)).lifecycle;
+const nameOf = (id: unknown, o1: string, o2: string) =>
+  id === o1 ? "O1" : id === o2 ? "O2" : String(id);
+
+describe("Order detail: a late lifecycle or payment answer stays with the order it was started on", () => {
+  it("O1 → O2, delayed Confirm success: O2's entry and screen stay O2's; a Cancel tapped there cancels the order shown — O2 — and O1 stays confirmed", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    await navigateOrder(o2); // O2 cached: it renders without a skeleton
+    await navigateOrder(o1);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    await releaseResponse(); // O1's confirmed detail, while O2 is shown
+    await readsSettled();
+    const o2Entry = cachedOrderIdAt(o2);
+    const o2Cached = cachedLifecycle(USER_A, ORG_A, o2);
+    const shownBeforeCancel = await showing(o1, o2);
+    const noticeShown = notices();
+    // The merchant acts on what this screen shows.
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length >= 2, "the cancel");
+    const [s1, s2] = [await orderState(o1), await orderState(o2)];
+    console.log(
+      `[evidence] O1→O2 delayed Confirm success, then Cancel: server=[${outcomes}] ` +
+        `o2EntryHolds=${nameOf(o2Entry, o1, o2)} o2Cached=${o2Cached} ` +
+        `shownAtCancel=${JSON.stringify(shownBeforeCancel)} notice=${JSON.stringify(noticeShown)} ` +
+        `cancelTarget=${nameOf(sent[1]?.data.orderId, o1, o2)} persisted O1=${s1.lifecycle} O2=${s2.lifecycle}`,
+    );
+    expect(o2Entry).toBe(o2);
+    expect(o2Cached).toBe("draft");
+    expect(shownBeforeCancel).toEqual({ o1: false, o2: true });
+    expect(noticeShown).not.toContain(en.order.confirmedNotice);
+    expect(sent.map((s) => s.data.orderId)).toEqual([o1, o2]);
+    expect(outcomes).toEqual(["ok", "ok"]);
+    expectConfirmedBy(s1, USER_A); // O1: confirmed once, by A — never cancelled
+    expect(s2.lifecycle).toBe("cancelled");
+    expect(writesIntoDetailOf(o2)).toEqual(["cancelled"]); // only its own cancel
+  });
+
+  it("O1 → O2, delayed Confirm FAILURE (committed, response lost): nothing of O1's error or detail on O2; back on O1 the committed state is shown", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    holdResponseNext.add("lifecycle");
+    loseNextResponse.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    const shownBefore = text();
+    await releaseResponse(); // "Failed to fetch", while O2 is shown
+    await readsSettled();
+    const shownAfter = text();
+    console.log(
+      `[evidence] O1→O2 delayed Confirm failure: server=[${outcomes}] o2Unchanged=${shownAfter === shownBefore} ` +
+        `o2Entry=${nameOf(cachedOrderIdAt(o2), o1, o2)} confirmEnabledOnO2=${confirmOrderButton()?.disabled === false}`,
+    );
+    expect(shownAfter).toBe(shownBefore); // no error banner, no O1 data
+    expect(confirmOrderButton()?.disabled).toBe(false);
+    expect(cachedOrderIdAt(o2)).toBe(o2);
+    expect(cachedLifecycle(USER_A, ORG_A, o2)).toBe("draft");
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(await lifecycleOf(o2)).toBe("draft");
+    await navigateOrder(o1);
+    await waitFor(() => cachedLifecycle(USER_A, ORG_A, o1) === "confirmed", "O1's re-read");
+    expectConfirmedBy(await orderState(o1), USER_A);
+  });
+
+  it("O1 → O2 → O1, then O1's held success: O1 shows its committed state, O2's entry is untouched", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    await releaseResponse();
+    await waitFor(() => cachedLifecycle(USER_A, ORG_A, o1) === "confirmed", "O1 confirmed");
+    await readsSettled();
+    const shown = await showing(o1, o2);
+    console.log(
+      `[evidence] O1→O2→O1 late success: O1=${cachedLifecycle(USER_A, ORG_A, o1)} ` +
+        `o2Entry=${nameOf(cachedOrderIdAt(o2), o1, o2)} shown=${JSON.stringify(shown)}`,
+    );
+    expect(cachedOrderIdAt(o1)).toBe(o1);
+    expect(cachedOrderIdAt(o2)).toBe(o2);
+    expect(cachedLifecycle(USER_A, ORG_A, o2)).toBe("draft");
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(shown).toEqual({ o1: true, o2: false });
+    expectConfirmedBy(await orderState(o1), USER_A);
+    expect(await lifecycleOf(o2)).toBe("draft");
+  });
+
+  it("O1 → O2, then a NEWER Confirm on O2 completes before O1's answer: O2 is confirmed and shown as O2; O1's answer is written nowhere", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    const o2ConfirmDisabled = confirmOrderButton()?.disabled ?? null;
+    console.log(
+      `[evidence] O1→O2: O2's Confirm disabled by O1's pending confirm=${o2ConfirmDisabled}`,
+    );
+    expect(o2ConfirmDisabled).toBe(false); // O1's pending confirm is not O2's
+    await tapConfirmOrder(); // O2's own confirm
+    await waitFor(() => cachedLifecycle(USER_A, ORG_A, o2) === "confirmed", "O2's confirm");
+    await releaseResponse(); // O1's answer, last
+    await readsSettled();
+    const shown = await showing(o1, o2);
+    console.log(
+      `[evidence] O1→O2 then a newer O2 confirm: server=[${outcomes}] ` +
+        `o2Entry=${nameOf(cachedOrderIdAt(o2), o1, o2)} shown=${JSON.stringify(shown)}`,
+    );
+    expect(sent.map((s) => s.data.orderId)).toEqual([o1, o2]);
+    expect(cachedOrderIdAt(o2)).toBe(o2);
+    expect(writesIntoDetailOf(o2)).toEqual(["confirmed"]);
+    expect(writesIntoDetailOf(o1)).toEqual([]);
+    expect(shown).toEqual({ o1: false, o2: true });
+    expectConfirmedBy(await orderState(o1), USER_A);
+    expectConfirmedBy(await orderState(o2), USER_A);
+  });
+
+  it("O1 → O2, then the screen remounts before O1's answer: nothing is written into either entry", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    await remountAs({});
+    await readsSettled();
+    await releaseResponse();
+    await readsSettled();
+    expect(writesIntoDetailOf(o1)).toEqual([]);
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(cachedOrderIdAt(o2)).toBe(o2);
+    expect(await showing(o1, o2)).toEqual({ o1: false, o2: true });
+    expectConfirmedBy(await orderState(o1), USER_A);
+  });
+
+  it("O1 → O2, then A's orders.read is revoked in place before O1's answer: the answer restores nothing; O2 is withdrawn", async () => {
+    const o1 = await seedDraft();
+    const o2 = await seedDraft();
+    await openOrderDetail(o1);
+    holdResponseNext.add("lifecycle");
+    await tapConfirmOrder();
+    await committedAsA();
+    await navigateOrder(o2);
+    grants.get(USER_A)!.delete("orders.read");
+    await refreshPermissions();
+    await releaseResponse();
+    await readsSettled();
+    const shown = await showing(o1, o2);
+    console.log(
+      `[evidence] O1→O2, orders.read revoked, late success: writes O1=[${writesIntoDetailOf(o1)}] ` +
+        `O2=[${writesIntoDetailOf(o2)}] shown=${JSON.stringify(shown)}`,
+    );
+    expect(writesIntoDetailOf(o1)).toEqual([]);
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(shown).toEqual({ o1: false, o2: false });
+    expect(confirmOrderButton()).toBeUndefined();
+  });
+
+  it("O1 → O2, delayed Record payment success: nothing announced, closed or recorded on O2; O1 has its one payment", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openOrderDetail(o1);
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    await typePaymentDraft("5000", "");
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await navigateOrder(o2);
+    await releaseResponse();
+    await readsSettled();
+    const [s1, s2] = [await orderState(o1), await orderState(o2)];
+    console.log(
+      `[evidence] O1→O2 delayed Record payment: notice=${JSON.stringify(notices())} sheet=${dialog() !== null} ` +
+        `O1payments=${s1.payments.length} O2payments=${s2.payments.length}`,
+    );
+    expect(notices()).not.toContain(paymentNotice);
+    expect(dialog()).toBeNull();
+    expect(sent.map((s) => s.data.orderId)).toEqual([o1]);
+    expect(s1.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 5000]]);
+    expect(s2.payments).toEqual([]);
+  });
+
+  it("O1 → O2 with an open payment sheet after a lost response: the draft is not on O2; O2 records with its own key; back on O1 the same payment replays ONCE", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openOrderDetail(o1);
+    await navigateOrder(o2);
+    await navigateOrder(o1);
+    await typePaymentDraft("5000", "");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await settle(12);
+    await navigateOrder(o2);
+    const shownOnO2 = {
+      sheet: dialog() !== null,
+      amount: [...document.querySelectorAll("input")].some((i) => i.value === "5000"),
+    };
+    await typePaymentDraft("7000", "");
+    await submitPaymentSheet("Record payment on O2");
+    await waitFor(() => outcomesOf("payment").length >= 2, "O2's payment");
+    await navigateOrder(o1);
+    await typePaymentDraft("5000", "");
+    await submitPaymentSheet("Retry on O1");
+    await waitFor(() => outcomesOf("payment").length >= 3, "O1's retry");
+    const keys = paymentKeys();
+    const [s1, s2] = [await orderState(o1), await orderState(o2)];
+    console.log(
+      `[evidence] O1→O2 payment sheet after a lost response: shownOnO2=${JSON.stringify(shownOnO2)} ` +
+        `server=[${outcomesOf("payment")}] o2OwnKey=${keys[1] !== keys[0]} o1Replayed=${keys[2] === keys[0]} ` +
+        `O1=[${s1.payments.map((p) => p.amount_minor)}] O2=[${s2.payments.map((p) => p.amount_minor)}]`,
+    );
+    expect(shownOnO2).toEqual({ sheet: false, amount: false });
+    expect(sent.filter((s) => s.fn === "payment").map((s) => s.data.orderId)).toEqual([o1, o2, o1]);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[2]).toBe(keys[0]);
+    expect(outcomesOf("payment")).toEqual(["ok", "ok", "ok"]);
+    expect(s1.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 5000]]);
+    expect(s2.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 7000]]);
+  });
+});
