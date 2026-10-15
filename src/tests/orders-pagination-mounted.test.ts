@@ -12,7 +12,7 @@ import { expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-it("Orders list pagination: mounted screen pages the whole list honestly, per principal", () => {
+it("Orders list pagination and filters: mounted screen pages every filter honestly, per principal", () => {
   const result = spawnSync(
     process.execPath,
     ["test", resolve("src/tests/orders-pagination-mounted.runtime.ts")],
