@@ -1230,8 +1230,35 @@ const CONFIRMED_TO_PACK: OrderListFilterAxes = {
   fulfillment: "unfulfilled",
 };
 
+/**
+ * An element's accessible name from the two sources a container can carry,
+ * in accname's order: the text aria-labelledby points at, else aria-label.
+ */
+function accessibleName(element: Element): string {
+  const labelledBy = element.getAttribute("aria-labelledby");
+  if (labelledBy) {
+    return labelledBy
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
+      .join(" ")
+      .trim();
+  }
+  return element.getAttribute("aria-label")?.trim() ?? "";
+}
+
+/**
+ * The group a screen reader announces as `name`: an element whose ROLE is
+ * group and whose computed name is `name`. A name on a div with no role is
+ * never announced (ARIA prohibits naming the generic role), so such a div is
+ * not found here.
+ */
+function groupNamed(name: string): HTMLElement | null {
+  const groups = [...document.querySelectorAll('[role="group"]')] as HTMLElement[];
+  return groups.find((group) => accessibleName(group) === name) ?? null;
+}
+
 function filterRow(): HTMLElement | null {
-  return document.querySelector('[aria-label="Filter orders"]');
+  return groupNamed("Filter orders");
 }
 
 function chipButtons(): HTMLButtonElement[] {
@@ -1911,6 +1938,88 @@ describe("Orders filters — URL, language and accessibility", () => {
     expect(buttons.some((b) => /truncate|line-clamp/.test(b.innerHTML + b.className))).toBe(false);
   });
 
+  it("GA. a screen reader meets the chips as ONE group named 'Filter orders' that holds all eight", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 2, "FGRP");
+    signInAs(U1, org);
+    await mount();
+
+    const group = filterRow();
+    expect(group).not.toBeNull();
+    expect(group!.getAttribute("role")).toBe("group");
+
+    // The name sits on the group and on nothing else: not on a role-less
+    // wrapper, where it would be silently dropped.
+    const named = [...document.querySelectorAll("[aria-label],[aria-labelledby]")].filter(
+      (element) => accessibleName(element) === "Filter orders",
+    );
+    expect(named).toEqual([group!]);
+
+    // Each of the eight chips belongs to that group (its nearest group is it),
+    // keeps its own name, and announces whether it is pressed.
+    const chips = [...document.querySelectorAll("button")].filter((button) =>
+      FILTERS.some((f) => (button.textContent ?? "").trim() === CHIP[f]),
+    );
+    expect(chips).toHaveLength(FILTERS.length);
+    expect(chips.every((chip) => chip.closest('[role="group"]') === group)).toBe(true);
+    expect(
+      chips.map((chip) => [(chip.textContent ?? "").trim(), chip.getAttribute("aria-pressed")]),
+    ).toEqual(FILTERS.map((f) => [CHIP[f], f === "all" ? "true" : "false"]));
+
+    // Choosing a chip moves the pressed state inside the same group.
+    await choose("processing");
+    expect(filterRow()).toBe(group);
+    expect(pressedChips()).toEqual(["Processing"]);
+  });
+
+  it("GB. when the chips change size after the first measure (a late Khmer font), the chosen chip is brought back on screen", async () => {
+    // happy-dom has no layout, so the browser's part is played by hand: a
+    // ResizeObserver whose callbacks this test fires, and the boxes Chromium
+    // measured after a Khmer refresh (the chosen chip 72px off the left edge).
+    const observers: { callback: () => void; targets: Element[] }[] = [];
+    const original = globalThis.ResizeObserver;
+    (globalThis as any).ResizeObserver = class {
+      private entry: { callback: () => void; targets: Element[] };
+      constructor(callback: () => void) {
+        this.entry = { callback, targets: [] };
+        observers.push(this.entry);
+      }
+      observe(target: Element) {
+        this.entry.targets.push(target);
+      }
+      disconnect() {
+        observers.splice(observers.indexOf(this.entry), 1);
+      }
+    };
+    try {
+      const { org } = await newOrg();
+      await seedOrders(org, 2, "FFNT");
+      signInAs(U1, org);
+      setRouteSearch({ filter: "fulfilled" });
+      await mount();
+
+      const row = filterRow()!;
+      const chosen = chipButtons().find((b) => b.getAttribute("aria-pressed") === "true")!;
+      // The row and every chip are watched, so any change of size re-measures.
+      const watched = observers.flatMap((o) => o.targets);
+      expect(watched).toContain(row);
+      expect(chipButtons().every((chip) => watched.includes(chip))).toBe(true);
+
+      const box = (left: number, right: number) =>
+        ({ left, right, top: 0, bottom: 44, width: right - left, height: 44 }) as DOMRect;
+      row.getBoundingClientRect = () => box(0, 360);
+      chosen.getBoundingClientRect = () => box(-72, 176);
+      row.scrollLeft = 500;
+      await act(async () => {
+        for (const observer of [...observers]) observer.callback();
+      });
+      // Scrolled back by exactly the 72px that were off screen.
+      expect(row.scrollLeft).toBe(428);
+    } finally {
+      (globalThis as any).ResizeObserver = original;
+    }
+  });
+
   it("FZ. Khmer: every chip, the filtered empty state and the filtered end read in Khmer", async () => {
     const km = (await import("@/locales/km.json")).default as any;
     const { org } = await newOrg();
@@ -1920,7 +2029,8 @@ describe("Orders filters — URL, language and accessibility", () => {
     setRouteSearch({ filter: "draft" });
     await mount();
 
-    const group = document.querySelector(`[aria-label="${km.orderList.filtersLabel}"]`);
+    // In Khmer the same group carries the Khmer name.
+    const group = groupNamed(km.orderList.filtersLabel);
     expect(group).not.toBeNull();
     const labels = [...group!.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
     expect(labels).toEqual(FILTERS.map((f) => km.orderList.filters[f]));

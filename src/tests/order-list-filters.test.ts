@@ -187,9 +187,22 @@ describe("labels", () => {
   it("chip labels reuse the words the row's own status chips use", () => {
     // A merchant who picks "Processing" sees rows marked "Processing".
     expect(lookup(en, "orderList.filters.processing")).toBe(lookup(en, "status.processing"));
-    expect(lookup(km, "orderList.filters.processing")).toBe(lookup(km, "status.processing"));
     expect(lookup(km, "orderList.filters.completed")).toBe(lookup(km, "status.completed"));
     expect(lookup(km, "orderList.filters.cancelled")).toBe(lookup(km, "status.cancelled"));
     expect(lookup(km, "orderList.filters.draft")).toBe(lookup(km, "status.draft"));
+  });
+
+  it("Khmer Processing and Fulfilled never say 'prepare': both hold orders past preparing", () => {
+    // Processing holds packing, ready AND in-transit orders; Fulfilled holds
+    // orders the customer already has. រៀបចំ ("prepare") would put a parcel on
+    // the road under a preparing label, and a delivered order under "prepared".
+    // (Khmer status.processing still says កំពុងរៀបចំ, so this chip departs
+    // from the row's word on purpose.)
+    for (const filter of ["processing", "fulfilled"] as const) {
+      expect(lookup(km, orderListFilterLabelKey(filter)) as string).not.toContain("រៀបចំ");
+    }
+    // Fulfilled is not Completed: its label never reads as the finished sale.
+    expect(lookup(km, "orderList.filters.fulfilled")).not.toBe(lookup(km, "status.completed"));
+    expect(lookup(km, "orderList.filters.fulfilled") as string).toContain("មិនទាន់បញ្ចប់");
   });
 });

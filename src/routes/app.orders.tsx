@@ -295,21 +295,35 @@ function OrderListScreen() {
    * The chosen chip is always on screen. On a 320px phone only the first three
    * chips fit, so a filter opened from a link, Back or a refresh would otherwise
    * be selected out of sight. Only the chip row scrolls, never the page.
+   *
+   * Measured again whenever a chip or the row changes size. After a refresh
+   * the browser restores the row's old scroll position and the Khmer web font
+   * can arrive after the first measure: every chip then changes width, and in
+   * Chromium the chosen Khmer chip ended up to 72px off the left edge.
    */
   const filterRowRef = useRef<HTMLDivElement>(null);
   const showFilters = canReadOrders && !blocked && !detailOpen;
   useEffect(() => {
     const row = filterRowRef.current?.firstElementChild;
-    const chip = row?.querySelector('[aria-pressed="true"]');
-    if (!(row instanceof HTMLElement) || !chip) return;
-    const gutter = parseFloat(getComputedStyle(row).paddingLeft) || 0;
-    const rowBox = row.getBoundingClientRect();
-    const chipBox = chip.getBoundingClientRect();
-    if (chipBox.left < rowBox.left + gutter) {
-      row.scrollLeft -= rowBox.left + gutter - chipBox.left;
-    } else if (chipBox.right > rowBox.right - gutter) {
-      row.scrollLeft += chipBox.right - (rowBox.right - gutter);
-    }
+    if (!(row instanceof HTMLElement)) return;
+    const reveal = () => {
+      const chip = row.querySelector('[aria-pressed="true"]');
+      if (!chip) return;
+      const gutter = parseFloat(getComputedStyle(row).paddingLeft) || 0;
+      const rowBox = row.getBoundingClientRect();
+      const chipBox = chip.getBoundingClientRect();
+      if (chipBox.left < rowBox.left + gutter) {
+        row.scrollLeft -= rowBox.left + gutter - chipBox.left;
+      } else if (chipBox.right > rowBox.right - gutter) {
+        row.scrollLeft += chipBox.right - (rowBox.right - gutter);
+      }
+    };
+    reveal();
+    if (typeof ResizeObserver === "undefined") return;
+    const resized = new ResizeObserver(reveal);
+    resized.observe(row);
+    for (const chip of row.children) resized.observe(chip);
+    return () => resized.disconnect();
   }, [filter, showFilters]);
 
   /*
@@ -356,7 +370,8 @@ function OrderListScreen() {
          */}
         {showFilters ? (
           <div ref={filterRowRef}>
-            <ChipRow label={t("orderList.filtersLabel")} className="mb-3 py-0.5">
+            {/* A named group of toggle buttons, announced as "Filter orders". */}
+            <ChipRow role="group" label={t("orderList.filtersLabel")} className="mb-3 py-0.5">
               {ORDER_LIST_FILTERS.map((option) => (
                 <Chip
                   key={option}
