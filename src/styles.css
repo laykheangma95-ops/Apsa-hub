@@ -122,6 +122,54 @@
   );
   --glass-inner-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.75);
 
+  /* Liquid-glass action tiles — Home's four Quick Actions ONLY (founder-approved
+     Home redesign, 2026-10-16). The single exception to "glass never on content"
+     and "gradient on the Home header only": these are the screen's primary
+     controls, not content cards.
+     One APSA Blue body for every tile; tiles differ only in the colour of one
+     soft light. The body darkens toward the bottom, where the white title sits,
+     so text never lands on a highlight: every stop the text can overlap is at
+     least #2b6ce8 dark (white on it is 4.8:1 or better). Lights sit at the top
+     right, away from the icon in the top-left corner. */
+  --tile-body: linear-gradient(164deg, #3a82f7 0%, #2b6ce8 30%, #245bd6 60%, #1f48bb 100%);
+  --tile-light-sky: rgba(112, 214, 255, 0.5);
+  --tile-light-teal: rgba(86, 226, 214, 0.42);
+  --tile-light-violet: rgba(170, 150, 255, 0.5);
+  --tile-light-ice: rgba(220, 238, 255, 0.5);
+  --tile-depth-glow: rgba(124, 92, 246, 0.38);
+  --tile-sheen: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.26) 0%,
+    rgba(255, 255, 255, 0.07) 34%,
+    rgba(255, 255, 255, 0) 52%
+  );
+  --tile-rim:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 -14px 28px -18px rgba(12, 28, 92, 0.45);
+  --tile-shadow: 0 16px 30px -18px rgba(31, 72, 187, 0.6), 0 3px 8px -4px rgba(31, 72, 187, 0.3);
+  --tile-icon-fill: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.34) 0%,
+    rgba(255, 255, 255, 0.1) 100%
+  );
+  --tile-icon-rim:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  --tile-text: #ffffff;
+  --tile-text-soft: rgba(255, 255, 255, 0.92);
+  /* An unavailable tile: same shape, porcelain glass, no blue — it reads as a
+     tile that is there but not yours, never as a disabled-looking action. */
+  --tile-muted-body: linear-gradient(164deg, #f6f9fe 0%, #edf2fa 100%);
+  --tile-muted-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px #dfe6f2;
+
+  /* Home's Today card — porcelain glass, a whisper of APSA Blue. */
+  --summary-glass: linear-gradient(
+    135deg,
+    rgba(234, 242, 254, 0.96) 0%,
+    rgba(255, 255, 255, 0.94) 55%,
+    rgba(232, 246, 255, 0.96) 100%
+  );
+  --summary-glass-border: rgba(187, 212, 250, 0.75);
+
   /* Mobile shell.
      The floating nav is measured once here so every screen, sticky bar and
      toast derives its clearance from the same number instead of guessing with
@@ -748,6 +796,309 @@ select:focus-visible {
 }
 .scrollbar-none::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * HOME — screen fit.
+ *
+ * The column is at least one SMALL viewport tall (svh: the height with the
+ * browser's bars showing). svh rather than dvh on purpose: dvh changes while
+ * the address bar slides away during a scroll, which would resize the tiles
+ * under the merchant's thumb. With svh the collapsed Home fits the screen as
+ * first shown, and nothing moves when the bar hides.
+ *
+ * The Quick Actions region takes whatever height the header, Today card,
+ * attention row and the nav's measured clearance leave over, and the tiles are
+ * sized from that region with container query units: as large as BOTH its
+ * width and its height allow, square, never wider than half the column. Below
+ * --tile-min the region stops shrinking and the page scrolls instead — a tile
+ * is never squeezed under a readable size just to avoid a scroll.
+ *
+ * The region is the last row of a GRID, not a flex item, on purpose: measured
+ * in Chromium 155, a size container that is a flex item resolves 100cqh to 0
+ * (its size-contained content height), so the height half of the sizing
+ * silently never applied. A grid row gives it a definite height first.
+ */
+.home-column {
+  display: flex;
+  min-height: 100vh;
+  min-height: 100svh;
+  flex-direction: column;
+}
+
+.home-main {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-rows: auto auto 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  /* 10px, not the tiles' 12px: measured, it is what lets Khmer fit an
+     iPhone 12-15 with Safari's bars showing (390 × 664) without a scroll. */
+  gap: 10px;
+}
+
+.home-actions {
+  --tile-gap: 12px;
+  --tile-min: 132px;
+  --tile-max: 236px;
+  display: flex;
+  min-height: calc(var(--tile-min) * 2 + var(--tile-gap));
+  flex-direction: column;
+  justify-content: center;
+}
+@supports (container-type: size) {
+  .home-actions {
+    container-type: size;
+  }
+}
+/*
+ * While Needs Attention is open, the tiles keep the size they had when it was
+ * closed (--tile-frozen, measured at the moment of the tap) and the page
+ * scrolls, instead of the open list squeezing the tiles smaller. The region is
+ * then sized by its tiles (inline-size containment only), so its row grows
+ * with them.
+ */
+.home-actions[data-frozen] {
+  min-height: 0;
+}
+@supports (container-type: size) {
+  .home-actions[data-frozen] {
+    container-type: inline-size;
+  }
+}
+
+.home-actions-grid {
+  /* Fallback without container queries: half the column, by width alone. */
+  --tile-size: calc((min(100vw, var(--screen-max)) - 2rem - var(--tile-gap)) / 2);
+  display: grid;
+  grid-template-columns: repeat(2, var(--tile-size));
+  justify-content: center;
+  gap: var(--tile-gap);
+}
+@supports (container-type: size) {
+  .home-actions-grid {
+    --tile-size: min(
+      (100cqw - var(--tile-gap)) / 2,
+      clamp(var(--tile-min), (100cqh - var(--tile-gap)) / 2, var(--tile-max))
+    );
+  }
+  .home-actions[data-frozen] .home-actions-grid {
+    --tile-size: min((100cqw - var(--tile-gap)) / 2, var(--tile-frozen));
+  }
+}
+
+/*
+ * HOME — liquid-glass action tile.
+ *
+ * Square by aspect-ratio, but a tile whose content needs more room (a long
+ * Khmer title at a large text size) grows taller rather than clipping, and
+ * its row partner stretches with it so the pair stays equal.
+ */
+.glass-tile {
+  --tile-light: var(--tile-light-sky);
+  --tile-light-at: 82% -6%;
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  /* No overflow clipping and no min-height override: either one turns off
+     aspect-ratio's content-based minimum, and the tile would clip a long title
+     instead of growing (seen at 150% zoom). Backgrounds and the ::before sheen
+     follow the border radius on their own. */
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  flex-direction: column;
+  justify-content: space-between;
+  align-self: stretch;
+  gap: 8px;
+  border-radius: 28px;
+  /* A percentage, not cqi: an element's own cq units resolve against its
+     ancestor container, and padding % is the tile's own width here. */
+  padding: clamp(12px, 8%, 18px);
+  color: var(--tile-text);
+  text-align: left;
+  background-image:
+    radial-gradient(90% 72% at var(--tile-light-at), var(--tile-light), transparent 64%),
+    radial-gradient(78% 64% at 104% 104%, var(--tile-depth-glow), transparent 72%), var(--tile-body);
+  box-shadow: var(--tile-rim), var(--tile-shadow);
+  container-type: inline-size;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    filter var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.glass-tile::before {
+  /* The reflection across the top of the glass. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-image: var(--tile-sheen);
+  pointer-events: none;
+}
+.glass-tile[data-tone="teal"] {
+  --tile-light: var(--tile-light-teal);
+  --tile-light-at: 96% 0%;
+}
+.glass-tile[data-tone="violet"] {
+  --tile-light: var(--tile-light-violet);
+  --tile-light-at: 78% -8%;
+}
+.glass-tile[data-tone="ice"] {
+  --tile-light: var(--tile-light-ice);
+  --tile-light-at: 96% 2%;
+}
+button.glass-tile {
+  cursor: pointer;
+}
+@media (hover: hover) {
+  button.glass-tile:hover {
+    filter: brightness(1.04) saturate(1.04);
+  }
+}
+button.glass-tile:active {
+  transform: scale(0.97);
+  filter: brightness(0.94);
+}
+button.glass-tile:focus-visible {
+  outline: 3px solid var(--border-focus);
+  outline-offset: 3px;
+}
+.glass-tile[data-unavailable] {
+  color: var(--text-secondary);
+  background-image: var(--tile-muted-body);
+  box-shadow: var(--tile-muted-rim), var(--elevation-1);
+}
+.glass-tile[data-unavailable]::before {
+  content: none;
+}
+
+.glass-tile-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.glass-tile-icon {
+  display: flex;
+  width: clamp(40px, 30cqi, 58px);
+  height: clamp(40px, 30cqi, 58px);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background-image: var(--tile-icon-fill);
+  box-shadow:
+    var(--tile-icon-rim),
+    0 6px 14px -8px rgba(12, 28, 92, 0.55);
+  backdrop-filter: blur(6px) saturate(140%);
+}
+.glass-tile-icon > svg {
+  width: 46%;
+  height: 46%;
+  filter: drop-shadow(0 1px 1px rgba(12, 28, 92, 0.3));
+}
+.glass-tile[data-unavailable] .glass-tile-icon {
+  background-image: none;
+  background-color: var(--surface-primary);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  backdrop-filter: none;
+}
+.glass-tile[data-unavailable] .glass-tile-icon > svg {
+  filter: none;
+}
+.glass-tile-arrow {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background-color: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+.glass-tile[data-unavailable] .glass-tile-arrow {
+  background-color: transparent;
+  box-shadow: none;
+}
+.glass-tile-title {
+  display: block;
+  font-size: clamp(16px, 10cqi, 19px);
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+[data-lang="km"] .glass-tile-title {
+  line-height: 1.55;
+  letter-spacing: 0;
+}
+.glass-tile-description {
+  display: none;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--tile-text-soft);
+  overflow-wrap: anywhere;
+}
+[data-lang="km"] .glass-tile-description {
+  font-size: 12px;
+  line-height: 19px;
+}
+.glass-tile[data-unavailable] .glass-tile-description {
+  display: block;
+  color: var(--text-secondary);
+}
+/* A description only where the tile has room for it in BOTH languages. */
+@container (min-width: 156px) {
+  .glass-tile-description {
+    display: block;
+  }
+}
+@container (max-width: 179px) {
+  [data-lang="km"] .glass-tile:not([data-unavailable]) .glass-tile-description {
+    display: none;
+  }
+}
+
+/* HOME — the Today card's porcelain glass. */
+.summary-glass {
+  background-image: var(--summary-glass);
+  border: 1px solid var(--summary-glass-border);
+  box-shadow: var(--glass-inner-highlight), var(--elevation-1);
+}
+
+/*
+ * Disclosure (accordion) panel. Closed, it is zero rows tall and
+ * visibility:hidden — out of the tab order and the accessibility tree, not
+ * merely clipped. visibility waits for the collapse to finish before hiding,
+ * and switches on at once when opening.
+ */
+.disclosure-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--dur-base) var(--ease-out),
+    visibility 0s linear var(--dur-base);
+}
+.disclosure-panel[data-open="true"] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition:
+    grid-template-rows var(--dur-base) var(--ease-out),
+    visibility 0s linear 0s;
+}
+.disclosure-panel > * {
+  min-height: 0;
+  overflow: hidden;
+}
+.disclosure-chevron {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(180deg);
 }
 
 @media (prefers-reduced-motion: reduce) {
