@@ -13,6 +13,7 @@ import type {
   OrderListPage as ServerOrderListPage,
 } from "@/server/orders/service";
 import type { OrderListCursor, OrderSourceDb } from "@/server/orders/types";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 import type { Channel, Order, OrderItem, OrderLifecycleStatus, OrderSource } from "@/types";
 
 // ── Source / channel mapping ──────────────────────────────────────────────────
@@ -315,16 +316,24 @@ export function isOrderListPrincipalChanged(err: unknown): boolean {
  * snapshot makes (createCapabilityView). The server authorized the request for
  * whoever its session cookie names; this decides only whether the answer may
  * be filed under THIS principal's key.
+ *
+ * The page must also be the answer to the filter this entry asked for. A
+ * mismatch is never a principal change, so it fails as an ordinary error (and
+ * is retried) rather than being shown under the wrong filter.
  */
 export function acceptOrderListPage(
   page: ServerOrderListPage,
   expected: { userId: string; organizationId: string },
+  filter: OrderListFilter,
 ): RealOrderPage {
   if (
     page.servedAs.userId !== expected.userId ||
     page.servedAs.organizationId !== expected.organizationId
   ) {
     throw new OrderListPrincipalChangedError();
+  }
+  if (page.filter !== filter) {
+    throw new Error("The order list was answered for a different filter");
   }
   return { orders: page.orders.map(mapOrderSummaryToUi), nextCursor: page.nextCursor };
 }

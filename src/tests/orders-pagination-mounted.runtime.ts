@@ -1,10 +1,11 @@
 /**
- * Orders list pagination — MOUNTED, through the REAL server function, the REAL
- * service and repository, and REAL SQL.
+ * Orders list pagination and filters — MOUNTED, through the REAL server
+ * function, the REAL service and repository, and REAL SQL.
  *
  * Mounts the production Orders screen (src/routes/app.orders.tsx) in happy-dom
  * and drives it the way a merchant does: scroll to the bottom, tap Load more,
- * tap it again, lose the network, retry. Between the screen and PostgreSQL:
+ * tap it again, lose the network, retry, pick a filter (cases F*). Between the
+ * screen and PostgreSQL:
  *
  *   screen → listRealOrdersPage (src/lib/api) → listOrdersPageFn (src/api/orders,
  *   its real zod validator and real handler) → resolveAuthContext → the real
@@ -25,19 +26,37 @@
  *   - the Supabase admin client — an SQL transport onto PGlite that returns
  *     rows through json_agg, exactly as PostgREST does, so timestamps keep
  *     their microseconds.
- *   - four TanStack Router hooks — there is no router in a unit process.
+ *   - four TanStack Router hooks — there is no router in a unit process. The
+ *     route's search (`?filter=`) is a small store: the route's own
+ *     validateSearch reads it, and the screen's navigate() writes it, as the
+ *     router would.
  *
  * Runs in its own process (orders-pagination-mounted.test.ts): it installs DOM
  * globals and module mocks.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { financialFixture } from "./helpers/payment-order-fixture";
+
+// Well past waitFor's own 5 s budget: a case that hangs fails on its own
+// "Timed out waiting" and stops there. With bun's 5 s default the two raced,
+// the abandoned case kept acting on the DOM, and every later case failed too.
+setDefaultTimeout(30_000);
 
 // ── Database: every migration, created before any DOM global exists ─────────
 
 const f = await financialFixture();
+
+const { orderMatchesListFilter } = await import("@/lib/order-list-filters");
+type OrderListFilter = import("@/lib/order-list-filters").OrderListFilter;
+type OrderListFilterAxes = import("@/lib/order-list-filters").OrderListFilterAxes;
+/** What an order inserted without statuses holds (migration 023's defaults). */
+const DEFAULT_AXES: OrderListFilterAxes = {
+  lifecycle: "draft",
+  payment: "unpaid",
+  fulfillment: "unfulfilled",
+};
 
 const OWNER_ROLE = "00000000-0000-0000-0000-000000000001";
 /** Owner of every test organization. */
@@ -100,31 +119,61 @@ async function seedOrders(
   prefix: string,
   createdAt: (i: number) => string = (i) =>
     `timestamptz '2026-10-01 12:00:00+00' - make_interval(secs => ${i})`,
+  axes: (i: number) => OrderListFilterAxes = () => DEFAULT_AXES,
 ): Promise<void> {
   const chunk = 200;
   for (let start = 0; start < count; start += chunk) {
     const values: string[] = [];
     for (let i = start; i < Math.min(count, start + chunk); i++) {
       const code = `${prefix}-${String(i + 1).padStart(4, "0")}`;
+      const { lifecycle, payment, fulfillment } = axes(i);
       values.push(
-        `(gen_random_uuid(),'${org}','${code}','MANUAL','USD',1000,1000,'${f.actor}',${createdAt(i)})`,
+        `(gen_random_uuid(),'${org}','${code}','MANUAL','USD',1000,1000,'${f.actor}',${createdAt(i)},
+          '${lifecycle}','${payment}','${fulfillment}')`,
       );
     }
-    await f.db.query(
-      `insert into orders(id,organization_id,order_number,source,currency,
-         subtotal_minor,total_minor,created_by,created_at) values ${values.join(",")}`,
-    );
+    const insert = `insert into orders(id,organization_id,order_number,source,currency,
+         subtotal_minor,total_minor,created_by,created_at,
+         lifecycle_status,payment_status,fulfillment_status) values ${values.join(",")}`;
+    if (values.some((row) => !row.includes("'unpaid'"))) {
+      // Only the Payment domain may give an order a payment status
+      // (guard_order_financial_state, migration 040). The filter cases need
+      // every status combination to exist, so this disposable database writes
+      // them with triggers suspended for this one statement.
+      await f.db.exec(`set session_replication_role = replica; ${insert};
+        set session_replication_role = origin;`);
+    } else {
+      await f.db.query(insert);
+    }
   }
 }
 
-/** The organization's orders exactly as the list must show them. */
-async function dbOrder(org: string): Promise<string[]> {
-  const result = await f.db.query<{ order_number: string }>(
-    `select order_number from orders where organization_id=$1
+/**
+ * The organization's orders exactly as the list must show them — under
+ * `filter`, by the filter's written specification (orderMatchesListFilter),
+ * never by the SQL under test.
+ */
+async function dbOrder(org: string, filter: OrderListFilter = "all"): Promise<string[]> {
+  const result = await f.db.query<{
+    order_number: string;
+    lifecycle_status: OrderListFilterAxes["lifecycle"];
+    payment_status: OrderListFilterAxes["payment"];
+    fulfillment_status: OrderListFilterAxes["fulfillment"];
+  }>(
+    `select order_number, lifecycle_status, payment_status, fulfillment_status
+       from orders where organization_id=$1
      order by created_at desc, id desc`,
     [org],
   );
-  return result.rows.map((row) => row.order_number);
+  return result.rows
+    .filter((row) =>
+      orderMatchesListFilter(filter, {
+        lifecycle: row.lifecycle_status,
+        payment: row.payment_status,
+        fulfillment: row.fulfillment_status,
+      }),
+    )
+    .map((row) => row.order_number);
 }
 
 // ── Principals: the route's (cache identity) and the server's (cookie) ──────
@@ -169,8 +218,20 @@ function sqlTransport() {
         return chain;
       },
       eq: compare("="),
+      neq: compare("<>"),
       lt: compare("<"),
       gt: compare(">"),
+      // PostgREST's or=(a.eq.x,b.eq.y): only the eq form the repository uses.
+      or(expression: string) {
+        const terms = expression.split(",").map((term) => {
+          const match = /^([a-z_]+)\.eq\.([a-z_]+)$/.exec(term);
+          if (!match) throw new Error(`Unsupported test or(): ${expression}`);
+          values.push(match[2]);
+          return `${identifier(match[1]!)} = $${values.length}`;
+        });
+        where.push(`(${terms.join(" or ")})`);
+        return chain;
+      },
       in(key: string, list: unknown[]) {
         const params = list.map((value) => {
           values.push(value);
@@ -351,8 +412,22 @@ GlobalRegistrator.register({ url: "http://localhost/app/orders" });
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const navigations: string[] = [];
+/** Every navigate() call's search, as the screen sent it. */
+const searchNavigations: unknown[] = [];
 const realRouter = await import("@tanstack/react-router");
-const { createElement } = await import("react");
+const { createElement, useSyncExternalStore } = await import("react");
+
+/** The URL's raw search (?filter=…), as the router would hold it. */
+let rawSearch: Record<string, unknown> = {};
+const searchListeners = new Set<() => void>();
+function setRouteSearch(next: Record<string, unknown>) {
+  rawSearch = next;
+  for (const listener of searchListeners) listener();
+}
+const subscribeSearch = (listener: () => void) => {
+  searchListeners.add(listener);
+  return () => searchListeners.delete(listener);
+};
 mock.module("@tanstack/react-router", () => ({
   ...realRouter,
   createFileRoute: () => (options: any) => ({
@@ -362,11 +437,19 @@ mock.module("@tanstack/react-router", () => ({
       session: { userId: route.userId },
       organizationId: route.organizationId,
     }),
+    useSearch: () => {
+      const raw = useSyncExternalStore(subscribeSearch, () => rawSearch);
+      return options.validateSearch ? options.validateSearch(raw) : raw;
+    },
   }),
-  Link: ({ children, to: _to, params: _params, ...rest }: any) =>
+  Link: ({ children, to: _to, params: _params, search: _search, ...rest }: any) =>
     createElement("a", rest, children),
-  useNavigate: () => (opts: { to: string }) => {
+  useNavigate: () => (opts: { to: string; search?: any }) => {
     navigations.push(opts.to);
+    if (opts.search !== undefined) {
+      searchNavigations.push(opts.search);
+      setRouteSearch(typeof opts.search === "function" ? opts.search(rawSearch) : opts.search);
+    }
     return Promise.resolve();
   },
   useRouterState: ({ select }: any = {}) => {
@@ -487,6 +570,9 @@ afterEach(async () => {
   holding = false;
   while (held.length) held.shift()!();
   navigations.length = 0;
+  searchNavigations.length = 0;
+  setRouteSearch({});
+  if (i18n.language !== "en") await i18n.changeLanguage("en");
 });
 
 beforeAll(async () => {
@@ -1106,5 +1192,858 @@ describe("Orders list pagination — the server function boundary", () => {
     await f.db.query(`delete from role_permissions where role_id = $1`, [viewerRole]);
     await expect(pageFn()({ data: {} })).rejects.toThrow(/permission/i);
     await expect(pageFn()({ data: { before: first.nextCursor } })).rejects.toThrow(/permission/i);
+  });
+});
+
+// ── Filters ──────────────────────────────────────────────────────────────────
+//
+// The eight Orders filters (src/lib/order-list-filters.ts), through the same
+// real server function, service, repository and SQL as the cases above.
+
+const CHIP: Record<OrderListFilter, string> = {
+  all: "All",
+  awaiting_payment: "Awaiting payment",
+  draft: "Drafts",
+  to_pack: "To pack",
+  processing: "Processing",
+  fulfilled: "Fulfilled, not completed",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+const FILTERS = Object.keys(CHIP) as OrderListFilter[];
+const END_FILTERED = "No older orders match this filter";
+const EMPTY_FILTERED = "No orders match this filter";
+
+const LIFECYCLES = ["draft", "confirmed", "completed", "cancelled"] as const;
+const PAYMENTS = ["unpaid", "pending", "paid", "failed"] as const;
+const FULFILLMENTS = ["unfulfilled", "processing", "fulfilled", "cancelled"] as const;
+/** Every combination of the three status columns — 64 orders. */
+const EVERY_COMBINATION: OrderListFilterAxes[] = LIFECYCLES.flatMap((lifecycle) =>
+  PAYMENTS.flatMap((payment) =>
+    FULFILLMENTS.map((fulfillment) => ({ lifecycle, payment, fulfillment })),
+  ),
+);
+
+const CONFIRMED_TO_PACK: OrderListFilterAxes = {
+  lifecycle: "confirmed",
+  payment: "unpaid",
+  fulfillment: "unfulfilled",
+};
+
+/**
+ * An element's accessible name from the two sources a container can carry,
+ * in accname's order: the text aria-labelledby points at, else aria-label.
+ */
+function accessibleName(element: Element): string {
+  const labelledBy = element.getAttribute("aria-labelledby");
+  if (labelledBy) {
+    return labelledBy
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
+      .join(" ")
+      .trim();
+  }
+  return element.getAttribute("aria-label")?.trim() ?? "";
+}
+
+/**
+ * The group a screen reader announces as `name`: an element whose ROLE is
+ * group and whose computed name is `name`. A name on a div with no role is
+ * never announced (ARIA prohibits naming the generic role), so such a div is
+ * not found here.
+ */
+function groupNamed(name: string): HTMLElement | null {
+  const groups = [...document.querySelectorAll('[role="group"]')] as HTMLElement[];
+  return groups.find((group) => accessibleName(group) === name) ?? null;
+}
+
+function filterRow(): HTMLElement | null {
+  return groupNamed("Filter orders");
+}
+
+function chipButtons(): HTMLButtonElement[] {
+  return [...(filterRow()?.querySelectorAll("button") ?? [])] as HTMLButtonElement[];
+}
+
+/** The chips that announce themselves as pressed. */
+function pressedChips(): string[] {
+  return chipButtons()
+    .filter((button) => button.getAttribute("aria-pressed") === "true")
+    .map((button) => (button.textContent ?? "").trim());
+}
+
+async function choose(filter: OrderListFilter) {
+  const chip = chipButtons().find((b) => (b.textContent ?? "").trim() === CHIP[filter]);
+  if (!chip) throw new Error(`No "${CHIP[filter]}" chip. Screen: ${text().slice(0, 400)}`);
+  await act(async () => {
+    chip.click();
+  });
+  await readsSettled();
+}
+
+/** Keys under `prefix` that hold data. */
+function cachedUnder(prefix: readonly unknown[]): (readonly unknown[])[] {
+  return client
+    .getQueriesData({ queryKey: prefix })
+    .filter(([, data]) => data !== undefined)
+    .map(([key]) => key);
+}
+
+/** The filter each list request asked for (absent = all). */
+const sentFilters = () => listCalls().map((c) => c.data?.filter ?? "all");
+
+describe("Orders filters — each filter is exactly its server-side predicate", () => {
+  const pageFn = () => realOrdersApi.listOrdersPageFn as (args: { data?: unknown }) => Promise<any>;
+
+  it("FA. every combination of the three status columns lands in exactly the orders each filter promises", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, EVERY_COMBINATION.length, "MAP", undefined, (i) => EVERY_COMBINATION[i]!);
+    signInAs(U1, org);
+
+    const served: Record<string, string[]> = {};
+    for (const filter of FILTERS) {
+      const page = await pageFn()({
+        data: filter === "all" ? { limit: 100 } : { filter, limit: 100 },
+      });
+      expect(page.filter).toBe(filter);
+      expect(page.nextCursor).toBeNull();
+      served[filter] = page.orders.map((o: any) => o.orderNumber);
+      // The SQL agrees with the written specification, row for row, in order.
+      expect(served[filter]).toEqual(await dbOrder(org, filter));
+    }
+
+    // Counts written out by hand from the definitions, so the specification is
+    // not only checked against itself.
+    expect(Object.fromEntries(FILTERS.map((f) => [f, served[f]!.length]))).toEqual({
+      all: 64,
+      awaiting_payment: 24, // 3 live lifecycles × {unpaid, pending} × 4 fulfillments
+      draft: 12, // 4 payments × 3 non-cancelled fulfillments
+      to_pack: 4,
+      processing: 4,
+      fulfilled: 4,
+      completed: 12,
+      cancelled: 28, // 16 cancelled sales + 12 cancelled fulfillments of live ones
+    });
+
+    // The six progress filters partition the list: every order exactly once.
+    const progress = ["draft", "to_pack", "processing", "fulfilled", "completed", "cancelled"];
+    const placed = progress.flatMap((f) => served[f]!);
+    expectNoDuplicates(placed);
+    expect([...placed].sort()).toEqual([...served.all!].sort());
+
+    // Spot checks against the axes themselves.
+    const byCode = new Map(
+      (await pageFn()({ data: { limit: 100 } })).orders.map((o: any) => [o.orderNumber, o]),
+    );
+    for (const code of served.awaiting_payment!) {
+      const o: any = byCode.get(code);
+      expect(o.lifecycleStatus).not.toBe("cancelled");
+      expect(["unpaid", "pending"]).toContain(o.paymentStatus);
+    }
+    for (const code of served.cancelled!) {
+      const o: any = byCode.get(code);
+      expect(o.lifecycleStatus === "cancelled" || o.fulfillmentStatus === "cancelled").toBe(true);
+    }
+  });
+
+  it("FB. an unknown, injected or mistyped filter is refused before any read", async () => {
+    const { org } = await newOrg();
+    signInAs(U1, org);
+    for (const filter of [
+      "ALL",
+      "Draft",
+      "unpaid",
+      "lifecycle_status.eq.draft",
+      "draft,organization_id.neq.x",
+      "",
+      42,
+      ["draft"],
+      { eq: "draft" },
+      null,
+    ]) {
+      await expect(pageFn()({ data: { filter } })).rejects.toThrow();
+    }
+  });
+
+  it("FC. a filter never widens the tenant: another organization's cursor under a filter yields only the caller's orders", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedOrders(a.org, 6, "FXA");
+    await seedOrders(b.org, 6, "FXB");
+    signInAs(U1, b.org);
+    const bPage = await pageFn()({ data: { filter: "draft", limit: 1 } });
+    signInAs(U1, a.org);
+
+    const page = await pageFn()({ data: { filter: "draft", before: bPage.nextCursor } });
+    expect(page.servedAs).toEqual({ userId: U1, organizationId: a.org });
+    expect(page.orders.every((o: any) => o.organizationId === a.org)).toBe(true);
+  });
+
+  it("FD. orders.read is required under every filter", async () => {
+    const { org, viewerRole } = await newOrg();
+    await seedOrders(org, 3, "FPERM");
+    signInAs(U2, org);
+    await pageFn()({ data: { filter: "draft" } });
+    await f.db.query(`delete from role_permissions where role_id = $1`, [viewerRole]);
+    for (const filter of FILTERS) {
+      await expect(pageFn()({ data: { filter } })).rejects.toThrow(/permission/i);
+    }
+  });
+});
+
+describe("Orders filters — paging a filtered list", () => {
+  it("FE. 130 matching orders among 260: three filtered pages, every match once, an honest filtered end", async () => {
+    const { org } = await newOrg();
+    // Drafts and orders to pack interleaved second by second.
+    await seedOrders(org, 260, "MIX", undefined, (i) =>
+      i % 2 === 0 ? DEFAULT_AXES : CONFIRMED_TO_PACK,
+    );
+    signInAs(U1, org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+
+    expect(pressedChips()).toEqual(["To pack"]);
+    expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 50));
+    expect(text()).not.toContain(END_FILTERED);
+
+    expect(await loadEverything()).toBe(2);
+    const codes = shown();
+    expectNoDuplicates(codes);
+    expect(codes).toEqual(await dbOrder(org, "to_pack"));
+    expect(codes).toHaveLength(130);
+    expect(text()).toContain(END_FILTERED);
+    expect(text()).toContain("130 matching orders shown");
+    expect(text()).not.toContain(END);
+    // Every page asked for the filter; each later page continued from a cursor.
+    expect(sentFilters()).toEqual(["to_pack", "to_pack", "to_pack"]);
+    expect(listCalls()[0]!.data.before).toBeUndefined();
+    expect(listCalls()[2]!.data.before.id).toBeString();
+  });
+
+  it("FF. switching filter starts the new list at its first page; switching back starts that one over", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 240, "SW", undefined, (i) =>
+      i % 3 === 0 ? CONFIRMED_TO_PACK : DEFAULT_AXES,
+    );
+    signInAs(U1, org);
+    await mount();
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toHaveLength(100);
+
+    calls.length = 0;
+    await choose("draft");
+    expect(searchNavigations.at(-1)).toEqual({ filter: "draft" });
+    expect(pressedChips()).toEqual(["Drafts"]);
+    expect(listCalls()).toHaveLength(1);
+    expect(listCalls()[0]!.data).toEqual({ filter: "draft" });
+    expect(shown()).toEqual((await dbOrder(org, "draft")).slice(0, 50));
+    // The All list walked before is gone, not kept two pages deep.
+    expect(client.getQueryData(ordersKeys.listPagesFor(U1, org, "all"))).toBeUndefined();
+
+    calls.length = 0;
+    await choose("all");
+    expect(searchNavigations.at(-1)).toEqual({});
+    expect(listCalls()).toHaveLength(1);
+    expect(listCalls()[0]!.data).toEqual({});
+    expect(shown()).toEqual((await dbOrder(org)).slice(0, 50));
+    expect(client.getQueryData(ordersKeys.listPagesFor(U1, org, "draft"))).toBeUndefined();
+  });
+
+  it("FG. orders created and changed while paging a filter: no match repeated or skipped; they arrive on refresh", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 120, "CPACK", undefined, () => CONFIRMED_TO_PACK);
+    await seedOrders(
+      org,
+      60,
+      "CDRAFT",
+      (i) => `timestamptz '2026-10-01 12:00:00.5+00' - make_interval(secs => ${i * 2})`,
+    );
+    signInAs(U1, org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+    const firstPage = shown();
+
+    // Meanwhile: new orders to pack, new drafts, and one older order still to
+    // load starts packing (it leaves this filter).
+    await seedOrders(
+      org,
+      7,
+      "NEWPACK",
+      (i) => `now() - make_interval(secs => ${i})`,
+      () => CONFIRMED_TO_PACK,
+    );
+    await seedOrders(org, 5, "NEWDRAFT", (i) => `now() - make_interval(secs => ${i})`);
+    await f.db.query(
+      `update orders set fulfillment_status='processing'
+        where organization_id=$1 and order_number='CPACK-0110'`,
+      [org],
+    );
+
+    await loadEverything();
+    const paged = shown();
+    expectNoDuplicates(paged);
+    expect(paged.slice(0, 50)).toEqual(firstPage);
+    // The walk continued exactly where page 1 ended, and only matching rows.
+    expect(paged.slice(50)).toEqual(
+      (await dbOrder(org, "to_pack")).filter((c) => c.startsWith("CPACK")).slice(50),
+    );
+    expect(paged).not.toContain("CPACK-0110");
+    expect(paged.some((c) => c.includes("DRAFT"))).toBe(false);
+
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ordersKeys.list(U1, org) });
+    });
+    await readsSettled();
+    const refreshed = shown();
+    expectNoDuplicates(refreshed);
+    expect(refreshed.slice(0, 7)).toEqual((await dbOrder(org, "to_pack")).slice(0, 7));
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+  });
+
+  it("FH. a filter with no matches is its own empty state, offers All, and never claims an end or a Load more", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 12, "NOMATCH");
+    signInAs(U1, org);
+    setRouteSearch({ filter: "completed" });
+    await mount();
+
+    expect(text()).toContain(EMPTY_FILTERED);
+    expect(text()).not.toContain(EMPTY);
+    expect(text()).not.toContain(END_FILTERED);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+    expect(shown()).toEqual([]);
+
+    await tap("Show all orders");
+    await readsSettled();
+    expect(pressedChips()).toEqual(["All"]);
+    expect(shown()).toEqual(await dbOrder(org));
+  });
+
+  it("FI. exactly one full filtered page (50): the server proves the end with one request", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 100, "HALF", undefined, (i) =>
+      i % 2 === 0 ? DEFAULT_AXES : CONFIRMED_TO_PACK,
+    );
+    signInAs(U1, org);
+    setRouteSearch({ filter: "draft" });
+    await mount();
+
+    expect(shown()).toEqual(await dbOrder(org, "draft"));
+    expect(shown()).toHaveLength(50);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+    expect(text()).toContain(END_FILTERED);
+    expect(listCalls()).toHaveLength(1);
+  });
+});
+
+describe("Orders filters — changing filter while a request is in flight", () => {
+  it("FJ. a Load more still in flight for the old filter lands nowhere, and the new filter can page at once", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 260, "PEND", undefined, (i) =>
+      i % 2 === 0 ? DEFAULT_AXES : CONFIRMED_TO_PACK,
+    );
+    signInAs(U1, org);
+    await mount();
+
+    holding = true;
+    await tap(LOAD_MORE);
+    await settle(4);
+    expect(held).toHaveLength(1);
+
+    holding = false;
+    await choose("to_pack");
+    expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 50));
+
+    // The new filter's Load more is not blocked by the old one's request.
+    calls.length = 0;
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(sentFilters()).toEqual(["to_pack"]);
+    expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 100));
+
+    // The All page lands now.
+    held.shift()!();
+    await readsSettled();
+    expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 100));
+    expect(shown().every((c) => c.startsWith("PEND-"))).toBe(true);
+    expect(client.getQueryData(ordersKeys.listPagesFor(U1, org, "all"))).toBeUndefined();
+    const toPack = new Set(await dbOrder(org, "to_pack"));
+    expect(shown().every((c) => toPack.has(c))).toBe(true);
+  });
+
+  it("FK. a FIRST page still in flight for the old filter never appears under the new one", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 40, "FIRSTA", undefined, () => DEFAULT_AXES);
+    await seedOrders(
+      org,
+      40,
+      "FIRSTB",
+      (i) => `timestamptz '2026-10-01 11:00:00+00' - make_interval(secs => ${i})`,
+      () => CONFIRMED_TO_PACK,
+    );
+    signInAs(U1, org);
+    setRouteSearch({ filter: "draft" });
+    holding = true;
+    client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root!.render(tree()));
+    await settle(4);
+    expect(held).toHaveLength(1);
+    expect(shown()).toEqual([]);
+
+    holding = false;
+    await choose("to_pack");
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+
+    held.shift()!();
+    await readsSettled();
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+    expect(shown().some((c) => c.startsWith("FIRSTA-"))).toBe(false);
+    expect(client.getQueryData(ordersKeys.listPagesFor(U1, org, "draft"))).toBeUndefined();
+    expect(text()).toContain(END_FILTERED);
+  });
+
+  it("FL. rapid taps across several chips: one list on screen, the last one chosen", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 64, "RAPID", undefined, (i) => EVERY_COMBINATION[i]!);
+    signInAs(U1, org);
+    await mount();
+
+    await act(async () => {
+      for (const filter of ["draft", "cancelled", "awaiting_payment", "completed"] as const) {
+        chipButtons()
+          .find((b) => (b.textContent ?? "").trim() === CHIP[filter])!
+          .click();
+      }
+    });
+    await readsSettled();
+    expect(pressedChips()).toEqual(["Completed"]);
+    expect(shown()).toEqual(await dbOrder(org, "completed"));
+    const cachedFilters = client
+      .getQueriesData({ queryKey: ordersKeys.listPages(U1, org) })
+      .filter(([, data]) => data !== undefined)
+      .map(([key]) => key.at(-1));
+    expect(cachedFilters).toEqual(["completed"]);
+  });
+});
+
+describe("Orders filters — failures are honest", () => {
+  it("FM. a failed filtered Load more keeps the rows, says so, and Retry continues the same filter", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 120, "FNET", undefined, () => CONFIRMED_TO_PACK);
+    signInAs(U1, org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+
+    failNext = 3;
+    calls.length = 0;
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(listCalls()).toHaveLength(3);
+    expect(sentFilters()).toEqual(["to_pack", "to_pack", "to_pack"]);
+    expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 50));
+    expect(text()).toContain("More orders didn't load");
+    expect(text()).not.toContain(END_FILTERED);
+
+    await tap(RETRY);
+    await readsSettled();
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+    expect(text()).toContain(END_FILTERED);
+  });
+
+  it("FN. a failed first filtered page is an error with Retry — never the filtered empty state", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 3, "FFIRST");
+    signInAs(U1, org);
+    setRouteSearch({ filter: "draft" });
+    failNext = 3;
+    await mount();
+
+    expect(text()).toContain("Orders didn't load");
+    expect(text()).not.toContain(EMPTY_FILTERED);
+    expect(text()).not.toContain(END_FILTERED);
+
+    await tap(RETRY);
+    await readsSettled();
+    expect(shown()).toEqual(await dbOrder(org, "draft"));
+    expect(sentFilters().at(-1)).toBe("draft");
+  });
+
+  it("FO. a page that says it answers a different filter is never shown under this one", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 10, "FMIS");
+    signInAs(U1, org);
+    const { acceptOrderListPage } = await import("@/lib/orders");
+    const page = await (realOrdersApi.listOrdersPageFn as any)({ data: {} });
+    expect(page.filter).toBe("all");
+    expect(() => acceptOrderListPage(page, { userId: U1, organizationId: org }, "draft")).toThrow(
+      /different filter/,
+    );
+    expect(
+      acceptOrderListPage(page, { userId: U1, organizationId: org }, "all").orders,
+    ).toHaveLength(10);
+  });
+});
+
+describe("Orders filters — principal and cache isolation", () => {
+  it("FP. member switch under a filter (U1 → U2): U2 starts that filter at page 1, U1's filtered pages are gone", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 120, "FMEM");
+    signInAs(U1, org);
+    setRouteSearch({ filter: "draft" });
+    await mount();
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toHaveLength(100);
+    calls.length = 0;
+
+    signInAs(U2, org);
+    await rerender();
+    expect(listCalls()).toHaveLength(1);
+    expect(listCalls()[0]!.data).toEqual({ filter: "draft" });
+    expect(shown()).toEqual((await dbOrder(org, "draft")).slice(0, 50));
+    expect(cachedUnder(ordersKeys.principal(U1, org))).toEqual([]);
+  });
+
+  it("FQ. organization switch A → B → A under a filter: each its own filtered list, from page 1", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedOrders(a.org, 140, "FORGA", undefined, (i) =>
+      i % 2 === 0 ? CONFIRMED_TO_PACK : DEFAULT_AXES,
+    );
+    await seedOrders(b.org, 140, "FORGB", undefined, (i) =>
+      i % 2 === 0 ? CONFIRMED_TO_PACK : DEFAULT_AXES,
+    );
+    signInAs(U1, a.org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual((await dbOrder(a.org, "to_pack")).slice(0, 70));
+
+    signInAs(U1, b.org);
+    await rerender();
+    expect(shown().every((c) => c.startsWith("FORGB-"))).toBe(true);
+    expect(shown()).toEqual((await dbOrder(b.org, "to_pack")).slice(0, 50));
+    expect(cachedUnder(ordersKeys.principal(U1, a.org))).toEqual([]);
+
+    calls.length = 0;
+    signInAs(U1, a.org);
+    await rerender();
+    expect(listCalls()[0]!.data).toEqual({ filter: "to_pack" });
+    expect(shown().every((c) => c.startsWith("FORGA-"))).toBe(true);
+    await loadEverything();
+    expectNoDuplicates(shown());
+    expect(shown()).toEqual(await dbOrder(a.org, "to_pack"));
+  });
+
+  it("FR. a late filtered page for A, delivered after switching to B, is stored nowhere", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedOrders(a.org, 120, "FLATEA");
+    await seedOrders(b.org, 20, "FLATEB");
+    signInAs(U1, a.org);
+    setRouteSearch({ filter: "draft" });
+    await mount();
+
+    holding = true;
+    await tap(LOAD_MORE);
+    await settle(4);
+    expect(held).toHaveLength(1);
+
+    holding = false;
+    signInAs(U1, b.org);
+    await rerender();
+    expect(shown()).toEqual(await dbOrder(b.org, "draft"));
+
+    held.shift()!();
+    await readsSettled();
+    expect(shown()).toEqual(await dbOrder(b.org, "draft"));
+    expect(JSON.stringify(client.getQueriesData({ queryKey: ["orders"] }))).not.toContain(
+      "FLATEA-",
+    );
+  });
+
+  it("FS. a filtered page answered for another organization (another tab) is refused, rows and filters leave", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedOrders(a.org, 120, "FTABA");
+    await seedOrders(b.org, 120, "FTABB");
+    signInAs(U1, a.org);
+    setRouteSearch({ filter: "draft" });
+    await mount();
+    expect(shown()).toHaveLength(50);
+
+    Object.assign(server, { userId: U1, organizationId: b.org });
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual([]);
+    expect(text()).toContain("You switched account or business");
+    expect(filterRow()).toBeNull();
+    expect(JSON.stringify(client.getQueriesData({ queryKey: ["orders"] }))).not.toContain("FTABB-");
+  });
+
+  it("FT. orders.read revoked while filtered: page 2 is refused and every row leaves; restored, the filter returns", async () => {
+    const { org, viewerRole } = await newOrg();
+    await seedOrders(org, 120, "FREV");
+    signInAs(U2, org);
+    setRouteSearch({ filter: "draft" });
+    await mount();
+    expect(shown()).toHaveLength(50);
+
+    await f.db.query(`delete from role_permissions where role_id = $1`, [viewerRole]);
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual([]);
+    expect(text()).toContain("You can't view orders");
+    expect(filterRow()).toBeNull();
+
+    // A chip cannot be used to ask again: there are none. Restored:
+    await f.db.query(
+      `insert into role_permissions(role_id,permission_id)
+       select $1, id from permissions where key = 'orders.read'`,
+      [viewerRole],
+    );
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ordersKeys.list(U2, org) });
+    });
+    await readsSettled();
+    expect(pressedChips()).toEqual(["Drafts"]);
+    expect(shown()).toEqual((await dbOrder(org, "draft")).slice(0, 50));
+  });
+
+  it("FU. session expiry while filtered: rows leave, sign-in is requested; re-authentication reloads the filter from page 1", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 90, "FEXP", undefined, () => CONFIRMED_TO_PACK);
+    signInAs(U1, org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+
+    Object.assign(server, { userId: null, organizationId: null });
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual([]);
+    expect(navigations).toContain("/sign-in");
+
+    signInAs(U1, org);
+    calls.length = 0;
+    await act(async () => {
+      await client.resetQueries({ queryKey: ordersKeys.listPages(U1, org) });
+    });
+    await readsSettled();
+    expect(listCalls()[0]!.data).toEqual({ filter: "to_pack" });
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+  });
+
+  it("FV. remount and eviction: the URL keeps the filter, and a cold cache starts it at page 1", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 120, "FGC");
+    signInAs(U1, org);
+    setRouteSearch({ filter: "draft" });
+    const shared = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false, gcTime: 0 } },
+    });
+    await mount({ client: shared });
+    await loadEverything();
+    expect(shown()).toHaveLength(120);
+
+    await unmount();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(shared.getQueryData(ordersKeys.listPagesFor(U1, org, "draft"))).toBeUndefined();
+
+    calls.length = 0;
+    await mount({ client: shared });
+    expect(pressedChips()).toEqual(["Drafts"]);
+    expect(listCalls()).toHaveLength(1);
+    expect(listCalls()[0]!.data).toEqual({ filter: "draft" });
+    expect(shown()).toEqual((await dbOrder(org, "draft")).slice(0, 50));
+  });
+
+  it("FW. a create or a delivery change refreshes the filtered list (the list prefix still reaches it)", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 10, "FINV", undefined, () => CONFIRMED_TO_PACK);
+    signInAs(U1, org);
+    setRouteSearch({ filter: "to_pack" });
+    await mount();
+    expect(shown()).toHaveLength(10);
+
+    await seedOrders(
+      org,
+      2,
+      "FINVNEW",
+      (i) => `now() - make_interval(secs => ${i})`,
+      () => CONFIRMED_TO_PACK,
+    );
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ordersKeys.list(U1, org) });
+    });
+    await readsSettled();
+    expect(shown()).toEqual(await dbOrder(org, "to_pack"));
+    expect(shown()).toHaveLength(12);
+  });
+});
+
+describe("Orders filters — URL, language and accessibility", () => {
+  it("FX. the URL names the filter: unknown values read as All, chips write it back with replace", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 5, "FURL");
+    signInAs(U1, org);
+    setRouteSearch({ filter: "drop table orders" });
+    await mount();
+    expect(pressedChips()).toEqual(["All"]);
+    expect(listCalls()[0]!.data).toEqual({});
+    expect(shown()).toEqual(await dbOrder(org));
+
+    await choose("awaiting_payment");
+    expect(searchNavigations.at(-1)).toEqual({ filter: "awaiting_payment" });
+    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    // Tapping the chip already selected asks for nothing new.
+    calls.length = 0;
+    await choose("awaiting_payment");
+    expect(listCalls()).toHaveLength(0);
+  });
+
+  it("FY. eight chips, one pressed, in a labelled group; each a real button reachable by keyboard", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 3, "FACC");
+    signInAs(U1, org);
+    await mount();
+
+    const buttons = chipButtons();
+    expect(buttons.map((b) => (b.textContent ?? "").trim())).toEqual(FILTERS.map((f) => CHIP[f]));
+    expect(buttons.every((b) => b.type === "button" && !b.disabled)).toBe(true);
+    expect(buttons.every((b) => ["true", "false"].includes(b.getAttribute("aria-pressed")!))).toBe(
+      true,
+    );
+    expect(pressedChips()).toEqual(["All"]);
+    // Selection is never colour alone: only the chosen chip carries a mark,
+    // and the mark moves with the selection.
+    const marked = () =>
+      chipButtons()
+        .filter((b) => b.querySelector("svg"))
+        .map((b) => (b.textContent ?? "").trim());
+    expect(marked()).toEqual(["All"]);
+    await choose("to_pack");
+    expect(marked()).toEqual(["To pack"]);
+    expect(pressedChips()).toEqual(["To pack"]);
+    // A chip label is never cut: no truncation on the chip or its text.
+    expect(buttons.some((b) => /truncate|line-clamp/.test(b.innerHTML + b.className))).toBe(false);
+  });
+
+  it("GA. a screen reader meets the chips as ONE group named 'Filter orders' that holds all eight", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, 2, "FGRP");
+    signInAs(U1, org);
+    await mount();
+
+    const group = filterRow();
+    expect(group).not.toBeNull();
+    expect(group!.getAttribute("role")).toBe("group");
+
+    // The name sits on the group and on nothing else: not on a role-less
+    // wrapper, where it would be silently dropped.
+    const named = [...document.querySelectorAll("[aria-label],[aria-labelledby]")].filter(
+      (element) => accessibleName(element) === "Filter orders",
+    );
+    expect(named).toEqual([group!]);
+
+    // Each of the eight chips belongs to that group (its nearest group is it),
+    // keeps its own name, and announces whether it is pressed.
+    const chips = [...document.querySelectorAll("button")].filter((button) =>
+      FILTERS.some((f) => (button.textContent ?? "").trim() === CHIP[f]),
+    );
+    expect(chips).toHaveLength(FILTERS.length);
+    expect(chips.every((chip) => chip.closest('[role="group"]') === group)).toBe(true);
+    expect(
+      chips.map((chip) => [(chip.textContent ?? "").trim(), chip.getAttribute("aria-pressed")]),
+    ).toEqual(FILTERS.map((f) => [CHIP[f], f === "all" ? "true" : "false"]));
+
+    // Choosing a chip moves the pressed state inside the same group.
+    await choose("processing");
+    expect(filterRow()).toBe(group);
+    expect(pressedChips()).toEqual(["Processing"]);
+  });
+
+  it("GB. when the chips change size after the first measure (a late Khmer font), the chosen chip is brought back on screen", async () => {
+    // happy-dom has no layout, so the browser's part is played by hand: a
+    // ResizeObserver whose callbacks this test fires, and the boxes Chromium
+    // measured after a Khmer refresh (the chosen chip 72px off the left edge).
+    const observers: { callback: () => void; targets: Element[] }[] = [];
+    const original = globalThis.ResizeObserver;
+    (globalThis as any).ResizeObserver = class {
+      private entry: { callback: () => void; targets: Element[] };
+      constructor(callback: () => void) {
+        this.entry = { callback, targets: [] };
+        observers.push(this.entry);
+      }
+      observe(target: Element) {
+        this.entry.targets.push(target);
+      }
+      disconnect() {
+        observers.splice(observers.indexOf(this.entry), 1);
+      }
+    };
+    try {
+      const { org } = await newOrg();
+      await seedOrders(org, 2, "FFNT");
+      signInAs(U1, org);
+      setRouteSearch({ filter: "fulfilled" });
+      await mount();
+
+      const row = filterRow()!;
+      const chosen = chipButtons().find((b) => b.getAttribute("aria-pressed") === "true")!;
+      // The row and every chip are watched, so any change of size re-measures.
+      const watched = observers.flatMap((o) => o.targets);
+      expect(watched).toContain(row);
+      expect(chipButtons().every((chip) => watched.includes(chip))).toBe(true);
+
+      const box = (left: number, right: number) =>
+        ({ left, right, top: 0, bottom: 44, width: right - left, height: 44 }) as DOMRect;
+      row.getBoundingClientRect = () => box(0, 360);
+      chosen.getBoundingClientRect = () => box(-72, 176);
+      row.scrollLeft = 500;
+      await act(async () => {
+        for (const observer of [...observers]) observer.callback();
+      });
+      // Scrolled back by exactly the 72px that were off screen.
+      expect(row.scrollLeft).toBe(428);
+    } finally {
+      (globalThis as any).ResizeObserver = original;
+    }
+  });
+
+  it("FZ. Khmer: every chip, the filtered empty state and the filtered end read in Khmer", async () => {
+    const km = (await import("@/locales/km.json")).default as any;
+    const { org } = await newOrg();
+    await seedOrders(org, 4, "FKM");
+    signInAs(U1, org);
+    await i18n.changeLanguage("km");
+    setRouteSearch({ filter: "draft" });
+    await mount();
+
+    // In Khmer the same group carries the Khmer name.
+    const group = groupNamed(km.orderList.filtersLabel);
+    expect(group).not.toBeNull();
+    const labels = [...group!.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
+    expect(labels).toEqual(FILTERS.map((f) => km.orderList.filters[f]));
+    expect(text()).toContain(km.orderList.endFiltered.title);
+
+    await act(async () => {
+      [...group!.querySelectorAll("button")]
+        .find((b) => (b.textContent ?? "").trim() === km.orderList.filters.completed)!
+        .click();
+    });
+    await readsSettled();
+    expect(text()).toContain(km.orderList.emptyFilter.title);
+    expect(text()).toContain(km.orderList.emptyFilter.showAll);
+    expect(text()).not.toContain("No orders match this filter");
   });
 });

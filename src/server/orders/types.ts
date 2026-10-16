@@ -16,6 +16,7 @@ import type {
   OrderFulfillmentStatus,
   OrderStatusAxis,
 } from "./state-machine";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 
 export type { OrderLifecycleStatus, OrderPaymentStatus, OrderFulfillmentStatus, OrderStatusAxis };
 
@@ -226,6 +227,11 @@ export interface ListOrdersOptions {
    * so callers pass one or the other.
    */
   fulfillment_statuses?: readonly OrderFulfillmentStatus[] | undefined;
+  /**
+   * One of the Orders screen's filters (src/lib/order-list-filters.ts), applied
+   * as SQL by the repository. Combines with the fields above by AND.
+   */
+  list_filter?: OrderListFilter | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
   /**

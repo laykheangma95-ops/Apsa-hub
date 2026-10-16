@@ -1185,6 +1185,27 @@
       "title": "You switched account or business",
       "body": "Another tab signed in as someone else or changed business. Reload to see the right orders.",
       "reload": "Reload"
+    },
+    "filtersLabel": "Filter orders",
+    "filters": {
+      "all": "All",
+      "awaiting_payment": "Awaiting payment",
+      "draft": "Drafts",
+      "to_pack": "To pack",
+      "processing": "Processing",
+      "fulfilled": "Fulfilled, not completed",
+      "completed": "Completed",
+      "cancelled": "Cancelled"
+    },
+    "emptyFilter": {
+      "title": "No orders match this filter",
+      "body": "Try another filter, or show all orders.",
+      "showAll": "Show all orders"
+    },
+    "endFiltered": {
+      "title": "No older orders match this filter",
+      "body_one": "{{count}} matching order shown. Orders that change status move in or out when the list refreshes.",
+      "body_other": "{{count}} matching orders shown. Orders that change status move in or out when the list refreshes."
     }
   },
   "orderCreate": {

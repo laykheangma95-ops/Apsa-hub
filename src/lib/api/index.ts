@@ -11,6 +11,7 @@ import {
   type RealOrderDetail,
   type RealOrderPage,
 } from "@/lib/orders";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
 import {
   isIdempotencyKeyHolder,
@@ -1154,15 +1155,22 @@ export async function listRealOrders(): Promise<Order[]> {
  * it; null asks for the newest page. `expected` is the principal of the cache
  * entry this page will be stored under (the /app route guard's server-derived
  * context). A page the server answered for anyone else is refused here, before
- * React Query can store it — see acceptOrderListPage().
+ * React Query can store it — see acceptOrderListPage(). `filter` is the
+ * screen's filter; the server applies it, and the page must say it did.
  */
 export async function listRealOrdersPage(input: {
   before: OrderListCursor | null;
   expected: { userId: string; organizationId: string };
+  filter: OrderListFilter;
 }): Promise<RealOrderPage> {
   const { listOrdersPageFn } = await import("@/api/orders");
-  const page = await listOrdersPageFn({ data: input.before ? { before: input.before } : {} });
-  return acceptOrderListPage(page, input.expected);
+  const page = await listOrdersPageFn({
+    data: {
+      ...(input.before ? { before: input.before } : {}),
+      ...(input.filter !== "all" ? { filter: input.filter } : {}),
+    },
+  });
+  return acceptOrderListPage(page, input.expected, input.filter);
 }
 
 /** Production Order detail — src/routes/app.orders.$id.tsx (real-UUID branch). */

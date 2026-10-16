@@ -92,7 +92,12 @@ export function ChipRow({
 }: {
   children: ReactNode;
   label?: string | undefined;
-  role?: "tablist" | undefined;
+  /**
+   * Give a labelled row a role: a name on a plain div is not announced
+   * (ARIA prohibits naming the generic role). "group" for a row of toggle
+   * chips, "tablist" for a row of tabs.
+   */
+  role?: "tablist" | "group" | undefined;
   className?: string;
 }) {
   return (

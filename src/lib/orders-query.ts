@@ -23,6 +23,7 @@
  *
  * Safe to bundle for the browser.
  */
+import type { OrderListFilter } from "@/lib/order-list-filters";
 import { createQueryPartition } from "@/lib/query-principal";
 
 export const ORDERS_QUERY_ROOT = "orders";
@@ -53,9 +54,19 @@ export const ordersKeys = {
    * with this differently shaped one. Partitioning the key partitions the
    * cursor with it: a position walked through one principal's orders can never
    * continue a request made for another.
+   *
+   * This is the PREFIX of every filter's entry (listPagesFor); invalidate it
+   * without `exact` to reach all of them.
    */
   listPages: (userId: string, organizationId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "list", "pages"] as const,
+  /**
+   * One filter's paged list. Each filter is its own entry with its own pages
+   * and cursor, so a page read for one filter can never be shown, or
+   * continued, under another.
+   */
+  listPagesFor: (userId: string, organizationId: string, filter: OrderListFilter) =>
+    [ORDERS_QUERY_ROOT, userId, organizationId, "list", "pages", filter] as const,
   /** One production Order's detail. */
   detail: (userId: string, organizationId: string, orderId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "detail", orderId] as const,
