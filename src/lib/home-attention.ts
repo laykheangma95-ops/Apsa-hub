@@ -1,5 +1,6 @@
 import type { AttentionItem, HomeSummary } from "@/types";
 import type { UiPermissionKey } from "@/lib/capabilities";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 
 /**
  * The Home sections that can contribute a "needs attention" row. Finance is
@@ -72,18 +73,8 @@ export type AttentionRoute =
  * mentions it. Payment review is decided on /app/payments (confirm, verify,
  * refund); an out-of-stock count is resolved on /app/inventory.
  *
- * Deliberately carries NO search-param filter. Every count Home shows is a
- * UNION its destination's filter vocabulary cannot express in one server
- * query:
- *
- *   awaiting_payment        orders with payment_status unpaid OR pending
- *   payments_needing_review mismatch OR duplicate_suspected OR pending+unverified
- *   low_stock               quantity <= 0, i.e. the zero AND negative filters
- *
- * Pre-selecting the nearest single filter would land the merchant on a
- * SHORTER list than the number they just tapped — a filter that contradicts
- * its own entry point is worse than no filter. Each destination surfaces the
- * same work through its own attention band, review markers and chips.
+ * The route alone; a pre-selected filter is ATTENTION_ORDER_FILTER's job, and
+ * only Orders has one.
  */
 const ATTENTION_ROUTE: Partial<Record<AttentionItem["id"], AttentionRoute>> = {
   unread_conversations: "/app/inbox",
@@ -108,9 +99,51 @@ const ATTENTION_PERMISSION: Record<AttentionRoute, UiPermissionKey> = {
   "/app/inventory": "inventory.read",
 };
 
-/** The destination for an attention row, or null when it has none. */
+/**
+ * The Orders filter an attention row opens on — only where the filter selects
+ * EXACTLY the orders Home counted, so the list the merchant lands on is the
+ * number they tapped:
+ *
+ *   awaiting_payment  Home counts lifecycle not cancelled AND payment unpaid or
+ *                     pending (src/server/home/repository.ts). The
+ *                     awaiting_payment filter is that predicate, column for
+ *                     column (src/lib/order-list-filters.ts).
+ *
+ * orders_needing_action has no filter on purpose. Home counts lifecycle not
+ * cancelled AND (draft OR fulfillment unfulfilled): every draft, plus every
+ * live order not yet packed. That is Drafts AND To pack together (and, at the
+ * edges, a draft whose fulfillment was cancelled, which the chips file under
+ * Cancelled). One chip shows one of them, so any filter would land on FEWER
+ * orders than the number just tapped. The row opens All, which holds every one
+ * of them. A filter for that union is a product decision, not a link.
+ *
+ * Every other row goes to a screen whose filters cannot express its count in
+ * one server query, so it carries none:
+ *
+ *   payments_needing_review mismatch OR duplicate_suspected OR pending+unverified
+ *   low_stock               quantity <= 0, i.e. the zero AND negative filters
+ *
+ * A filter that contradicts its own entry point is worse than no filter. Each
+ * of those screens surfaces the same work through its own attention band,
+ * review markers and chips.
+ */
+const ATTENTION_ORDER_FILTER: Partial<Record<AttentionItem["id"], OrderListFilter>> = {
+  awaiting_payment: "awaiting_payment",
+};
+
+/** Where an attention row may lead: a screen, and for Orders, the filter it opens on. */
+export type AttentionDestination =
+  | { to: "/app/orders"; search: { filter?: OrderListFilter } }
+  | { to: Exclude<AttentionRoute, "/app/orders"> };
+
+/** The screen for an attention row, or null when it has none. */
 export function attentionRoute(id: AttentionItem["id"]): AttentionRoute | null {
   return ATTENTION_ROUTE[id] ?? null;
+}
+
+/** The Orders filter an attention row opens on, or null for the whole list (All). */
+export function attentionOrderFilter(id: AttentionItem["id"]): OrderListFilter | null {
+  return ATTENTION_ORDER_FILTER[id] ?? null;
 }
 
 /** The permission a destination requires. */
@@ -129,8 +162,12 @@ export function attentionRoutePermission(route: AttentionRoute): UiPermissionKey
 export function attentionDestination(
   id: AttentionItem["id"],
   can: (key: UiPermissionKey) => boolean,
-): AttentionRoute | null {
+): AttentionDestination | null {
   const route = attentionRoute(id);
-  if (!route) return null;
-  return can(attentionRoutePermission(route)) ? route : null;
+  if (!route || !can(attentionRoutePermission(route))) return null;
+  if (route !== "/app/orders") return { to: route };
+  // An explicit search either way: All is the absence of `filter`, so this
+  // row never inherits a filter from wherever the merchant last was.
+  const filter = attentionOrderFilter(id);
+  return { to: route, search: filter ? { filter } : {} };
 }

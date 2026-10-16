@@ -25,7 +25,9 @@
  *     therefore real rows.
  *   - the Supabase admin client — an SQL transport onto PGlite that returns
  *     rows through json_agg, exactly as PostgREST does, so timestamps keep
- *     their microseconds.
+ *     their microseconds. It also answers PostgREST's exact count (and a
+ *     head-only count) so Home's own repository counts over the same rows
+ *     (cases H*).
  *   - four TanStack Router hooks — there is no router in a unit process. The
  *     route's search (`?filter=`) is a small store: the route's own
  *     validateSearch reads it, and the screen's navigate() writes it, as the
@@ -204,23 +206,28 @@ function sqlTransport() {
     let single: "single" | "maybe" | null = null;
     let max: number | undefined;
     let skip: number | undefined;
+    let counted = false;
+    let headOnly = false;
     const compare = (op: string) => (key: string, value: unknown) => {
       values.push(value);
       where.push(`${identifier(key)} ${op} $${values.length}`);
       return chain;
     };
     const chain: any = {
-      select(cols = "*") {
+      select(cols = "*", options: { count?: "exact"; head?: boolean } = {}) {
         if (cols !== "*" && !/^[a-z_0-9, ]+$/.test(cols)) {
           throw new Error(`Unsupported test select: ${cols}`);
         }
         columns = cols;
+        counted = options.count === "exact";
+        headOnly = options.head === true;
         return chain;
       },
       eq: compare("="),
       neq: compare("<>"),
       lt: compare("<"),
       gt: compare(">"),
+      gte: compare(">="),
       // PostgREST's or=(a.eq.x,b.eq.y): only the eq form the repository uses.
       or(expression: string) {
         const terms = expression.split(",").map((term) => {
@@ -262,8 +269,23 @@ function sqlTransport() {
         return chain;
       },
       async execute() {
-        let inner = `select ${columns} from ${table}`;
-        if (where.length) inner += ` where ${where.join(" and ")}`;
+        const filtered = where.length ? ` where ${where.join(" and ")}` : "";
+        let count: number | null = null;
+        if (counted) {
+          // PostgREST's exact count: every row the filters admit, before any
+          // order, limit or offset.
+          try {
+            const total = await f.db.query<{ n: number }>(
+              `select count(*)::int as n from ${table}${filtered}`,
+              values,
+            );
+            count = total.rows[0]!.n;
+          } catch (error) {
+            return { data: null, count: null, error };
+          }
+          if (headOnly) return { data: null, count, error: null };
+        }
+        let inner = `select ${columns} from ${table}${filtered}`;
         if (ordering.length) inner += ` order by ${ordering.join(",")}`;
         if (max !== undefined) inner += ` limit ${max}`;
         if (skip !== undefined) inner += ` offset ${skip}`;
@@ -281,7 +303,7 @@ function sqlTransport() {
               ? { data: null, error: null }
               : { data: null, error: { code: "PGRST116", message: "no rows" } };
           }
-          return { data: rows, error: null };
+          return { data: rows, count, error: null };
         } catch (error) {
           return { data: null, error };
         }
@@ -2045,5 +2067,175 @@ describe("Orders filters — URL, language and accessibility", () => {
     expect(text()).toContain(km.orderList.emptyFilter.title);
     expect(text()).toContain(km.orderList.emptyFilter.showAll);
     expect(text()).not.toContain("No orders match this filter");
+  });
+});
+
+// ── Home → Orders ────────────────────────────────────────────────────────────
+//
+// Home's attention cards open this screen (src/lib/home-attention.ts): "Orders
+// awaiting payment" on the Awaiting payment filter, "Orders needing action" on
+// All. The card's number comes from Home's OWN repository query
+// (src/server/home/repository.ts getHomeOrderSummary), the list from the
+// Orders server function: two different pieces of SQL over the same PGlite,
+// held here to the same orders.
+
+/** Wide enough to hold every seeded order; the attention counts ignore it anyway. */
+const HOME_RANGE = { from: "2026-01-01T00:00:00.000Z", until: "2027-01-01T00:00:00.000Z" };
+
+async function homeOrderCounts(org: string) {
+  const { getHomeOrderSummary } = await import("@/server/home/repository");
+  return getHomeOrderSummary(org, HOME_RANGE);
+}
+
+/**
+ * Mount the Orders screen exactly where Home's card sends it: the card's own
+ * destination, its search written into the URL as the router would.
+ */
+async function openFromHomeCard(id: "awaiting_payment" | "orders_needing_action") {
+  const { attentionDestination } = await import("@/lib/home-attention");
+  const destination = attentionDestination(id, (key) => key === "orders.read");
+  if (!destination || destination.to !== "/app/orders") {
+    throw new Error(`${id} does not open the Orders list`);
+  }
+  setRouteSearch(destination.search);
+  await mount();
+  return destination;
+}
+
+/** Order numbers Home's "needing action" predicate admits, read straight from the table. */
+async function needingAction(org: string): Promise<string[]> {
+  const result = await f.db.query<{ order_number: string }>(
+    `select order_number from orders
+      where organization_id = $1 and lifecycle_status <> 'cancelled'
+        and (lifecycle_status = 'draft' or fulfillment_status = 'unfulfilled')`,
+    [org],
+  );
+  return result.rows.map((row) => row.order_number);
+}
+
+describe("Home → Orders — the card's number is the list it opens", () => {
+  it("HA. Awaiting payment: Home's count and the filtered list are the same orders, page after page", async () => {
+    const { org } = await newOrg();
+    await seedOrders(
+      org,
+      EVERY_COMBINATION.length,
+      "HOME",
+      undefined,
+      (i) => EVERY_COMBINATION[i]!,
+    );
+    // Sixty older drafts, unpaid: the filtered list now runs past one page.
+    await seedOrders(
+      org,
+      60,
+      "HOMEOLD",
+      (i) => `timestamptz '2026-09-01 12:00:00+00' - make_interval(secs => ${i})`,
+    );
+    signInAs(U1, org);
+
+    const counts = await homeOrderCounts(org);
+    // 24 of the 64 combinations (3 live lifecycles × unpaid|pending × 4
+    // fulfillments) plus the 60 drafts.
+    expect(counts.awaitingPaymentCount).toBe(84);
+
+    const destination = await openFromHomeCard("awaiting_payment");
+    expect(destination.search).toEqual({ filter: "awaiting_payment" });
+    // Arrives with the filter chosen and visible, and asks the server for it.
+    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(listCalls()[0]!.data).toEqual({ filter: "awaiting_payment" });
+
+    await loadEverything();
+    expectNoDuplicates(shown());
+    expect(shown()).toHaveLength(counts.awaitingPaymentCount);
+    expect(shown()).toEqual(await dbOrder(org, "awaiting_payment"));
+    expect(sentFilters().every((sent) => sent === "awaiting_payment")).toBe(true);
+    expect(text()).toContain(END_FILTERED);
+  });
+
+  it("HB. Orders needing action opens All, which holds every order the card counts; no one filter does", async () => {
+    const { org } = await newOrg();
+    await seedOrders(org, EVERY_COMBINATION.length, "ACT", undefined, (i) => EVERY_COMBINATION[i]!);
+    signInAs(U1, org);
+
+    const counts = await homeOrderCounts(org);
+    const counted = await needingAction(org);
+    // 16 drafts (every payment × every fulfillment) + confirmed and completed
+    // orders still unfulfilled (2 × 4 payments).
+    expect(counts.actionNeededCount).toBe(24);
+    expect(counted).toHaveLength(counts.actionNeededCount);
+
+    const destination = await openFromHomeCard("orders_needing_action");
+    expect(destination.search).toEqual({});
+    expect(pressedChips()).toEqual(["All"]);
+    expect(listCalls()[0]!.data).toEqual({});
+    await loadEverything();
+    const all = shown();
+    expect(counted.filter((code) => !all.includes(code))).toEqual([]);
+
+    // Any narrower filter would land on fewer orders than the number tapped.
+    for (const filter of FILTERS.filter((name) => name !== "all")) {
+      const list = await dbOrder(org, filter);
+      const missing = counted.filter((code) => !list.includes(code)).length;
+      expect({ filter, missesSome: missing > 0 }).toEqual({ filter, missesSome: true });
+    }
+  });
+
+  it("HC. nothing awaiting payment: Home has no number to show, and the filter says it is empty, not ended", async () => {
+    const { org } = await newOrg();
+    const settled = EVERY_COMBINATION.filter(
+      (axes) => !orderMatchesListFilter("awaiting_payment", axes),
+    );
+    await seedOrders(org, settled.length, "SETTLED", undefined, (i) => settled[i]!);
+    signInAs(U1, org);
+
+    expect((await homeOrderCounts(org)).awaitingPaymentCount).toBe(0);
+
+    // Home renders no card at zero; a saved link or Back can still land here.
+    await openFromHomeCard("awaiting_payment");
+    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(shown()).toEqual([]);
+    expect(text()).toContain(EMPTY_FILTERED);
+    expect(text()).not.toContain(END_FILTERED);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+  });
+
+  it("HD. organization switch under the card's filter: each organization's list is its own Home count", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedOrders(a.org, 7, "HORGA");
+    await seedOrders(b.org, 12, "HORGB");
+    await seedOrders(b.org, 4, "HORGBPAID", undefined, () => ({
+      lifecycle: "confirmed",
+      payment: "paid",
+      fulfillment: "unfulfilled",
+    }));
+    signInAs(U1, a.org);
+    await openFromHomeCard("awaiting_payment");
+    expect(shown()).toHaveLength((await homeOrderCounts(a.org)).awaitingPaymentCount);
+    expect(shown().every((code) => code.startsWith("HORGA-"))).toBe(true);
+
+    signInAs(U1, b.org);
+    await rerender();
+    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(shown().every((code) => code.startsWith("HORGB-"))).toBe(true);
+    expect(shown()).toHaveLength((await homeOrderCounts(b.org)).awaitingPaymentCount);
+    expect(shown()).toHaveLength(12);
+    expect(cachedUnder(ordersKeys.principal(U1, a.org))).toEqual([]);
+  });
+
+  it("HE. orders.read revoked after Home drew the card: the server refuses the filtered list, no rows", async () => {
+    const { org, viewerRole } = await newOrg();
+    await seedOrders(org, 5, "HREV");
+    signInAs(U2, org);
+    // Home showed the card while U2 could still read orders.
+    expect((await homeOrderCounts(org)).awaitingPaymentCount).toBe(5);
+    await f.db.query(`delete from role_permissions where role_id = $1`, [viewerRole]);
+
+    // This tab's capability snapshot still says orders.read (stale), so the
+    // card was a link; the server is what refuses.
+    await openFromHomeCard("awaiting_payment");
+    expect(listCalls()[0]!.data).toEqual({ filter: "awaiting_payment" });
+    expect(shown()).toEqual([]);
+    expect(text()).toContain("You can't view orders");
+    expect(filterRow()).toBeNull();
   });
 });

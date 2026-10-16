@@ -302,14 +302,18 @@ function BusinessHome() {
                          * A row is a link only when something owns that work AND
                          * this member may enter the screen that does. capabilities
                          * .can is fail-closed, so an unresolved snapshot renders a
-                         * plain card rather than a link into a refusal.
+                         * plain card rather than a link into a refusal. A row
+                         * whose count one Orders filter selects exactly opens on
+                         * that filter (see home-attention.ts).
                          */
-                        const to = attentionDestination(item.id, (key) => capabilities.can(key));
+                        const destination = attentionDestination(item.id, (key) =>
+                          capabilities.can(key),
+                        );
                         return (
                           <AttentionCard
                             key={item.id}
                             item={item}
-                            onClick={to ? () => void navigate({ to }) : undefined}
+                            onClick={destination ? () => void navigate(destination) : undefined}
                           />
                         );
                       })}
