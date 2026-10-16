@@ -48,10 +48,13 @@ const SURFACES: Array<{
     serverFile: "src/server/orders/state-machine.ts",
   },
   {
-    name: "Home — add product quick action",
+    // Add product left Home with the redesign; it stays on the catalogue
+    // ("Product catalogue — add product" below). Home's New order card opens
+    // the create-order sheet behind the key createOrder enforces.
+    name: "Home — new order quick action",
     uiFile: "src/routes/app.index.tsx",
-    key: "products.create",
-    serverFile: "src/server/products/service.ts",
+    key: "orders.create",
+    serverFile: "src/server/orders/service.ts",
   },
   {
     name: "Orders list — new order action",
