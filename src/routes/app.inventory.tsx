@@ -301,8 +301,8 @@ function InventoryListScreen() {
   });
 
   const productsQuery = useQuery({
-    // The same key the catalogue screen uses, so the two share one cached read
-    // rather than each paying for its own.
+    // Inventory's own bounded read (CATALOG_PAGE_LIMIT), said on screen when
+    // full. The Products screen pages under catalogKeys.productPagesFor instead.
     queryKey: catalogKeys.products(userId, organizationId, "ACTIVE", null),
     queryFn: () => listCatalogProducts({ status: "ACTIVE", categoryId: null }),
     enabled: !detailOpen && canReadStock && canReadProducts,

@@ -98,6 +98,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   listOrganizationStockFn: { reason: "ledger sum read" },
   listInventoryLocationsFn: { reason: "list read" },
   listProductsFn: { reason: "catalog read" },
+  listProductsPageFn: { reason: "paged catalog read" },
   getProductDetailFn: { reason: "detail read" },
   lookupBySkuFn: { reason: "lookup read" },
   lookupByBarcodeFn: { reason: "lookup read" },

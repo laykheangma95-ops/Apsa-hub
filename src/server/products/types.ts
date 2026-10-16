@@ -128,3 +128,18 @@ export interface ListProductsOptions {
   limit?: number | undefined;
   offset?: number | undefined;
 }
+
+/**
+ * One keyset read of the catalogue list (repository listProductsPage).
+ *
+ * `search` arrives already normalized by the service
+ * (src/lib/catalog-search.ts); "" or undefined means no search. `limit` is the
+ * number of rows to return, the service's page size plus its one probe row.
+ */
+export interface ListProductsPageOptions {
+  status: ProductStatusDb;
+  category_id?: string | undefined;
+  search?: string | undefined;
+  before?: { createdAt: string; id: string } | undefined;
+  limit: number;
+}

@@ -21,6 +21,7 @@
  * the caller has products.view_cost; the browser never reconstructs it.
  */
 import type { QueryClient } from "@tanstack/react-query";
+import type { CatalogListCursor } from "@/lib/catalog-search";
 import type { Currency, CompanionColor, Money } from "@/types";
 
 // ── Shapes returned by the server (src/server/products/service.ts) ───────────
@@ -109,10 +110,19 @@ export function isCatalogId(id: string): boolean {
 
 export const CATALOG_QUERY_ROOT = "catalog";
 
-/** One page. Search below is explicitly scoped to what this loaded. */
+/**
+ * The single bounded read Inventory still makes to name its stock rows
+ * (src/routes/app.inventory.tsx), which says so on screen when it is full.
+ * The Products screen no longer uses it: it pages through the whole catalogue
+ * CATALOG_LIST_PAGE_SIZE at a time (listCatalogProductsPage).
+ */
 export const CATALOG_PAGE_LIMIT = 200;
 
+/** Products per page on the Products screen; the server caps a request at 100. */
+export const CATALOG_LIST_PAGE_SIZE = 50;
+
 export const catalogKeys = {
+  /** Inventory's bounded one-shot read (CATALOG_PAGE_LIMIT). */
   products: (
     userId: string,
     organizationId: string,
@@ -120,6 +130,31 @@ export const catalogKeys = {
     categoryId: string | null,
   ) =>
     [CATALOG_QUERY_ROOT, userId, organizationId, "products", status, categoryId ?? "all"] as const,
+  /**
+   * The Products screen's paged lists (infinite queries: pages plus the
+   * cursor that continues them) — the PREFIX of every question's entry.
+   * Partitioning the key partitions the cursor with it: a position walked
+   * through one principal's catalogue can never continue a request made for
+   * another. A sibling of `products`, never the same entry: that one holds a
+   * plain array.
+   */
+  productPages: (userId: string, organizationId: string) =>
+    [CATALOG_QUERY_ROOT, userId, organizationId, "product-pages"] as const,
+  /**
+   * One question's paged list. Status, category and the NORMALIZED search
+   * each have their own entry with their own pages and cursor, so a page read
+   * for one question can never be shown, or continued, under another.
+   */
+  productPagesFor: (userId: string, organizationId: string, query: CatalogPageQuery) =>
+    [
+      CATALOG_QUERY_ROOT,
+      userId,
+      organizationId,
+      "product-pages",
+      query.status,
+      query.categoryId ?? "all",
+      query.search,
+    ] as const,
   product: (userId: string, organizationId: string, productId: string) =>
     [CATALOG_QUERY_ROOT, userId, organizationId, "product", productId] as const,
   categories: (userId: string, organizationId: string) =>
@@ -236,32 +271,6 @@ export function categoryLabel(
 ): string {
   if (language.startsWith("en") && category.nameEn) return category.nameEn;
   return category.nameKm;
-}
-
-/**
- * Search the products already loaded into this page — nothing more.
- *
- * This is NOT server search. It cannot see a product outside the page the
- * server returned, and the screen says so next to the field rather than
- * implying the whole catalog was searched.
- */
-export function searchLoadedProducts(
-  products: readonly CatalogProduct[],
-  query: string,
-): CatalogProduct[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === "") return [...products];
-
-  return products.filter((product) => {
-    if (product.nameKm.toLowerCase().includes(needle)) return true;
-    if ((product.nameEn ?? "").toLowerCase().includes(needle)) return true;
-    return product.variants.some(
-      (variant) =>
-        variant.name.toLowerCase().includes(needle) ||
-        (variant.sku ?? "").toLowerCase().includes(needle) ||
-        (variant.barcode ?? "").toLowerCase().includes(needle),
-    );
-  });
 }
 
 /** The price the list shows for a product: its first active variant's, or none. */
@@ -428,6 +437,134 @@ export async function listCatalogProducts(
     },
   });
   return result as unknown as CatalogProduct[];
+}
+
+// ── Products screen pages ────────────────────────────────────────────────────
+
+export type { CatalogListCursor };
+
+/** The question one paged list asks. `search` is already normalized. */
+export interface CatalogPageQuery {
+  status: CatalogListStatus;
+  categoryId: string | null;
+  search: string;
+}
+
+/** What listProductsPageFn returns (src/server/products/service.ts ProductListPage). */
+interface ServerCatalogPage {
+  products: unknown[];
+  nextCursor: CatalogListCursor | null;
+  servedAs: { userId: string; organizationId: string };
+  query: { status: string; categoryId: string | null; search: string };
+}
+
+/** One page of the Products screen, accepted for one principal and one question. */
+export interface CatalogPage {
+  products: CatalogProduct[];
+  /** Null only when the server found nothing further under this question. */
+  nextCursor: CatalogListCursor | null;
+}
+
+/**
+ * A page answered for a different member or organization than the cache entry
+ * that asked for it — another tab signed in as someone else, or switched
+ * business, between two requests from this screen. The page is discarded
+ * before React Query can store it.
+ */
+export class CatalogPrincipalChangedError extends Error {
+  constructor() {
+    super("The product list was answered for a different account or business");
+    this.name = "CatalogPrincipalChangedError";
+  }
+}
+
+export function isCatalogPrincipalChanged(err: unknown): boolean {
+  return err instanceof CatalogPrincipalChangedError;
+}
+
+/**
+ * Accept a server page only when it was served for exactly the principal this
+ * screen's cache entry belongs to, and answers exactly the question this entry
+ * asked. The server authorized the request for whoever its session cookie
+ * names; this decides only whether the answer may be filed under THIS key.
+ *
+ * A question mismatch is never a principal change, so it fails as an ordinary
+ * error (and is retried) rather than being shown under the wrong search.
+ */
+export function acceptCatalogPage(
+  page: ServerCatalogPage,
+  expected: { userId: string; organizationId: string },
+  query: CatalogPageQuery,
+): CatalogPage {
+  if (
+    page.servedAs.userId !== expected.userId ||
+    page.servedAs.organizationId !== expected.organizationId
+  ) {
+    throw new CatalogPrincipalChangedError();
+  }
+  if (
+    page.query.status !== query.status ||
+    page.query.categoryId !== query.categoryId ||
+    page.query.search !== query.search
+  ) {
+    throw new Error("The product list was answered for a different search or filter");
+  }
+  return { products: page.products as CatalogProduct[], nextCursor: page.nextCursor };
+}
+
+/**
+ * One page of the Products screen — src/routes/app.products.tsx.
+ *
+ * `before` is the previous page's `nextCursor`, exactly as the server issued
+ * it; null asks for the newest page. `expected` is the principal of the cache
+ * entry this page will be stored under (the /app route guard's server-derived
+ * context). `signal` is React Query's: a search the merchant has already typed
+ * past is aborted on the wire, and its answer could not be filed anyway.
+ */
+export async function listCatalogProductsPage(input: {
+  before: CatalogListCursor | null;
+  expected: { userId: string; organizationId: string };
+  query: CatalogPageQuery;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<CatalogPage> {
+  const { listProductsPageFn } = await import("@/api/products");
+  const page = await listProductsPageFn({
+    data: {
+      status: input.query.status,
+      ...(input.query.categoryId ? { categoryId: input.query.categoryId } : {}),
+      ...(input.query.search ? { search: input.query.search } : {}),
+      ...(input.before ? { before: input.before } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+    },
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  return acceptCatalogPage(page as unknown as ServerCatalogPage, input.expected, input.query);
+}
+
+export type CatalogListErrorKind =
+  "principal_changed" | "unauthorized" | "forbidden" | "server_error";
+
+/**
+ * What a failed page read means for the list on screen.
+ *
+ * unauthorized / forbidden / principal_changed are answers about WHO is
+ * asking: retrying cannot change them, and rows already on screen must leave
+ * it. Anything else (a dropped connection, a 500) is worth a retry.
+ */
+export function classifyCatalogListError(err: unknown): CatalogListErrorKind {
+  if (isCatalogPrincipalChanged(err)) return "principal_changed";
+  const code = err instanceof Error ? (err as { statusCode?: unknown }).statusCode : undefined;
+  const message = err instanceof Error ? err.message : "";
+  if (code === 401) return "unauthorized";
+  if (code === 403) return "forbidden";
+  // The service's own crafted copy, when a status code does not survive the
+  // RPC boundary — the same fallback classifyOrderError uses.
+  if (/^(not authenticated|no active organization membership)$/i.test(message)) {
+    return "unauthorized";
+  }
+  if (/^missing permission:/i.test(message)) return "forbidden";
+  return "server_error";
 }
 
 export async function getCatalogProduct(

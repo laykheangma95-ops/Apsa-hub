@@ -57,7 +57,6 @@ import {
   isCatalogId,
   parseMinorUnits,
   productLeadPrice,
-  searchLoadedProducts,
   variantFieldAccess,
   visibleVariantCost,
   type CatalogProduct,
@@ -810,7 +809,7 @@ describe("C. a product, variant or category id from another organization", () =>
       expect(code).not.toMatch(/organizationId\s*\?\?\s*["']unresolved["']/);
       expect(source).toContain("catalogKeys.categories(userId, organizationId");
     }
-    expect(read(LIST_ROUTE)).toContain("catalogKeys.products(userId, organizationId");
+    expect(read(LIST_ROUTE)).toContain("catalogKeys.productPagesFor(userId, organizationId");
     expect(read(DETAIL_ROUTE)).toContain("catalogKeys.product(userId, organizationId");
   });
 
@@ -1665,55 +1664,37 @@ function fakeProduct(over: Partial<CatalogProduct>): CatalogProduct {
 }
 
 describe("catalog list search is honest about its own scope", () => {
-  const loaded: CatalogProduct[] = [
-    fakeProduct({ id: "p1", nameKm: "កាហ្វេ", nameEn: "Coffee" }),
-    fakeProduct({ id: "p2", nameKm: "តែ", nameEn: "Tea" }),
-    fakeProduct({
-      id: "p3",
-      nameKm: "នំបុ័ង",
-      nameEn: null,
-      variants: [
-        {
-          id: "v3",
-          productId: "p3",
-          sku: "BRD-01",
-          barcode: "8850",
-          name: "Large",
-          price: { amount: 250, currency: "USD" },
-          cost: null,
-          weightGrams: null,
-          status: "ACTIVE",
-          createdAt: "2026-01-01T00:00:00Z",
-          updatedAt: "2026-01-01T00:00:00Z",
-        },
-      ],
-    }),
-  ];
-
-  it("matches Khmer and English names, SKU and barcode", () => {
-    expect(searchLoadedProducts(loaded, "កាហ្វេ").map((p) => p.id)).toEqual(["p1"]);
-    expect(searchLoadedProducts(loaded, "tea").map((p) => p.id)).toEqual(["p2"]);
-    expect(searchLoadedProducts(loaded, "brd-01").map((p) => p.id)).toEqual(["p3"]);
-    expect(searchLoadedProducts(loaded, "8850").map((p) => p.id)).toEqual(["p3"]);
-    expect(searchLoadedProducts(loaded, "large").map((p) => p.id)).toEqual(["p3"]);
+  /*
+   * The screen used to filter only the 200 products it had loaded and said so.
+   * It now asks the server across the whole catalogue (behaviour proven
+   * against SQL in products-catalog-mounted.runtime.ts); these pin that the
+   * screen no longer filters in the browser and no longer claims a page limit.
+   */
+  it("the list asks the server, and filters nothing in the browser", () => {
+    const code = read(LIST_ROUTE)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(code).toContain("listCatalogProductsPage(");
+    expect(code).toContain("useInfiniteQuery(");
+    expect(code).not.toContain("searchLoadedProducts");
+    expect(code).not.toContain("CATALOG_PAGE_LIMIT");
+    expect(code).not.toMatch(/products\.filter\(/);
+    expect(read(CATALOG_LIB)).not.toContain("export function searchLoadedProducts");
   });
 
-  it("returns the loaded page unchanged for an empty query — it never re-queries", () => {
-    expect(searchLoadedProducts(loaded, "   ").map((p) => p.id)).toEqual(["p1", "p2", "p3"]);
-  });
-
-  it("searches nothing beyond what was loaded", () => {
-    expect(searchLoadedProducts([], "កាហ្វេ")).toEqual([]);
-    expect(searchLoadedProducts(loaded, "nothing-here")).toEqual([]);
-  });
-
-  it("the screen says so, in both languages, and flags a full page", () => {
+  it("the screen says the whole catalogue is searched, in both languages, with no page ceiling", () => {
     const en = JSON.parse(read("src/locales/en.json"));
     const km = JSON.parse(read("src/locales/km.json"));
-    expect(en.catalog.list.searchScope).toMatch(/this page/i);
+    expect(en.catalog.list.searchScope).toMatch(/whole catalogue/i);
+    expect(en.catalog.list.searchScope).not.toMatch(/this page/i);
     expect(km.catalog.list.searchScope).toMatch(/[ក-៿]/);
+    expect(km.catalog.list.searchScope).toContain("ទាំងមូល");
+    expect(en.catalog.list.pageLimit).toBeUndefined();
+    expect(km.catalog.list.pageLimit).toBeUndefined();
     expect(read(LIST_ROUTE)).toContain("catalog.list.searchScope");
-    expect(read(LIST_ROUTE)).toContain("catalog.list.pageLimit");
+    expect(read(LIST_ROUTE)).not.toContain("catalog.list.pageLimit");
+    // Inventory still makes one bounded read, and still says so when full.
+    expect(read("src/routes/app.inventory.tsx")).toContain("inventoryList.catalogPageLimit");
     expect(CATALOG_PAGE_LIMIT).toBeGreaterThan(0);
   });
 
