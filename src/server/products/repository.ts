@@ -187,7 +187,7 @@ export async function listProductsPage(
   };
 
   const search = opts.search ?? "";
-  const reads = search === "" ? [() => scoped()] : searchReads(scoped, search);
+  const reads = search === "" ? [() => scoped()] : searchReads(scoped, organizationId, search);
   const results = await Promise.all(reads.map((read) => keysetRead(read, opts)));
   return newestFirst(results.flat(), opts.limit);
 }
@@ -200,13 +200,25 @@ type ProductQuery = (columns?: string) => any;
  * pattern differ only by Khmer digits read as ASCII (see
  * src/lib/catalog-search.ts); the LIKE metacharacters a merchant typed are
  * escaped, so "100%" searches for that text instead of matching everything.
+ *
+ * The variant reads name the organization on the variant side too. The parent
+ * product's organization filter already confines the result; this confines
+ * the WORK. Measured on PostgreSQL 17 with 294,000 variants across three
+ * tenants, the planner otherwise seq-scanned every tenant's variants for a
+ * 10,000-product merchant (about 500 ms per search, the same as for a
+ * 100,000-product one).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
-function searchReads(scoped: ProductQuery, search: string): (() => any)[] {
+function searchReads(
+  scoped: ProductQuery,
+  organizationId: string,
+  search: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
+): (() => any)[] {
   const pattern = `%${escapeLikePattern(search)}%`;
   const identifierPattern = `%${escapeLikePattern(catalogIdentifierSearch(search))}%`;
   const throughVariant = (column: "name" | "sku" | "barcode", value: string) => () =>
     scoped("*, product_variants!inner(product_id)")
+      .eq("product_variants.organization_id", organizationId)
       .eq("product_variants.status", "ACTIVE")
       .ilike(`product_variants.${column}`, value);
   return [

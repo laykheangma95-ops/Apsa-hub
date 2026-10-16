@@ -236,7 +236,13 @@ function signInAs(userId: string, organizationId: string) {
 /** Supabase's default PostgREST max_rows: a longer answer is cut, silently. */
 const MAX_ROWS = 1000;
 /** Every statement the transport ran: table, and rows returned. */
-const statements: { table: string; rows: number; limit: number | undefined }[] = [];
+const statements: {
+  table: string;
+  rows: number;
+  limit: number | undefined;
+  /** The embedded child's own conditions, when the read used an !inner embed. */
+  embedFilters: string[] | null;
+}[] = [];
 
 function sqlTransport() {
   const identifier = (value: string) => {
@@ -355,7 +361,12 @@ function sqlTransport() {
             values,
           );
           const rows = result.rows[0]!.rows as unknown[];
-          statements.push({ table, rows: rows.length, limit: max });
+          statements.push({
+            table,
+            rows: rows.length,
+            limit: max,
+            embedFilters: embed ? [...embedWhere] : null,
+          });
           if (single) {
             if (rows.length) return { data: rows[0], error: null };
             return single === "maybe"
@@ -1141,6 +1152,22 @@ describe("C. search asks the server, across the whole catalogue", () => {
         }),
       ),
     ).toBeUndefined();
+  });
+
+  it("C10. every variant-side search read is bound to the caller's organization (the work, not just the result)", async () => {
+    const { org } = await newOrg();
+    await product(org, { nameKm: "តែ", sku: "TEA-1" });
+    signInAs(U1, org);
+    statements.length = 0;
+
+    await walk({ search: "tea" });
+    const embedded = statements.filter((s) => s.embedFilters !== null);
+    // Variant name, SKU and barcode: three reads, each naming the organization.
+    expect(embedded).toHaveLength(3);
+    for (const read of embedded) {
+      expect(read.embedFilters!.some((c) => c.startsWith("e.organization_id = "))).toBe(true);
+      expect(read.embedFilters!.some((c) => c.startsWith("e.status = "))).toBe(true);
+    }
   });
 
   it("C9. no matches: says so, and Clear search returns to the whole list", async () => {
