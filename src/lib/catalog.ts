@@ -490,11 +490,16 @@ export function isCatalogPrincipalChanged(err: unknown): boolean {
  *
  * A question mismatch is never a principal change, so it fails as an ordinary
  * error (and is retried) rather than being shown under the wrong search.
+ *
+ * So does a page that would continue without moving: a cursor on an empty
+ * page, or the very cursor it was asked from. Following either would request
+ * the same page forever behind Load more; refusing it shows an error instead.
  */
 export function acceptCatalogPage(
   page: ServerCatalogPage,
   expected: { userId: string; organizationId: string },
   query: CatalogPageQuery,
+  before: CatalogListCursor | null = null,
 ): CatalogPage {
   if (
     page.servedAs.userId !== expected.userId ||
@@ -508,6 +513,15 @@ export function acceptCatalogPage(
     page.query.search !== query.search
   ) {
     throw new Error("The product list was answered for a different search or filter");
+  }
+  if (
+    page.nextCursor &&
+    (page.products.length === 0 ||
+      (before !== null &&
+        page.nextCursor.createdAt === before.createdAt &&
+        page.nextCursor.id === before.id))
+  ) {
+    throw new Error("The product list did not move past the previous page");
   }
   return { products: page.products as CatalogProduct[], nextCursor: page.nextCursor };
 }
@@ -539,7 +553,12 @@ export async function listCatalogProductsPage(input: {
     },
     ...(input.signal ? { signal: input.signal } : {}),
   });
-  return acceptCatalogPage(page as unknown as ServerCatalogPage, input.expected, input.query);
+  return acceptCatalogPage(
+    page as unknown as ServerCatalogPage,
+    input.expected,
+    input.query,
+    input.before,
+  );
 }
 
 export type CatalogListErrorKind =

@@ -188,8 +188,30 @@ export async function listProductsPage(
 
   const search = opts.search ?? "";
   const reads = search === "" ? [() => scoped()] : searchReads(scoped, organizationId, search);
-  const results = await Promise.all(reads.map((read) => keysetRead(read, opts)));
+  // Read at most once per page, and only if some answer comes back short.
+  let floor: Promise<number> | null = null;
+  const capFloor = () => (floor ??= rowCapFloor(organizationId, opts.limit));
+  const results = await Promise.all(reads.map((read) => keysetRead(read, opts, capFloor)));
   return newestFirst(results.flat(), opts.limit);
+}
+
+/**
+ * A number of rows the API has just proven it will return in one response.
+ *
+ * A response is never longer than PostgREST's max_rows, so the length of ANY
+ * response is a lower bound on the cap. One index-backed read of the caller's
+ * own products, asking for `limit` ids, measures that bound for this request:
+ * a later answer with FEWER rows than it cannot have been cut, so it is the
+ * end of its read without another request. Nothing is remembered between
+ * requests, so a cap lowered while the server runs can never be trusted from
+ * an older measurement.
+ */
+async function rowCapFloor(organizationId: string, limit: number): Promise<number> {
+  return (
+    await readRows(
+      db.from("products").select("id").eq("organization_id", organizationId).limit(limit),
+    )
+  ).length;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the untyped `db` chain, see the file header
@@ -231,6 +253,15 @@ function searchReads(
 }
 
 /**
+ * Requests one keyset read may make before it gives up. A read takes another
+ * round only when an answer may have been cut, so this many rounds cover a
+ * page plus its probe (CATALOG_LIST_PAGE_MAX + 1) under any row cap of 10 or
+ * more. Below that the read fails loudly rather than return a page it could
+ * not prove complete.
+ */
+export const KEYSET_READ_ROUNDS = 12;
+
+/**
  * `limit` rows of one read, newest first, strictly after `before`.
  *
  * Two reads rather than one `.or()` filter when continuing: the boundary is
@@ -239,42 +270,88 @@ function searchReads(
  * and the first group sorts entirely before the second. Each binds the cursor
  * as an ordinary parameter — the same shape as the Orders list
  * (src/server/orders/repository.ts listOrdersBefore).
+ *
+ * A short answer is not, by itself, the end. PostgREST cuts a response at
+ * max_rows without an error and without saying so, and a project can set
+ * max_rows below `limit` (or a proxy can cap a response). An answer is the end
+ * of its read only when it is EMPTY, or shorter than both what was asked and
+ * `capFloor` (rowCapFloor above) — fewer rows than the API has proven it will
+ * send cannot be a cut. Any other answer continues from its last row. Within
+ * one instant the same rule decides whether the older read may follow: while
+ * the same-instant answer may have been cut, rows of that instant it held back
+ * would sort before the older rows, so those wait for the next round.
  */
 async function keysetRead(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
   filtered: () => any,
   opts: Pick<ListProductsPageOptions, "before" | "limit">,
+  capFloor: () => Promise<number>,
 ): Promise<ProductRow[]> {
-  const queries = opts.before
-    ? [
-        filtered()
-          .eq("created_at", opts.before.createdAt)
-          .lt("id", opts.before.id)
-          .order("id", { ascending: false })
-          .limit(opts.limit),
-        filtered()
-          .lt("created_at", opts.before.createdAt)
-          .order("created_at", { ascending: false })
-          .order("id", { ascending: false })
-          .limit(opts.limit),
-      ]
-    : [
-        filtered()
-          .order("created_at", { ascending: false })
-          .order("id", { ascending: false })
-          .limit(opts.limit),
-      ];
-  const results = await Promise.all(queries);
+  const isEnd = async (received: number, asked: number) =>
+    received === 0 || (received < asked && received < (await capFloor()));
+
   const rows: ProductRow[] = [];
-  for (const result of results) {
-    if (result.error) {
-      throw new Error(`listProductsPage: ${(result.error as { message: string }).message}`);
+  let before = opts.before;
+  for (let round = 0; rows.length < opts.limit; round++) {
+    if (round === KEYSET_READ_ROUNDS) {
+      throw new Error(
+        `listProductsPage: the API returned too few rows per request to page safely ` +
+          `(${rows.length} of ${opts.limit} after ${round} requests)`,
+      );
     }
-    for (const row of (result.data ?? []) as (ProductRow & { product_variants?: unknown })[]) {
-      // The inner embed exists only to narrow the read; it is not product data.
-      const { product_variants: _embed, ...product } = row;
-      rows.push(product as ProductRow);
+    const need = opts.limit - rows.length;
+    let batch: ProductRow[];
+    let ended: boolean;
+    if (before) {
+      const [sameInstant, older] = await Promise.all([
+        readRows(
+          filtered()
+            .eq("created_at", before.createdAt)
+            .lt("id", before.id)
+            .order("id", { ascending: false })
+            .limit(need),
+        ),
+        readRows(newestFirstRead(filtered().lt("created_at", before.createdAt), need)),
+      ]);
+      if (await isEnd(sameInstant.length, need)) {
+        batch = [...sameInstant, ...older];
+        ended = await isEnd(older.length, need);
+      } else {
+        batch = sameInstant;
+        ended = false;
+      }
+    } else {
+      batch = await readRows(newestFirstRead(filtered(), need));
+      ended = await isEnd(batch.length, need);
     }
+    rows.push(...batch.slice(0, need));
+    if (ended || batch.length === 0) break;
+    const last = rows[rows.length - 1]!;
+    before = { createdAt: last.created_at, id: last.id };
+  }
+  return rows;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
+function newestFirstRead(query: any, limit: number) {
+  return query
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit);
+}
+
+/** One request's product rows, without the search's inner embed. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
+async function readRows(query: PromiseLike<any>): Promise<ProductRow[]> {
+  const result = await query;
+  if (result.error) {
+    throw new Error(`listProductsPage: ${(result.error as { message: string }).message}`);
+  }
+  const rows: ProductRow[] = [];
+  for (const row of (result.data ?? []) as (ProductRow & { product_variants?: unknown })[]) {
+    // The inner embed exists only to narrow the read; it is not product data.
+    const { product_variants: _embed, ...product } = row;
+    rows.push(product as ProductRow);
   }
   return rows;
 }
@@ -543,9 +620,9 @@ export async function updateVariantBarcodeIfNull(
 /** Product ids per variant read: 100 UUIDs keep the request URL near 4 KB. */
 export const VARIANT_READ_PRODUCT_IDS = 100;
 /**
- * Rows per variant read. Equal to Supabase's default PostgREST max_rows, so a
- * read never asks for more than the API will return; a full read is followed
- * by another rather than taken as the end.
+ * Rows a variant read asks for. Equal to Supabase's default PostgREST
+ * max_rows; the API may still answer with fewer (a lower max_rows, a proxy),
+ * which is why the read never treats a short answer as the end.
  */
 export const VARIANT_READ_ROWS = 1000;
 /** Variant reads in flight at once for one call. */
@@ -563,8 +640,15 @@ const VARIANT_READ_CONCURRENCY = 4;
  *     VARIANT_READ_PRODUCT_IDS.
  *   - Row cap. A response is cut at PostgREST's max_rows without an error, so
  *     a page of products with many variants each could silently lose some.
- *     Each group is read in id order, VARIANT_READ_ROWS at a time, continuing
- *     after the last id until a read comes back short.
+ *     Each group is read in id order, continuing after the last id.
+ *
+ * When is a group complete? Not when a read comes back short: max_rows may be
+ * lower than VARIANT_READ_ROWS, and a cut response looks exactly like a short
+ * one. The first read of a group asks for an exact count, which PostgREST
+ * computes in the same statement (one snapshot) as the rows; if that one
+ * response holds every counted row, the group is done in one request.
+ * Otherwise the read continues until a request comes back EMPTY — later
+ * counts are never trusted, since variants can change between requests.
  */
 export async function listVariantsByOrg(
   organizationId: string,
@@ -586,18 +670,19 @@ export async function listVariantsByOrg(
       for (;;) {
         let query = db
           .from("product_variants")
-          .select("*")
+          .select("*", after ? undefined : { count: "exact" })
           .eq("organization_id", organizationId)
           .in("product_id", group)
           .eq("status", "ACTIVE");
         if (after) query = query.gt("id", after);
-        const { data, error } = await query
+        const { data, error, count } = await query
           .order("id", { ascending: true })
           .limit(VARIANT_READ_ROWS);
         if (error) throw new Error(`listVariantsByOrg: ${(error as { message: string }).message}`);
         const batch = (data ?? []) as ProductVariantRow[];
         rows.push(...batch);
-        if (batch.length < VARIANT_READ_ROWS) break;
+        if (batch.length === 0) break;
+        if (!after && typeof count === "number" && batch.length >= count) break;
         after = batch[batch.length - 1]!.id;
       }
     }

@@ -30,8 +30,9 @@
  *     rows through json_agg exactly as PostgREST does (timestamps keep their
  *     microseconds), expands "*" to "%" in like/ilike values as PostgREST
  *     does, implements the `!inner` embed the search uses as an EXISTS over
- *     the child rows, and cuts every response at max_rows = 1000 WITHOUT an
- *     error, as Supabase's default PostgREST configuration does.
+ *     the child rows, answers `count: "exact"` with the whole filtered set's
+ *     size, and cuts every response at max_rows = 1000 (lower in section I)
+ *     WITHOUT an error, as Supabase's default PostgREST configuration does.
  *   - four TanStack Router hooks — there is no router in a unit process.
  *
  * Runs in its own process (products-catalog-mounted.test.ts): it installs DOM
@@ -235,6 +236,12 @@ function signInAs(userId: string, organizationId: string) {
 
 /** Supabase's default PostgREST max_rows: a longer answer is cut, silently. */
 const MAX_ROWS = 1000;
+/**
+ * The max_rows this database answers under right now. A project can set it
+ * lower than the default (or a proxy can cap a response), and nothing in the
+ * response says so — section I runs the catalogue under 50 and 100.
+ */
+let maxRows = MAX_ROWS;
 /** Every statement the transport ran: table, and rows returned. */
 const statements: {
   table: string;
@@ -242,6 +249,8 @@ const statements: {
   limit: number | undefined;
   /** The embedded child's own conditions, when the read used an !inner embed. */
   embedFilters: string[] | null;
+  /** Whether the read asked for an exact count. */
+  counted: boolean;
 }[] = [];
 
 function sqlTransport() {
@@ -263,6 +272,7 @@ function sqlTransport() {
     let single: "single" | "maybe" | null = null;
     let max: number | undefined;
     let skip: number | undefined;
+    let counted = false;
     const target = (key: string): { list: string[]; column: string } => {
       const dot = key.indexOf(".");
       if (dot === -1) return { list: where, column: `t0.${identifier(key)}` };
@@ -277,7 +287,11 @@ function sqlTransport() {
       return chain;
     };
     const chain: any = {
-      select(cols = "*") {
+      select(cols = "*", options?: { count?: string }) {
+        if (options?.count !== undefined && options.count !== "exact") {
+          throw new Error(`Unsupported test count: ${options.count}`);
+        }
+        counted = options?.count === "exact";
         const embedded = /^\*, ([a-z_]+)!inner\(([a-z_]+)\)$/.exec(cols);
         if (embedded) {
           const spec = EMBEDS[`${table}/${embedded[1]}`];
@@ -350,9 +364,11 @@ function sqlTransport() {
                               from ${embed.child} e where ${childFilter}) as ${embed.name}`;
         }
         const filtered = conditions.length ? ` where ${conditions.join(" and ")}` : "";
+        // Prefer: count=exact — the whole filtered set, past any limit or max_rows.
+        const countSql = `select count(*)::int as n from ${table} t0${filtered}`;
         let inner = `select ${projection} from ${table} t0${filtered}`;
         if (ordering.length) inner += ` order by ${ordering.join(",")}`;
-        const cap = Math.min(max ?? MAX_ROWS, MAX_ROWS);
+        const cap = Math.min(max ?? maxRows, maxRows);
         inner += ` limit ${cap}`;
         if (skip !== undefined) inner += ` offset ${skip}`;
         try {
@@ -361,11 +377,15 @@ function sqlTransport() {
             values,
           );
           const rows = result.rows[0]!.rows as unknown[];
+          const count = counted
+            ? (await f.db.query<{ n: number }>(countSql, values)).rows[0]!.n
+            : null;
           statements.push({
             table,
             rows: rows.length,
             limit: max,
             embedFilters: embed ? [...embedWhere] : null,
+            counted,
           });
           if (single) {
             if (rows.length) return { data: rows[0], error: null };
@@ -373,7 +393,7 @@ function sqlTransport() {
               ? { data: null, error: null }
               : { data: null, error: { code: "PGRST116", message: "no rows" } };
           }
-          return { data: rows, error: null };
+          return { data: rows, error: null, count };
         } catch (error) {
           return { data: null, error };
         }
@@ -689,6 +709,7 @@ afterEach(async () => {
   calls.length = 0;
   statements.length = 0;
   failNext = 0;
+  maxRows = MAX_ROWS;
   holding = false;
   while (held.length) held.shift()!();
   navigations.length = 0;
@@ -878,7 +899,11 @@ describe("A. the list has no ceiling — size boundaries, mounted", () => {
     // No read ever asked for, or got, more than one page plus its probe row.
     const productReads = statements.filter((s) => s.table === "products");
     expect(Math.max(...productReads.map((s) => s.rows))).toBeLessThanOrEqual(51);
-    expect(productReads.every((s) => s.limit === 51)).toBe(true);
+    expect(productReads.every((s) => s.limit! >= 1 && s.limit! <= 51)).toBe(true);
+    // One read for page one, a same-instant/older pair for each later page,
+    // and on the last page one read of the caller's ids that proves the API
+    // sends at least 51 rows — so that page's 50-row answer was not cut.
+    expect(productReads).toHaveLength(1 + 199 * 2 + 1);
   });
 });
 
@@ -966,7 +991,10 @@ describe("B. the cursor neither repeats nor skips", () => {
     const first = await page();
     expect(first.products[0].variants).toHaveLength(1200);
     const variantReads = statements.filter((s) => s.table === "product_variants");
-    expect(variantReads.map((s) => s.rows)).toEqual([1000, 200]);
+    // The first read's exact count (1,200) says it is incomplete; the 200-row
+    // read is short, but only the empty one after it proves the end.
+    expect(variantReads.map((s) => s.rows)).toEqual([1000, 200, 0]);
+    expect(variantReads.map((s) => s.counted)).toEqual([true, false, false]);
   });
 
   it("B6. the whole-catalogue read POS still uses gets every variant for 250 products (URL chunking)", async () => {
@@ -1162,8 +1190,10 @@ describe("C. search asks the server, across the whole catalogue", () => {
 
     await walk({ search: "tea" });
     const embedded = statements.filter((s) => s.embedFilters !== null);
-    // Variant name, SKU and barcode: three reads, each naming the organization.
-    expect(embedded).toHaveLength(3);
+    // Variant name, SKU and barcode: three reads, plus the SKU read's
+    // continuation pair (its one-row answer is short, which proves nothing
+    // until an empty answer does) — every one naming the organization.
+    expect(embedded).toHaveLength(3 + 2);
     for (const read of embedded) {
       expect(read.embedFilters!.some((c) => c.startsWith("e.organization_id = "))).toBe(true);
       expect(read.embedFilters!.some((c) => c.startsWith("e.status = "))).toBe(true);
@@ -1519,5 +1549,404 @@ describe("H. Khmer", () => {
     await readsSettled();
     expect(text()).toContain("នេះជាទំនិញទាំងអស់ក្នុងបញ្ជីនេះ");
     expect(shown()).toHaveLength(60);
+  });
+});
+
+// ── I. Under a lower API row cap ─────────────────────────────────────────────
+//
+// PostgREST cuts a response at max_rows without an error, and a project (or a
+// proxy) can set that lower than the page plus its probe row. Nothing in the
+// response says it was cut, so a short read proves nothing: only an EMPTY read
+// proves the end. Every case here failed before that rule — the list stopped
+// at the cap and said "That's every product".
+
+/** The organization's products, newest first, with ids, by plain SQL. */
+async function dbRows(org: string, where = "status = 'ACTIVE'", params: unknown[] = []) {
+  const result = await f.db.query<{ id: string; name_km: string }>(
+    `select id, name_km from products where organization_id = $1 and ${where}
+      order by created_at desc, id desc`,
+    [org, ...params],
+  );
+  return result.rows;
+}
+
+describe("I. a capped API response is never taken as the end of the list", () => {
+  it("I1. max_rows 50, 201 products, mounted: Load more reaches all 201, then the end", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 201, "CAP");
+    signInAs(U1, org);
+    maxRows = 50;
+    await mount();
+
+    expect(shown()).toHaveLength(50);
+    expect(buttonNamed(LOAD_MORE)).not.toBeNull();
+    expect(text()).not.toContain(END);
+    const taps = await loadEverything();
+
+    expect(taps).toBe(4);
+    expect(shown()).toEqual(await dbOrder(org));
+    expectNoDuplicates(shown());
+    expect(text()).toContain(END);
+    expect(text()).toContain("201 products shown");
+    // The cap was real: no read came back with more than 50 rows.
+    expect(Math.max(...statements.map((s) => s.rows))).toBeLessThanOrEqual(50);
+  });
+
+  it("I2. max_rows 50, 1,000 products: 20 full pages through the server function, each product once, in order", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 1000, "CAPK");
+    signInAs(U1, org);
+    maxRows = 50;
+
+    const walked = await walk();
+    expect(walked.pages).toBe(20);
+    expect(walked.names).toEqual(await dbOrder(org));
+    expect(walked.products.every((p: any) => p.variants.length === 1)).toBe(true);
+  });
+
+  it("I3. max_rows 100: the default page and the largest page (100) both walk 1,000 products exactly", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 1000, "CAPH");
+    signInAs(U1, org);
+    maxRows = 100;
+
+    expect((await walk()).names).toEqual(await dbOrder(org));
+    const largest = await walk({ limit: 100 });
+    expect(largest.pages).toBe(10);
+    expect(largest.names).toEqual(await dbOrder(org));
+  });
+
+  it("I4. max_rows 50 inside a 130-product same-instant burst, between older and newer rows: no gap, no repeat", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 30, "NEWR", {
+      createdAt: (i) => `timestamptz '2026-10-02 12:00:00+00' - make_interval(secs => ${i})`,
+    });
+    await seedProducts(org, 130, "BURST", {
+      createdAt: () => `timestamptz '2026-10-01 12:00:00.123456+00'`,
+    });
+    await seedProducts(org, 30, "OLDR", {
+      createdAt: (i) => `timestamptz '2026-09-30 12:00:00+00' - make_interval(secs => ${i})`,
+    });
+    signInAs(U1, org);
+    maxRows = 50;
+
+    for (const limit of [50, 100, 7]) {
+      const walked = await walk({ limit });
+      expect(walked.products.map((p: any) => p.id)).toEqual((await dbRows(org)).map((r) => r.id));
+    }
+  });
+
+  it("I5. max_rows 50: a category and the Archived list each walk completely", async () => {
+    const { org } = await newOrg();
+    const drinks = await newCategory(org, "ភេសជ្ជៈ", "Drinks");
+    await seedProducts(org, 120, "CDRINK", { categoryId: drinks });
+    await seedProducts(org, 90, "COTHER");
+    await seedProducts(org, 110, "CARCH", { status: "ARCHIVED", categoryId: drinks });
+    signInAs(U1, org);
+    maxRows = 50;
+
+    expect((await walk({ categoryId: drinks })).names).toEqual(
+      await dbOrder(org, "category_id = $2 and status = 'ACTIVE'", [drinks]),
+    );
+    expect((await walk({ status: "ARCHIVED" })).names).toEqual(
+      await dbOrder(org, "status = 'ARCHIVED'"),
+    );
+    expect((await walk({ status: "ARCHIVED", categoryId: drinks })).names).toHaveLength(110);
+  });
+
+  it("I6. max_rows 50: search pages through 160 matches (names, SKUs, variant names), mounted, then the end", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 120, "TEAS", { nameEn: (i) => `'Tea blend ' || ${i}` });
+    await seedProducts(org, 40, "TEAV", { nameEn: null });
+    await f.db.query(
+      `update product_variants set name = 'tea size' where organization_id = $1 and sku like 'TEAV-%'`,
+      [org],
+    );
+    await seedProducts(org, 70, "COFF", { nameEn: (i) => `'Coffee ' || ${i}` });
+    signInAs(U1, org);
+    maxRows = 50;
+
+    const walked = await walk({ search: "tea" });
+    expect(walked.names).toEqual(await dbOrder(org, "name_km like 'TEA%'"));
+    expect(walked.names).toHaveLength(160);
+
+    await mount();
+    await search("tea");
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(org, "name_km like 'TEA%'"));
+    expect(text()).toContain(END_SEARCH);
+    expect(text()).toContain("160 matching products shown");
+  });
+
+  it("I7. empty and final pages under max_rows 50: 0, exactly 50, exactly 100 products", async () => {
+    for (const [count, pages] of [
+      [0, 1],
+      [50, 1],
+      [100, 2],
+    ] as const) {
+      const { org } = await newOrg();
+      await seedProducts(org, count, `FIN${count}`);
+      signInAs(U1, org);
+      maxRows = 50;
+      const walked = await walk();
+      expect(walked.pages).toBe(pages);
+      expect(walked.names).toEqual(await dbOrder(org));
+      // Past the last product: nothing, and no cursor to follow.
+      const tail = walked.products.at(-1);
+      if (tail) {
+        const past = await page({ before: { createdAt: tail.createdAt, id: tail.id } });
+        expect(past.products).toEqual([]);
+        expect(past.nextCursor).toBeNull();
+      }
+    }
+  });
+
+  it("I8. a cap too small to page safely fails visibly — never an end-of-list claim", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 80, "TINY");
+    signInAs(U1, org);
+    maxRows = 1;
+
+    await expect(page()).rejects.toThrow(/too few rows/i);
+    await mount();
+    expect(text()).not.toContain(END);
+    expect(text()).toContain("Products didn't load");
+  });
+});
+
+describe("J. variants arrive complete under any row cap", () => {
+  it("J1. max_rows 1,000: one product with 2,500 variants, and 50 products × 30 variants, all arrive", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 1, "V2500", { variants: 2500 });
+    signInAs(U1, org);
+    const huge = await page();
+    expect(huge.products[0].variants).toHaveLength(2500);
+    expect(new Set(huge.products[0].variants.map((v: any) => v.id)).size).toBe(2500);
+
+    const wide = await newOrg();
+    await seedProducts(wide.org, 50, "V30", { variants: 30 });
+    signInAs(U1, wide.org);
+    const first = await page();
+    expect(first.products.every((p: any) => p.variants.length === 30)).toBe(true);
+    // Every variant sits under its own product.
+    for (const p of first.products) {
+      expect(p.variants.every((v: any) => v.sku.startsWith(`${p.nameKm}-V`))).toBe(true);
+    }
+  });
+
+  it("J2. max_rows 100: 50 products × 3 variants (150 rows) — none lost to a short read", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 50, "V3", { variants: 3 });
+    signInAs(U1, org);
+    maxRows = 100;
+
+    const first = await page();
+    expect(first.products).toHaveLength(50);
+    expect(first.products.every((p: any) => p.variants.length === 3)).toBe(true);
+  });
+
+  it("J3. max_rows 50: a 1,200-variant product and the POS whole-catalogue read keep every variant", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 1, "V1200", { variants: 1200 });
+    await seedProducts(org, 40, "VPOS", { variants: 4 });
+    signInAs(U1, org);
+    maxRows = 50;
+
+    const walked = await walk();
+    const huge = walked.products.find((p: any) => p.nameKm === "V1200-00001");
+    expect(huge.variants).toHaveLength(1200);
+    expect(
+      walked.products
+        .filter((p: any) => p.nameKm.startsWith("VPOS-"))
+        .every((p: any) => p.variants.length === 4),
+    ).toBe(true);
+  });
+
+  it("J4. variants never cross organizations, whatever the cap", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedProducts(a.org, 20, "VXA", { variants: 10 });
+    await seedProducts(b.org, 20, "VXB", { variants: 10 });
+    signInAs(U1, a.org);
+    for (const cap of [50, 1000]) {
+      maxRows = cap;
+      const walked = await walk();
+      const variants = walked.products.flatMap((p: any) => p.variants);
+      expect(variants).toHaveLength(200);
+      expect(variants.every((v: any) => v.sku.startsWith("VXA-"))).toBe(true);
+    }
+  });
+});
+
+describe("K. principal isolation and cursor checks hold under a capped API", () => {
+  it("K1. max_rows 50, Organization A → B → A, mounted: each list complete, never a row of the other", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedProducts(a.org, 120, "KORGA");
+    await seedProducts(b.org, 130, "KORGB");
+    maxRows = 50;
+    signInAs(U1, a.org);
+    await mount();
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(a.org));
+
+    signInAs(U1, b.org);
+    await rerender();
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(b.org));
+    expect(text()).toContain("130 products shown");
+
+    signInAs(U1, a.org);
+    await rerender();
+    expect(shown()).toHaveLength(50);
+    expect(shown().every((n) => n.startsWith("KORGA-"))).toBe(true);
+  });
+
+  it("K2. max_rows 50, member switch in one organization: each member's walk is complete and cost follows the member", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 110, "KMEM");
+    maxRows = 50;
+    signInAs(U1, org);
+    const owner = await walk();
+    expect(owner.names).toEqual(await dbOrder(org));
+    expect(owner.products.every((p: any) => p.variants[0].cost !== null)).toBe(true);
+
+    signInAs(U2, org);
+    const viewer = await walk();
+    expect(viewer.names).toEqual(await dbOrder(org));
+    expect(viewer.products.every((p: any) => p.variants[0].cost === null)).toBe(true);
+  });
+
+  it("K3. max_rows 50, session expiry mid-walk: the next page is refused, rows leave, sign-in", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 120, "KEXP");
+    maxRows = 50;
+    signInAs(U1, org);
+    await mount();
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toHaveLength(100);
+
+    Object.assign(server, { userId: null, organizationId: null });
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual([]);
+    expect(navigations).toContain("/sign-in");
+    expect(text()).not.toContain(END);
+  });
+
+  it("K4. max_rows 50, products.read revoked mid-walk: refused on the server, every row leaves", async () => {
+    const { org, viewerRole } = await newOrg();
+    await seedProducts(org, 120, "KREV");
+    maxRows = 50;
+    signInAs(U2, org);
+    await mount();
+    expect(shown()).toHaveLength(50);
+
+    await f.db.query(`delete from role_permissions where role_id = $1`, [viewerRole]);
+    await tap(LOAD_MORE);
+    await readsSettled();
+    expect(shown()).toEqual([]);
+    expect(text()).toContain("You can't view products");
+    await expect(page()).rejects.toThrow(/Missing permission/);
+  });
+
+  it("K5. max_rows 50, another organization's cursor: only the caller's own rows, strictly after it, completely", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seedProducts(a.org, 140, "KFORA");
+    await seedProducts(b.org, 60, "KFORB", {
+      createdAt: (i) => `timestamptz '2026-10-01 12:00:30+00' - make_interval(secs => ${i})`,
+    });
+    maxRows = 50;
+    signInAs(U1, b.org);
+    const foreign = (await page()).nextCursor;
+
+    signInAs(U1, a.org);
+    const walked = await walk({ before: foreign });
+    expect(walked.products.every((p: any) => p.organizationId === a.org)).toBe(true);
+    expect(walked.names).toEqual(
+      await dbOrder(a.org, "(created_at, id) < ($2::timestamptz, $3::uuid)", [
+        foreign.createdAt,
+        foreign.id,
+      ]),
+    );
+  });
+
+  it("K6. the browser refuses a page that would continue without moving (no endless Load more)", async () => {
+    const { acceptCatalogPage } = await import("@/lib/catalog");
+    const who = { userId: U1, organizationId: "org" };
+    const query = { status: "ACTIVE" as const, categoryId: null, search: "" };
+    const cursor = { createdAt: "2026-10-01T12:00:00+00:00", id: crypto.randomUUID() };
+    const served = (products: unknown[], nextCursor: unknown) => ({
+      products,
+      nextCursor,
+      servedAs: who,
+      query,
+    });
+
+    // A cursor on an empty page, and the very cursor the page was asked from.
+    expect(() => acceptCatalogPage(served([], cursor) as any, who, query, null)).toThrow(
+      /did not move/,
+    );
+    expect(() => acceptCatalogPage(served([{}], cursor) as any, who, query, cursor)).toThrow(
+      /did not move/,
+    );
+    // An honest end, and an honest continuation, are accepted.
+    expect(acceptCatalogPage(served([], null) as any, who, query, cursor).nextCursor).toBeNull();
+    const next = { ...cursor, id: crypto.randomUUID() };
+    expect(acceptCatalogPage(served([{}], next) as any, who, query, cursor).nextCursor).toEqual(
+      next,
+    );
+  });
+});
+
+describe("L. a short answer ends its read only when the API proved it could have sent more", () => {
+  it("L1. a one-hit search over 260 products ends in one round: five field reads and one floor read, no re-scan", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 260, "HAY");
+    await product(org, { nameKm: "ម្ជុល", nameEn: "Needle", sku: "NDL-1" });
+    signInAs(U1, org);
+    statements.length = 0;
+
+    const result = await page({ search: "needle" });
+    expect(result.products.map((p: any) => p.nameKm)).toEqual(["ម្ជុល"]);
+    expect(result.nextCursor).toBeNull();
+    const productReads = statements.filter((s) => s.table === "products");
+    expect(productReads).toHaveLength(5 + 1);
+    // The floor read: the caller's ids, as many as the page asks for.
+    expect(productReads.filter((s) => s.embedFilters === null && s.rows === 51)).toHaveLength(1);
+  });
+
+  it("L2. nothing is remembered between requests: the cap lowered mid-process is caught on the next page", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 230, "DROP");
+    signInAs(U1, org);
+
+    const first = await page();
+    expect(first.products).toHaveLength(50);
+    // A short answer under the default cap: this request measures a floor of 51.
+    expect((await page({ search: "DROP-00001" })).products).toHaveLength(1);
+    // The operator lowers max_rows while the server keeps running. A floor
+    // carried over from the search would take every 30-row answer as the end.
+    maxRows = 30;
+    const rest = await walk({ before: first.nextCursor });
+    expect([...first.products, ...rest.products].map((p: any) => p.nameKm)).toEqual(
+      await dbOrder(org),
+    );
+  });
+
+  it("L3. a catalogue smaller than a page still proves its end (no endless continuation)", async () => {
+    for (const count of [1, 19, 50, 51]) {
+      const { org } = await newOrg();
+      await seedProducts(org, count, `SMALL${count}`);
+      signInAs(U1, org);
+      for (const cap of [1000, 50, 20]) {
+        maxRows = cap;
+        const walked = await walk();
+        expect(walked.names).toEqual(await dbOrder(org));
+      }
+      maxRows = MAX_ROWS;
+    }
   });
 });

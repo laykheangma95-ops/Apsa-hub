@@ -183,6 +183,8 @@ function makeDb(world: World) {
           return asc ? x.localeCompare(y) : y.localeCompare(x);
         });
       }
+      // An exact count (listVariantsByOrg asks for one) is the filtered set, past any limit.
+      const count = rows.length;
       if (max !== undefined) rows = rows.slice(0, max);
       rows = rows.map((r) => ({ ...r }));
       if (mode === "single") {
@@ -191,7 +193,7 @@ function makeDb(world: World) {
           : { data: null, error: { code: "PGRST116", message: "no rows" } };
       }
       if (mode === "maybe") return { data: rows[0] ?? null, error: null };
-      return { data: rows, error: null };
+      return { data: rows, error: null, count };
     };
 
     const q = {

@@ -150,7 +150,10 @@ function makeChain(rows: any[]) {
         : { data: r[0], error: null };
     },
     then(resolve: any) {
-      resolve({ data: filtered(), error: null });
+      // No row cap here, so an exact count (asked for by listVariantsByOrg) is
+      // simply every matching row.
+      const rows = filtered();
+      resolve({ data: rows, error: null, count: rows.length });
     },
   };
   return chain;
