@@ -902,8 +902,12 @@ describe("lifecycle and delivered-only gating", () => {
     const order = await seedOrder(f.org, [{ s, quantity: 2 }], { location });
     await requested(f.org, order, [{ item: 0, quantity: 1 }]);
 
-    await expect(
-      f.rpc("transition_order_status_v1", [
+    // A return needs a delivered delivery, so migration 063's custody guard
+    // refuses the cancellation first — cleanly, writing nothing. (seedOrder
+    // inserts the delivered row directly, without the fulfillment it would
+    // drive, so the guard names the delivery rather than the fulfillment.)
+    expect(
+      await f.rpc("transition_order_status_v1", [
         f.org,
         order.orderId,
         "lifecycle",
@@ -912,6 +916,10 @@ describe("lifecycle and delivered-only gating", () => {
         f.actor,
         null,
       ]),
+    ).toEqual({ status: "cancel_blocked", reason: "goods_dispatched" });
+    // 056's trigger stays the backstop for any write that reaches the row.
+    await expect(
+      f.db.query(`update orders set lifecycle_status='cancelled' where id=$1`, [order.orderId]),
     ).rejects.toThrow(/order_has_customer_return/);
     expect(await onHand(s.variant, location)).toBe(8);
     const lifecycle = (

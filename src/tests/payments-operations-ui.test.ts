@@ -927,8 +927,10 @@ describe("production boundary", () => {
       // 057–058 (atomic APSA Parcel on confirm + parcel backfill) belong to the parcel/shipment phase;
       // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair;
       // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase;
-      // 061 (browser table authority hardening) is an unrelated security fix.
-      return Number.isFinite(prefix) && prefix > 61;
+      // 061 (browser table authority hardening) is an unrelated security fix;
+      // 062 is reserved for the PR #121 financial security repair;
+      // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
+      return Number.isFinite(prefix) && prefix > 63;
     });
     expect(beyond047).toEqual([]);
   });
