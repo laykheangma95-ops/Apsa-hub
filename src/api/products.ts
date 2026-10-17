@@ -17,6 +17,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSessionFn } from "@/api/auth";
+import { CATALOG_CURSOR_TIMESTAMP_RE } from "@/lib/catalog-search";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 
 // ── Money schema ──────────────────────────────────────────────────────────────
@@ -70,6 +71,60 @@ export const listProductsFn = createServerFn()
       category_id: data?.category_id ?? undefined,
       limit: data?.limit,
       offset: data?.offset,
+    });
+  });
+
+// ── listProductsPageFn ────────────────────────────────────────────────────────
+
+/**
+ * The Products screen's paged read (src/routes/app.products.tsx).
+ *
+ * No organization, no user and no offset: the tenant and the member come from
+ * the session exactly as for listProductsFn above, and the only position a
+ * caller can name is a cursor a previous page handed out. A cursor is a place
+ * in the caller's OWN catalogue — the repository filters on the
+ * server-resolved organization before it applies one, so a cursor copied from
+ * another organization's page only moves within this caller's rows.
+ *
+ * `search` is free text, normalized and bounded by the service
+ * (src/lib/catalog-search.ts) and bound to the query as a parameter, never
+ * spliced into a filter expression. listProductsFn stays as it was for the
+ * callers that still read the whole active list (POS, order create).
+ */
+export const listProductsPageFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        // CATALOG_LIST_PAGE_MAX in the service; omitted → CATALOG_LIST_PAGE_SIZE.
+        limit: z.number().int().min(1).max(100).optional(),
+        before: z
+          .object({
+            createdAt: z
+              .string()
+              .regex(CATALOG_CURSOR_TIMESTAMP_RE, "Invalid cursor")
+              .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid cursor"),
+            id: z.string().uuid("Invalid cursor"),
+          })
+          .strict()
+          .optional(),
+        status: z.enum(["DRAFT", "ACTIVE", "ARCHIVED"]).optional(),
+        categoryId: z.string().uuid().nullish(),
+        // Raw text; the service normalizes it and keeps the first 100 characters.
+        search: z.string().max(400).optional(),
+      })
+      .strict()
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listProductsPage } = await import("@/server/products/service");
+    return listProductsPage(authCtx, {
+      limit: data?.limit,
+      before: data?.before,
+      status: data?.status,
+      categoryId: data?.categoryId ?? null,
+      search: data?.search,
     });
   });
 
