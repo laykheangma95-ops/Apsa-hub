@@ -203,7 +203,18 @@ mock.module("@/api/org", () => ({
 
 // ── DOM and router ──────────────────────────────────────────────────────────
 
+// happy-dom's window.setTimeout (which register() installs as the global)
+// folds every zero-delay timeout into ONE timer and appends later ones to it
+// until it fires. React Query delivers every notification that way. On Bun's
+// fake timers, a timer pending at useRealTimers() is dropped, and a real one
+// pending at useFakeTimers() is frozen until the next switch. Then a group
+// pending at a clock switch never fires: on the way out of a fake-clock test
+// that swallowed every later zero-delay timeout in the process, so no later
+// test ever re-rendered (the whole-suite hang). Bun's own timers keep each
+// timeout separate, as a browser does; the fake clock still governs them.
+const nativeTimers = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
 GlobalRegistrator.register({ url: "http://localhost/app" });
+Object.assign(globalThis, nativeTimers);
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 /** The /app guard's route context: the principal this tab is serving. */
@@ -1640,5 +1651,39 @@ describe("New Order: both orders.create and products.read are required", () => {
     signIn(USER_A, ORG_1);
     await rerender();
     await waitFor(() => newOrderTile().button !== null, "member A tile again");
+  });
+});
+
+// ── The harness itself ──────────────────────────────────────────────────────
+
+/** Whether a zero-delay timeout fires before a 1s one, on the current clock. */
+async function zeroDelayTimeoutFires(): Promise<boolean> {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(true), 0);
+    setTimeout(() => resolve(false), 1_000);
+    if (fakeClock) jest.advanceTimersByTime(1_000);
+  });
+}
+
+describe("Harness: switching the clock never strands a zero-delay timeout", () => {
+  it("one left pending when a fake-clock test ends: later ones still fire", async () => {
+    useFakeClock();
+    setTimeout(() => undefined, 0);
+    jest.useRealTimers();
+    fakeClock = false;
+    expect(await zeroDelayTimeoutFires()).toBe(true);
+    useFakeClock();
+    expect(await zeroDelayTimeoutFires()).toBe(true);
+  });
+
+  it("one left pending when a fake-clock test starts: it and later ones still fire", async () => {
+    let first = false;
+    setTimeout(() => (first = true), 0);
+    useFakeClock();
+    expect(await zeroDelayTimeoutFires()).toBe(true);
+    jest.useRealTimers();
+    fakeClock = false;
+    expect(await zeroDelayTimeoutFires()).toBe(true);
+    expect(first).toBe(true);
   });
 });
