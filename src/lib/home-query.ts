@@ -1,7 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { CapabilityView } from "@/lib/capabilities";
 import { isPermissionDeniedError } from "@/lib/team-errors";
-import type { MetricRange } from "@/types";
+import type { HomeSummary, MetricRange } from "@/types";
 
 /**
  * Every authenticated Home cache entry lives under this prefix, so one
@@ -90,12 +90,14 @@ export const HOME_FINANCE_PERMISSIONS = ["orders.read", "payments.reconcile"] as
  * Whether Home may draw the money it holds right now.
  *
  * - `granted`    — the capability snapshot is currently confirmed by the
- *                  server (canSensitive) AND holds every finance key AND
- *                  Home's own latest read succeeded.
+ *                  server (canSensitive) AND that confirmation is recent
+ *                  (useSensitiveCapabilityFreshness) AND holds every finance
+ *                  key AND Home's own latest read succeeded.
  * - `denied`     — a confirmed snapshot says this member lacks a finance key.
  * - `unverified` — anything else: the snapshot is pending, its latest refresh
- *                  failed, the session no longer resolves to an active member,
- *                  or Home's latest read failed. A figure fetched while access
+ *                  failed or has not answered within the freshness deadline,
+ *                  the session no longer resolves to an active member, or
+ *                  Home's latest read failed. A figure fetched while access
  *                  held is not evidence that it still holds.
  */
 export type HomeFinanceAccess = "granted" | "denied" | "unverified";
@@ -103,8 +105,9 @@ export type HomeFinanceAccess = "granted" | "denied" | "unverified";
 export function resolveHomeFinanceAccess(
   capabilities: Pick<CapabilityView, "state" | "stale" | "canSensitive">,
   homeReadFailed: boolean,
+  confirmationFresh: boolean,
 ): HomeFinanceAccess {
-  const confirmed = capabilities.state === "ready" && !capabilities.stale;
+  const confirmed = capabilities.state === "ready" && !capabilities.stale && confirmationFresh;
   if (!confirmed) return "unverified";
   if (!HOME_FINANCE_PERMISSIONS.every((key) => capabilities.canSensitive(key))) return "denied";
   return homeReadFailed ? "unverified" : "granted";
@@ -130,6 +133,41 @@ export function isHomeAccessError(error: unknown): boolean {
 const LAST_FINANCE_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
 
 /**
+ * Whether Home last rendered with this principal's finance access confirmed.
+ * False until it has — a read that lands before then is not to keep money.
+ */
+export function isHomeFinanceConfirmed(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+): boolean {
+  try {
+    return LAST_FINANCE_GRANT.get(queryClient)?.get(`${userId}/${organizationId}`) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Home's read result as it may be CACHED: the figures it carries are dropped
+ * (as "error" — unavailable) unless finance access is confirmed at the moment
+ * the response lands. So a re-read made while confirmation has lapsed keeps
+ * its counts but never puts money back into memory, where a later render
+ * could pick it up. The figures come back only through a read that lands
+ * after confirmation returns (enforceHomeFinanceCache triggers it).
+ */
+export function guardHomeFinance(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  summary: HomeSummary,
+): HomeSummary {
+  if (summary.finance.status !== "available") return summary;
+  if (isHomeFinanceConfirmed(queryClient, userId, organizationId)) return summary;
+  return { ...summary, finance: { status: "error" } };
+}
+
+/**
  * Evict this principal's Home entries — and cancel their in-flight reads — the
  * moment Home's finance access stops being confirmed, so a figure fetched
  * while it held cannot be read back out of the cache, and a response that was
@@ -141,6 +179,12 @@ const LAST_FINANCE_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
  * entry that should already be gone. A no-op while access keeps holding, and
  * again while it stays lost, so ordinary caching is untouched. Never throws;
  * the render-time gate (resolveHomeFinanceAccess) still hides the value.
+ *
+ * When confirmation RETURNS, entries that hold no figures — withheld by
+ * guardHomeFinance, or refused/failed by the server under the old answer —
+ * are re-read (their counts stay on screen meanwhile), so money comes back
+ * only from a read that lands under the new confirmation. Once per return,
+ * so this cannot loop.
  */
 export function enforceHomeFinanceCache(
   queryClient: QueryClient,
@@ -157,7 +201,19 @@ export function enforceHomeFinanceCache(
     const tag = `${userId}/${organizationId}`;
     const previous = record.get(tag);
     record.set(tag, financeConfirmed);
-    if (financeConfirmed || previous === false) return;
+    if (financeConfirmed) {
+      if (previous === false) {
+        void queryClient
+          .invalidateQueries({
+            queryKey: [...HOME_QUERY_PREFIX, userId, organizationId],
+            predicate: (query) =>
+              (query.state.data as HomeSummary | undefined)?.finance.status !== "available",
+          })
+          .catch(() => undefined);
+      }
+      return;
+    }
+    if (previous === false) return;
     evictHomePrincipal(queryClient, userId, organizationId);
   } catch {
     // Never block a render.

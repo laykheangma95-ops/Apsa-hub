@@ -8,13 +8,14 @@
  *
  * Outside a provider the default view is "pending", so nothing is offered.
  */
-import { createContext, useContext, useMemo, type ReactNode } from "react";
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from "react";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getActiveMemberCapabilitiesFn } from "@/api/capabilities";
 import {
   capabilityQueryKey,
   createCapabilityView,
   createFixtureCapabilityView,
+  isCapabilityConfirmationFresh,
   UNRESOLVED_CAPABILITIES,
   type CapabilityResult,
   type CapabilityView,
@@ -33,6 +34,17 @@ const CAPABILITY_STALE_MS = 60_000;
  * revocation only by unrelated navigation or focus changes.
  */
 export const SENSITIVE_CAPABILITY_REVALIDATE_MS = 15_000;
+
+/**
+ * How long one positive server answer may keep a sensitive value on screen.
+ *
+ * Two revalidation intervals: one refresh that is slow or lost is tolerated,
+ * a second is not. Revalidation only ever re-asks; it never extends this
+ * window by itself — only a successful answer does. A refresh that never
+ * settles (a hung request, which React Query's interval then dedupes onto
+ * forever) therefore cannot keep a value up past this age.
+ */
+export const SENSITIVE_CAPABILITY_MAX_AGE_MS = 2 * SENSITIVE_CAPABILITY_REVALIDATE_MS;
 
 interface CapabilityProviderProps {
   /** From the /app route context — validated server-side, never from the URL. */
@@ -86,8 +98,8 @@ export function useSensitiveCapabilityRevalidation(
   userId: string,
   organizationId: string,
   active: boolean,
-): void {
-  useQuery({
+): number {
+  const query = useQuery({
     queryKey: capabilityQueryKey(userId, organizationId),
     queryFn: () => getActiveMemberCapabilitiesFn(),
     enabled: active,
@@ -97,6 +109,70 @@ export function useSensitiveCapabilityRevalidation(
     refetchIntervalInBackground: true,
     retry: false,
   });
+  // When the server last answered successfully — set on success only, never
+  // by a request starting or still pending. 0 until the first answer.
+  return query.dataUpdatedAt;
+}
+
+/**
+ * useSensitiveCapabilityRevalidation, plus a deadline: true only while the
+ * server's last successful answer for THIS principal is younger than
+ * SENSITIVE_CAPABILITY_MAX_AGE_MS. For a surface whose mere display is a
+ * disclosure (Home's money); combine with canSensitive(), never instead of it.
+ *
+ * The deadline is a timer, so it lapses on time even when no request settles
+ * and nothing else re-renders; returning to a hidden tab re-checks at once (a
+ * throttled background timer must not stretch the window). Once lapsed, it
+ * re-asks the server — abandoning a hung request, whose late answer is then
+ * discarded — immediately and every SENSITIVE_CAPABILITY_MAX_AGE_MS until an
+ * answer lands: bounded, never a tight loop.
+ *
+ * This limits how long a stale figure can stay on screen. It cannot make the
+ * browser learn of a revocation the instant it happens; the server still
+ * authorizes every read on its own.
+ */
+export function useSensitiveCapabilityFreshness(
+  userId: string,
+  organizationId: string,
+  active: boolean,
+): boolean {
+  const queryClient = useQueryClient();
+  const confirmedAt = useSensitiveCapabilityRevalidation(userId, organizationId, active);
+  const [, recheck] = useReducer((tick: number) => tick + 1, 0);
+  const fresh =
+    active &&
+    isCapabilityConfirmationFresh(confirmedAt, Date.now(), SENSITIVE_CAPABILITY_MAX_AGE_MS);
+
+  useEffect(() => {
+    if (!fresh) return;
+    const timer = setTimeout(
+      recheck,
+      Math.max(0, confirmedAt + SENSITIVE_CAPABILITY_MAX_AGE_MS - Date.now()),
+    );
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, [fresh, confirmedAt]);
+
+  // Lapsed after an earlier answer: re-ask. (Before the first answer, the
+  // provider's own first fetch is still the request that matters.)
+  const lapsed = active && !fresh && confirmedAt > 0;
+  useEffect(() => {
+    if (!lapsed) return;
+    const queryKey = capabilityQueryKey(userId, organizationId);
+    const reask = () => {
+      void queryClient
+        .refetchQueries({ queryKey, exact: true }, { cancelRefetch: true })
+        .catch(() => undefined);
+    };
+    reask();
+    const timer = setInterval(reask, SENSITIVE_CAPABILITY_MAX_AGE_MS);
+    return () => clearInterval(timer);
+  }, [lapsed, queryClient, userId, organizationId]);
+
+  return fresh;
 }
 
 /**

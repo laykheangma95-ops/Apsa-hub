@@ -30,6 +30,7 @@ import {
   createFixtureCapabilityView,
   UI_PERMISSION_KEYS,
   type UiPermissionKey,
+  isCapabilityConfirmationFresh,
 } from "@/lib/capabilities";
 import {
   attentionDestination,
@@ -42,10 +43,16 @@ import { homeGreetingKey } from "@/lib/home-greeting";
 import {
   enforceHomeCachePrincipal,
   enforceHomeFinanceCache,
+  guardHomeFinance,
   homeQueryKey,
   isHomeAccessError,
+  isHomeFinanceConfirmed,
   resolveHomeFinanceAccess,
 } from "@/lib/home-query";
+import {
+  SENSITIVE_CAPABILITY_MAX_AGE_MS,
+  SENSITIVE_CAPABILITY_REVALIDATE_MS,
+} from "@/hooks/use-capabilities";
 import {
   HOME_QUICK_ACTION_IDS,
   homeQuickActionAvailable,
@@ -648,12 +655,74 @@ describe("Home finance access", () => {
   );
 
   it("is granted only for a confirmed snapshot holding both finance keys and a good read", () => {
-    expect(resolveHomeFinanceAccess(owner, false)).toBe("granted");
-    expect(resolveHomeFinanceAccess(owner, true)).toBe("unverified");
-    expect(resolveHomeFinanceAccess(noReconcile, false)).toBe("denied");
-    expect(resolveHomeFinanceAccess({ ...owner, stale: true }, false)).toBe("unverified");
-    expect(resolveHomeFinanceAccess({ ...owner, state: "pending" }, false)).toBe("unverified");
-    expect(resolveHomeFinanceAccess({ ...owner, state: "denied" }, false)).toBe("unverified");
+    expect(resolveHomeFinanceAccess(owner, false, true)).toBe("granted");
+    expect(resolveHomeFinanceAccess(owner, true, true)).toBe("unverified");
+    expect(resolveHomeFinanceAccess(noReconcile, false, true)).toBe("denied");
+    expect(resolveHomeFinanceAccess({ ...owner, stale: true }, false, true)).toBe("unverified");
+    expect(resolveHomeFinanceAccess({ ...owner, state: "pending" }, false, true)).toBe(
+      "unverified",
+    );
+    expect(resolveHomeFinanceAccess({ ...owner, state: "denied" }, false, true)).toBe("unverified");
+  });
+
+  it("is never granted once the last server confirmation has aged out", () => {
+    expect(resolveHomeFinanceAccess(owner, false, false)).toBe("unverified");
+    expect(resolveHomeFinanceAccess(noReconcile, false, false)).toBe("unverified");
+  });
+
+  it("a confirmation is fresh for two revalidation intervals (30s), and no longer", () => {
+    expect(SENSITIVE_CAPABILITY_REVALIDATE_MS).toBe(15_000);
+    expect(SENSITIVE_CAPABILITY_MAX_AGE_MS).toBe(30_000);
+    const fresh = (confirmedAt: number, now: number) =>
+      isCapabilityConfirmationFresh(confirmedAt, now, SENSITIVE_CAPABILITY_MAX_AGE_MS);
+    const at = 1_000_000;
+    expect(fresh(at, at)).toBe(true);
+    expect(fresh(at, at + 29_999)).toBe(true);
+    expect(fresh(at, at + 30_000)).toBe(false);
+    // Never answered, or a clock that runs backwards: not fresh.
+    expect(fresh(0, at)).toBe(false);
+    expect(fresh(at, at - 1)).toBe(false);
+  });
+
+  it("money that lands while access is unconfirmed is not cached; counts are", () => {
+    const client = new QueryClient();
+    const withMoney = summaryWith({
+      finance: available({ netCollectedForCreatedOrders: [{ amount: 12345, currency: "USD" }] }),
+    });
+    // Never confirmed for this principal yet.
+    expect(isHomeFinanceConfirmed(client, "u1", "o1")).toBe(false);
+    const held = guardHomeFinance(client, "u1", "o1", withMoney);
+    expect(held.finance).toEqual({ status: "error" });
+    expect(held.orders).toEqual(withMoney.orders);
+
+    enforceHomeFinanceCache(client, "u1", "o1", true);
+    expect(guardHomeFinance(client, "u1", "o1", withMoney)).toBe(withMoney);
+    // Another principal's confirmation is not this one's.
+    expect(guardHomeFinance(client, "u2", "o1", withMoney).finance.status).toBe("error");
+
+    enforceHomeFinanceCache(client, "u1", "o1", false);
+    expect(guardHomeFinance(client, "u1", "o1", withMoney).finance.status).toBe("error");
+  });
+
+  it("marks figure-less entries for a re-read once when confirmation returns, and nothing else", () => {
+    const client = new QueryClient();
+    const withheld = homeQueryKey("u1", "o1", "today");
+    const withMoney = homeQueryKey("u1", "o1", "week");
+    const theirs = homeQueryKey("u2", "o1", "today");
+    enforceHomeFinanceCache(client, "u1", "o1", false);
+    client.setQueryData(withheld, summaryWith({ finance: { status: "error" } }));
+    client.setQueryData(withMoney, summaryWith());
+    client.setQueryData(theirs, summaryWith({ finance: { status: "error" } }));
+
+    enforceHomeFinanceCache(client, "u1", "o1", true);
+    expect(client.getQueryState(withheld)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(withMoney)?.isInvalidated).toBe(false);
+    expect(client.getQueryState(theirs)?.isInvalidated).toBe(false);
+
+    // Still confirmed: no further re-read, so no loop.
+    client.setQueryData(withheld, summaryWith({ finance: { status: "error" } }));
+    enforceHomeFinanceCache(client, "u1", "o1", true);
+    expect(client.getQueryState(withheld)?.isInvalidated).toBe(false);
   });
 
   it("recognises only real access refusals as access loss", () => {
@@ -687,13 +756,15 @@ describe("Home finance access", () => {
     expect(client.getQueryData(mine)).toEqual({ refetched: true });
   });
 
-  it("Home wires the gate in before its read and polls while money can show", () => {
+  it("Home wires the gate in before its read and polls, on a deadline, while money can show", () => {
     const home = code(HOME);
     const gate = home.indexOf("enforceHomeFinanceCache(queryClient");
     const read = home.indexOf("const homeQuery = useQuery(");
     expect(gate).toBeGreaterThan(0);
     expect(gate).toBeLessThan(read);
-    expect(home).toContain("useSensitiveCapabilityRevalidation(");
+    expect(home).toContain("useSensitiveCapabilityFreshness(");
+    expect(home).toContain("resolveHomeFinanceAccess(capabilities, false, confirmationFresh)");
+    expect(home).toContain("guardHomeFinance(");
     expect(home).toContain("data: homeAccessLost ? undefined : homeQuery.data,");
     expect(home).toContain("financeAccess={financeAccess}");
   });

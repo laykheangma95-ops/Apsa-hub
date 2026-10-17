@@ -14,6 +14,7 @@ import { customerKeys } from "@/lib/customers-query";
 import {
   enforceHomeFinanceCache,
   evictHomePrincipal,
+  guardHomeFinance,
   HOME_QUERY_PREFIX,
   homeQueryKey,
   isHomeAccessError,
@@ -36,7 +37,7 @@ import { ordersKeys } from "@/lib/orders-query";
 import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
 import { resolveTeamIdentityView } from "@/lib/team-view";
 import { AttentionCard, BottomNav, Disclosure, ScreenBleed, SkeletonBlock } from "@/design-system";
-import { useCapabilities, useSensitiveCapabilityRevalidation } from "@/hooks/use-capabilities";
+import { useCapabilities, useSensitiveCapabilityFreshness } from "@/hooks/use-capabilities";
 import { useHeldTileSize } from "@/hooks/use-held-tile-size";
 import type { MetricRange } from "@/types";
 
@@ -76,27 +77,41 @@ function BusinessHome() {
   const tiles = useHeldTileSize();
 
   /*
-   * Today's money is drawn only while the server has just confirmed this
-   * member still holds the finance keys (src/lib/home-query.ts). The moment
-   * that stops — a revocation, an expired session, a capability refresh that
-   * failed — this principal's Home entries are cancelled and dropped, during
-   * render and before the read below, so neither the cache nor a response
-   * already in flight can put a grant-era figure back on screen.
+   * Re-ask the server while money can be on screen (the same single
+   * capability query; it only polls), and know whether its last successful
+   * answer is still recent — a refresh that never answers lapses on a timer
+   * (SENSITIVE_CAPABILITY_MAX_AGE_MS). Keyed on can(), not canSensitive(), so
+   * a snapshot left stale by one failed refresh is retried and can recover.
    */
-  const financeConfirmed = resolveHomeFinanceAccess(capabilities, false) === "granted";
-  enforceHomeFinanceCache(queryClient, session.userId, organizationId, financeConfirmed);
-  // Re-ask the server while money can be on screen (the same single
-  // capability query; it only polls). Keyed on can(), not canSensitive(), so a
-  // snapshot left stale by one failed refresh is retried and can recover.
-  useSensitiveCapabilityRevalidation(
+  const confirmationFresh = useSensitiveCapabilityFreshness(
     session.userId,
     organizationId,
     capabilities.can("orders.read") && capabilities.can("payments.reconcile"),
   );
 
+  /*
+   * Today's money is drawn only while the server has recently confirmed this
+   * member still holds the finance keys (src/lib/home-query.ts). The moment
+   * that stops — a revocation, an expired session, a capability refresh that
+   * failed or has not answered in time — this principal's Home entries are
+   * cancelled and dropped, during render and before the read below, so neither
+   * the cache nor a response already in flight can put a grant-era figure back
+   * on screen.
+   */
+  const financeConfirmed =
+    resolveHomeFinanceAccess(capabilities, false, confirmationFresh) === "granted";
+  enforceHomeFinanceCache(queryClient, session.userId, organizationId, financeConfirmed);
+
   const homeQuery = useQuery({
     queryKey: homeQueryKey(session.userId, organizationId, HOME_RANGE),
-    queryFn: () => getHomeSummary(HOME_RANGE),
+    // Figures that land while access is unconfirmed are never cached.
+    queryFn: async () =>
+      guardHomeFinance(
+        queryClient,
+        session.userId,
+        organizationId,
+        await getHomeSummary(HOME_RANGE),
+      ),
   });
 
   /*
@@ -122,7 +137,11 @@ function BusinessHome() {
     isError: homeQuery.isError,
   });
   // A failed refresh keeps the last counts on screen; never the last money.
-  const financeAccess = resolveHomeFinanceAccess(capabilities, homeQuery.isError);
+  const financeAccess = resolveHomeFinanceAccess(
+    capabilities,
+    homeQuery.isError,
+    confirmationFresh,
+  );
   const summary = view.kind === "ready" ? view.summary : undefined;
   const attention = summary ? attentionItems(summary) : [];
   // An empty attention list is only reassuring when Home actually knows the

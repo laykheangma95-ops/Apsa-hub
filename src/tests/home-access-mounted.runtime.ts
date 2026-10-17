@@ -26,7 +26,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, jest, mock } from "bun:test";
 import type { CapabilityResult, UiPermissionKey } from "../lib/capabilities";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import type { HomeSummary, MetricRange, Money } from "../types";
@@ -84,6 +84,27 @@ let holdHome = false;
 const heldHome: (() => void)[] = [];
 let homeReads = 0;
 let capabilityReads = 0;
+/**
+ * Capability reads held open until released — a refresh that never answers.
+ * The answer is decided when the request is MADE (like the real boundary), so
+ * a held response carries whatever the server said at that moment.
+ */
+let holdCapabilities = false;
+const heldCapabilities: (() => void)[] = [];
+
+function capabilityAnswer(): CapabilityResult | Error {
+  if (server.capabilityFailure) return server.capabilityFailure;
+  if (!server.session) return { status: "unauthenticated" };
+  const permissions = currentPermissions();
+  if (permissions.length === 0) return { status: "no_membership" };
+  return {
+    status: "active",
+    userId: server.session.userId,
+    organizationId: server.session.organizationId,
+    role: null,
+    permissions,
+  };
+}
 
 // ── Server functions ────────────────────────────────────────────────────────
 
@@ -107,18 +128,11 @@ mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: {} }));
 mock.module("@/api/capabilities", () => ({
   getActiveMemberCapabilitiesFn: async (): Promise<CapabilityResult> => {
     capabilityReads++;
+    const answer = capabilityAnswer();
     await Promise.resolve();
-    if (server.capabilityFailure) throw server.capabilityFailure;
-    if (!server.session) return { status: "unauthenticated" };
-    const permissions = currentPermissions();
-    if (permissions.length === 0) return { status: "no_membership" };
-    return {
-      status: "active",
-      userId: server.session.userId,
-      organizationId: server.session.organizationId,
-      role: null,
-      permissions,
-    };
+    if (holdCapabilities) await new Promise<void>((resolve) => heldCapabilities.push(resolve));
+    if (answer instanceof Error) throw answer;
+    return answer;
   },
 }));
 
@@ -259,10 +273,22 @@ function tree() {
   return createElement(QueryClientProvider, { client }, createElement(AppLayout));
 }
 
+/**
+ * True while a test runs on fake timers (the freshness-deadline suites). Every
+ * wait below then moves the clock itself, 1ms per round, so nothing depends
+ * on wall time and a deadline is crossed only when a test says so.
+ */
+let fakeClock = false;
+
 async function settle(rounds = 4) {
   for (let i = 0; i < rounds; i++) {
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
+      if (fakeClock) {
+        jest.advanceTimersByTime(1);
+        for (let m = 0; m < 4; m++) await Promise.resolve();
+      } else {
+        await new Promise((r) => setTimeout(r, 0));
+      }
     });
   }
 }
@@ -271,7 +297,7 @@ async function waitFor(check: () => boolean, label: string) {
   const started = Date.now();
   for (let round = 0; ; round++) {
     if (check()) return;
-    if (round >= 80 && Date.now() - started > 5000) {
+    if (fakeClock ? round >= 3000 : round >= 80 && Date.now() - started > 5000) {
       throw new Error(`Timed out waiting: ${label}. Screen: ${text().slice(0, 500)}`);
     }
     await settle(1);
@@ -333,6 +359,12 @@ async function unmount() {
 
 afterEach(async () => {
   await unmount();
+  holdCapabilities = false;
+  while (heldCapabilities.length) heldCapabilities.shift()!();
+  if (fakeClock) {
+    jest.useRealTimers();
+    fakeClock = false;
+  }
   document.body.innerHTML = "";
   client?.clear();
   server.session = null;
@@ -616,6 +648,359 @@ describe("Home money: identity switching", () => {
     await rerender();
     for (const figure of A_FIGURES) expect(drewSince(toB, figure)).toBe(false);
     expect(cachedFinance()).toEqual([]);
+  });
+});
+
+// ── Financial privacy: the freshness deadline ───────────────────────────────
+//
+// A capability refresh that never answers must not keep money on screen. The
+// last server confirmation is good for SENSITIVE_CAPABILITY_MAX_AGE_MS (30s,
+// two revalidation intervals) and no longer — enforced by a timer, so it holds
+// even when no promise settles and nothing else re-renders. These suites run
+// on fake timers: the clock moves only when a test moves it.
+
+/** Mirrors SENSITIVE_CAPABILITY_MAX_AGE_MS / SENSITIVE_CAPABILITY_REVALIDATE_MS. */
+const MAX_AGE_MS = 30_000;
+const POLL_MS = 15_000;
+
+function useFakeClock() {
+  jest.useFakeTimers();
+  fakeClock = true;
+}
+
+/** Move the clock forward in one jump (every timer due inside it fires), then settle. */
+async function advance(ms: number) {
+  await act(async () => {
+    jest.advanceTimersByTime(Math.max(0, ms));
+    for (let m = 0; m < 4; m++) await Promise.resolve();
+  });
+  await settle(30);
+}
+
+/** When the server last positively answered this tab's principal. */
+const confirmedAt = () =>
+  client.getQueryState(capabilityQueryKey(route.userId, route.organizationId))?.dataUpdatedAt ?? 0;
+
+/** Let held capability responses land: the oldest first, unless `newestFirst`. */
+async function releaseCapabilities(newestFirst = false) {
+  holdCapabilities = false;
+  await act(async () => {
+    while (heldCapabilities.length) {
+      (newestFirst ? heldCapabilities.pop() : heldCapabilities.shift())!();
+      for (let m = 0; m < 4; m++) await Promise.resolve();
+    }
+  });
+  await settle(30);
+}
+
+const withoutReconcile = () => OWNER.filter((key) => key !== "payments.reconcile");
+
+describe("Home money: a capability refresh that never answers", () => {
+  it("hides the figures at the deadline, evicts them, and a late grant-era answer cannot restore them", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const confirmed = confirmedAt();
+    expect(confirmed).toBeGreaterThan(0);
+
+    // The next revalidation leaves while the grant still holds, and hangs…
+    holdCapabilities = true;
+    const reads = capabilityReads;
+    await advance(confirmed + POLL_MS - Date.now());
+    expect(capabilityReads).toBe(reads + 1);
+    expect(heldCapabilities.length).toBe(1);
+    // …and the server revokes payments.reconcile while it hangs.
+    grant(USER_A, ORG_1, withoutReconcile());
+
+    // Up to the deadline the last confirmation stands: the bounded window.
+    await advance(confirmed + MAX_AGE_MS - 1_000 - Date.now());
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+
+    // Past it the figures are gone — no promise settled, no input, no navigation.
+    const mark = frames.length;
+    await advance(confirmed + MAX_AGE_MS + 1 - Date.now());
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(shows(UNAVAILABLE) || shows(NO_PERMISSION)).toBe(true);
+    // Not reusable from memory either.
+    expect(cachedFinance()).toEqual([]);
+
+    // The grant-era response finally lands, then everything else held.
+    const late = frames.length;
+    await releaseCapabilities();
+    for (const figure of A_FIGURES) {
+      expect(shows(figure)).toBe(false);
+      expect(drewSince(late, figure)).toBe(false);
+    }
+    expect(cachedFinance()).toEqual([]);
+
+    // Revalidation carries on and the server keeps saying "revoked".
+    await advance(POLL_MS);
+    await waitFor(() => shows(NO_PERMISSION), "denied copy");
+    for (const figure of A_FIGURES) expect(drewSince(mark, figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+
+  it("Codex's order: revoke first, then a revalidation that is held indefinitely", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const confirmed = confirmedAt();
+
+    grant(USER_A, ORG_1, withoutReconcile());
+    holdCapabilities = true;
+    await advance(confirmed + POLL_MS - Date.now());
+    expect(heldCapabilities.length).toBeGreaterThan(0);
+
+    const mark = frames.length;
+    // Well beyond the 15s interval, and beyond the 30s deadline.
+    await advance(confirmed + MAX_AGE_MS + 5_000 - Date.now());
+    for (const figure of A_FIGURES) {
+      expect(shows(figure)).toBe(false);
+      expect(drewSince(mark + 1, figure)).toBe(false);
+    }
+    expect(cachedFinance()).toEqual([]);
+    // Still hung a minute later: still hidden, and not re-asked in a tight loop.
+    const reads = capabilityReads;
+    await advance(60_000);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(capabilityReads - reads).toBeLessThanOrEqual(3);
+  });
+
+  it("a hang with the grant intact still evicts, and recovers only through a fresh confirmation and a fresh read", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const confirmed = confirmedAt();
+
+    holdCapabilities = true;
+    await advance(confirmed + MAX_AGE_MS + 1 - Date.now());
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    // Home was re-read after the eviction (counts stay), and the server still
+    // grants finance — yet nothing read while unconfirmed is kept as money.
+    expect(shows("7 orders")).toBe(true);
+    expect(cachedFinance()).toEqual([]);
+    await advance(10_000);
+    expect(cachedFinance()).toEqual([]);
+
+    // Authorized recovery: the server answers again, Home is read again.
+    const homeBefore = homeReads;
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "recovered figures");
+    expect(confirmedAt()).toBeGreaterThan(confirmed + MAX_AGE_MS);
+    expect(homeReads).toBeGreaterThan(homeBefore);
+  });
+});
+
+describe("Home money: the deadline does not disturb normal operation", () => {
+  it("successful revalidation keeps the figures up, with one request per interval and no Home re-reads", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const mark = frames.length;
+    const caps = capabilityReads;
+    const homes = homeReads;
+    for (let i = 0; i < 8; i++) {
+      await advance(POLL_MS);
+      for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+    }
+    // Two minutes: eight polls, never a flicker, never a loop.
+    expect(capabilityReads - caps).toBeGreaterThanOrEqual(7);
+    expect(capabilityReads - caps).toBeLessThanOrEqual(9);
+    expect(homeReads).toBe(homes);
+    expect(frames.slice(mark).every((frame) => frame.includes(A_FIGURES[0]!))).toBe(true);
+  });
+
+  it("revocation picked up by the poll hides the figures", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    grant(USER_A, ORG_1, withoutReconcile());
+    await advance(POLL_MS);
+    await waitFor(() => shows(NO_PERMISSION), "denied copy");
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+
+  it("session expiry picked up by the poll hides the figures and stops polling", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    server.session = null;
+    await advance(POLL_MS);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    const reads = capabilityReads;
+    await advance(120_000);
+    expect(capabilityReads - reads).toBeLessThanOrEqual(1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+  });
+
+  it("failed capability refreshes keep the figures hidden at a bounded retry rate, then recover", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    server.capabilityFailure = new Error("network");
+    await advance(POLL_MS);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    const reads = capabilityReads;
+    await advance(120_000);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    // Polls every 15s plus at most one deadline re-ask every 30s.
+    expect(capabilityReads - reads).toBeLessThanOrEqual(13);
+
+    server.capabilityFailure = null;
+    await advance(POLL_MS);
+    await waitFor(() => shows(A_FIGURES[0]!), "recovered figures");
+  });
+
+  it("a failed Home refresh keeps the money hidden while capabilities stay fresh", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    server.homeFailure = new Error("getHome finance orders: connection reset");
+    await refreshHome();
+    await advance(MAX_AGE_MS * 2);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(shows("7 orders")).toBe(true);
+    server.homeFailure = null;
+    await refreshHome();
+    await waitFor(() => shows(A_FIGURES[0]!), "recovered figures");
+  });
+});
+
+describe("Home money: freshness is per principal", () => {
+  it("member A → member B: A's confirmation never stands in for B's", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    grant(USER_B, ORG_1, OWNER);
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "member A figures");
+
+    // B's capability answer never arrives; B's Home read does (same org's figures).
+    holdCapabilities = true;
+    const toB = frames.length;
+    signIn(USER_B, ORG_1);
+    await act(async () => root!.render(tree()));
+    await advance(MAX_AGE_MS + 1);
+    for (const figure of A_FIGURES) expect(drewSince(toB, figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    // B confirmed by the server: B may see its own organization's money.
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "member B figures");
+  });
+
+  it("organization A → B → A: A's expired confirmation is not reused on return", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    grant(USER_A, ORG_2, OWNER);
+    server.collected.set(ORG_2, [USD_2]);
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "org 1 figures");
+
+    signIn(USER_A, ORG_2);
+    await act(async () => root!.render(tree()));
+    await waitFor(() => shows(ORG_2_FIGURE), "org 2 figures");
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    // Long enough on B for A's last confirmation to lapse.
+    await advance(MAX_AGE_MS * 2);
+
+    // Back to A, whose re-confirmation hangs: A's old snapshot is not enough.
+    holdCapabilities = true;
+    const backToA = frames.length;
+    signIn(USER_A, ORG_1);
+    await act(async () => root!.render(tree()));
+    await advance(5_000);
+    expect(drewSince(backToA, ORG_2_FIGURE)).toBe(false);
+    for (const figure of A_FIGURES) expect(drewSince(backToA, figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "org 1 figures again");
+    expect(drewSince(backToA, ORG_2_FIGURE)).toBe(false);
+  });
+});
+
+describe("Home money: concurrency and lifecycle", () => {
+  it("several requests in flight across the deadline, released newest-first, restore nothing", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const confirmed = confirmedAt();
+
+    // Grant-era requests leave and hang: two Home reads, the poll, a focus re-ask.
+    holdCapabilities = true;
+    holdHome = true;
+    await act(async () => {
+      void client.refetchQueries({ queryKey: HOME_QUERY_PREFIX });
+    });
+    await settle(10);
+    await act(async () => {
+      void client.refetchQueries({ queryKey: HOME_QUERY_PREFIX }, { cancelRefetch: false });
+    });
+    await advance(confirmed + POLL_MS - Date.now());
+    await act(async () => {
+      void client.refetchQueries(
+        { queryKey: capabilityQueryKey(route.userId, route.organizationId) },
+        { cancelRefetch: false },
+      );
+    });
+    await settle(10);
+    expect(heldHome.length).toBeGreaterThanOrEqual(1);
+    expect(heldCapabilities.length).toBeGreaterThanOrEqual(1);
+    grant(USER_A, ORG_1, withoutReconcile());
+
+    const mark = frames.length;
+    await advance(confirmed + MAX_AGE_MS + 1 - Date.now());
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    // Everything lands, newest first, then the rest.
+    holdHome = false;
+    await act(async () => {
+      while (heldHome.length) {
+        heldHome.pop()!();
+        for (let m = 0; m < 4; m++) await Promise.resolve();
+      }
+    });
+    await releaseCapabilities(true);
+    await advance(POLL_MS);
+    for (const figure of A_FIGURES) {
+      expect(shows(figure)).toBe(false);
+      expect(drewSince(mark + 1, figure)).toBe(false);
+    }
+    expect(cachedFinance()).toEqual([]);
+  });
+
+  it("unmounting clears the deadline and the polling; late answers land harmlessly", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    holdCapabilities = true;
+    await advance(POLL_MS);
+    expect(heldCapabilities.length).toBe(1);
+
+    await unmount();
+    const caps = capabilityReads;
+    const homes = homeReads;
+    await advance(5 * 60_000);
+    expect(capabilityReads).toBe(caps);
+    expect(homeReads).toBe(homes);
+    await releaseCapabilities();
+    await advance(MAX_AGE_MS);
+    expect(capabilityReads).toBe(caps);
+    expect(text()).toBe("");
   });
 });
 
