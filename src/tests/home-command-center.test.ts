@@ -39,10 +39,17 @@ import {
   attentionSummaryKey,
 } from "@/lib/home-attention";
 import { homeGreetingKey } from "@/lib/home-greeting";
-import { enforceHomeCachePrincipal, homeQueryKey } from "@/lib/home-query";
+import {
+  enforceHomeCachePrincipal,
+  enforceHomeFinanceCache,
+  homeQueryKey,
+  isHomeAccessError,
+  resolveHomeFinanceAccess,
+} from "@/lib/home-query";
 import {
   HOME_QUICK_ACTION_IDS,
-  homeQuickActionPermission,
+  homeQuickActionAvailable,
+  homeQuickActionPermissions,
   homeQuickActions,
   homeQuickActionTarget,
 } from "@/lib/home-quick-actions";
@@ -151,10 +158,12 @@ describe("Quick Action destinations", () => {
 
 describe("Quick Action permission gating", () => {
   it("keys each card to the permission its destination's server requires", () => {
-    expect(homeQuickActionPermission("newSale")).toBe("orders.create");
-    expect(homeQuickActionPermission("newOrder")).toBe("orders.create");
-    expect(homeQuickActionPermission("packOrders")).toBe("orders.read");
-    expect(homeQuickActionPermission("inbox")).toBe("messages.read");
+    expect(homeQuickActionPermissions("newSale")).toEqual(["orders.create"]);
+    // The create-order sheet's product picker is mandatory and reads the
+    // catalog, so New order needs products.read as well as orders.create.
+    expect(homeQuickActionPermissions("newOrder")).toEqual(["orders.create", "products.read"]);
+    expect(homeQuickActionPermissions("packOrders")).toEqual(["orders.read"]);
+    expect(homeQuickActionPermissions("inbox")).toEqual(["messages.read"]);
 
     // The server halves of those keys.
     const orders = read("src/server/orders/service.ts");
@@ -163,6 +172,40 @@ describe("Quick Action permission gating", () => {
     expect(fulfillment).toMatch(
       /export async function listReadyToPack\([\s\S]*?ctx\.require\("orders\.read"\)/,
     );
+    // The sheet's catalog read: getProducts → listProductsFn → products.read.
+    const sheet = read("src/components/orders/CreateRealOrderSheet.tsx");
+    expect(sheet).toContain("queryFn: getProducts,");
+    const products = read("src/server/products/service.ts");
+    expect(products).toContain('ctx.require("products.read");');
+  });
+
+  it("New order is available only when BOTH of its keys are granted", () => {
+    const combos: [UiPermissionKey[], boolean][] = [
+      [["orders.create", "products.read"], true],
+      [["orders.create"], false],
+      [["products.read"], false],
+      [[], false],
+    ];
+    for (const [keys, expected] of combos) {
+      expect({ keys, available: homeQuickActionAvailable("newOrder", allow(...keys)) }).toEqual({
+        keys,
+        available: expected,
+      });
+      const tile = homeQuickActions(allow(...keys)).find((a) => a.id === "newOrder");
+      expect(tile?.available).toBe(expected);
+    }
+    // New sale keeps its single key; this repair touches only New order.
+    expect(homeQuickActionAvailable("newSale", allow("orders.create"))).toBe(true);
+  });
+
+  it("the create-order sheet is mounted behind the tile's own two-key gate", () => {
+    const home = code(HOME);
+    expect(home).toContain(
+      'const canCreateOrder = homeQuickActionAvailable("newOrder", (key) => capabilities.can(key));',
+    );
+    expect(home).toContain("open={createOrderOpen && canCreateOrder}");
+    expect(home).toContain("if (!canCreateOrder) setCreateOrderOpen(false);");
+    expect(home).toContain("if (!action.available) return;");
   });
 
   it("fails closed: an unresolved snapshot offers no card", () => {
@@ -170,10 +213,18 @@ describe("Quick Action permission gating", () => {
   });
 
   it("offers exactly the cards a role can use, and keeps the other tiles in place", () => {
-    const cashier = homeQuickActions(allow("orders.create", "orders.read"));
+    const cashier = homeQuickActions(allow("orders.create", "orders.read", "products.read"));
     expect(cashier.map((a) => [a.id, a.available])).toEqual([
       ["newSale", true],
       ["newOrder", true],
+      ["packOrders", true],
+      ["inbox", false],
+    ]);
+    // Without the catalog, New order cannot be built, so it is not offered.
+    const noCatalog = homeQuickActions(allow("orders.create", "orders.read"));
+    expect(noCatalog.map((a) => [a.id, a.available])).toEqual([
+      ["newSale", true],
+      ["newOrder", false],
       ["packOrders", true],
       ["inbox", false],
     ]);
@@ -235,8 +286,14 @@ describe("Quick Action permission gating", () => {
 
   it("the money line stays behind the server's finance section status", () => {
     const card = code("src/components/home/TodaySalesCard.tsx");
-    expect(card).toContain('summary.finance.status === "available"');
+    expect(card).toContain('summary.finance.status === "permission_denied"');
     expect(card).toContain('"home.financialsUnavailable"');
+    // AND behind access that is still confirmed now (resolveHomeFinanceAccess).
+    expect(card).toContain(
+      'const finance = summary && financeAccess === "granted" ? summary.finance : null;',
+    );
+    expect(card).toContain('finance?.status === "available"');
+    expect(card).not.toContain("summary.finance.data");
     // One formatted line per currency — never summed or converted.
     expect(card).toContain("netCollectedForCreatedOrders.map((amount) =>");
     expect(card).toContain("formatMoney(amount)");
@@ -532,9 +589,9 @@ describe("navigation consistency", () => {
     const tab = (id: string) =>
       [...SELLER_TABS.left, ...SELLER_TABS.right].find((entry) => entry.id === id);
     expect(tab("inbox")?.to).toBe("/app/inbox");
-    expect(tab("inbox")?.requiresAll).toEqual([homeQuickActionPermission("inbox")]);
+    expect(tab("inbox")?.requiresAll).toEqual(homeQuickActionPermissions("inbox"));
     expect(tab("sales")?.to).toBe("/app/pos");
-    expect(tab("sales")?.requiresAll).toEqual([homeQuickActionPermission("newSale")]);
+    expect(tab("sales")?.requiresAll).toEqual(homeQuickActionPermissions("newSale"));
 
     const owner = createFixtureCapabilityView(UI_PERMISSION_KEYS);
     const config = filterBusinessNavConfig(getBusinessNavConfig("online-seller"), owner);
@@ -579,5 +636,65 @@ describe("reduced motion and layout CSS", () => {
     expect(css).toMatch(
       /button\.glass-tile:focus-visible \{\s*outline: 3px solid var\(--border-focus\);\s*outline-offset: 3px;/,
     );
+  });
+});
+
+// ── Financial privacy helpers (src/lib/home-query.ts) ────────────────────────
+
+describe("Home finance access", () => {
+  const owner = createFixtureCapabilityView(UI_PERMISSION_KEYS);
+  const noReconcile = createFixtureCapabilityView(
+    UI_PERMISSION_KEYS.filter((key) => key !== "payments.reconcile"),
+  );
+
+  it("is granted only for a confirmed snapshot holding both finance keys and a good read", () => {
+    expect(resolveHomeFinanceAccess(owner, false)).toBe("granted");
+    expect(resolveHomeFinanceAccess(owner, true)).toBe("unverified");
+    expect(resolveHomeFinanceAccess(noReconcile, false)).toBe("denied");
+    expect(resolveHomeFinanceAccess({ ...owner, stale: true }, false)).toBe("unverified");
+    expect(resolveHomeFinanceAccess({ ...owner, state: "pending" }, false)).toBe("unverified");
+    expect(resolveHomeFinanceAccess({ ...owner, state: "denied" }, false)).toBe("unverified");
+  });
+
+  it("recognises only real access refusals as access loss", () => {
+    expect(isHomeAccessError(new Error("Not authenticated"))).toBe(true);
+    expect(isHomeAccessError(new Error("No active organization membership"))).toBe(true);
+    expect(isHomeAccessError(new Error("Home requires an operational read permission"))).toBe(true);
+    expect(isHomeAccessError(Object.assign(new Error("x"), { status: 401 }))).toBe(true);
+    expect(isHomeAccessError(Object.assign(new Error("x"), { statusCode: 403 }))).toBe(true);
+    expect(isHomeAccessError(new Error("getHome finance orders: connection reset"))).toBe(false);
+    expect(isHomeAccessError(Object.assign(new Error("x"), { status: 500 }))).toBe(false);
+    expect(isHomeAccessError("Not authenticated")).toBe(false);
+  });
+
+  it("evicts a principal's Home entries once when confirmation is lost, and only theirs", () => {
+    const client = new QueryClient();
+    const mine = homeQueryKey("u1", "o1", "today");
+    const theirs = homeQueryKey("u2", "o1", "today");
+    client.setQueryData(mine, { held: true });
+    client.setQueryData(theirs, { held: true });
+
+    enforceHomeFinanceCache(client, "u1", "o1", true);
+    expect(client.getQueryData(mine)).toEqual({ held: true });
+
+    enforceHomeFinanceCache(client, "u1", "o1", false);
+    expect(client.getQueryData(mine)).toBeUndefined();
+    expect(client.getQueryData(theirs)).toEqual({ held: true });
+
+    // Still lost: a later entry (e.g. a counts-only refetch) is left alone.
+    client.setQueryData(mine, { refetched: true });
+    enforceHomeFinanceCache(client, "u1", "o1", false);
+    expect(client.getQueryData(mine)).toEqual({ refetched: true });
+  });
+
+  it("Home wires the gate in before its read and polls while money can show", () => {
+    const home = code(HOME);
+    const gate = home.indexOf("enforceHomeFinanceCache(queryClient");
+    const read = home.indexOf("const homeQuery = useQuery(");
+    expect(gate).toBeGreaterThan(0);
+    expect(gate).toBeLessThan(read);
+    expect(home).toContain("useSensitiveCapabilityRevalidation(");
+    expect(home).toContain("data: homeAccessLost ? undefined : homeQuery.data,");
+    expect(home).toContain("financeAccess={financeAccess}");
   });
 });

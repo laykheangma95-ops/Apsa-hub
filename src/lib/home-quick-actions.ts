@@ -40,38 +40,55 @@ const TARGET: Record<HomeQuickActionId, HomeQuickActionTarget> = {
 };
 
 /**
- * The permission each card needs — the SAME key its destination's screen and
- * server functions require, so a card is never a link into a refusal:
+ * Every permission each card needs — the SAME keys its destination's screen
+ * and server functions require, so a card is never a link into a refusal:
  *
  *   newSale     orders.create  POS sells through createOrder (and the nav's
  *                              Sales tab is gated on the same key).
  *   newOrder    orders.create  createOrder; the Orders list's "+" uses it too.
+ *               products.read  the sheet's product picker is mandatory — an
+ *                              order cannot be built without it — and reads
+ *                              the catalog through getProducts, which the
+ *                              server gates on products.read. Without it the
+ *                              sheet opens onto a picker that can only fail.
  *   packOrders  orders.read    listReadyToPack (src/server/fulfillment); label
  *                              printing inside re-checks its own narrower key.
  *   inbox       messages.read  every Inbox read.
  *
- * The UI gate is presentation only; the server re-authorizes every call.
+ * A card is available only when ALL of its keys are granted. The UI gate is
+ * presentation only; the server re-authorizes every call.
  */
-const PERMISSION: Record<HomeQuickActionId, UiPermissionKey> = {
-  newSale: "orders.create",
-  newOrder: "orders.create",
-  packOrders: "orders.read",
-  inbox: "messages.read",
+const PERMISSIONS: Record<HomeQuickActionId, readonly UiPermissionKey[]> = {
+  newSale: ["orders.create"],
+  newOrder: ["orders.create", "products.read"],
+  packOrders: ["orders.read"],
+  inbox: ["messages.read"],
 };
 
 export function homeQuickActionTarget(id: HomeQuickActionId): HomeQuickActionTarget {
   return TARGET[id];
 }
 
-export function homeQuickActionPermission(id: HomeQuickActionId): UiPermissionKey {
-  return PERMISSION[id];
+export function homeQuickActionPermissions(id: HomeQuickActionId): readonly UiPermissionKey[] {
+  return PERMISSIONS[id];
+}
+
+/**
+ * Whether one card may be used. `can` is the caller's fail-closed capability
+ * reader; every key must hold.
+ */
+export function homeQuickActionAvailable(
+  id: HomeQuickActionId,
+  can: (key: UiPermissionKey) => boolean,
+): boolean {
+  return PERMISSIONS[id].every((key) => can(key));
 }
 
 export interface HomeQuickActionState {
   id: HomeQuickActionId;
   target: HomeQuickActionTarget;
   /**
-   * False when this member lacks the destination's permission. The card still
+   * False when this member lacks any of the destination's permissions. The card still
    * holds its place in the grid — four squares stay four squares — but renders
    * as a plain, non-interactive tile that says it is not available, never as a
    * button that leads to a refusal.
@@ -89,6 +106,6 @@ export function homeQuickActions(
   return HOME_QUICK_ACTION_IDS.map((id) => ({
     id,
     target: TARGET[id],
-    available: can(PERMISSION[id]),
+    available: homeQuickActionAvailable(id, can),
   }));
 }

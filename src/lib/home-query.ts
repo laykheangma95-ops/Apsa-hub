@@ -1,4 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
+import type { CapabilityView } from "@/lib/capabilities";
+import { isPermissionDeniedError } from "@/lib/team-errors";
 import type { MetricRange } from "@/types";
 
 /**
@@ -72,4 +74,107 @@ export function enforceHomeCachePrincipal(
   if (LAST_PRINCIPAL.get(queryClient) === principal) return;
   clearHomeQueries(queryClient);
   LAST_PRINCIPAL.set(queryClient, principal);
+}
+
+// ── Financial figures: display gate and grant eviction ──────────────────────
+
+/**
+ * The keys the server's Home finance section requires (canReadFinancials in
+ * src/server/home/service.ts). Mirrored here only to decide whether a figure
+ * the server already returned may still be DRAWN; the server re-checks on
+ * every read regardless.
+ */
+export const HOME_FINANCE_PERMISSIONS = ["orders.read", "payments.reconcile"] as const;
+
+/**
+ * Whether Home may draw the money it holds right now.
+ *
+ * - `granted`    — the capability snapshot is currently confirmed by the
+ *                  server (canSensitive) AND holds every finance key AND
+ *                  Home's own latest read succeeded.
+ * - `denied`     — a confirmed snapshot says this member lacks a finance key.
+ * - `unverified` — anything else: the snapshot is pending, its latest refresh
+ *                  failed, the session no longer resolves to an active member,
+ *                  or Home's latest read failed. A figure fetched while access
+ *                  held is not evidence that it still holds.
+ */
+export type HomeFinanceAccess = "granted" | "denied" | "unverified";
+
+export function resolveHomeFinanceAccess(
+  capabilities: Pick<CapabilityView, "state" | "stale" | "canSensitive">,
+  homeReadFailed: boolean,
+): HomeFinanceAccess {
+  const confirmed = capabilities.state === "ready" && !capabilities.stale;
+  if (!confirmed) return "unverified";
+  if (!HOME_FINANCE_PERMISSIONS.every((key) => capabilities.canSensitive(key))) return "denied";
+  return homeReadFailed ? "unverified" : "granted";
+}
+
+/**
+ * True for the exact refusals Home's read boundary throws when the caller is
+ * no longer an authenticated active member with an operational read
+ * (src/api/home.ts, src/server/home/service.ts) — or a transport-level 401 or
+ * 403. Never a loose substring match: a database failure is a retryable
+ * outage, not a revocation.
+ */
+export function isHomeAccessError(error: unknown): boolean {
+  if (isPermissionDeniedError(error)) return true;
+  if (!(error instanceof Error)) return false;
+  if (error.message === "Home requires an operational read permission") return true;
+  const status =
+    (error as { status?: unknown }).status ?? (error as { statusCode?: unknown }).statusCode;
+  return status === 401 || status === 403;
+}
+
+/** The last finance answer each principal's Home cache was filled under. */
+const LAST_FINANCE_GRANT = new WeakMap<QueryClient, Map<string, boolean>>();
+
+/**
+ * Evict this principal's Home entries — and cancel their in-flight reads — the
+ * moment Home's finance access stops being confirmed, so a figure fetched
+ * while it held cannot be read back out of the cache, and a response that was
+ * already on the wire cannot land afterwards and restore it (a cancelled
+ * query discards its result).
+ *
+ * Same shape as enforceCustomerSensitiveCache (src/lib/customers-query.ts):
+ * call it during render, before Home's useQuery, so no frame is drawn from an
+ * entry that should already be gone. A no-op while access keeps holding, and
+ * again while it stays lost, so ordinary caching is untouched. Never throws;
+ * the render-time gate (resolveHomeFinanceAccess) still hides the value.
+ */
+export function enforceHomeFinanceCache(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+  financeConfirmed: boolean,
+): void {
+  try {
+    let record = LAST_FINANCE_GRANT.get(queryClient);
+    if (!record) {
+      record = new Map();
+      LAST_FINANCE_GRANT.set(queryClient, record);
+    }
+    const tag = `${userId}/${organizationId}`;
+    const previous = record.get(tag);
+    record.set(tag, financeConfirmed);
+    if (financeConfirmed || previous === false) return;
+    evictHomePrincipal(queryClient, userId, organizationId);
+  } catch {
+    // Never block a render.
+  }
+}
+
+/** Cancel and drop one principal's Home entries. Never throws. */
+export function evictHomePrincipal(
+  queryClient: QueryClient,
+  userId: string,
+  organizationId: string,
+): void {
+  try {
+    const queryKey = [...HOME_QUERY_PREFIX, userId, organizationId];
+    void queryClient.cancelQueries({ queryKey }).catch(() => undefined);
+    queryClient.removeQueries({ queryKey });
+  } catch {
+    // Never block a render.
+  }
 }

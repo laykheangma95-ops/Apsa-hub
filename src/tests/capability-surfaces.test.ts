@@ -28,6 +28,8 @@ const SURFACES: Array<{
   uiFile: string;
   key: string;
   serverFile: string;
+  /** The component that reads the capability hook, when the key lives in a helper. */
+  hookFile?: string;
 }> = [
   {
     name: "Orders list",
@@ -50,11 +52,21 @@ const SURFACES: Array<{
   {
     // Add product left Home with the redesign; it stays on the catalogue
     // ("Product catalogue — add product" below). Home's New order card opens
-    // the create-order sheet behind the key createOrder enforces.
+    // the create-order sheet behind the key createOrder enforces — and, since
+    // the sheet's product picker is mandatory, the catalog read's key too.
+    // The keys live in Home's quick-action table; Home reads the hook.
     name: "Home — new order quick action",
-    uiFile: "src/routes/app.index.tsx",
+    uiFile: "src/lib/home-quick-actions.ts",
     key: "orders.create",
     serverFile: "src/server/orders/service.ts",
+    hookFile: "src/routes/app.index.tsx",
+  },
+  {
+    name: "Home — new order quick action (product picker)",
+    uiFile: "src/lib/home-quick-actions.ts",
+    key: "products.read",
+    serverFile: "src/server/products/service.ts",
+    hookFile: "src/routes/app.index.tsx",
   },
   {
     name: "Orders list — new order action",
@@ -242,7 +254,7 @@ describe("each gated surface uses the key its server function enforces", () => {
 });
 
 describe("gated surfaces read capabilities from the one shared hook", () => {
-  const uiFiles = [...new Set(SURFACES.map((surface) => surface.uiFile))];
+  const uiFiles = [...new Set(SURFACES.map((surface) => surface.hookFile ?? surface.uiFile))];
 
   for (const file of uiFiles) {
     it(`${file} uses useCapabilities()`, () => {

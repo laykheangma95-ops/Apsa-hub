@@ -2,12 +2,19 @@ import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { SkeletonBlock } from "@/design-system";
+import type { HomeFinanceAccess } from "@/lib/home-query";
 import type { HomeSummaryView } from "@/lib/home-summary-view";
 import { formatMoney } from "@/lib/money";
 
 interface TodaySalesCardProps {
   /** Today's view from resolveHomeSummaryView — the only gate on what may show. */
   view: HomeSummaryView;
+  /**
+   * resolveHomeFinanceAccess — whether money the summary carries may be drawn
+   * NOW. The server's section status says what it returned; this says whether
+   * access is still confirmed. Both must hold.
+   */
+  financeAccess: HomeFinanceAccess;
   onRetry: () => void;
   /** analytics.read — Week and Month live on Analytics, not here. */
   analyticsAvailable: boolean;
@@ -28,10 +35,16 @@ interface TodaySalesCardProps {
  * Every state keeps the same three rows — label, value, caption — so the card
  * is the same height loading as loaded, and the tiles under it never jump.
  */
-export function TodaySalesCard({ view, onRetry, analyticsAvailable }: TodaySalesCardProps) {
+export function TodaySalesCard({
+  view,
+  financeAccess,
+  onRetry,
+  analyticsAvailable,
+}: TodaySalesCardProps) {
   const { t } = useTranslation();
   const summary = view.kind === "ready" ? view.summary : null;
-  const financeShown = summary?.finance.status === "available";
+  const finance = summary && financeAccess === "granted" ? summary.finance : null;
+  const financeShown = finance?.status === "available";
 
   return (
     <section
@@ -91,9 +104,9 @@ export function TodaySalesCard({ view, onRetry, analyticsAvailable }: TodaySales
         {summary ? (
           <>
             <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3">
-              {summary.finance.status === "available" ? (
-                summary.finance.data.netCollectedForCreatedOrders.length > 0 ? (
-                  summary.finance.data.netCollectedForCreatedOrders.map((amount) => (
+              {finance?.status === "available" ? (
+                finance.data.netCollectedForCreatedOrders.length > 0 ? (
+                  finance.data.netCollectedForCreatedOrders.map((amount) => (
                     <p key={amount.currency} className="text-financial-lg text-text-primary">
                       {formatMoney(amount)}
                     </p>
@@ -104,7 +117,7 @@ export function TodaySalesCard({ view, onRetry, analyticsAvailable }: TodaySales
               ) : (
                 <p className="text-body-sm text-text-secondary">
                   {t(
-                    summary.finance.status === "permission_denied"
+                    financeAccess === "denied" || summary.finance.status === "permission_denied"
                       ? "home.financialsUnavailable"
                       : "home.financialsError",
                   )}

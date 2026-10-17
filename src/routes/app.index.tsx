@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getOrganizationProfileFn } from "@/api/org";
 import { getHomeSummary, lookupVariantByBarcode } from "@/lib/api";
@@ -11,7 +11,14 @@ import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeQuickActions } from "@/components/home/HomeQuickActions";
 import { TodaySalesCard } from "@/components/home/TodaySalesCard";
 import { customerKeys } from "@/lib/customers-query";
-import { HOME_QUERY_PREFIX, homeQueryKey } from "@/lib/home-query";
+import {
+  enforceHomeFinanceCache,
+  evictHomePrincipal,
+  HOME_QUERY_PREFIX,
+  homeQueryKey,
+  isHomeAccessError,
+  resolveHomeFinanceAccess,
+} from "@/lib/home-query";
 import {
   attentionDestination,
   attentionItems,
@@ -19,13 +26,17 @@ import {
   attentionSummary,
   attentionSummaryKey,
 } from "@/lib/home-attention";
-import { homeQuickActions, type HomeQuickActionState } from "@/lib/home-quick-actions";
+import {
+  homeQuickActionAvailable,
+  homeQuickActions,
+  type HomeQuickActionState,
+} from "@/lib/home-quick-actions";
 import { resolveHomeSummaryView } from "@/lib/home-summary-view";
 import { ordersKeys } from "@/lib/orders-query";
 import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
 import { resolveTeamIdentityView } from "@/lib/team-view";
 import { AttentionCard, BottomNav, Disclosure, ScreenBleed, SkeletonBlock } from "@/design-system";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { useCapabilities, useSensitiveCapabilityRevalidation } from "@/hooks/use-capabilities";
 import { useHeldTileSize } from "@/hooks/use-held-tile-size";
 import type { MetricRange } from "@/types";
 
@@ -64,18 +75,54 @@ function BusinessHome() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const tiles = useHeldTileSize();
 
+  /*
+   * Today's money is drawn only while the server has just confirmed this
+   * member still holds the finance keys (src/lib/home-query.ts). The moment
+   * that stops — a revocation, an expired session, a capability refresh that
+   * failed — this principal's Home entries are cancelled and dropped, during
+   * render and before the read below, so neither the cache nor a response
+   * already in flight can put a grant-era figure back on screen.
+   */
+  const financeConfirmed = resolveHomeFinanceAccess(capabilities, false) === "granted";
+  enforceHomeFinanceCache(queryClient, session.userId, organizationId, financeConfirmed);
+  // Re-ask the server while money can be on screen (the same single
+  // capability query; it only polls). Keyed on can(), not canSensitive(), so a
+  // snapshot left stale by one failed refresh is retried and can recover.
+  useSensitiveCapabilityRevalidation(
+    session.userId,
+    organizationId,
+    capabilities.can("orders.read") && capabilities.can("payments.reconcile"),
+  );
+
   const homeQuery = useQuery({
     queryKey: homeQueryKey(session.userId, organizationId, HOME_RANGE),
     queryFn: () => getHomeSummary(HOME_RANGE),
   });
 
+  /*
+   * A refusal from Home's own read (expired session, revoked membership, no
+   * operational read left) means everything it holds is no longer this
+   * member's to see: nothing retained is drawn, and the entries are dropped.
+   */
+  const homeAccessLost = homeQuery.isError && isHomeAccessError(homeQuery.error);
+  // Only while something is still held, so a refusal that repeats after the
+  // eviction cannot start a remove → refetch → refuse loop.
+  const homeDataHeld = homeQuery.data !== undefined;
+  useEffect(() => {
+    if (homeAccessLost && homeDataHeld) {
+      evictHomePrincipal(queryClient, session.userId, organizationId);
+    }
+  }, [homeAccessLost, homeDataHeld, queryClient, session.userId, organizationId]);
+
   // The one place allowed to decide whether fetched data may be shown as
   // Today's numbers — see src/lib/home-summary-view.ts.
   const view = resolveHomeSummaryView({
     range: HOME_RANGE,
-    data: homeQuery.data,
+    data: homeAccessLost ? undefined : homeQuery.data,
     isError: homeQuery.isError,
   });
+  // A failed refresh keeps the last counts on screen; never the last money.
+  const financeAccess = resolveHomeFinanceAccess(capabilities, homeQuery.isError);
   const summary = view.kind === "ready" ? view.summary : undefined;
   const attention = summary ? attentionItems(summary) : [];
   // An empty attention list is only reassuring when Home actually knows the
@@ -105,10 +152,20 @@ function BusinessHome() {
    * keeps its place and says so; it is never a button into a refusal.
    */
   const quickActions = homeQuickActions((key) => capabilities.can(key));
-  const canCreateOrder = capabilities.can("orders.create");
+  // The tile's own gate (orders.create AND products.read) — the sheet is never
+  // mounted for a member whose tile is unavailable.
+  const canCreateOrder = homeQuickActionAvailable("newOrder", (key) => capabilities.can(key));
+
+  // Losing either key while the sheet is open closes it, and it stays closed:
+  // regaining access later must not pop it back open uninvited.
+  useEffect(() => {
+    if (!canCreateOrder) setCreateOrderOpen(false);
+  }, [canCreateOrder]);
 
   function handleQuickAction(action: HomeQuickActionState) {
+    if (!action.available) return;
     if (action.target.kind === "createOrderSheet") {
+      if (!canCreateOrder) return;
       setCreateOrderOpen(true);
       return;
     }
@@ -158,6 +215,7 @@ function BusinessHome() {
       <main className="home-main screen-gutter mx-auto w-full max-w-[var(--screen-max)] pt-2.5">
         <TodaySalesCard
           view={view}
+          financeAccess={financeAccess}
           onRetry={() => void homeQuery.refetch()}
           analyticsAvailable={capabilities.can("analytics.read")}
         />
@@ -266,7 +324,7 @@ function BusinessHome() {
        */}
       {canCreateOrder ? (
         <CreateRealOrderSheet
-          open={createOrderOpen}
+          open={createOrderOpen && canCreateOrder}
           onOpenChange={setCreateOrderOpen}
           userId={session.userId}
           organizationId={organizationId}
