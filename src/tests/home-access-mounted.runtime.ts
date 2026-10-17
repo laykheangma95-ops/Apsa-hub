@@ -1392,13 +1392,18 @@ describe("Home money: the deadline while the tab is hidden", () => {
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
 
     let shownOnReturn: boolean[] = [];
+    let cachedOnReturn: Money[] = [];
     await setTabVisible(true, () => {
       shownOnReturn = A_FIGURES.map(shows);
+      cachedOnReturn = cachedFinance();
     });
     expect(shownOnReturn).toEqual([false, false]);
-    await settle(5);
+    expect(cachedOnReturn).toEqual([]);
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
     expect(cachedFinance()).toEqual([]);
+    // Nothing further on this clock: the next advanceTimersByTime() would
+    // (on Bun 1.3) rewind Date to the timer clock, i.e. wind BOTH clocks
+    // back 31s — something no real device does.
   });
 });
 
