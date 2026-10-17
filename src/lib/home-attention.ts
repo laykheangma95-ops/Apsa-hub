@@ -62,6 +62,101 @@ export function attentionNoticeKey(
   return attentionCount === 0 ? "home.noAttention" : null;
 }
 
+// ── The rows themselves ──────────────────────────────────────────────────────
+
+/**
+ * One row per kind of work with a non-zero count, each carrying the server's
+ * own count for it unchanged. A denied, failed or truncated section adds no
+ * row — attentionNoticeKey / attentionSummary say so instead.
+ */
+export function attentionItems(summary: HomeSummary): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  if (summary.orders.status === "available") {
+    if (summary.orders.data.awaitingPaymentCount > 0) {
+      items.push({
+        id: "awaiting_payment",
+        count: summary.orders.data.awaitingPaymentCount,
+        tone: "warning",
+      });
+    }
+    if (summary.orders.data.actionNeededCount > 0) {
+      items.push({
+        id: "orders_needing_action",
+        count: summary.orders.data.actionNeededCount,
+        tone: "warning",
+      });
+    }
+  }
+  if (summary.payments.status === "available" && summary.payments.data.needsReviewCount > 0) {
+    items.push({
+      id: "payments_needing_review",
+      count: summary.payments.data.needsReviewCount,
+      tone: "danger",
+    });
+  }
+  if (
+    summary.inventory.status === "available" &&
+    summary.inventory.data.outOfStockVariantCount > 0
+  ) {
+    items.push({
+      id: "low_stock",
+      count: summary.inventory.data.outOfStockVariantCount,
+      tone: "danger",
+    });
+  }
+  if (summary.delivery.status === "available" && summary.delivery.data.actionCount > 0) {
+    items.push({
+      id: "awaiting_delivery",
+      count: summary.delivery.data.actionCount,
+      tone: "info",
+    });
+  }
+  return items;
+}
+
+// ── The collapsed Needs Attention line ───────────────────────────────────────
+
+/**
+ * What the collapsed Needs Attention row says, and the number on its badge.
+ *
+ * The badge counts ROWS — kinds of work waiting — never the sum of the rows'
+ * counts. The rows overlap: an unpaid draft is in both "awaiting payment" and
+ * "needing action", and a payment under review usually belongs to an order
+ * awaiting payment. Adding them up would present one order two or three times
+ * as if it were several, so no total of orders is ever shown. Each row keeps
+ * its own exact count once expanded.
+ *
+ * The reassuring "clear" state is reachable through exactly the same path as
+ * attentionNoticeKey's clean zero: no rows AND a complete picture.
+ */
+export type AttentionSummary =
+  | { kind: "loading" }
+  | { kind: "error" }
+  | { kind: "unavailable" }
+  | { kind: "count"; rows: number; complete: boolean }
+  | { kind: "incomplete" }
+  | { kind: "clear" };
+
+export function attentionSummary(
+  view: { kind: "loading" } | { kind: "error" } | { kind: "ready"; summary: HomeSummary },
+  rowCount: number,
+): AttentionSummary {
+  if (view.kind !== "ready") return { kind: view.kind };
+  const completeness = attentionCompleteness(view.summary);
+  if (completeness === "unavailable") return { kind: "unavailable" };
+  if (rowCount > 0) return { kind: "count", rows: rowCount, complete: completeness === "complete" };
+  return completeness === "complete" ? { kind: "clear" } : { kind: "incomplete" };
+}
+
+/**
+ * The copy key for each collapsed state; the two count keys are pluralised by
+ * i18next. Rows from a partial picture say so even while collapsed.
+ */
+export function attentionSummaryKey(state: AttentionSummary): string {
+  if (state.kind === "count" && !state.complete) return "home.attentionSummary.countIncomplete";
+  return `home.attentionSummary.${state.kind}`;
+}
+
 // ── Where an attention row takes the merchant ────────────────────────────────
 
 /** Every destination an attention row may point at. */

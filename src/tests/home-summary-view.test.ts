@@ -122,15 +122,20 @@ describe("the route is wired to the decision, not to keepPreviousData", () => {
     expect(source).toContain('from "@/lib/home-summary-view"');
   });
 
-  it("the segmented control is not gated behind the fetched summary", () => {
-    // It must stay mounted (and reflect the tap immediately) whether the
-    // query for the new range is loading, erroring, or done: it appears
-    // before the first place that reads real numbers off `summary`.
+  /*
+   * Home used to carry a Today/Week/Month control; the redesign shows Today
+   * only and links Week and Month to Analytics (src/routes/app.analytics.tsx,
+   * which keeps its own range control and its own resolveAnalyticsSection
+   * gate). With one range there is still exactly one range for the key, the
+   * fetch and the view decision — never a second source that could drift.
+   */
+  it("fetches, keys and judges Home's data with the one pinned range", () => {
     const source = readSource(ROUTE);
-    const controlIdx = source.indexOf("<SegmentedControl");
-    const firstSummaryReadIdx = source.indexOf("summary.finance.status");
-    expect(controlIdx).toBeGreaterThan(-1);
-    expect(firstSummaryReadIdx).toBeGreaterThan(-1);
-    expect(controlIdx).toBeLessThan(firstSummaryReadIdx);
+    expect(source).toContain('const HOME_RANGE: MetricRange = "today";');
+    expect(source).toContain("homeQueryKey(session.userId, organizationId, HOME_RANGE)");
+    expect(source).toContain("getHomeSummary(HOME_RANGE)");
+    expect(source).toContain("range: HOME_RANGE,");
+    expect(source).not.toContain("<SegmentedControl");
+    expect(source).not.toContain("useState<MetricRange>");
   });
 });

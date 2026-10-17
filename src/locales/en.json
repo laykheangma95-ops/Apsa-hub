@@ -505,7 +505,51 @@
       "title": "Today's numbers didn't load",
       "body": "The data didn't come back. Check your connection and try again."
     },
-    "attentionAction": "{{label}}: {{count}}. Open"
+    "attentionAction": "{{label}}: {{count}}. Open",
+    "greet": {
+      "morning": "Good morning",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening"
+    },
+    "today": {
+      "title": "Today's sales",
+      "definition": "Net collected for orders created today",
+      "none": "No net collection yet for orders created today",
+      "orders_one": "{{count}} order",
+      "orders_other": "{{count}} orders",
+      "analytics": "Analytics",
+      "analyticsLabel": "Analytics: this week and this month"
+    },
+    "attentionSummary": {
+      "loading": "Checking…",
+      "error": "Couldn't check right now",
+      "unavailable": "Not available for your role",
+      "count_one": "{{count}} kind of work waiting",
+      "count_other": "{{count}} kinds of work waiting",
+      "countIncomplete_one": "{{count}} kind of work waiting · some checks didn't finish",
+      "countIncomplete_other": "{{count}} kinds of work waiting · some checks didn't finish",
+      "incomplete": "Some checks didn't finish",
+      "clear": "All clear in the areas you can access"
+    },
+    "quick": {
+      "newSale": {
+        "title": "New sale",
+        "description": "Check out at the counter"
+      },
+      "newOrder": {
+        "title": "New order",
+        "description": "Enter an order by hand"
+      },
+      "packOrders": {
+        "title": "Pack orders",
+        "description": "Confirmed orders to pack"
+      },
+      "inbox": {
+        "title": "Inbox",
+        "description": "Every customer conversation"
+      },
+      "unavailable": "Not available for your role"
+    }
   },
   "status": {
     "unread": "Unread",
