@@ -84,6 +84,8 @@ let holdHome = false;
 const heldHome: (() => void)[] = [];
 let homeReads = 0;
 let capabilityReads = 0;
+/** Date.now() at which each capability request was dispatched, in order. */
+const capabilityDispatches: number[] = [];
 /**
  * Capability reads held open until released — a refresh that never answers.
  * The answer is decided when the request is MADE (like the real boundary), so
@@ -128,6 +130,7 @@ mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: {} }));
 mock.module("@/api/capabilities", () => ({
   getActiveMemberCapabilitiesFn: async (): Promise<CapabilityResult> => {
     capabilityReads++;
+    capabilityDispatches.push(Date.now());
     const answer = capabilityAnswer();
     await Promise.resolve();
     if (holdCapabilities) await new Promise<void>((resolve) => heldCapabilities.push(resolve));
@@ -242,11 +245,15 @@ const { createRoot } = await import("react-dom/client");
 const { QueryClient, QueryClientProvider, useQueryClient } = await import("@tanstack/react-query");
 const { CapabilityProvider } = await import("@/hooks/use-capabilities");
 const { capabilityQueryKey } = await import("@/lib/capabilities");
+const { capabilityConfirmation } = await import("@/lib/capability-confirmation");
 const { enforceHomeCachePrincipal, HOME_QUERY_PREFIX } = await import("@/lib/home-query");
 const { formatMoney } = await import("@/lib/money");
 const i18n = (await import("@/lib/i18n")).default;
 const { Route } = await import("@/routes/app.index");
 const BusinessHome = (Route as any).component as () => React.ReactElement;
+
+/** The /app loader's SSR seed, when a test supplies one (as app.tsx does). */
+let seed: CapabilityResult | undefined;
 
 /** The /app layout's part: partition Home's cache during render, then the provider. */
 function AppLayout() {
@@ -254,7 +261,7 @@ function AppLayout() {
   enforceHomeCachePrincipal(queryClient, route.userId, route.organizationId);
   return createElement(
     CapabilityProvider,
-    { userId: route.userId, organizationId: route.organizationId },
+    { userId: route.userId, organizationId: route.organizationId, initialResult: seed },
     createElement(BusinessHome),
   );
 }
@@ -326,6 +333,21 @@ async function mount() {
   await readsSettled();
 }
 
+/** mount() for a test whose first capability answer is held: no wait for reads. */
+async function mountUnsettled() {
+  client = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  });
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  frames = [];
+  observer = new MutationObserver(() => frames.push(text()));
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  root = createRoot(container);
+  await act(async () => root!.render(tree()));
+  await settle(10);
+}
+
 async function rerender() {
   await act(async () => root!.render(tree()));
   await readsSettled();
@@ -358,6 +380,9 @@ async function unmount() {
 }
 
 afterEach(async () => {
+  // Work React or React Query queued on a fake timer would be dropped by
+  // useRealTimers() below and wedge the next test: let it run first.
+  if (fakeClock) await settle(5);
   await unmount();
   holdCapabilities = false;
   while (heldCapabilities.length) heldCapabilities.shift()!();
@@ -376,6 +401,8 @@ afterEach(async () => {
   while (heldHome.length) heldHome.shift()!();
   homeReads = 0;
   capabilityReads = 0;
+  capabilityDispatches.length = 0;
+  seed = undefined;
   route.userId = USER_A;
   route.organizationId = ORG_1;
 });
@@ -677,6 +704,11 @@ async function advance(ms: number) {
   await settle(30);
 }
 
+/** Move the clock forward 1s at a time, letting every answer land as it arrives. */
+async function advanceInSteps(ms: number, step = 1_000) {
+  for (let moved = 0; moved < ms; moved += step) await advance(Math.min(step, ms - moved));
+}
+
 /** When the server last positively answered this tab's principal. */
 const confirmedAt = () =>
   client.getQueryState(capabilityQueryKey(route.userId, route.organizationId))?.dataUpdatedAt ?? 0;
@@ -868,7 +900,10 @@ describe("Home money: the deadline does not disturb normal operation", () => {
     await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
     server.homeFailure = new Error("getHome finance orders: connection reset");
     await refreshHome();
-    await advance(MAX_AGE_MS * 2);
+    // In steps, so each poll's answer is handled as it arrives — "capabilities
+    // stay fresh". (One 60s jump would deliver all of them at the end, aged by
+    // up to 45s since they left, and correctly count as lapsed.)
+    await advanceInSteps(MAX_AGE_MS * 2);
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
     expect(shows("7 orders")).toBe(true);
     server.homeFailure = null;
@@ -1001,6 +1036,486 @@ describe("Home money: concurrency and lifecycle", () => {
     await advance(MAX_AGE_MS);
     expect(capabilityReads).toBe(caps);
     expect(text()).toBe("");
+  });
+});
+
+// ── Financial privacy: confirmation age is measured from DISPATCH ──────────
+//
+// The server checks permission while handling a request — after the browser
+// sent it. So a successful answer proves access only as of (at latest) the
+// moment the request left, never as of the moment the answer arrived. A slow
+// grant-era answer must not buy the figures a fresh 30s from its arrival.
+
+/** Let the OLDEST held capability response land; later ones stay held. */
+async function releaseOldestCapability() {
+  const releasedAt = Date.now();
+  await act(async () => {
+    heldCapabilities.shift()!();
+    for (let m = 0; m < 4; m++) await Promise.resolve();
+  });
+  // Landed — and was rendered — at the instant it was released.
+  expect(Date.now()).toBe(releasedAt);
+  await settle(30);
+}
+
+/**
+ * Advance until Date.now() === `at` EXACTLY, firing every timer due on the
+ * way and flushing React — but without advance()'s settling rounds, which
+ * move the clock on by a few more ms. For assertions on a boundary.
+ */
+async function jumpTo(at: number) {
+  await act(async () => {
+    jest.advanceTimersByTime(Math.max(0, at - Date.now()));
+    for (let m = 0; m < 4; m++) await Promise.resolve();
+  });
+  expect(Date.now()).toBe(at);
+}
+
+/** Advance until Date.now() === `at` (never backwards). */
+async function advanceTo(at: number) {
+  await advance(at - Date.now());
+}
+
+describe("Home money: a delayed successful capability answer (Codex P2)", () => {
+  it("15s request, revoked, answer at 29s: visible at 30s, gone at 45s and 46s, nothing cached", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+
+    // Every request from here on is held until a test releases it.
+    holdCapabilities = true;
+    await advanceTo(start + POLL_MS);
+    expect(heldCapabilities.length).toBe(1);
+    const dispatched = capabilityDispatches.at(-1)!;
+    expect(dispatched - start).toBeGreaterThanOrEqual(POLL_MS);
+    expect(dispatched - start).toBeLessThan(POLL_MS + 100);
+
+    // The server granted at dispatch; the revocation comes right after.
+    grant(USER_A, ORG_1, withoutReconcile());
+
+    // The grant-era answer is slow: it arrives 14s after it left (≈29s).
+    await advanceTo(dispatched + 14_000);
+    await releaseOldestCapability();
+
+    // ≈30s: inside the window that answer can vouch for (dispatch + 30s).
+    await advanceTo(dispatched + 15_000);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+
+    // ≈45s: dispatch + 30s — no longer vouched for.
+    const mark = frames.length;
+    await advanceTo(dispatched + MAX_AGE_MS);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    // ≈46s: still gone, from the screen and from memory.
+    await advanceTo(dispatched + MAX_AGE_MS + 1_000);
+    for (const figure of A_FIGURES) {
+      expect(shows(figure)).toBe(false);
+      expect(drewSince(mark + 1, figure)).toBe(false);
+    }
+    expect(cachedFinance()).toEqual([]);
+  });
+});
+
+const capabilityKey = () => capabilityQueryKey(route.userId, route.organizationId);
+const anyFigureSince = (start: number) => A_FIGURES.some((figure) => drewSince(start, figure));
+
+describe("Home money: an answer near the freshness boundary (measured from dispatch)", () => {
+  it("lands 29.9s after it left → shown, then gone at dispatch + 30,000ms, nothing cached", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    holdCapabilities = true;
+    await mountUnsettled();
+    expect(heldCapabilities.length).toBe(1);
+    const dispatched = capabilityDispatches[0]!;
+    expect(anyFigureSince(0)).toBe(false);
+
+    await advanceTo(dispatched + 29_900);
+    await releaseOldestCapability();
+    await waitFor(() => shows(A_FIGURES[0]!), "figures under a 29.9s-old confirmation");
+    expect(Date.now() - dispatched).toBeLessThan(MAX_AGE_MS);
+
+    await jumpTo(dispatched + MAX_AGE_MS - 1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+    await jumpTo(dispatched + MAX_AGE_MS);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    await jumpTo(dispatched + MAX_AGE_MS + 1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+
+  for (const lateBy of [0, 1, 5_000]) {
+    it(`lands ${MAX_AGE_MS + lateBy}ms after it left → never shown for a single frame, nothing cached`, async () => {
+      useFakeClock();
+      ownerOnOrg1();
+      holdCapabilities = true;
+      await mountUnsettled();
+      const dispatched = capabilityDispatches[0]!;
+      await advanceTo(dispatched + MAX_AGE_MS - 1_000);
+      await jumpTo(dispatched + MAX_AGE_MS + lateBy);
+      const mark = frames.length;
+      await releaseOldestCapability();
+      await advance(1_000);
+      expect(anyFigureSince(0)).toBe(false);
+      expect(anyFigureSince(mark)).toBe(false);
+      expect(cachedFinance()).toEqual([]);
+      // Re-asked (bounded), never a loop.
+      expect(capabilityReads).toBeLessThanOrEqual(3);
+    });
+  }
+});
+
+describe("Home money: slow answers, cancellations and overlapping refreshes", () => {
+  it("a slow grant-era answer does not mask the revocation the next answer reports", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    holdCapabilities = true;
+    await advanceTo(start + POLL_MS);
+    grant(USER_A, ORG_1, withoutReconcile());
+    await advance(10_000);
+    // The slow grant lands at ≈25s; the next poll (15s after an answer
+    // settles) answers at once, and says "revoked".
+    holdCapabilities = false;
+    const slowDispatch = capabilityDispatches.at(-1)!;
+    await releaseOldestCapability();
+    await advance(POLL_MS);
+    await waitFor(() => shows(NO_PERMISSION), "denied copy");
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    // …and it was reported inside the slow answer's own window.
+    expect(Date.now() - slowDispatch).toBeLessThan(MAX_AGE_MS);
+  });
+
+  it("a cancelled request's late answer is discarded: it neither shows money nor counts as a confirmation", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    holdCapabilities = true;
+    await advanceTo(start + POLL_MS);
+    expect(heldCapabilities.length).toBe(1);
+    // The grant-era request is cancelled (navigation, a reauthorization…).
+    await act(async () => {
+      await client.cancelQueries({ queryKey: capabilityKey() });
+    });
+    // The confirmation lapses; the re-ask is held too.
+    await advanceTo(start + MAX_AGE_MS + 1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(heldCapabilities.length).toBe(2);
+
+    // The cancelled answer (granted at 15s, so "fresh" until 45s by its own
+    // dispatch) finally arrives at 35s: discarded.
+    await advanceTo(start + 35_000);
+    const mark = frames.length;
+    await releaseOldestCapability();
+    await advance(1_000);
+    expect(anyFigureSince(mark)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    // The re-ask that is still current then answers: authorized recovery.
+    const homes = homeReads;
+    await releaseOldestCapability();
+    await waitFor(() => shows(A_FIGURES[0]!), "recovered figures");
+    expect(homeReads).toBeGreaterThan(homes);
+  });
+
+  it("two overlapping refreshes, newest answers first (revoked), oldest last (grant) → stays hidden", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    holdCapabilities = true;
+    await advanceTo(start + POLL_MS);
+    grant(USER_A, ORG_1, withoutReconcile());
+    await advance(2_000);
+    await act(async () => {
+      void client.refetchQueries({ queryKey: capabilityKey() }, { cancelRefetch: true });
+    });
+    await settle(5);
+    expect(heldCapabilities.length).toBe(2);
+
+    // Newest first: "revoked".
+    holdCapabilities = false;
+    await act(async () => {
+      heldCapabilities.pop()!();
+      for (let m = 0; m < 4; m++) await Promise.resolve();
+    });
+    await settle(30);
+    await waitFor(() => shows(NO_PERMISSION), "denied copy");
+    const mark = frames.length;
+    // Then the superseded grant-era answer.
+    await releaseOldestCapability();
+    await advance(POLL_MS);
+    expect(anyFigureSince(mark)).toBe(false);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+
+  it("two overlapping refreshes, both granted, out of order → the window follows the newer request only", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    holdCapabilities = true;
+    await advanceTo(start + POLL_MS);
+    await advance(2_000);
+    await act(async () => {
+      void client.refetchQueries({ queryKey: capabilityKey() }, { cancelRefetch: true });
+    });
+    await settle(5);
+    const newer = capabilityDispatches.at(-1)!;
+    expect(heldCapabilities.length).toBe(2);
+    // Newest first, then the superseded older one; everything after stays held.
+    await act(async () => {
+      heldCapabilities.pop()!();
+      for (let m = 0; m < 4; m++) await Promise.resolve();
+    });
+    await settle(30);
+    await releaseOldestCapability();
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+    // The superseded answer did not overwrite the newer request's provenance.
+    expect(capabilityConfirmation(client.getQueryData(capabilityKey()))?.wall).toBe(newer);
+    // Fresh until the newer request's dispatch + 30s — not one arrival-based ms more.
+    await jumpTo(newer + MAX_AGE_MS - 1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+    await jumpTo(newer + MAX_AGE_MS);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+});
+
+describe("Home money: confirmation provenance is per principal and per tenure", () => {
+  it("member A → member B: B's held confirmation never borrows A's recent stamp", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    grant(USER_B, ORG_1, OWNER);
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "member A figures");
+    holdCapabilities = true;
+    const toB = frames.length;
+    signIn(USER_B, ORG_1);
+    await act(async () => root!.render(tree()));
+    // Well inside A's own window.
+    await advance(5_000);
+    expect(anyFigureSince(toB)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "member B figures, confirmed for B");
+  });
+
+  it("organization A → B → A within 30s: A's still-recent stamp is from an earlier tenure and not reused", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    grant(USER_A, ORG_2, OWNER);
+    server.collected.set(ORG_2, [USD_2]);
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "org 1 figures");
+
+    signIn(USER_A, ORG_2);
+    await act(async () => root!.render(tree()));
+    await waitFor(() => shows(ORG_2_FIGURE), "org 2 figures");
+    await advance(2_000);
+
+    // Back to A within A's old 30s window; A's re-confirmation is held.
+    holdCapabilities = true;
+    const backToA = frames.length;
+    signIn(USER_A, ORG_1);
+    await act(async () => root!.render(tree()));
+    await advance(5_000);
+    expect(anyFigureSince(backToA)).toBe(false);
+    expect(drewSince(backToA, ORG_2_FIGURE)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "org 1 figures, re-confirmed");
+    expect(drewSince(backToA, ORG_2_FIGURE)).toBe(false);
+  });
+});
+
+/** Make the tab hidden or visible, and tell the page — as a browser does. */
+async function setTabVisible(visible: boolean, check?: () => void) {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (visible ? "visible" : "hidden"),
+  });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => !visible });
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    // Synchronously, before React's own scheduling gets a turn.
+    check?.();
+  });
+}
+
+describe("Home money: the deadline while the tab is hidden", () => {
+  afterEach(() => {
+    delete (document as any).visibilityState;
+    delete (document as any).hidden;
+  });
+
+  it("lapses on its timer while hidden, and stays gone when shown again", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    await setTabVisible(false);
+    holdCapabilities = true;
+    await advanceTo(start + MAX_AGE_MS + 1);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    const mark = frames.length;
+    await setTabVisible(true);
+    await advance(1_000);
+    expect(anyFigureSince(mark)).toBe(false);
+  });
+
+  it("timers frozen while hidden (device asleep): shown again past the deadline → gone before anything else runs", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const start = capabilityDispatches.at(-1)!;
+    holdCapabilities = true;
+    await setTabVisible(false);
+    // The wall clock moves 31s; no timer fires and the monotonic clock stands
+    // still — what a sleeping laptop or a frozen background tab looks like.
+    jest.setSystemTime(start + MAX_AGE_MS + 1_000);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(true);
+
+    let shownOnReturn: boolean[] = [];
+    await setTabVisible(true, () => {
+      shownOnReturn = A_FIGURES.map(shows);
+    });
+    expect(shownOnReturn).toEqual([false, false]);
+    await settle(5);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+  });
+});
+
+describe("Home money: recovery needs a new confirmation AND a new Home read", () => {
+  it("revoked → re-granted: money returns only after a fresh answer and a re-read landing under it", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    grant(USER_A, ORG_1, withoutReconcile());
+    await advance(POLL_MS);
+    await waitFor(() => shows(NO_PERMISSION), "denied copy");
+    expect(cachedFinance()).toEqual([]);
+
+    // Home stops polling once the finance keys are gone (its revalidation is
+    // keyed on can()); the next check — a focus, a navigation — re-asks.
+    grant(USER_A, ORG_1, OWNER);
+    const homes = homeReads;
+    const caps = capabilityDispatches.length;
+    await advance(POLL_MS);
+    expect(shows(A_FIGURES[0]!)).toBe(false);
+    await act(async () => {
+      void client.refetchQueries({ queryKey: capabilityKey() });
+    });
+    await settle(30);
+    await waitFor(() => shows(A_FIGURES[0]!), "re-granted figures");
+    expect(capabilityDispatches.length).toBeGreaterThan(caps);
+    expect(homeReads).toBeGreaterThan(homes);
+  });
+});
+
+describe("Home money: an SSR/loader-seeded capability snapshot", () => {
+  const ownerSnapshot = (): CapabilityResult => ({
+    status: "active",
+    userId: USER_A,
+    organizationId: ORG_1,
+    role: null,
+    permissions: OWNER,
+  });
+
+  it("is never treated as a confirmation: no money until this tab's own request answers, one request, a placeholder meanwhile", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    seed = ownerSnapshot();
+    holdCapabilities = true;
+    await mountUnsettled();
+    await waitFor(() => homeReads > 0 && client.isFetching() <= 1, "home read");
+    await advance(10_000);
+    // The seed renders the role-correct shell (tiles are available)…
+    expect(shows("New order")).toBe(true);
+    // …but never money, and not an error either: it is being confirmed.
+    expect(anyFigureSince(0)).toBe(false);
+    expect(shows(UNAVAILABLE)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    // Exactly one capability request — the seed's confirmation — no churn.
+    expect(capabilityReads).toBe(1);
+
+    await releaseOldestCapability();
+    await waitFor(() => shows(A_FIGURES[0]!), "confirmed figures");
+  });
+
+  it("whose confirmation hangs: still no money, re-asked at a bounded rate", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    seed = ownerSnapshot();
+    holdCapabilities = true;
+    await mountUnsettled();
+    await advance(3 * 60_000);
+    expect(anyFigureSince(0)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    // One re-ask per 30s once a request is too old to vouch for anything.
+    expect(capabilityReads).toBeGreaterThanOrEqual(2);
+    expect(capabilityReads).toBeLessThanOrEqual(8);
+  });
+
+  it("seeded with another principal's snapshot: nothing shown, nothing borrowed", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    seed = { ...ownerSnapshot(), userId: USER_B };
+    holdCapabilities = true;
+    await mountUnsettled();
+    await advance(10_000);
+    expect(anyFigureSince(0)).toBe(false);
+    expect(cachedFinance()).toEqual([]);
+    await releaseCapabilities();
+    await waitFor(() => shows(A_FIGURES[0]!), "own confirmed figures");
+  });
+});
+
+describe("Home money: no excess polling or Home reads under the new provenance", () => {
+  it("three healthy minutes: one capability request per 15s, zero Home re-reads, figures never flicker", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    const mark = frames.length;
+    const caps = capabilityReads;
+    const homes = homeReads;
+    await advanceInSteps(3 * 60_000);
+    expect(capabilityReads - caps).toBeGreaterThanOrEqual(11);
+    expect(capabilityReads - caps).toBeLessThanOrEqual(13);
+    expect(homeReads).toBe(homes);
+    expect(frames.slice(mark).every((frame) => frame.includes(A_FIGURES[0]!))).toBe(true);
+  });
+
+  it("lapsed and hung for three minutes: bounded capability re-asks and bounded Home reads", async () => {
+    useFakeClock();
+    ownerOnOrg1();
+    await mount();
+    await waitFor(() => shows(A_FIGURES[0]!), "owner figures");
+    holdCapabilities = true;
+    const caps = capabilityReads;
+    const homes = homeReads;
+    await advanceInSteps(3 * 60_000);
+    for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
+    expect(capabilityReads - caps).toBeLessThanOrEqual(8);
+    expect(homeReads - homes).toBeLessThanOrEqual(2);
   });
 });
 

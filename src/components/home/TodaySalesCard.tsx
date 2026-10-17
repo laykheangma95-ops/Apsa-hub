@@ -15,6 +15,12 @@ interface TodaySalesCardProps {
    * access is still confirmed. Both must hold.
    */
   financeAccess: HomeFinanceAccess;
+  /**
+   * The server's first confirmation of a seeded snapshot is still on its way
+   * (useSensitiveCapabilityFreshness → "confirming"): no money yet, but a
+   * placeholder rather than "unavailable".
+   */
+  financeConfirming?: boolean;
   onRetry: () => void;
   /** analytics.read — Week and Month live on Analytics, not here. */
   analyticsAvailable: boolean;
@@ -38,6 +44,7 @@ interface TodaySalesCardProps {
 export function TodaySalesCard({
   view,
   financeAccess,
+  financeConfirming = false,
   onRetry,
   analyticsAvailable,
 }: TodaySalesCardProps) {
@@ -114,6 +121,8 @@ export function TodaySalesCard({
                 ) : (
                   <p className="text-body-sm text-text-secondary">{t("home.today.none")}</p>
                 )
+              ) : financeConfirming ? (
+                <SkeletonBlock className="h-7 w-32 rounded-lg" />
               ) : (
                 <p className="text-body-sm text-text-secondary">
                   {t(

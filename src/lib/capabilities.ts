@@ -209,10 +209,14 @@ export function capabilityQueryKey(
 }
 
 /**
- * Whether a server answer received at `confirmedAt` (epoch ms; 0 = never) is
- * still recent enough at `now` to back a sensitive display. A clock that reads
- * earlier than the answer is not trusted either. The window itself is
+ * Whether a confirmation at `confirmedAt` (epoch ms; 0 = never) is still
+ * recent enough at `now` to back a sensitive display. A clock that reads
+ * earlier than the confirmation is not trusted either. The window itself is
  * SENSITIVE_CAPABILITY_MAX_AGE_MS (src/hooks/use-capabilities.tsx).
+ *
+ * The single-clock rule. The production deadline applies it to the REQUEST's
+ * dispatch instant on two clocks at once (isConfirmationFresh,
+ * src/lib/capability-confirmation.ts), never to a response's arrival.
  */
 export function isCapabilityConfirmationFresh(
   confirmedAt: number,

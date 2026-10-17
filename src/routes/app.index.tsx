@@ -79,15 +79,18 @@ function BusinessHome() {
   /*
    * Re-ask the server while money can be on screen (the same single
    * capability query; it only polls), and know whether its last successful
-   * answer is still recent — a refresh that never answers lapses on a timer
-   * (SENSITIVE_CAPABILITY_MAX_AGE_MS). Keyed on can(), not canSensitive(), so
-   * a snapshot left stale by one failed refresh is retried and can recover.
+   * answer is still recent — counted from when that request LEFT, so a slow
+   * answer buys no extra time, and a refresh that never answers lapses on a
+   * timer (SENSITIVE_CAPABILITY_MAX_AGE_MS). Keyed on can(), not
+   * canSensitive(), so a snapshot left stale by one failed refresh is retried
+   * and can recover.
    */
-  const confirmationFresh = useSensitiveCapabilityFreshness(
+  const confirmation = useSensitiveCapabilityFreshness(
     session.userId,
     organizationId,
     capabilities.can("orders.read") && capabilities.can("payments.reconcile"),
   );
+  const confirmationFresh = confirmation === "fresh";
 
   /*
    * Today's money is drawn only while the server has recently confirmed this
@@ -235,6 +238,11 @@ function BusinessHome() {
         <TodaySalesCard
           view={view}
           financeAccess={financeAccess}
+          // A seeded snapshot's first confirmation is on its way: a placeholder,
+          // not an error, and still no money.
+          financeConfirming={
+            confirmation === "confirming" && financeAccess === "unverified" && !homeQuery.isError
+          }
           onRetry={() => void homeQuery.refetch()}
           analyticsAvailable={capabilities.can("analytics.read")}
         />
