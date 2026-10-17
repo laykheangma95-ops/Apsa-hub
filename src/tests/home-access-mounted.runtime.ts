@@ -380,9 +380,6 @@ async function unmount() {
 }
 
 afterEach(async () => {
-  // Work React or React Query queued on a fake timer would be dropped by
-  // useRealTimers() below and wedge the next test: let it run first.
-  if (fakeClock) await settle(5);
   await unmount();
   holdCapabilities = false;
   while (heldCapabilities.length) heldCapabilities.shift()!();
@@ -1071,6 +1068,15 @@ async function jumpTo(at: number) {
   expect(Date.now()).toBe(at);
 }
 
+/**
+ * A test that ends on jumpTo() must let the work its last jump queued (on
+ * fake timers) run while the test still owns the clock; otherwise
+ * useRealTimers() in afterEach drops it and the next test wedges.
+ */
+async function settleAfterJump() {
+  await settle(5);
+}
+
 /** Advance until Date.now() === `at` (never backwards). */
 async function advanceTo(at: number) {
   await advance(at - Date.now());
@@ -1145,6 +1151,7 @@ describe("Home money: an answer near the freshness boundary (measured from dispa
     await jumpTo(dispatched + MAX_AGE_MS + 1);
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
     expect(cachedFinance()).toEqual([]);
+    await settleAfterJump();
   });
 
   for (const lateBy of [0, 1, 5_000]) {
@@ -1290,6 +1297,7 @@ describe("Home money: slow answers, cancellations and overlapping refreshes", ()
     await jumpTo(newer + MAX_AGE_MS);
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
     expect(cachedFinance()).toEqual([]);
+    await settleAfterJump();
   });
 });
 
@@ -1401,9 +1409,12 @@ describe("Home money: the deadline while the tab is hidden", () => {
     expect(cachedOnReturn).toEqual([]);
     for (const figure of A_FIGURES) expect(shows(figure)).toBe(false);
     expect(cachedFinance()).toEqual([]);
-    // Nothing further on this clock: the next advanceTimersByTime() would
-    // (on Bun 1.3) rewind Date to the timer clock, i.e. wind BOTH clocks
-    // back 31s — something no real device does.
+    // Nothing further is asserted on this clock: the next
+    // advanceTimersByTime() would (on Bun 1.3) rewind Date to the timer clock,
+    // i.e. wind BOTH clocks back 31s — something no real device does. It still
+    // runs, only so that work queued on fake timers is not left for the next
+    // test (settleAfterJump).
+    await settleAfterJump();
   });
 });
 
