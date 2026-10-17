@@ -26,10 +26,26 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { afterEach, beforeAll, describe, expect, it, jest, mock } from "bun:test";
+import {
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  jest,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 import type { CapabilityResult, UiPermissionKey } from "../lib/capabilities";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import type { HomeSummary, MetricRange, Money } from "../types";
+
+// Every money assertion here runs on a fake clock or on rendered frames, so
+// real elapsed time proves nothing. A loaded CI runner runs this file many
+// times slower than a workstation, and Bun's 5s default would time out a
+// passing test mid-way and cascade into the next one (same as
+// orders-pagination-mounted.runtime.ts).
+setDefaultTimeout(30_000);
 
 // ── The server's current answer ─────────────────────────────────────────────
 
