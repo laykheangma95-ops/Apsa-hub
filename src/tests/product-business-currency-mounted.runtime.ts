@@ -147,6 +147,7 @@ const RETRY = en.common.retry;
 let open = true;
 let permissions: string[] = ["products.create", "products.update_cost"];
 let canSetCost = true;
+let categoriesProp: any[] = [];
 let created = 0;
 let client: InstanceType<typeof QueryClient>;
 let root: ReturnType<typeof createRoot> | null = null;
@@ -165,7 +166,7 @@ function tree() {
         onOpenChange: (next: boolean) => {
           open = next;
         },
-        categories: [],
+        categories: categoriesProp,
         canSetCost,
         onCreated: () => {
           created += 1;
@@ -215,6 +216,7 @@ beforeEach(async () => {
   open = true;
   permissions = ["products.create", "products.update_cost"];
   canSetCost = true;
+  categoriesProp = [];
   sent.length = 0;
   createMode = "answer";
   heldCreates.length = 0;
@@ -804,5 +806,309 @@ describe("obsolete save attempts never touch a newer draft", () => {
     expect(nameKm()!.value).toBe("");
     await releaseAll();
     expect(sent).toHaveLength(0);
+  });
+});
+
+// ── Edit lock while saving (PR #130 final P2) ────────────────────────────────
+//
+// The defect: the payload is read from the form when Save is pressed, but the
+// fields stayed editable while the confirmation and the create were out. A
+// price changed from 5,000 to 9,000 ៛ mid-save was never sent, and the
+// original save's success then reset the form and closed the sheet — the newer
+// edit silently lost. Now every field that feeds the payload is locked from
+// Save until the attempt settles, and unlocked again after a failure.
+
+/** Every control whose value is part of the create payload. */
+function payloadControls(): (HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement)[] {
+  const ids = [
+    "product-name-km",
+    "product-name-en",
+    "product-description-km",
+    "product-price",
+    "product-cost",
+    "product-sku",
+    "product-barcode",
+  ];
+  const fields = ids.map((id) => document.getElementById(id) as HTMLInputElement | null);
+  if (fields.some((f) => f === null))
+    throw new Error(`missing field; page: ${text().slice(0, 300)}`);
+  const chips = [
+    ...price()!.parentElement!.querySelectorAll("[role=group] button"),
+    ...cost()!.parentElement!.querySelectorAll("[role=group] button"),
+    ...categoryChips(),
+  ] as HTMLButtonElement[];
+  return [...(fields as HTMLInputElement[]), ...chips];
+}
+
+/** The category chips: "none" plus one per category passed in. */
+function categoryChips(): HTMLButtonElement[] {
+  const labels = new Set<string>([en.catalog.detail.categoryNone]);
+  for (const c of categoriesProp) {
+    labels.add(c.nameKm);
+    if (c.nameEn) labels.add(c.nameEn);
+  }
+  return [...document.querySelectorAll("button")].filter((b) =>
+    labels.has(b.textContent?.trim() ?? ""),
+  ) as HTMLButtonElement[];
+}
+
+const allLocked = () => payloadControls().every((c) => c.disabled);
+const noneLocked = () => payloadControls().every((c) => !c.disabled);
+
+async function typeTextarea(id: string, value: string) {
+  const el = document.getElementById(id) as HTMLTextAreaElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await settle();
+}
+
+/** Every route a value can take into the draft, attempted at once. */
+async function attemptEditsEverywhere() {
+  await type(price(), "9000");
+  await type(cost(), "7000");
+  await type(nameKm(), "តែ");
+  await type(document.getElementById("product-name-en") as HTMLInputElement, "Tea");
+  await typeTextarea("product-description-km", "ផ្សេង");
+  await type(document.getElementById("product-sku") as HTMLInputElement, "SKU-NEW");
+  await type(document.getElementById("product-barcode") as HTMLInputElement, "999");
+  const category = categoryChips().find(
+    (b) => b.textContent?.trim() !== en.catalog.detail.categoryNone,
+  );
+  if (category) await act(async () => category.click());
+  await settle();
+}
+
+describe("the draft is locked while it is being saved", () => {
+  const CATEGORIES = [
+    {
+      id: "cat-1",
+      organizationId: ORG_A,
+      parentId: null,
+      nameKm: "ភេសជ្ជៈ",
+      nameEn: "Drinks",
+      sortOrder: 0,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+    },
+  ];
+
+  function expectDraftUnchanged() {
+    expect(price()!.value).toBe("5000");
+    expect(cost()!.value).toBe("1000");
+    expect(nameKm()!.value).toBe("កាហ្វេ");
+    expect((document.getElementById("product-name-en") as HTMLInputElement).value).toBe("");
+    expect((document.getElementById("product-sku") as HTMLInputElement).value).toBe("");
+  }
+
+  async function fillDraft() {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    await type(cost(), "1000");
+  }
+
+  it("editing during a delayed currency confirmation: fields locked, no edit lost", async () => {
+    await fillDraft();
+    expect(noneLocked()).toBe(true);
+    serverMode = "hold";
+    await clickSubmit();
+    expect(held).toHaveLength(1);
+    expect(allLocked()).toBe(true);
+    expect(button(en.catalog.saving)!.getAttribute("aria-busy")).toBe("true");
+
+    await attemptEditsEverywhere();
+    expectDraftUnchanged();
+
+    await releaseAll();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].nameKm).toBe("កាហ្វេ");
+    expect(sent[0].initialVariant).toMatchObject({
+      priceAmount: 5000,
+      priceCurrency: "KHR",
+      costAmount: 1000,
+      costCurrency: "KHR",
+      sku: null,
+    });
+    expect(open).toBe(false);
+  });
+
+  it("editing during a delayed product creation: fields locked, no edit lost", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    expect(heldCreates).toHaveLength(1);
+    expect(allLocked()).toBe(true);
+
+    await attemptEditsEverywhere();
+    expectDraftUnchanged();
+    expect(sent[0].initialVariant).toMatchObject({ priceAmount: 5000, costAmount: 1000 });
+
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(open).toBe(false);
+  });
+
+  it("a failed save unlocks the draft with what was submitted, and edits then apply", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    await attemptEditsEverywhere();
+    await act(async () => heldCreates.shift()!.reject(new Error("fetch failed")));
+    await settle();
+
+    expect(text()).toContain(en.catalog.error.generic);
+    expect(open).toBe(true);
+    expect(noneLocked()).toBe(true);
+    expectDraftUnchanged();
+    expect(button(ADD)!.disabled).toBe(false);
+
+    await type(price(), "9000");
+    expect(price()!.value).toBe("9000");
+    createMode = "answer";
+    await submit();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].initialVariant).toMatchObject({ priceAmount: 9000, priceCurrency: "KHR" });
+    expect(open).toBe(false);
+  });
+
+  it("a refused confirmation unlocks the draft", async () => {
+    await fillDraft();
+    serverMode = "hold";
+    await clickSubmit();
+    currencies[ORG_A] = "USD"; // the business changed currency under the save
+    await releaseAll();
+    expect(sent).toHaveLength(0);
+    expect(open).toBe(true);
+    expect(text()).toContain(T.confirmFailed);
+    expect(button(en.catalog.saving)).toBeUndefined();
+  });
+
+  it("the server refusing the principal unlocks the draft and saves nothing", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    expect(allLocked()).toBe(true);
+    const { CREATE_BINDING_CHANGED_MESSAGE } = await import("@/lib/business-currency");
+    await act(async () => heldCreates.shift()!.reject(new Error(CREATE_BINDING_CHANGED_MESSAGE)));
+    await settle();
+    expect(text()).toContain(T.confirmFailed);
+    expect(open).toBe(true);
+    expect(created).toBe(0);
+    expect(noneLocked()).toBe(true);
+    expectDraftUnchanged();
+  });
+
+  it("success closes only the submitted draft", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    await attemptEditsEverywhere();
+    // What the merchant sees is what is being saved: no newer edit to lose.
+    expectDraftUnchanged();
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(created).toBe(1);
+    expect(open).toBe(false);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].initialVariant.priceAmount).toBe(5000);
+  });
+
+  it("organization A → B → A during saving: the new tenure is editable, the old save cannot close it", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    expect(allLocked()).toBe(true);
+
+    await switchOrganization(ORG_B);
+    await switchOrganization(ORG_A);
+    expect(noneLocked()).toBe(true); // a new draft is never stuck locked
+    await type(price(), "9000");
+    expect(price()!.value).toBe("9000");
+
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(open).toBe(true);
+    expect(price()!.value).toBe("9000");
+
+    createMode = "answer";
+    await submit();
+    expect(sent.at(-1).initialVariant).toMatchObject({ priceAmount: 9000, priceCurrency: "KHR" });
+    expect(sent.at(-1).expected).toEqual({ userId: USER, organizationId: ORG_A, currency: "KHR" });
+  });
+
+  it("close and reopen during saving: the reopened draft is editable and stays open", async () => {
+    await fillDraft();
+    serverMode = "hold";
+    await clickSubmit();
+    await closeWithEscape();
+    expect(open).toBe(false);
+    await rerender();
+    serverMode = "answer";
+    open = true;
+    await rerender();
+    expect(noneLocked()).toBe(true);
+    await fillName();
+    await type(price(), "9000");
+    await releaseAll();
+    expect(sent).toHaveLength(0);
+    expect(open).toBe(true);
+    expect(price()!.value).toBe("9000");
+  });
+
+  it("duplicate submission while locked starts no second save", async () => {
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    const saving = button(en.catalog.saving)!;
+    expect(saving.disabled).toBe(true);
+    await act(async () => {
+      saving.click();
+      saving.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await settle();
+    expect(sent).toHaveLength(1);
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(created).toBe(1);
+  });
+
+  it("USD business: the locked draft is sent in cents", async () => {
+    currencies[ORG_A] = "USD";
+    await mount();
+    await fillName();
+    await type(price(), "12.50");
+    await type(cost(), "3");
+    createMode = "hold";
+    await clickSubmit();
+    await type(price(), "99.99");
+    expect(price()!.value).toBe("12.50");
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(sent[0].initialVariant).toMatchObject({
+      priceAmount: 1250,
+      priceCurrency: "USD",
+      costAmount: 300,
+      costCurrency: "USD",
+    });
+    expect(sent[0].expected).toEqual({ userId: USER, organizationId: ORG_A, currency: "USD" });
+  });
+
+  it("category choice is locked too", async () => {
+    // Categories are part of the payload; mount with one to cover the chips.
+    categoriesProp = CATEGORIES;
+    await fillDraft();
+    createMode = "hold";
+    await clickSubmit();
+    const chips = categoryChips();
+    expect(chips.length).toBe(2);
+    expect(chips.every((c) => c.disabled)).toBe(true);
+    await attemptEditsEverywhere();
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(sent[0].categoryId).toBeNull();
   });
 });

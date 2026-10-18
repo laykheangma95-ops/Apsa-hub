@@ -67,6 +67,13 @@ interface CreateProductSheetProps {
  * gone, the attempt's late confirmation, success or failure changes nothing on
  * screen — it never submits a discarded draft, never resets or closes a newer
  * one, and never shows its error over it. One attempt runs at a time.
+ *
+ * Edit lock. The payload is read when Save is pressed, so from then until the
+ * attempt settles every field that feeds it is disabled, and every setter
+ * refuses changes (`editable`), so no input path can alter a draft that is
+ * already on its way — an edit made then would be dropped by the success that
+ * closes the sheet. A failure or refusal unlocks the draft exactly as it was
+ * sent; a new draft (close/reopen, a new tenure) is never locked.
  */
 export function CreateProductSheet({
   open,
@@ -163,6 +170,17 @@ export function CreateProductSheet({
   // The binding at the latest render, for checks after an await.
   const latestBinding = useRef<MoneyBinding | null>(live);
   latestBinding.current = live;
+
+  // While an attempt is out for this draft, nothing may change it (see header).
+  // Checked on the ref, not `saving`, so even an event dispatched before the
+  // re-render is refused.
+  const locked = saving;
+  function editable<T>(set: (next: T) => void) {
+    return (next: T) => {
+      if (request.current) return;
+      set(next);
+    };
+  }
 
   const nameError = touched && nameKm.trim() === "" ? t("catalog.detail.nameKmMissing") : null;
 
@@ -307,8 +325,9 @@ export function CreateProductSheet({
             className="h-12"
             value={nameKm}
             lang="km"
+            disabled={locked}
             aria-invalid={nameError ? true : undefined}
-            onChange={(event) => setNameKm(event.target.value)}
+            onChange={(event) => editable(setNameKm)(event.target.value)}
           />
           {nameError ? (
             <p className="text-caption text-status-danger-text" role="alert">
@@ -330,7 +349,8 @@ export function CreateProductSheet({
             className="h-12"
             value={nameEn}
             lang="en"
-            onChange={(event) => setNameEn(event.target.value)}
+            disabled={locked}
+            onChange={(event) => editable(setNameEn)(event.target.value)}
           />
           <span className="text-caption text-text-secondary">{t("catalog.detail.nameEnHint")}</span>
         </div>
@@ -344,7 +364,8 @@ export function CreateProductSheet({
             value={descriptionKm}
             lang="km"
             rows={3}
-            onChange={(event) => setDescriptionKm(event.target.value)}
+            disabled={locked}
+            onChange={(event) => editable(setDescriptionKm)(event.target.value)}
           />
         </div>
 
@@ -353,7 +374,8 @@ export function CreateProductSheet({
           <CategoryChoice
             categories={categories}
             value={categoryId}
-            onChange={setCategoryId}
+            onChange={editable(setCategoryId)}
+            disabled={locked}
             label={t("catalog.detail.category")}
             noneLabel={t("catalog.detail.categoryNone")}
             className="-mx-5 px-5"
@@ -378,7 +400,8 @@ export function CreateProductSheet({
               id="product-price"
               label={t("catalog.variant.price")}
               value={priceText}
-              onChange={setPriceText}
+              onChange={editable(setPriceText)}
+              disabled={locked}
               currency={live.currency}
               currencies={[live.currency]}
               onCurrencyChange={() => {}}
@@ -391,7 +414,8 @@ export function CreateProductSheet({
                 id="product-cost"
                 label={t("catalog.variant.cost")}
                 value={costText}
-                onChange={setCostText}
+                onChange={editable(setCostText)}
+                disabled={locked}
                 currency={live.currency}
                 currencies={[live.currency]}
                 onCurrencyChange={() => {}}
@@ -412,7 +436,8 @@ export function CreateProductSheet({
             id="product-sku"
             className="h-12"
             value={sku}
-            onChange={(event) => setSku(event.target.value)}
+            disabled={locked}
+            onChange={(event) => editable(setSku)(event.target.value)}
           />
         </div>
 
@@ -424,7 +449,8 @@ export function CreateProductSheet({
             id="product-barcode"
             className="h-12"
             value={barcode}
-            onChange={(event) => setBarcode(event.target.value)}
+            disabled={locked}
+            onChange={(event) => editable(setBarcode)(event.target.value)}
           />
         </div>
 
