@@ -29,7 +29,6 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   afterEach,
   beforeAll,
-  beforeEach,
   describe,
   expect,
   it,
@@ -37,34 +36,7 @@ import {
   mock,
   setDefaultTimeout,
 } from "bun:test";
-import { readFileSync, writeSync } from "node:fs";
 import type { CapabilityResult, UiPermissionKey } from "../lib/capabilities";
-
-// TEMPORARY DIAGNOSTICS (PR #127 CI hang) — removed with the repair.
-// Synchronous write to fd 2: survives a child killed on timeout. `real` is
-// kernel uptime (Bun 1.3 fakes Date, performance.now, hrtime AND
-// Bun.nanoseconds); `mono` is Bun's (fakeable) monotonic clock; `fake` is Date.now().
-const realMs = () => Math.round(Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]) * 1000);
-const DIAG_T0 = realMs();
-let diagTest = "";
-function diag(id: string, extra = "") {
-  let state = "";
-  try {
-    const timers = (jest as any).getTimerCount?.();
-    state =
-      ` timers=${String(timers)} fakeClock=${String(fakeClock)} rootMounted=${String(root !== null)}` +
-      ` held=${heldCapabilities.length} heldHome=${heldHome.length} fetching=${client?.isFetching?.() ?? "-"}` +
-      ` queries=${client?.getQueryCache?.().getAll().length ?? "-"} caps=${capabilityReads} homes=${homeReads}`;
-  } catch (error) {
-    state = ` state=unavailable(${(error as Error).message.slice(0, 60)})`;
-  }
-  const real = realMs() - DIAG_T0;
-  const mono = Math.round(Bun.nanoseconds() / 1e6);
-  writeSync(
-    2,
-    `APSA-DIAG ${id} real=${real}ms mono=${mono}ms fake=${Date.now()}${state} ${extra} [${diagTest.slice(0, 40)}]\n`,
-  );
-}
 import type { AuthorizationContext } from "../server/auth/authorization";
 import type { HomeSummary, MetricRange, Money } from "../types";
 
@@ -174,14 +146,10 @@ mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: {} }));
 mock.module("@/api/capabilities", () => ({
   getActiveMemberCapabilitiesFn: async (): Promise<CapabilityResult> => {
     capabilityReads++;
-    diag("D05", "capability request started");
     capabilityDispatches.push(Date.now());
     const answer = capabilityAnswer();
     await Promise.resolve();
-    if (holdCapabilities) {
-      diag("D06", "capability response held");
-      await new Promise<void>((resolve) => heldCapabilities.push(resolve));
-    }
+    if (holdCapabilities) await new Promise<void>((resolve) => heldCapabilities.push(resolve));
     if (answer instanceof Error) throw answer;
     return answer;
   },
@@ -390,7 +358,6 @@ async function mount() {
   root = createRoot(container);
   await act(async () => root!.render(tree()));
   await readsSettled();
-  diag("D04", "Home mounted");
 }
 
 /** mount() for a test whose first capability answer is held: no wait for reads. */
@@ -431,39 +398,24 @@ async function refreshHome() {
 }
 
 async function unmount() {
-  diag("D07", "unmount started");
   observer?.disconnect();
   observer = null;
   await act(async () => root?.unmount());
-  diag("D07a", "unmount act returned");
   root = null;
   container?.remove();
   container = null;
-  diag("D08", "unmount completed");
 }
 
-beforeEach(() => {
-  diagTest = "";
-  diag("D01", "beforeEach entered");
-  diag("D02", `env ready document=${typeof document} body=${document.body.childNodes.length}`);
-});
-
 afterEach(async () => {
-  diag("D14", "afterEach started");
   await unmount();
-  diag("D15", "React cleanup completed");
   holdCapabilities = false;
   while (heldCapabilities.length) heldCapabilities.shift()!();
-  diag("D15a", "held capabilities released");
   if (fakeClock) {
     jest.useRealTimers();
     fakeClock = false;
-    diag("D13", "fake timers restored");
   }
   document.body.innerHTML = "";
-  diag("D15b", "body cleared");
   client?.clear();
-  diag("D15c", "client cleared");
   server.session = null;
   server.grants.clear();
   server.capabilityFailure = null;
@@ -477,7 +429,6 @@ afterEach(async () => {
   seed = undefined;
   route.userId = USER_A;
   route.organizationId = ORG_1;
-  diag("D16", "afterEach finished");
 });
 
 beforeAll(async () => {
@@ -766,7 +717,6 @@ const POLL_MS = 15_000;
 function useFakeClock() {
   jest.useFakeTimers();
   fakeClock = true;
-  diag("D03", "fake timers enabled");
 }
 
 /** Move the clock forward in one jump (every timer due inside it fires), then settle. */
@@ -1092,7 +1042,6 @@ describe("Home money: concurrency and lifecycle", () => {
   });
 
   it("unmounting clears the deadline and the polling; late answers land harmlessly", async () => {
-    diagTest = "unmounting clears";
     useFakeClock();
     ownerOnOrg1();
     await mount();
@@ -1104,19 +1053,13 @@ describe("Home money: concurrency and lifecycle", () => {
     await unmount();
     const caps = capabilityReads;
     const homes = homeReads;
-    diag("D09", "five-minute advance started");
     await advance(5 * 60_000);
-    diag("D10", "five-minute advance completed");
     expect(capabilityReads).toBe(caps);
     expect(homeReads).toBe(homes);
-    diag("D11", "late response released");
     await releaseCapabilities();
-    diag("D12", "late response processed");
     await advance(MAX_AGE_MS);
-    diag("D12a", "post-release advance completed");
     expect(capabilityReads).toBe(caps);
     expect(text()).toBe("");
-    diag("D12b", "test body finished");
   });
 });
 

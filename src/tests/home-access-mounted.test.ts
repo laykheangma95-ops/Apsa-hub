@@ -34,13 +34,8 @@ function failureDigest(result: ReturnType<typeof spawnSync>): string[] {
   const notable = lines.filter((line) =>
     /^\(fail\)|timed out|Timed out waiting|^error:|^\s+at .*runtime\.ts/.test(line),
   );
-  // TEMPORARY DIAGNOSTICS (PR #127 CI hang): lifecycle markers from the child.
-  const markers = lines.filter((line) => line.startsWith("APSA-DIAG"));
   return [
     `child status=${String(result.status)} signal=${String(result.signal)} error=${result.error?.message ?? "none"} output=${output.length} chars`,
-    "--- diagnostic markers: the unmount test, then the last 40 ---",
-    ...markers.filter((line) => line.includes("[unmounting clears")),
-    ...markers.slice(-40),
     "--- failures, timeouts and errors (first 80) ---",
     ...[...new Set(notable)].slice(0, 80),
     "--- before the first failure ---",
