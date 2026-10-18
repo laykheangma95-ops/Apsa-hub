@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
@@ -433,7 +433,24 @@ function PosScreen() {
             ) : null}
 
             {!productsQuery.isPending && !productsQuery.isError && catalog.length === 0 ? (
-              <PosNotice title={t("pos.empty.title")} body={t("pos.empty.body")} />
+              /*
+               * An empty catalogue is the first-sale dead end: say where
+               * products come from, and link there only for a member who can
+               * actually add one (products.create, the createProduct gate).
+               */
+              capabilities.can("products.create") ? (
+                <PosNotice
+                  title={t("pos.empty.title")}
+                  body={t("pos.empty.body")}
+                  action={
+                    <Button asChild className="tap-target h-auto min-h-12 whitespace-normal py-2">
+                      <Link to="/app/products">{t("pos.empty.addProduct")}</Link>
+                    </Button>
+                  }
+                />
+              ) : (
+                <PosNotice title={t("pos.empty.title")} body={t("pos.empty.bodyNoAccess")} />
+              )
             ) : null}
 
             {catalog.length > 0 && filtered.length === 0 ? (

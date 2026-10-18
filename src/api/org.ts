@@ -24,6 +24,7 @@ import {
 import type { CreateOrganizationResult } from "@/lib/org-schema";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import type { OrganizationProfile } from "@/server/org/get-organization-profile";
+import type { BusinessCurrency } from "@/server/org/get-business-currency";
 
 export {
   slugSchema,
@@ -88,6 +89,20 @@ export const getOrganizationProfileFn = createServerFn().handler(
     const authCtx = await resolveAuthContext();
     const { getOrganizationProfile } = await import("@/server/org/get-organization-profile");
     return getOrganizationProfile(authCtx);
+  },
+);
+
+// ── getBusinessCurrencyFn — Add Product's pricing currency ─────────────────────
+//
+// Read-only. Gated on products.create (the create path it serves) inside the
+// service, and echoes the organization it read so the browser can reject a
+// response that belongs to a different organization than its open form.
+
+export const getBusinessCurrencyFn = createServerFn().handler(
+  async (): Promise<BusinessCurrency> => {
+    const authCtx = await resolveAuthContext();
+    const { getBusinessCurrency } = await import("@/server/org/get-business-currency");
+    return getBusinessCurrency(authCtx);
   },
 );
 

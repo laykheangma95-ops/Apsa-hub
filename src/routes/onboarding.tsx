@@ -11,16 +11,22 @@
  *     (migration 009). This page performs no inserts and no slug availability
  *     query — the DB constraint organizations_slug_unique is the sole authority.
  *   - Client-side validation is a UX affordance only; the server re-validates.
+ *   - Business currency (USD or KHR) is chosen explicitly — nothing is
+ *     preselected and the form will not submit without a choice. It goes to
+ *     the same RPC as p_currency; see src/lib/onboarding-form.ts for why it is
+ *     never guessed.
  */
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { checkAppGuardFn } from "@/api/app-guard";
-import { createOrganizationFn, slugSchema } from "@/api/org";
+import { createOrganizationFn } from "@/api/org";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Apsi, Spinner } from "@/design-system";
 import { headTranslator, useTranslation } from "@/lib/i18n";
+import { BUSINESS_CURRENCIES, validateOnboardingForm } from "@/lib/onboarding-form";
 import { slugify } from "@/lib/slug";
 
 export const Route = createFileRoute("/onboarding")({
@@ -46,6 +52,7 @@ export const Route = createFileRoute("/onboarding")({
 type FieldErrors = {
   name?: string;
   slug?: string;
+  currency?: string;
 };
 
 function OnboardingPage() {
@@ -55,6 +62,7 @@ function OnboardingPage() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
+  const [currency, setCurrency] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -76,34 +84,24 @@ function OnboardingPage() {
     // Double-submit guard: one organization per founder, one request at a time.
     if (submitting) return;
 
-    const trimmedName = name.trim();
-    const trimmedSlug = slug.trim();
-
-    const nextFieldErrors: FieldErrors = {};
-    if (trimmedName.length === 0) {
-      nextFieldErrors.name = t("onboarding.errors.nameRequired");
-    }
-    if (trimmedSlug.length === 0) {
-      nextFieldErrors.slug = t("onboarding.errors.slugRequired");
-    } else if (!slugSchema.safeParse(trimmedSlug).success) {
-      // Format only. Availability is decided by the database, never here.
-      nextFieldErrors.slug = t("onboarding.errors.slugFormat");
-    }
+    const validation = validateOnboardingForm({ name, slug, currency });
 
     setFormError(null);
-    setFieldErrors(nextFieldErrors);
-    if (nextFieldErrors.name || nextFieldErrors.slug) return;
+    if (!validation.ok) {
+      const { errors } = validation;
+      setFieldErrors({
+        ...(errors.name ? { name: t(`onboarding.errors.${errors.name}`) } : {}),
+        ...(errors.slug ? { slug: t(`onboarding.errors.${errors.slug}`) } : {}),
+        ...(errors.currency ? { currency: t(`onboarding.errors.${errors.currency}`) } : {}),
+      });
+      return;
+    }
+    setFieldErrors({});
 
     setSubmitting(true);
 
     try {
-      const result = await createOrganizationFn({
-        data: {
-          legalName: trimmedName,
-          displayName: trimmedName,
-          slug: trimmedSlug,
-        },
-      });
+      const result = await createOrganizationFn({ data: validation.input });
 
       if (result.ok) {
         await navigate({ to: "/app" });
@@ -145,7 +143,7 @@ function OnboardingPage() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col bg-background px-4 py-8">
+    <div className="safe-top safe-bottom flex min-h-dvh flex-col bg-background px-4 py-8">
       <div className="mx-auto w-full max-w-sm space-y-6">
         <div className="flex flex-col items-center text-center">
           <Apsi emotion="waving" size="md" withCompanion />
@@ -167,6 +165,7 @@ function OnboardingPage() {
               className="min-h-11"
               value={name}
               onChange={(event) => handleNameChange(event.target.value)}
+              enterKeyHint="next"
               placeholder={t("onboarding.namePlaceholder")}
               aria-invalid={fieldErrors.name ? true : undefined}
               aria-describedby={
@@ -197,6 +196,7 @@ function OnboardingPage() {
               autoCapitalize="none"
               spellCheck={false}
               inputMode="url"
+              enterKeyHint="done"
               required
               className="min-h-11"
               value={slug}
@@ -221,6 +221,67 @@ function OnboardingPage() {
               </p>
             )}
           </div>
+
+          <fieldset
+            className="space-y-1.5"
+            aria-describedby={
+              fieldErrors.currency ? "business-currency-error" : "business-currency-hint"
+            }
+          >
+            <legend className="text-sm font-medium leading-none text-foreground">
+              {t("onboarding.currencyLabel")}
+            </legend>
+            <RadioGroup
+              value={currency}
+              onValueChange={(value) => {
+                setCurrency(value);
+                setFieldErrors((current) => {
+                  const next = { ...current };
+                  delete next.currency;
+                  return next;
+                });
+              }}
+              aria-label={t("onboarding.currencyLabel")}
+              aria-required
+              aria-invalid={fieldErrors.currency ? true : undefined}
+              className="grid-cols-2 gap-3 pt-1"
+            >
+              {BUSINESS_CURRENCIES.map((code) => (
+                <Label
+                  key={code}
+                  htmlFor={`business-currency-${code}`}
+                  className="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-border-default bg-surface-primary px-3 py-3 has-[[data-state=checked]]:border-action-primary has-[[data-state=checked]]:bg-action-primary-soft has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring"
+                >
+                  <RadioGroupItem
+                    id={`business-currency-${code}`}
+                    value={code}
+                    className="shrink-0"
+                  />
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-label text-text-primary">
+                      {t(`onboarding.currency.${code}.label`)}
+                    </span>
+                    <span className="text-caption text-text-secondary">
+                      {t(`onboarding.currency.${code}.example`)}
+                    </span>
+                  </span>
+                </Label>
+              ))}
+            </RadioGroup>
+            {fieldErrors.currency ? (
+              <p
+                id="business-currency-error"
+                role="alert"
+                className="text-sm text-status-danger-text"
+              >
+                {fieldErrors.currency}
+              </p>
+            ) : (
+              <p id="business-currency-hint" className="text-sm text-muted-foreground">
+                {t("onboarding.currencyHint")}
+              </p>
+            )}
+          </fieldset>
 
           {formError ? (
             <p role="alert" className="text-sm text-status-danger-text">
