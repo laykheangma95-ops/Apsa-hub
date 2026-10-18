@@ -461,6 +461,19 @@ function OrderListScreen() {
                 <OperationalState
                   title={t("orderList.empty.title")}
                   body={t("orderList.empty.body")}
+                  // POS sells through createOrder, so the same orders.create
+                  // gate as this screen's "+" decides whether it is offered.
+                  action={
+                    canCreateOrder ? (
+                      <Button
+                        asChild
+                        variant="ghost"
+                        className="tap-target h-auto min-h-11 whitespace-normal py-2"
+                      >
+                        <Link to="/app/pos">{t("orderList.empty.openPos")}</Link>
+                      </Button>
+                    ) : undefined
+                  }
                   className="rounded-none border-0"
                 />
               )

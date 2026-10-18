@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,6 +8,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { BottomSheet } from "@/design-system";
 import { MoneyAmountField } from "@/components/products/MoneyAmountField";
 import { CategoryChoice } from "@/components/products/CategoryChoice";
+import { useBusinessCurrency } from "@/hooks/use-business-currency";
+import { initialPriceCurrency, priceCurrencyMismatch } from "@/lib/business-currency";
 import {
   catalogErrorKey,
   classifyCatalogError,
@@ -33,6 +36,13 @@ interface CreateProductSheetProps {
  * server rejects an empty name_km — and because Khmer is the name a Cambodian
  * merchant's customers actually read. English is optional and never stands in
  * for it.
+ *
+ * Price and cost start in the business currency (organizations.
+ * default_currency) rather than a fixed USD: the order RPC refuses a product
+ * priced in any other currency, so a KHR business's first product would
+ * otherwise be unsellable without anyone noticing. The merchant can still
+ * pick the other currency — the product contract is unchanged — but the sheet
+ * says plainly when the price no longer matches what the business sells in.
  */
 export function CreateProductSheet({
   open,
@@ -42,6 +52,7 @@ export function CreateProductSheet({
   onCreated,
 }: CreateProductSheetProps) {
   const { t } = useTranslation();
+  const businessCurrency = useBusinessCurrency(open);
   const [nameKm, setNameKm] = useState("");
   const [nameEn, setNameEn] = useState("");
   const [descriptionKm, setDescriptionKm] = useState("");
@@ -49,9 +60,14 @@ export function CreateProductSheet({
   const [sku, setSku] = useState("");
   const [barcode, setBarcode] = useState("");
   const [priceText, setPriceText] = useState("");
-  const [priceCurrency, setPriceCurrency] = useState<Currency>("USD");
+  // null until the merchant picks a currency themselves; until then the
+  // business currency (once known) is the price's currency.
+  const [priceCurrencyChoice, setPriceCurrency] = useState<Currency | null>(null);
   const [costText, setCostText] = useState("");
-  const [costCurrency, setCostCurrency] = useState<Currency>("USD");
+  const [costCurrencyChoice, setCostCurrency] = useState<Currency | null>(null);
+  const priceCurrency = priceCurrencyChoice ?? initialPriceCurrency(businessCurrency);
+  const costCurrency = costCurrencyChoice ?? initialPriceCurrency(businessCurrency);
+  const priceMismatch = priceCurrencyMismatch(priceCurrency, businessCurrency);
   const [touched, setTouched] = useState(false);
   const [priceError, setPriceError] = useState<string | null>(null);
   const [costError, setCostError] = useState<string | null>(null);
@@ -68,9 +84,9 @@ export function CreateProductSheet({
     setSku("");
     setBarcode("");
     setPriceText("");
-    setPriceCurrency("USD");
+    setPriceCurrency(null);
     setCostText("");
-    setCostCurrency("USD");
+    setCostCurrency(null);
     setTouched(false);
     setPriceError(null);
     setCostError(null);
@@ -211,6 +227,18 @@ export function CreateProductSheet({
           onCurrencyChange={setPriceCurrency}
           error={priceError}
         />
+
+        {priceMismatch && businessCurrency ? (
+          <p
+            className="text-caption -mt-2 flex items-start gap-1.5 text-status-warning-text"
+            role="status"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <span>
+              {t("catalog.variant.businessCurrencyMismatch", { currency: businessCurrency })}
+            </span>
+          </p>
+        ) : null}
 
         {canSetCost ? (
           <MoneyAmountField
