@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { MoneyAmountField } from "@/components/products/MoneyAmountField";
 import { CategoryChoice } from "@/components/products/CategoryChoice";
 import { useBusinessCurrency } from "@/hooks/use-business-currency";
 import {
+  isCreateBindingChanged,
   moneyBindingIsLive,
   reconcileMoneyBinding,
   type MoneyBinding,
@@ -55,8 +56,17 @@ interface CreateProductSheetProps {
  *     currency.
  *   - Immediately before the create, the server is asked again; a form whose
  *     binding no longer matches does not submit.
+ *   - The create carries the user, organization and currency it was initiated
+ *     under; the server refuses it, before any write, if the session no longer
+ *     matches (src/server/products/service.ts createProduct).
  *
- * The payload sent to createCatalogProduct is unchanged in shape.
+ * Draft and request lifecycle. Every draft has an instance number that moves
+ * on reset, close/open, unmount, any principal change (so A → B → A is a new
+ * tenure, not "the same organization") and any re-binding of the amounts.
+ * Each save attempt records the draft it was started for; when that draft is
+ * gone, the attempt's late confirmation, success or failure changes nothing on
+ * screen — it never submits a discarded draft, never resets or closes a newer
+ * one, and never shows its error over it. One attempt runs at a time.
  */
 export function CreateProductSheet({
   open,
@@ -84,6 +94,38 @@ export function CreateProductSheet({
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Draft-instance identity and the save attempt in flight (see header).
+  const draft = useRef(0);
+  const request = useRef<{ draft: number } | null>(null);
+  const mounted = useRef(true);
+  const principal = lookup.principal;
+  const principalKey = principal ? `${principal.userId}:${principal.organizationId}` : null;
+  const seenPrincipal = useRef(principalKey);
+  const seenOpen = useRef(open);
+
+  /**
+   * Start a new draft instance. A save still in flight for the old one is
+   * abandoned; `announce` tells the merchant it was not saved (used when the
+   * business moved under it, not when they closed the sheet themselves).
+   */
+  function discardDraft(announce = false) {
+    draft.current += 1;
+    if (request.current) {
+      request.current = null;
+      setSaving(false);
+      if (announce) setFormError(t("catalog.variant.businessCurrency.confirmFailed"));
+    }
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      draft.current += 1;
+      request.current = null;
+    };
+  }, []);
+
   // Bind to the first known currency; on any change of organization or
   // currency, clear what was typed rather than reinterpret it. Adjusting state
   // during render (not in an effect) means no frame ever shows an old amount
@@ -94,6 +136,7 @@ export function CreateProductSheet({
     priceText !== "" || costText !== "",
   );
   if (reconciled.binding !== binding) {
+    discardDraft(true);
     setBinding(reconciled.binding);
     if (reconciled.clearAmounts && reconciled.binding) {
       setPriceText("");
@@ -103,6 +146,19 @@ export function CreateProductSheet({
       setAmountsCleared(reconciled.binding.currency);
     }
   }
+  // A new tenure — another user, another organization, or back again — or an
+  // open/close the parent drove makes this a new draft. Another user also
+  // never sees what the previous one typed.
+  if (seenOpen.current !== open) {
+    seenOpen.current = open;
+    discardDraft();
+  }
+  if (seenPrincipal.current !== principalKey) {
+    const previousUser = seenPrincipal.current?.split(":")[0] ?? null;
+    seenPrincipal.current = principalKey;
+    if (previousUser !== null && previousUser !== principal?.userId) reset();
+    else discardDraft(true);
+  }
   const live = moneyBindingIsLive(binding, lookup.state) ? binding : null;
   // The binding at the latest render, for checks after an await.
   const latestBinding = useRef<MoneyBinding | null>(live);
@@ -111,6 +167,7 @@ export function CreateProductSheet({
   const nameError = touched && nameKm.trim() === "" ? t("catalog.detail.nameKmMissing") : null;
 
   function reset() {
+    discardDraft();
     setNameKm("");
     setNameEn("");
     setDescriptionKm("");
@@ -128,13 +185,16 @@ export function CreateProductSheet({
   }
 
   async function submit() {
+    // One attempt at a time; a double click does not start a second create.
+    if (request.current) return;
     setTouched(true);
     setFormError(null);
 
     // No known, current business currency → nothing can be priced or sent.
     const bound = live;
-    if (!bound) return;
+    if (!bound || !principal || principal.organizationId !== bound.organizationId) return;
     const currency = bound.currency;
+    const startedFor = principalKey;
 
     const priceAmount = parseMinorUnits(priceText, currency);
     const priceInvalid = priceAmount === null;
@@ -150,18 +210,26 @@ export function CreateProductSheet({
 
     if (nameKm.trim() === "" || priceInvalid || costInvalid || priceAmount === null) return;
 
+    const mine = { draft: draft.current };
+    request.current = mine;
+    // Still the attempt for the draft on screen? False once that draft was
+    // replaced, closed, reopened, remounted or re-tenured.
+    const isCurrent = () =>
+      mounted.current && request.current === mine && draft.current === mine.draft;
+
     setSaving(true);
     try {
       // Ask the server again right before creating: the create lands in the
       // session's CURRENT organization, so it must still be the one — and the
       // currency — these amounts were typed under.
       const confirmed = await lookup.confirm(bound);
-      const current = latestBinding.current;
+      if (!isCurrent()) return;
+      const latest = latestBinding.current;
       if (
         !confirmed ||
-        !current ||
-        current.organizationId !== bound.organizationId ||
-        current.currency !== bound.currency
+        !latest ||
+        latest.organizationId !== bound.organizationId ||
+        latest.currency !== bound.currency
       ) {
         setFormError(t("catalog.variant.businessCurrency.confirmFailed"));
         return;
@@ -182,14 +250,29 @@ export function CreateProductSheet({
           costCurrency: costAmount === null ? null : currency,
           weightGrams: null,
         },
+        expected: { userId: principal.userId, organizationId: bound.organizationId, currency },
       });
+      if (!isCurrent()) {
+        // The product exists, but its draft is gone: refresh the catalog it
+        // belongs to (only if that is still this principal's), touch nothing else.
+        if (seenPrincipal.current === startedFor) onCreated(product);
+        return;
+      }
       onCreated(product);
       reset();
       onOpenChange(false);
     } catch (err) {
-      setFormError(t(catalogErrorKey(classifyCatalogError(err))));
+      if (!isCurrent()) return;
+      setFormError(
+        isCreateBindingChanged(err)
+          ? t("catalog.variant.businessCurrency.confirmFailed")
+          : t(catalogErrorKey(classifyCatalogError(err))),
+      );
     } finally {
-      setSaving(false);
+      if (request.current === mine) {
+        request.current = null;
+        if (mounted.current) setSaving(false);
+      }
     }
   }
 

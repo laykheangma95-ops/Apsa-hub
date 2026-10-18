@@ -25,6 +25,8 @@ import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
 import { formatApsaBarcode, APSA_SERIAL_LENGTH } from "@/lib/barcode/apsa-code";
 import { isCode128Encodable } from "@/lib/barcode/code128";
+import { getBusinessCurrency } from "@/server/org/get-business-currency";
+import { CREATE_BINDING_CHANGED_MESSAGE, type ProductCreateBinding } from "@/lib/business-currency";
 import * as repo from "./repository";
 import type {
   ProductRow,
@@ -390,13 +392,36 @@ export async function generateVariantBarcode(
   throw publicError("Could not generate a unique barcode; please try again", 503);
 }
 
+/**
+ * `binding` is what the browser form was initiated under. It authorizes
+ * nothing — ctx (session + active membership) does — but when present the
+ * create is refused, before any write, unless ctx is still that same user and
+ * organization and the organization still sells in that currency. Without it
+ * a form confirmed in A could land in B after a session switch.
+ */
 export async function createProduct(
   ctx: AuthorizationContext,
   input: CreateProductInput & { initialVariant: CreateVariantInput },
+  binding?: ProductCreateBinding,
 ): Promise<ProductDetail> {
   ctx.require("products.create");
 
   const { initialVariant, ...productInput } = input;
+
+  if (binding) {
+    const changed = () => publicError(CREATE_BINDING_CHANGED_MESSAGE, 409);
+    if (ctx.userId !== binding.userId || ctx.organizationId !== binding.organizationId) {
+      throw changed();
+    }
+    if (
+      initialVariant.price_currency !== binding.currency ||
+      (initialVariant.cost_currency != null && initialVariant.cost_currency !== binding.currency)
+    ) {
+      throw changed();
+    }
+    const business = await getBusinessCurrency(ctx);
+    if (business.currency !== binding.currency) throw changed();
+  }
 
   // Validate money: price_amount must be a non-negative integer.
   if (!Number.isInteger(initialVariant.price_amount) || initialVariant.price_amount < 0) {

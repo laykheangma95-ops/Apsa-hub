@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { getBusinessCurrencyFn } from "@/api/org";
-import { useAppPrincipal } from "@/hooks/use-app-principal";
+import { useAppPrincipal, type AppPrincipal } from "@/hooks/use-app-principal";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import {
   businessCurrencyQueryKey,
@@ -13,6 +13,8 @@ import {
 
 export interface BusinessCurrencyLookup {
   state: BusinessCurrencyState;
+  /** The /app guard's server-derived principal the state was resolved for. */
+  principal: AppPrincipal | null;
   /** Re-run a failed lookup. */
   retry: () => void;
   /**
@@ -77,5 +79,5 @@ export function useBusinessCurrency(enabled = true): BusinessCurrencyLookup {
     [principal, queryClient],
   );
 
-  return { state, retry, confirm };
+  return { state, principal, retry, confirm };
 }

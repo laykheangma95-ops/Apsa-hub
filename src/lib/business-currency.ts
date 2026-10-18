@@ -151,6 +151,26 @@ export function reconcileMoneyBinding(
   return { binding: next, clearAmounts: hasAmounts };
 }
 
+/**
+ * What a product create was initiated under: the principal the form rendered
+ * for and the business currency it confirmed. Sent with the create as a
+ * CONSISTENCY CHECK only — the server still derives user and organization
+ * from the session and refuses the write when they differ from this.
+ */
+export interface ProductCreateBinding {
+  userId: string;
+  organizationId: string;
+  currency: Currency;
+}
+
+/** The server's refusal when a create no longer matches its binding. */
+export const CREATE_BINDING_CHANGED_MESSAGE =
+  "Business or currency changed before saving; review the product and try again";
+
+export function isCreateBindingChanged(error: unknown): boolean {
+  return error instanceof Error && error.message === CREATE_BINDING_CHANGED_MESSAGE;
+}
+
 /** The form may accept and submit amounts only while state and binding agree. */
 export function moneyBindingIsLive(
   binding: MoneyBinding | null,

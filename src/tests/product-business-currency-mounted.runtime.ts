@@ -90,12 +90,21 @@ let principal: { userId: string; organizationId: string } | null = {
 mock.module("@/hooks/use-app-principal", () => ({ useAppPrincipal: () => principal }));
 
 const sent: any[] = [];
+/** "hold" parks each create until the test resolves or rejects it. */
+let createMode: "answer" | "hold" = "answer";
+const heldCreates: { resolve: () => void; reject: (e: Error) => void }[] = [];
 const realCatalog = await import("@/lib/catalog");
 mock.module("@/lib/catalog", () => ({
   ...realCatalog,
   createCatalogProduct: async (input: any) => {
     sent.push(input);
-    return { id: crypto.randomUUID(), ...input, variants: [] };
+    const product = { id: crypto.randomUUID(), ...input, variants: [] };
+    if (createMode === "hold") {
+      return new Promise((resolve, reject) =>
+        heldCreates.push({ resolve: () => resolve(product), reject }),
+      );
+    }
+    return product;
   },
 }));
 
@@ -138,6 +147,7 @@ const RETRY = en.common.retry;
 let open = true;
 let permissions: string[] = ["products.create", "products.update_cost"];
 let canSetCost = true;
+let created = 0;
 let client: InstanceType<typeof QueryClient>;
 let root: ReturnType<typeof createRoot> | null = null;
 let container: HTMLElement | null = null;
@@ -157,7 +167,9 @@ function tree() {
         },
         categories: [],
         canSetCost,
-        onCreated: () => {},
+        onCreated: () => {
+          created += 1;
+        },
       }),
     ),
   );
@@ -204,6 +216,9 @@ beforeEach(async () => {
   permissions = ["products.create", "products.update_cost"];
   canSetCost = true;
   sent.length = 0;
+  createMode = "answer";
+  heldCreates.length = 0;
+  created = 0;
 });
 
 afterEach(async () => {
@@ -267,6 +282,23 @@ async function switchOrganization(org: string) {
   principal = { userId: USER, organizationId: org };
   await rerender();
 }
+
+async function closeWithEscape() {
+  await act(async () => {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  await settle();
+}
+
+/** Click submit without waiting for anything held to resolve. */
+async function clickSubmit() {
+  const b = button(ADD);
+  if (!b) throw new Error("no submit button");
+  await act(async () => b.click());
+  await settle();
+}
+
+const nameKm = () => document.getElementById("product-name-km") as HTMLInputElement | null;
 
 const changedText = (currency: string) => T.changed.replaceAll("{{currency}}", currency);
 
@@ -588,5 +620,189 @@ describe("getBusinessCurrency (server)", () => {
     await expect(getBusinessCurrency(ctx(ORG_A, ["products.create"]))).rejects.toThrow();
     delete orgRows[ORG_A];
     await expect(getBusinessCurrency(ctx(ORG_A, ["products.create"]))).rejects.toThrow();
+  });
+});
+
+// ── Draft and save-attempt lifecycle (PR #130 final P2 #1) ───────────────────
+//
+// A save attempt belongs to the draft it was started for. Once that draft is
+// replaced — organization tenure A → B → A, close/reopen, remount — the old
+// attempt's late confirmation, success or failure must not submit the
+// discarded draft, reset or close the newer one, or paint its error over it.
+
+describe("obsolete save attempts never touch a newer draft", () => {
+  it("A → B → A with a 9,000 KHR replacement: the 5,000 draft is not submitted", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    serverMode = "hold";
+    await clickSubmit();
+    expect(held).toHaveLength(1); // draft A's confirmation is out
+
+    serverMode = "answer";
+    await switchOrganization(ORG_B);
+    await switchOrganization(ORG_A);
+    await type(price(), "9000");
+
+    await releaseAll(); // the obsolete confirmation answers A / KHR
+    expect(sent).toHaveLength(0);
+    expect(price()!.value).toBe("9000");
+    expect(open).toBe(true);
+
+    await submit();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].initialVariant).toMatchObject({ priceAmount: 9000, priceCurrency: "KHR" });
+    expect(sent[0].expected).toEqual({ userId: USER, organizationId: ORG_A, currency: "KHR" });
+  });
+
+  it("delayed SUCCESS of an obsolete save leaves the replacement draft open and intact", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+    expect(heldCreates).toHaveLength(1);
+
+    await switchOrganization(ORG_B);
+    await switchOrganization(ORG_A);
+    await type(price(), "9000");
+
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(open).toBe(true);
+    expect(price()!.value).toBe("9000");
+    expect(nameKm()!.value).toBe("កាហ្វេ");
+    expect(button(ADD)!.disabled).toBe(false);
+    // The product it made is in this principal's catalog: refresh it, nothing more.
+    expect(created).toBe(1);
+
+    createMode = "answer";
+    await submit();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].initialVariant).toMatchObject({ priceAmount: 9000, priceCurrency: "KHR" });
+    expect(open).toBe(false);
+  });
+
+  it("delayed FAILURE of an obsolete save shows no error over the replacement draft", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+
+    await switchOrganization(ORG_B);
+    await switchOrganization(ORG_A);
+    await type(price(), "9000");
+
+    await act(async () => heldCreates.shift()!.reject(new Error("SKU already exists")));
+    await settle();
+    expect(text()).not.toContain(en.catalog.error.duplicate_sku);
+    expect(price()!.value).toBe("9000");
+    expect(open).toBe(true);
+  });
+
+  it("close and reopen during submission: the old result does not close or reset the new draft", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+
+    await closeWithEscape();
+    expect(open).toBe(false);
+    await rerender();
+    open = true;
+    await rerender();
+    expect(price()!.value).toBe("");
+    expect(button(ADD)!.disabled).toBe(false); // the new draft is not stuck "saving"
+    await fillName();
+    await type(price(), "9000");
+
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(open).toBe(true);
+    expect(price()!.value).toBe("9000");
+  });
+
+  it("remount during submission: the unmounted sheet's result does not reach the new one", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+
+    await unmount();
+    await mount({ fresh: false });
+    await fillName();
+    await type(price(), "9000");
+
+    await act(async () => heldCreates.shift()!.resolve());
+    await settle();
+    expect(open).toBe(true);
+    expect(price()!.value).toBe("9000");
+    expect(crashes).toEqual([]);
+  });
+
+  it("double click starts exactly one save", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    serverMode = "hold";
+    const b = button(ADD)!;
+    await act(async () => {
+      b.click();
+      b.click();
+    });
+    await settle();
+    expect(held).toHaveLength(1);
+    await releaseAll();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("a failed save can be retried, and the retry is a single new attempt", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+    expect(button(ADD)).toBeUndefined();
+    expect(button(en.catalog.saving)!.disabled).toBe(true); // loading state while out
+    await act(async () => heldCreates.shift()!.reject(new Error("fetch failed")));
+    await settle();
+    expect(text()).toContain(en.catalog.error.generic);
+    expect(price()!.value).toBe("5000");
+
+    createMode = "answer";
+    await submit();
+    expect(sent).toHaveLength(2);
+    expect(open).toBe(false);
+  });
+
+  it("the server refusing a changed binding is reported as nothing saved", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    createMode = "hold";
+    await clickSubmit();
+    const { CREATE_BINDING_CHANGED_MESSAGE } = await import("@/lib/business-currency");
+    await act(async () => heldCreates.shift()!.reject(new Error(CREATE_BINDING_CHANGED_MESSAGE)));
+    await settle();
+    expect(text()).toContain(T.confirmFailed);
+    expect(open).toBe(true);
+  });
+
+  it("another user signing in mid-save: the draft is cleared and nothing is submitted", async () => {
+    await mount();
+    await fillName();
+    await type(price(), "5000");
+    serverMode = "hold";
+    await clickSubmit();
+
+    principal = { userId: "dddddddd-0000-4000-8000-00000000000d", organizationId: ORG_A };
+    serverMode = "answer";
+    await rerender();
+    expect(nameKm()!.value).toBe("");
+    await releaseAll();
+    expect(sent).toHaveLength(0);
   });
 });
