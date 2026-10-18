@@ -27,6 +27,8 @@ import {
 
 import { OperationalState } from "@/components/common/OperationalState";
 import { CancelOrderSheet } from "@/components/orders/CancelOrderSheet";
+import { CompleteOrderSheet } from "@/components/orders/CompleteOrderSheet";
+import { OrderNextActionPanel } from "@/components/orders/OrderNextActionPanel";
 import {
   RecordOrderPaymentSheet,
   type RecordOrderPaymentSubmit,
@@ -47,6 +49,7 @@ import {
 import {
   arrangeDelivery,
   cancelRealOrder,
+  completeRealOrder,
   confirmRealOrder,
   createRefund,
   createReturn,
@@ -71,6 +74,7 @@ import {
   type OrderErrorKind,
 } from "@/lib/orders";
 import { canPackOrder, fulfillmentActions, packHistoryReasonMessage } from "@/lib/pack";
+import { deriveOrderNextAction, type OrderActionId } from "@/lib/order-next-action";
 import { packingKeys } from "@/lib/packing-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { RetryDeliveryReadyBoundary } from "@/components/fulfillment/RetryDeliveryReadyAction";
@@ -233,6 +237,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const capabilities = useCapabilities();
 
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [completeOpen, setCompleteOpen] = useState(false);
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
   const [parcelLabelOpen, setParcelLabelOpen] = useState(false);
@@ -402,6 +407,24 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     },
   });
 
+  // confirmed -> completed. No stock or money moves; the DB re-checks paid AND
+  // fulfilled under the order lock and refuses otherwise.
+  const completeMutation = useMutation({
+    mutationFn: () => completeRealOrder(id),
+    onSuccess: (detail) => {
+      queryClient.setQueryData(queryKey, detail);
+      invalidateAfterLifecycleChange();
+      setCompleteOpen(false);
+      setNotice(t("order.completedNotice"));
+    },
+    onError: () => {
+      // A refusal means the order moved under us (paid/fulfilled changed):
+      // re-read it so the Next Action reflects the real state.
+      setCompleteOpen(false);
+      void query.refetch();
+    },
+  });
+
   /**
    * Everything a recorded payment makes stale, and nothing more.
    *
@@ -490,7 +513,10 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   // server checks the permission again on the transition itself
   // (src/server/orders/state-machine.ts).
   const canConfirm = canConfirmOrder(order.lifecycleStatus) && capabilities.can("orders.confirm");
-  const canCancel = canCancelOrder(order.lifecycleStatus) && capabilities.can("orders.cancel");
+  // Cancel is further narrowed by the Next Action below: never once the goods
+  // have left the shop (the server would restock units the customer holds).
+  const lifecycleAllowsCancel =
+    canCancelOrder(order.lifecycleStatus) && capabilities.can("orders.cancel");
   // Two labels (CORRECTION-003). The INTERNAL APSA Parcel label carries no
   // PII and is always offered for an order in fulfillment; the SHIPPING label
   // carries the receiver's PII, so it rides the sensitive (fail-closed) grant.
@@ -609,11 +635,60 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     }));
 
   const mutationErrorBanner = (() => {
-    const err = confirmMutation.error ?? cancelMutation.error;
+    const err = confirmMutation.error ?? cancelMutation.error ?? completeMutation.error;
     if (!err) return null;
     const copy = errorCopy(classifyOrderError(err));
     return <OperationalState tone="danger" title={copy.title} body={copy.body} className="mt-3" />;
   })();
+
+  /*
+   * One "what happens next" decision (src/lib/order-next-action.ts), derived
+   * from what this screen has already read. `dataPrincipal` is the partition
+   * the order was read under, so a late response for another principal can
+   * never be offered actions.
+   */
+  const principal = { userId, organizationId: routeOrganizationId };
+  const nextAction = deriveOrderNextAction(
+    {
+      id: order.id,
+      lifecycleStatus: order.lifecycleStatus,
+      paymentStatus: order.paymentStatus,
+      refundStatus: order.refundStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
+    },
+    capabilities,
+    {
+      principal,
+      dataPrincipal: { userId: queryKey[1], organizationId: queryKey[2] },
+      parcelMissing,
+      deliveries: deliveriesQuery.isSuccess
+        ? {
+            latestId: latestDelivery?.id ?? null,
+            latestStatus: latestDelivery?.status ?? null,
+            activeId: activeDelivery?.id ?? null,
+            activeStatus: activeDelivery?.status ?? null,
+            anyDelivered: deliveries.some((d) => d.status === "delivered"),
+            latestHasCod: latestDelivery?.codAmount != null,
+          }
+        : null,
+      deliveriesUnavailable: deliveriesQuery.isError,
+      // null from the server = order not found for this principal: never "not packed".
+      packed: packStateQuery.isSuccess
+        ? (packStateQuery.data?.packed ?? "unavailable")
+        : packStateQuery.isError
+          ? "unavailable"
+          : "loading",
+      parcelCode: packState?.parcelCode ?? null,
+      pendingPaymentId: canReadPayments
+        ? (payments.find((p) => p.status === "pending")?.id ?? null)
+        : null,
+    },
+  );
+  const canCancel =
+    lifecycleAllowsCancel && nextAction.secondary.some((item) => item.id === "cancel_order");
+  const nextActionPending: OrderActionId | null = completeMutation.isPending
+    ? "complete_order"
+    : null;
 
   const hasActions = canConfirm || canCancel;
 
@@ -668,6 +743,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           {...(showStockConsequence
             ? { nextStep: t("order.stockConsequence", { count: stockUnits }) }
             : {})}
+        />
+
+        <OrderNextActionPanel
+          next={nextAction}
+          pendingAction={nextActionPending}
+          handlers={{
+            complete_order: () => setCompleteOpen(true),
+            ...(showRecordPayment ? { record_payment: () => setRecordPaymentOpen(true) } : {}),
+            arrange_delivery: () => setCreateDeliveryOpen(true),
+          }}
+          onRetry={() => {
+            if (deliveriesQuery.isError) void deliveriesQuery.refetch();
+            if (packStateQuery.isError) void packStateQuery.refetch();
+          }}
         />
 
         <Section title={t("order.items")}>
@@ -1090,6 +1179,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         onOpenChange={setCancelOpen}
         pending={cancelMutation.isPending}
         onConfirm={(reason) => cancelMutation.mutate(reason)}
+      />
+      <CompleteOrderSheet
+        open={completeOpen}
+        onOpenChange={setCompleteOpen}
+        pending={completeMutation.isPending}
+        onConfirm={() => completeMutation.mutate()}
       />
       <CreateDeliverySheet
         open={createDeliveryOpen}
