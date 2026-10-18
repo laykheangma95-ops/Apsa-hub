@@ -1841,7 +1841,14 @@
       "costWithheld": "Cost is not shown to your account, so it is left unchanged.",
       "invalidPrice": "Enter a price like 12.50 for USD or 4000 for riel.",
       "invalidCost": "Enter a cost like 12.50 for USD or 4000 for riel.",
-      "businessCurrencyMismatch": "Your business sells in {{currency}}. Orders can only use products priced in {{currency}}.",
+      "businessCurrency": {
+        "loading": "Checking your business currency…",
+        "error": "We couldn't confirm your business currency, so prices can't be entered yet.",
+        "denied": "Your account can't add products for this business.",
+        "locked": "Priced in your business currency ({{currency}}).",
+        "changed": "Your business currency is {{currency}}, so the amounts you entered were cleared. Enter them again in {{currency}}.",
+        "confirmFailed": "Your business currency could not be confirmed, so nothing was saved. Check the price and try again."
+      },
       "invalidWeight": "Enter a whole number of grams.",
       "created": "Variant added",
       "saved": "Variant saved",

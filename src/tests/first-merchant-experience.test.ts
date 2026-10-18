@@ -5,8 +5,10 @@
  *      through the existing create_organization_for_founder contract, and an
  *      unsupported value is refused by the client validator and the server
  *      schema alike.
- *   B. The first product starts in the business currency, because the order
- *      RPC refuses a product priced in any other currency.
+ *   B. Add Product prices only in the confirmed business currency, because
+ *      the order RPC refuses a product priced in any other currency. The
+ *      pure rules are pinned here; the mounted sheet is driven end to end in
+ *      product-business-currency-mounted.runtime.ts.
  *   C. Empty Products / POS / Orders screens point at the next real step,
  *      gated on the permission that step needs.
  *   D. Every new string exists in Khmer and English.
@@ -21,9 +23,14 @@ import en from "../locales/en.json";
 import km from "../locales/km.json";
 import {
   BUSINESS_CURRENCIES,
-  initialPriceCurrency,
+  StaleBusinessCurrencyError,
+  businessCurrencyQueryKey,
   isBusinessCurrency,
-  priceCurrencyMismatch,
+  moneyBindingIsLive,
+  reconcileMoneyBinding,
+  resolveBusinessCurrencyState,
+  verifyBusinessCurrency,
+  type BusinessCurrencyState,
 } from "../lib/business-currency";
 import { validateOnboardingForm } from "../lib/onboarding-form";
 import { CreateOrganizationInputSchema } from "../lib/org-schema";
@@ -127,24 +134,113 @@ describe("onboarding business currency", () => {
 // ── B. First product in the business currency ────────────────────────────────
 
 describe("first product currency", () => {
-  it("starts a new price in the business currency once it is known", () => {
-    expect(initialPriceCurrency("KHR")).toBe("KHR");
-    expect(initialPriceCurrency("USD")).toBe("USD");
-    // Unknown (no organization.read, pending, failed): previous behaviour.
-    expect(initialPriceCurrency(null)).toBe("USD");
+  const A = "aaaaaaaa-0000-4000-8000-00000000000a";
+  const B = "bbbbbbbb-0000-4000-8000-00000000000b";
+  const USER = "cccccccc-0000-4000-8000-00000000000c";
+  const principalA = { userId: USER, organizationId: A };
+  const ready = (organizationId: string, currency: "USD" | "KHR"): BusinessCurrencyState => ({
+    status: "ready",
+    organizationId,
+    currency,
   });
-
-  it("flags a price that the order RPC would refuse, and only then", () => {
-    expect(priceCurrencyMismatch("USD", "KHR")).toBe(true);
-    expect(priceCurrencyMismatch("KHR", "USD")).toBe(true);
-    expect(priceCurrencyMismatch("KHR", "KHR")).toBe(false);
-    expect(priceCurrencyMismatch("USD", null)).toBe(false);
-  });
+  const idle = { isError: false, error: null, data: undefined };
 
   it("only treats the two supported codes as a business currency", () => {
     expect(isBusinessCurrency("KHR")).toBe(true);
     expect(isBusinessCurrency("EUR")).toBe(false);
     expect(isBusinessCurrency(undefined)).toBe(false);
+  });
+
+  it("accepts a response only for the organization it was asked for", () => {
+    expect(verifyBusinessCurrency({ organizationId: A, currency: "KHR" }, A)).toEqual({
+      organizationId: A,
+      currency: "KHR",
+    });
+    expect(() => verifyBusinessCurrency({ organizationId: B, currency: "USD" }, A)).toThrow(
+      StaleBusinessCurrencyError,
+    );
+    expect(() => verifyBusinessCurrency({ organizationId: A, currency: "EUR" }, A)).toThrow();
+    expect(() => verifyBusinessCurrency({ organizationId: A, currency: null }, A)).toThrow();
+  });
+
+  it("keys the cache by user and organization under the purged settings root", () => {
+    expect(businessCurrencyQueryKey(USER, A)).toEqual(["settings", USER, A, "business-currency"]);
+    expect(businessCurrencyQueryKey(USER, A)).not.toEqual(businessCurrencyQueryKey(USER, B));
+  });
+
+  it("never resolves an unknown currency to USD", () => {
+    const pending = resolveBusinessCurrencyState({
+      principal: principalA,
+      canCreate: true,
+      query: idle,
+    });
+    expect(pending).toEqual({ status: "loading" });
+    expect(resolveBusinessCurrencyState({ principal: null, canCreate: true, query: idle })).toEqual(
+      { status: "loading" },
+    );
+    expect(
+      resolveBusinessCurrencyState({
+        principal: principalA,
+        canCreate: true,
+        query: { isError: true, error: new Error("fetch failed"), data: undefined },
+      }),
+    ).toEqual({ status: "error" });
+  });
+
+  it("maps refusals to a permission state, and a missing capability to denied", () => {
+    expect(
+      resolveBusinessCurrencyState({
+        principal: principalA,
+        canCreate: true,
+        query: {
+          isError: true,
+          error: new Error("Missing permission: products.create"),
+          data: undefined,
+        },
+      }),
+    ).toEqual({ status: "denied" });
+    expect(
+      resolveBusinessCurrencyState({ principal: principalA, canCreate: false, query: idle }),
+    ).toEqual({ status: "denied" });
+  });
+
+  it("refuses cached data for a different organization than the principal", () => {
+    expect(
+      resolveBusinessCurrencyState({
+        principal: principalA,
+        canCreate: true,
+        query: { isError: false, error: null, data: { organizationId: B, currency: "USD" } },
+      }),
+    ).toEqual({ status: "error" });
+  });
+
+  it("binds once, keeps the binding through a refetch, and clears amounts on any change", () => {
+    const first = reconcileMoneyBinding(null, ready(A, "KHR"), false);
+    expect(first).toEqual({ binding: { organizationId: A, currency: "KHR" }, clearAmounts: false });
+
+    const binding = first.binding!;
+    expect(reconcileMoneyBinding(binding, ready(A, "KHR"), true).binding).toBe(binding);
+    // A pending refetch or an error leaves typed amounts alone (submit is blocked meanwhile).
+    expect(reconcileMoneyBinding(binding, { status: "loading" }, true)).toEqual({
+      binding,
+      clearAmounts: false,
+    });
+    expect(reconcileMoneyBinding(binding, ready(A, "USD"), true)).toEqual({
+      binding: { organizationId: A, currency: "USD" },
+      clearAmounts: true,
+    });
+    expect(reconcileMoneyBinding(binding, ready(B, "KHR"), true).clearAmounts).toBe(true);
+    // Nothing typed: re-bind silently.
+    expect(reconcileMoneyBinding(binding, ready(B, "USD"), false).clearAmounts).toBe(false);
+  });
+
+  it("is live only while the state agrees with the binding", () => {
+    const binding = { organizationId: A, currency: "KHR" as const };
+    expect(moneyBindingIsLive(binding, ready(A, "KHR"))).toBe(true);
+    expect(moneyBindingIsLive(binding, ready(A, "USD"))).toBe(false);
+    expect(moneyBindingIsLive(binding, ready(B, "KHR"))).toBe(false);
+    expect(moneyBindingIsLive(binding, { status: "loading" })).toBe(false);
+    expect(moneyBindingIsLive(null, ready(A, "KHR"))).toBe(false);
   });
 
   it("the order RPC is the rule this mirrors", () => {
@@ -155,22 +251,27 @@ describe("first product currency", () => {
     expect(migration).toContain("IF v_variant.price_currency <> v_currency THEN");
   });
 
-  it("the Add Product sheet derives its currency from the business, not a fixed USD", () => {
+  it("the Add Product sheet has no USD fallback and offers only the bound currency", () => {
     const sheet = read("src/components/products/CreateProductSheet.tsx");
-    expect(sheet).toContain("useBusinessCurrency(open)");
-    expect(sheet).toContain("initialPriceCurrency(businessCurrency)");
-    expect(sheet).not.toContain('useState<Currency>("USD")');
-    expect(sheet).toContain("catalog.variant.businessCurrencyMismatch");
+    expect(sheet).not.toMatch(/useState<Currency(?: \| null)?>\("USD"\)/);
+    expect(sheet).not.toContain("initialPriceCurrency");
+    expect(sheet).toContain("currencies={[live.currency]}");
+    expect(sheet).toContain("disabled={saving || !live}");
+    expect(sheet).toContain("await lookup.confirm(bound)");
     // The product contract is unchanged: both currency fields still go to the server.
-    expect(sheet).toContain("priceCurrency,");
-    expect(sheet).toContain("costCurrency: costAmount === null ? null : costCurrency");
+    expect(sheet).toContain("priceCurrency: currency,");
+    expect(sheet).toContain("costCurrency: costAmount === null ? null : currency,");
   });
 
-  it("the business currency read is gated on organization.read and fails closed to null", () => {
+  it("the currency read is gated on products.create and echoes its organization", () => {
+    const service = read("src/server/org/get-business-currency.ts");
+    expect(service).toContain('ctx.require("products.create");');
+    expect(service).toContain('.eq("id", ctx.organizationId)');
+    expect(service).toContain("return { organizationId: ctx.organizationId, currency };");
     const hook = read("src/hooks/use-business-currency.ts");
-    expect(hook).toContain('capabilities.can("organization.read")');
-    expect(hook).toContain("ORGANIZATION_PROFILE_QUERY_KEY");
-    expect(hook).toContain("if (!canReadOrganization) return null;");
+    expect(hook).toContain('capabilities.can("products.create")');
+    expect(hook).toContain("verifyBusinessCurrency(await getBusinessCurrencyFn(), organizationId)");
+    expect(hook).not.toContain("organization.read");
   });
 });
 
@@ -225,7 +326,12 @@ describe("first-use copy exists in both locales", () => {
     "catalog.list.firstProduct.title",
     "catalog.list.firstProduct.body",
     "catalog.list.firstProduct.action",
-    "catalog.variant.businessCurrencyMismatch",
+    "catalog.variant.businessCurrency.loading",
+    "catalog.variant.businessCurrency.error",
+    "catalog.variant.businessCurrency.denied",
+    "catalog.variant.businessCurrency.locked",
+    "catalog.variant.businessCurrency.changed",
+    "catalog.variant.businessCurrency.confirmFailed",
     "pos.empty.body",
     "pos.empty.bodyNoAccess",
     "pos.empty.addProduct",
@@ -267,11 +373,13 @@ describe("first-use copy exists in both locales", () => {
     }
   });
 
-  it("the mismatch message interpolates the currency in both languages", () => {
+  it("the currency-bearing messages interpolate the currency in both languages", () => {
     for (const locale of [en, km]) {
-      expect(String(lookup(locale, "catalog.variant.businessCurrencyMismatch"))).toContain(
-        "{{currency}}",
-      );
+      for (const key of ["locked", "changed"]) {
+        expect(String(lookup(locale, `catalog.variant.businessCurrency.${key}`))).toContain(
+          "{{currency}}",
+        );
+      }
     }
   });
 });

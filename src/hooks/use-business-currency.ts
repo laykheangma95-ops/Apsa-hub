@@ -1,30 +1,81 @@
-import { useQuery } from "@tanstack/react-query";
-import { getOrganizationProfileFn } from "@/api/org";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
+import { getBusinessCurrencyFn } from "@/api/org";
+import { useAppPrincipal } from "@/hooks/use-app-principal";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { isBusinessCurrency } from "@/lib/business-currency";
-import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
-import type { Currency } from "@/types";
+import {
+  businessCurrencyQueryKey,
+  resolveBusinessCurrencyState,
+  verifyBusinessCurrency,
+  type BusinessCurrencyState,
+  type MoneyBinding,
+} from "@/lib/business-currency";
+
+export interface BusinessCurrencyLookup {
+  state: BusinessCurrencyState;
+  /** Re-run a failed lookup. */
+  retry: () => void;
+  /**
+   * Ask the server again, bypassing the cache, and resolve true only if it
+   * still answers `binding`'s organization and currency. Called immediately
+   * before a create, so a form bound to organization A does not submit after
+   * the session has moved to B.
+   */
+  confirm: (binding: MoneyBinding) => Promise<boolean>;
+}
 
 /**
- * The signed-in member's business currency, or null while it is unknown.
+ * The signed-in member's business currency for Add Product.
  *
- * Reads the same business-profile query as Home and Settings (same key, same
- * organization.read gate, so it is usually already cached and is purged with
- * the rest of the settings partition on a principal change). A member
- * without organization.read, a pending read, or a failed read all resolve to
- * null — callers fall back to their previous behaviour rather than guess.
+ * The principal is the /app guard's server-derived one (useAppPrincipal), the
+ * cache key carries it, and every response is checked against it, so a reply
+ * for another organization is rejected rather than shown. Pending, failed and
+ * refused lookups each surface as their own state — never as a default.
  */
-export function useBusinessCurrency(enabled = true): Currency | null {
+export function useBusinessCurrency(enabled = true): BusinessCurrencyLookup {
+  const principal = useAppPrincipal();
   const capabilities = useCapabilities();
-  const canReadOrganization = capabilities.can("organization.read");
-  const profileQuery = useQuery({
-    queryKey: ORGANIZATION_PROFILE_QUERY_KEY,
-    queryFn: () => getOrganizationProfileFn(),
+  const queryClient = useQueryClient();
+  const canCreate = capabilities.can("products.create");
+  const organizationId = principal?.organizationId ?? "";
+  const userId = principal?.userId ?? "";
+
+  const query = useQuery({
+    queryKey: businessCurrencyQueryKey(userId, organizationId),
+    queryFn: async () => verifyBusinessCurrency(await getBusinessCurrencyFn(), organizationId),
     retry: false,
-    enabled: enabled && canReadOrganization,
+    enabled: enabled && canCreate && principal !== null,
   });
 
-  if (!canReadOrganization) return null;
-  const currency = profileQuery.data?.defaultCurrency;
-  return isBusinessCurrency(currency) ? currency : null;
+  const state = resolveBusinessCurrencyState({
+    principal,
+    canCreate,
+    query: { isError: query.isError, error: query.error, data: query.data },
+  });
+
+  const { refetch } = query;
+  const retry = useCallback(() => void refetch(), [refetch]);
+
+  const confirm = useCallback(
+    async (binding: MoneyBinding) => {
+      if (!principal || binding.organizationId !== principal.organizationId) return false;
+      try {
+        const fresh = await queryClient.fetchQuery({
+          queryKey: businessCurrencyQueryKey(principal.userId, binding.organizationId),
+          queryFn: async () =>
+            verifyBusinessCurrency(await getBusinessCurrencyFn(), binding.organizationId),
+          staleTime: 0,
+          retry: false,
+        });
+        return (
+          fresh.organizationId === binding.organizationId && fresh.currency === binding.currency
+        );
+      } catch {
+        return false;
+      }
+    },
+    [principal, queryClient],
+  );
+
+  return { state, retry, confirm };
 }
