@@ -134,6 +134,12 @@ export const UI_PERMISSION_KEYS = [
   "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
+  // delivery.create / delivery.update gate Order detail's Next Action offering
+  // "Arrange delivery" (createDelivery requires delivery.create) and "Mark the
+  // delivery outcome" (transitionDeliveryStatus requires delivery.update).
+  // Presentation hints only; the deliveries service requires both again.
+  "delivery.create",
+  "delivery.update",
   // delivery.handoff gates the courier-handoff confirmation affordance
   // (confirmHandoff requires it — src/server/handoff/service.ts, migration 051).
   // A distinct grant from delivery.update: handoff is operational (Cashier/Sales

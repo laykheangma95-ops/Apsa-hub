@@ -39,6 +39,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { financialFixture } from "./helpers/payment-order-fixture";
 import { principalOf } from "./helpers/refuse-only-principal";
+import { overServerFnWire } from "./helpers/server-fn-wire";
+import { markPublicDomainError } from "@/server/public-domain-error";
 
 type Json = Record<string, any>;
 
@@ -120,7 +122,10 @@ function contextFor(userId: string, organizationId: string): AuthorizationContex
     can: granted,
     require: (key: string) => {
       if (!granted(key)) {
-        throw Object.assign(new Error(`Missing permission: ${key}`), { statusCode: 403 });
+        // ForbiddenError: public, so the boundary passes it to the browser.
+        throw markPublicDomainError(
+          Object.assign(new Error(`Missing permission: ${key}`), { statusCode: 403 }),
+        );
       }
     },
   } as unknown as AuthorizationContext;
@@ -128,7 +133,8 @@ function contextFor(userId: string, organizationId: string): AuthorizationContex
 /** resolveAuthContext(): the session's member, its active organization — or 401. */
 function serverContext(): AuthorizationContext {
   if (!server.signedIn) {
-    throw Object.assign(new Error("Not authenticated"), { statusCode: 401 });
+    // UnauthorizedError: public, so the boundary passes it to the browser.
+    throw markPublicDomainError(Object.assign(new Error("Not authenticated"), { statusCode: 401 }));
   }
   return contextFor(server.userId, server.organizationId);
 }
@@ -283,6 +289,8 @@ const loseNextResponse = new Set<Gated>();
 /** The next request of this kind commits server-side, then its response waits for release(). */
 const holdResponseNext = new Set<Gated>();
 const heldResponses: (() => void)[] = [];
+/** The next request of this kind fails on the server with this error instead of running. */
+const failNextWith = new Map<Gated, unknown>();
 
 async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) => Promise<T>) {
   if (holdDispatchNext.has(fn)) {
@@ -302,6 +310,11 @@ async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) 
         server: { userId: ctx.userId, organizationId: ctx.organizationId },
       }) - 1;
     try {
+      const injected = failNextWith.get(fn);
+      if (injected !== undefined) {
+        failNextWith.delete(fn);
+        throw injected;
+      }
       outcome = { value: await run(ctx) };
       outcomes[index] = "ok";
     } catch (error) {
@@ -315,9 +328,16 @@ async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) 
   }
   if (holdResponse) await new Promise<void>((release) => heldResponses.push(release));
   if (lose) throw new TypeError("Failed to fetch");
-  if ("error" in outcome) throw outcome.error;
+  // What the screen receives is what the real boundary and TanStack's
+  // serialization deliver: only the message (src/tests/helpers/server-fn-wire.ts).
+  if ("error" in outcome) throw await overServerFnWire(outcome.error, WIRE_FILE[fn]);
   return outcome.value;
 }
+const WIRE_FILE: Record<Gated, string> = {
+  lifecycle: "src/api/orders.ts",
+  payment: "src/api/payments.ts",
+  delivery: "src/api/deliveries.ts",
+};
 
 mock.module("@/api/orders", () => ({
   createOrderFn: async ({ data }: { data: Json }) => {
@@ -386,8 +406,15 @@ mock.module("@/api/packing", () => ({
     return getOrderPackState(serverContext(), data.orderId);
   },
 }));
+/** This case reads the order's deliveries from the database (as A's grants allow). */
+let realDeliveryReads = false;
 mock.module("@/api/deliveries", () => ({
-  listDeliveriesFn: async () => [],
+  // src/api/deliveries.ts listDeliveriesFn's handler — only when the case asks.
+  listDeliveriesFn: async ({ data }: { data?: Json } = {}) => {
+    if (!realDeliveryReads) return [];
+    const { listDeliveries } = await import("@/server/deliveries/service");
+    return listDeliveries(serverContext(), { order_id: data?.orderId, limit: 50 });
+  },
   // src/api/deliveries.ts createDeliveryFn's handler, field for field.
   createDeliveryFn: async ({ data }: { data: Json }) =>
     serve("delivery", data, async (ctx) => {
@@ -527,6 +554,7 @@ const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query
 const { CapabilityProvider } = await import("@/hooks/use-capabilities");
 const i18n = (await import("@/lib/i18n")).default;
 const en = (await import("@/locales/en.json")).default as any;
+const km = (await import("@/locales/km.json")).default as any;
 const OrderDetailScreen = ((await import("@/routes/app.orders.$id")).Route as any)
   .component as () => React.ReactElement;
 const ConversationScreen = ((await import("@/routes/app.inbox.$id")).Route as any)
@@ -628,6 +656,8 @@ afterEach(async () => {
   holdResponseNext.clear();
   for (const release of heldResponses) release();
   heldResponses.length = 0;
+  failNextWith.clear();
+  realDeliveryReads = false;
   resetGrants();
   route.userId = server.userId = USER_A;
   route.organizationId = server.organizationId = ORG_A;
@@ -740,6 +770,28 @@ async function seedConfirmed(): Promise<string> {
   audits.length = 0;
   return orderId;
 }
+/** Confirmed, paid (a verified cash payment) and handed over at the counter: ready to complete. */
+async function seedReadyToComplete(): Promise<string> {
+  const orderId = await seedConfirmed();
+  const payment = await f.record(10000, "cash", null, orderId, ORG_A);
+  await f.verify(payment, "staff_confirmed", "unverified", ORG_A);
+  await handOverAtCounter(orderId);
+  audits.length = 0;
+  return orderId;
+}
+/** The fulfillment move behind the screen's back: unfulfilled → fulfilled (goods with the customer). */
+async function handOverAtCounter(orderId: string) {
+  const r = await f.rpc("transition_order_status_v1", [
+    ORG_A,
+    orderId,
+    "fulfillment",
+    "unfulfilled",
+    "fulfilled",
+    USER_A,
+    null,
+  ]);
+  if (r.status !== "success") throw new Error(JSON.stringify(r));
+}
 
 // Order detail.
 
@@ -757,6 +809,15 @@ async function tapCancelOrder() {
   await waitFor(() => button(en.order.cancel), "Cancel order");
   await click(button(en.order.cancel), "Cancel order");
   await click(button(en.order.cancelSheet.submit, dialog()!), "Cancel order (sheet)");
+}
+const completeActionButton = () => button(en.order.next.action.complete_order);
+async function tapCompleteOrder() {
+  await waitFor(
+    () => completeActionButton() && !completeActionButton()!.disabled,
+    "Complete order (Next step)",
+  );
+  await click(completeActionButton(), "Complete order (Next step)");
+  await click(button(en.order.completeSheet.submit, dialog()!), "Complete order (sheet)");
 }
 async function tapRecordPayment(amount: string) {
   await waitFor(() => button(en.order.recordPayment), "Record payment");
@@ -1266,7 +1327,7 @@ function lateEvidence(label: string, orderId: string, other: { user: string; org
 }
 
 interface LifecycleAction {
-  name: "Confirm" | "Cancel";
+  name: "Confirm" | "Cancel" | "Complete";
   seed: () => Promise<string>;
   tap: () => Promise<void>;
   from: string;
@@ -1302,6 +1363,31 @@ const LIFECYCLE_ACTIONS: LifecycleAction[] = [
       ]);
     },
   },
+  {
+    name: "Complete",
+    seed: seedReadyToComplete,
+    tap: tapCompleteOrder,
+    from: "confirmed",
+    to: "completed",
+    notice: en.order.completedNotice,
+    expectDoneByA: (s) => {
+      expect(s.lifecycle).toBe("completed");
+      const completes = s.history.filter((h) => h.to_status === "completed");
+      expect(completes.map((h) => `${h.axis}:${who(h.changed_by)}`)).toEqual(["lifecycle:A"]);
+      // Completing moves no stock and no money: only the confirm's sale, one payment.
+      expect(s.movements.map((m) => m.movement_type)).toEqual(["sale"]);
+      expect(s.payments).toHaveLength(1);
+    },
+  },
+];
+/** Every grant that could let B act on the order's lifecycle or payments. */
+const B_ACTION_GRANTS = [
+  "orders.confirm",
+  "orders.cancel",
+  "orders.update",
+  "payments.read",
+  "payments.record",
+  "payments.mark_cod",
 ];
 
 describe("Order detail: a late confirm / cancel response stays with the principal that started it", () => {
@@ -1330,15 +1416,7 @@ describe("Order detail: a late confirm / cancel response stays with the principa
         await action.tap();
         await committedAsA();
         const bGrants = grants.get(USER_B)!;
-        for (const key of [
-          "orders.confirm",
-          "orders.cancel",
-          "payments.read",
-          "payments.record",
-          "payments.mark_cod",
-        ]) {
-          bGrants.delete(key);
-        }
+        for (const key of B_ACTION_GRANTS) bGrants.delete(key);
         if (!to.read) bGrants.delete("orders.read");
         await switchTo({ user: to.user, org: to.org });
         if (to.read)
@@ -1422,15 +1500,7 @@ describe("Order detail: a late confirm / cancel response stays with the principa
         loseNextResponse.add("lifecycle"); // committed, then the response fails
         await action.tap();
         await committedAsA();
-        for (const key of [
-          "orders.confirm",
-          "orders.cancel",
-          "payments.read",
-          "payments.record",
-          "payments.mark_cod",
-        ]) {
-          grants.get(USER_B)!.delete(key);
-        }
+        for (const key of B_ACTION_GRANTS) grants.get(USER_B)!.delete(key);
         if (!to.read) grants.get(USER_B)!.delete("orders.read");
         await switchTo({ user: to.user, org: to.org });
         if (to.read)
@@ -1597,6 +1667,321 @@ describe("Order detail: a late confirm / cancel response stays with the principa
       if (!to.read) expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Order detail Smart Next Action: Complete, and the custody guard's refusals
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Order detail: Complete runs as the member who asked, and a stale screen is refused", () => {
+  it("member A → B during Complete: never completed as B; A's retry is A's", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    holdDispatchNext.add("lifecycle");
+    await tapCompleteOrder();
+    await switchTo({ user: USER_B });
+    const before = await writeSurface();
+    await releaseDispatch();
+    const wrote = wroteSince(before, await writeSurface());
+    const during = await orderState(orderId);
+    evidence("order detail: complete, member A→B while dispatching", during, wrote);
+
+    await switchTo({ user: USER_A });
+    await tapCompleteOrder();
+    const after = await orderState(orderId);
+    expect(sent[0]!.data.expectedPrincipal).toEqual({ userId: USER_A, organizationId: ORG_A });
+    expect(outcomes[0]).toBe("refused:principal_changed");
+    expect(wrote).toEqual([]);
+    expect(during.lifecycle).toBe("confirmed");
+    expect(outcomes[1]).toBe("ok");
+    LIFECYCLE_ACTIONS[2]!.expectDoneByA(after);
+  });
+
+  it("A stays signed in: Complete is written into A's own entry once, closes the sheet and is announced", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await tapCompleteOrder();
+    await waitFor(() => notices().includes(en.order.completedNotice), "the completed notice");
+    expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe("completed");
+    expect(dialog()).toBeNull();
+    expect(completeActionButton()).toBeUndefined(); // a completed order offers no Complete
+    const detailKey = JSON.stringify(detailKeyOf(USER_A, ORG_A, orderId));
+    expect(writesInto(USER_A, ORG_A)).toEqual([`${detailKey}=completed`]);
+    expect(outcomes).toEqual(["ok"]);
+  });
+
+  it("the sheet cannot submit twice while Complete is in flight", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    holdResponseNext.add("lifecycle");
+    await tapCompleteOrder();
+    await committedAsA();
+    const submit = buttonContaining(en.order.completing, dialog()!);
+    expect(submit?.disabled).toBe(true);
+    await click(submit, "Complete order (sheet, again)");
+    await releaseResponse();
+    await waitFor(() => notices().includes(en.order.completedNotice), "the completed notice");
+    expect(sent.filter((s) => s.fn === "lifecycle")).toHaveLength(1);
+  });
+
+  it("stale screen: the payment is reversed after the screen read it — the server refuses Complete, nothing is announced, the order is re-read", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await waitFor(() => completeActionButton(), "Complete order (Next step)");
+    const [payment] = (
+      await f.db.query<{ id: string }>("select id from payments where order_id = $1", [orderId])
+    ).rows;
+    await f.reverse(payment!.id, ORG_A); // behind the screen's back: no longer paid
+    const before = await writeSurface();
+    await tapCompleteOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    const wrote = wroteSince(before, await writeSurface());
+    console.log(
+      `[evidence] stale Complete after reversal: server=[${outcomes.join(",")}] wrote=[${wrote}]`,
+    );
+    expect(outcomes[0]).toMatch(/^refused:/);
+    expect(wrote).toEqual([]);
+    expect((await orderState(orderId)).lifecycle).toBe("confirmed");
+    expect(notices()).not.toContain(en.order.completedNotice);
+    expect(dialog()).toBeNull();
+    // The re-read withdraws Complete: the order is no longer paid.
+    await waitFor(() => !completeActionButton(), "Complete withdrawn after the re-read");
+  });
+
+  it("stale screen: A's orders.update is revoked — Complete is refused by A's own permission (403), nothing written", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await waitFor(() => completeActionButton(), "Complete order (Next step)");
+    grants.get(USER_A)!.delete("orders.update");
+    const before = await writeSurface();
+    await tapCompleteOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    expect(outcomes[0]).toBe("refused:403");
+    expect(wroteSince(before, await writeSurface())).toEqual([]);
+    expect(notices()).not.toContain(en.order.completedNotice);
+  });
+});
+
+describe("Order detail: the custody guard's cancellation refusal reaches the merchant", () => {
+  it("handed over at the counter after the screen read it: Cancel is refused (goods_with_customer), no stock returns, the reason is shown and Cancel is withdrawn", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await waitFor(() => button(en.order.cancel), "Cancel order");
+    await handOverAtCounter(orderId); // behind the screen's back
+    const before = await writeSurface();
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    const wrote = wroteSince(before, await writeSurface());
+    const s = await orderState(orderId);
+    console.log(
+      `[evidence] stale Cancel after hand-over: server=[${outcomes.join(",")}] wrote=[${wrote}]`,
+    );
+    expect(outcomes[0]).toBe("refused:order_cancel_goods_with_customer");
+    expect(wrote).toEqual([]);
+    expect(s.lifecycle).toBe("confirmed");
+    expect(s.movements.filter((m) => m.quantity_delta > 0)).toEqual([]); // nothing restocked
+    expect(text()).toContain(en.order.error.cancelBlocked.title);
+    expect(text()).toContain(en.order.error.cancelBlocked.goods_with_customer);
+    expect(notices()).not.toContain(en.order.cancelledNotice);
+    // The sheet closes so the reason is visible; its submit would be refused again.
+    await waitFor(() => dialog() === null, "the cancel sheet closed");
+    await waitFor(() => !button(en.order.cancel), "Cancel withdrawn after the re-read");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The custody refusal as the browser actually receives it
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// serve() hands the screen what the real server-function boundary and
+// TanStack's ShallowErrorPlugin deliver (src/tests/helpers/server-fn-wire.ts):
+// a bare Error carrying only the message. Each custody refusal is made real —
+// the goods or a delivery move behind the screen's back, then the guard in the
+// database refuses — and must still close the sheet, say why in both
+// languages, and re-read the order so Cancel is withdrawn.
+
+/** A delivery for the order, created behind the screen's back and moved to `status`. */
+async function deliveryBehindScreen(orderId: string, status: "pending" | "in_transit") {
+  const created = await f.rpc("create_delivery_v1", [
+    ORG_A,
+    orderId,
+    USER_A,
+    null,
+    null,
+    null,
+    "Courier",
+    null,
+    null,
+  ]);
+  if (created.status !== "success") throw new Error(JSON.stringify(created));
+  const chain = ["pending", "preparing", "ready", "in_transit"];
+  for (let i = 0; chain[i] !== status; i++) {
+    const to = chain[i + 1]!;
+    // '→ ready' is the step Mark Packed makes (054); packing is not under test.
+    const moved = await f.rpc("transition_delivery_status_v1", [
+      ORG_A,
+      created.delivery_id,
+      chain[i],
+      to,
+      USER_A,
+      to === "ready" ? "pack_order_packed" : null,
+    ]);
+    if (moved.status !== "success") throw new Error(JSON.stringify(moved));
+  }
+}
+
+const CUSTODY_REFUSALS = [
+  {
+    code: "order_cancel_goods_with_customer",
+    reason: "goods_with_customer",
+    behindScreen: (orderId: string) => handOverAtCounter(orderId),
+  },
+  {
+    code: "order_cancel_goods_dispatched",
+    reason: "goods_dispatched",
+    behindScreen: (orderId: string) => deliveryBehindScreen(orderId, "in_transit"),
+  },
+  {
+    code: "order_cancel_active_delivery",
+    reason: "active_delivery",
+    behindScreen: (orderId: string) => deliveryBehindScreen(orderId, "pending"),
+  },
+] as const;
+
+/** A's confirmed order on screen, Cancel offered — the screen has read its (empty) deliveries. */
+async function openCancellableOrder(orderId: string) {
+  grants.get(USER_A)!.add("delivery.read");
+  realDeliveryReads = true;
+  await openOrderDetail(orderId);
+  await waitFor(() => button(en.order.cancel), "Cancel order");
+  await readsSettled();
+}
+
+describe("Order detail: a custody refusal across the real server-function wire", () => {
+  for (const refusal of CUSTODY_REFUSALS) {
+    it(`${refusal.reason}: the sheet closes, the reason shows in English and Khmer, the order is re-read and Cancel is withdrawn — nothing written`, async () => {
+      const orderId = await seedConfirmed();
+      await openCancellableOrder(orderId);
+      await refusal.behindScreen(orderId);
+      const readAt = client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))!.dataUpdatedAt;
+      const before = await writeSurface();
+      await tapCancelOrder();
+      await waitFor(() => outcomes.length === 1, "the server's answer");
+      await waitFor(() => dialog() === null, "the cancel sheet closed");
+      await waitFor(() => !button(en.order.cancel), "Cancel withdrawn after the re-read");
+      await readsSettled();
+      const wrote = wroteSince(before, await writeSurface());
+      const s = await orderState(orderId);
+      const rereadAt = client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))!.dataUpdatedAt;
+      console.log(
+        `[evidence] wire custody refusal ${refusal.reason}: server=[${outcomes}] wrote=[${wrote}] ` +
+          `reread=${rereadAt > readAt} cancelOffered=${Boolean(button(en.order.cancel))}`,
+      );
+      expect(outcomes).toEqual([`refused:${refusal.code}`]);
+      expect(wrote).toEqual([]); // no status, history, stock, payment, event, token or audit
+      expect(audits).toEqual([]);
+      expect(s.lifecycle).toBe("confirmed");
+      expect(s.movements.filter((m) => m.quantity_delta > 0)).toEqual([]);
+      expect(rereadAt).toBeGreaterThan(readAt);
+      expect(text()).toContain(en.order.error.cancelBlocked.title);
+      expect(text()).toContain(en.order.error.cancelBlocked[refusal.reason]);
+      expect(text()).not.toContain(en.error.title);
+      expect(text()).not.toContain(refusal.code); // the wire code is never shown
+      expect(notices()).not.toContain(en.order.cancelledNotice);
+      try {
+        await act(async () => {
+          await i18n.changeLanguage("km");
+        });
+        await settle(6);
+        expect(text()).toContain(km.order.error.cancelBlocked.title);
+        expect(text()).toContain(km.order.error.cancelBlocked[refusal.reason]);
+      } finally {
+        await act(async () => {
+          await i18n.changeLanguage("en");
+        });
+      }
+    });
+  }
+
+  it("delayed refusal, O1 → O2: O2's screen, sheet and Cancel are untouched; back on O1 Cancel is withdrawn", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openCancellableOrder(o2);
+    await navigateOrder(o1);
+    await deliveryBehindScreen(o1, "in_transit");
+    holdResponseNext.add("lifecycle");
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "O1's refusal, held");
+    await navigateOrder(o2);
+    await waitFor(() => button(en.order.cancel), "O2's Cancel");
+    await click(button(en.order.cancel), "O2's Cancel"); // O2's own sheet, open
+    const shownBefore = text();
+    await releaseResponse(); // O1's refusal, while O2 is shown
+    await readsSettled();
+    console.log(
+      `[evidence] delayed custody refusal O1→O2: server=[${outcomes}] o2Unchanged=${text() === shownBefore} ` +
+        `o2SheetOpen=${dialog() !== null} o2Writes=[${writesIntoDetailOf(o2)}]`,
+    );
+    expect(outcomes).toEqual(["refused:order_cancel_goods_dispatched"]);
+    expect(text()).toBe(shownBefore);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(dialog()).not.toBeNull(); // O2's own sheet stays open
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(await lifecycleOf(o2)).toBe("confirmed");
+    await act(async () => {
+      dialog()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await waitFor(() => dialog() === null, "O2's sheet dismissed");
+    await navigateOrder(o1);
+    await waitFor(() => !button(en.order.cancel), "O1's Cancel withdrawn by its own re-read");
+    expect(await lifecycleOf(o1)).toBe("confirmed");
+  });
+
+  it("delayed refusal, member A → B: nothing of A's refusal reaches B's screen", async () => {
+    const orderId = await seedConfirmed();
+    grants.get(USER_B)!.add("delivery.read");
+    await openCancellableOrder(orderId);
+    await handOverAtCounter(orderId);
+    holdResponseNext.add("lifecycle");
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "A's refusal, held");
+    await switchTo({ user: USER_B });
+    await readsSettled();
+    const shownBefore = text();
+    await releaseResponse();
+    await readsSettled();
+    console.log(
+      `[evidence] delayed custody refusal A→B: server=[${outcomes}] bUnchanged=${text() === shownBefore} ` +
+        `writesForB=[${writesInto(USER_B, ORG_A)}]`,
+    );
+    expect(outcomes).toEqual(["refused:order_cancel_goods_with_customer"]);
+    expect(sent[0]!.server).toEqual({ userId: USER_A, organizationId: ORG_A });
+    expect(text()).toBe(shownBefore);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(writesInto(USER_B, ORG_A)).toEqual([]);
+  });
+
+  it("an unexpected server error carrying a custody code is sanitized: generic copy, the sheet stays open, nothing written", async () => {
+    const orderId = await seedConfirmed();
+    await openCancellableOrder(orderId);
+    failNextWith.set(
+      "lifecycle",
+      Object.assign(new Error('duplicate key value violates "orders_pkey"'), {
+        statusCode: 409,
+        code: "order_cancel_goods_with_customer",
+      }),
+    );
+    const before = await writeSurface();
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    await waitFor(() => text().includes(en.error.title), "the generic error");
+    const wrote = wroteSince(before, await writeSurface());
+    expect(wrote).toEqual([]);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(text()).not.toContain("orders_pkey");
+    expect(dialog()).not.toBeNull(); // not a custody refusal: the sheet stays for a retry
+    expect(button(en.order.cancel)).toBeTruthy();
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1902,6 +2287,44 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     );
     expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
     expect(new Set(paymentKeys()).size).toBe(1); // the same key: a replay, not a second payment
+    expectOnePaymentByA(after, 12345);
+  });
+
+  it("opened from the Next step panel, A → B → A while A's submit is still in flight: the retry reuses A's key, so the late original and the retry are one payment", async () => {
+    const nextStep = () =>
+      [...document.querySelectorAll("section")].find(
+        (el) => el.querySelector("h2")?.textContent?.trim() === en.order.next.title,
+      ) ?? null;
+    const openFromNextStep = async () => {
+      await waitFor(
+        () => nextStep() && button(en.order.next.action.record_payment, nextStep()!),
+        "Next step: Record payment",
+      );
+      await click(
+        button(en.order.next.action.record_payment, nextStep()!),
+        "Next step: Record payment",
+      );
+      await typeInto(document.querySelector("#order-payment-amount"), PRIVATE_AMOUNT);
+      await typeInto(document.querySelector("#order-payment-reference"), PRIVATE_REF);
+    };
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // goods with the customer, unpaid: the panel offers Record payment
+    await openOrderDetail(orderId);
+    await openFromNextStep();
+    holdDispatchNext.add("payment"); // left the screen as A, not yet at the server
+    await submitPaymentSheet();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await openFromNextStep(); // the order still reads unpaid: A re-enters the payment
+    await releaseDispatch(); // A's original lands now, as A
+    await submitPaymentSheet("Record payment (A's retry from Next step)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const after = await orderState(orderId);
+    console.log(
+      `[evidence] Next step retry during in-flight submit: outcomes=[${outcomesOf("payment")}] keys=${JSON.stringify(paymentKeys())} payments=${after.payments.length}`,
+    );
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1); // the parked key came back: a replay
     expectOnePaymentByA(after, 12345);
   });
 
@@ -2599,5 +3022,378 @@ describe("Order detail: a late lifecycle or payment answer stays with the order 
     expect(outcomesOf("payment")).toEqual(["ok", "ok", "ok"]);
     expect(s1.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 5000]]);
     expect(s2.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 7000]]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — an unresolved payment's retry identity outlives the Order detail screen
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Reproduced on 79f120a: the identity of a submitted-but-unanswered payment
+// lived in Order detail's own refs, so UNMOUNTING the screen (navigate away,
+// another member's screen, back) destroyed it. A's re-entry of the same
+// payment then went out under a NEW key and the server recorded a second
+// pending payment, a second `created` event and a second payments.record
+// audit. Every case asserts those three SQL/audit facts, not only client keys.
+
+const nextStepSection = () =>
+  [...document.querySelectorAll("section")].find(
+    (el) => el.querySelector("h2")?.textContent?.trim() === en.order.next.title,
+  ) ?? null;
+/** Smart Next Action → Record payment, then the draft typed into the sheet. */
+async function typePaymentFromNextStep(amount = PRIVATE_AMOUNT, reference = PRIVATE_REF) {
+  await waitFor(
+    () => nextStepSection() && button(en.order.next.action.record_payment, nextStepSection()!),
+    "Next step: Record payment",
+  );
+  await click(
+    button(en.order.next.action.record_payment, nextStepSection()!),
+    "Next step: Record payment",
+  );
+  await typeInto(document.querySelector("#order-payment-amount"), amount);
+  if (reference) await typeInto(document.querySelector("#order-payment-reference"), reference);
+}
+/** One row per recorded payment, with its own `created` event and payments.record audit. */
+async function paymentLedger(orderId: string) {
+  const rows = (
+    await f.db.query<Json>(
+      `select p.id, p.recorded_by, p.amount_minor, p.method, p.reference, p.idempotency_key,
+              (select count(*)::int from payment_events e
+                where e.payment_id = p.id and e.event_type = 'created') as created_events
+         from payments p where p.order_id = $1 order by p.created_at`,
+      [orderId],
+    )
+  ).rows;
+  return {
+    rows: rows.map((r) => ({
+      by: who(r.recorded_by),
+      amount: Number(r.amount_minor),
+      method: r.method as string,
+      reference: (r.reference as string | null) ?? null,
+      key: r.idempotency_key as string,
+      createdEvents: r.created_events as number,
+    })),
+    allRecordAudits: audits.filter((a) => a.action === "payments.record").length,
+  };
+}
+function ledgerEvidence(label: string, ledger: Awaited<ReturnType<typeof paymentLedger>>) {
+  console.log(
+    `[evidence] ${label}: outcomes=[${outcomesOf("payment")}] keys=${JSON.stringify(paymentKeys())} ` +
+      `payments=${JSON.stringify(ledger.rows.map((r) => [r.by, r.amount, r.method, r.createdEvents]))} ` +
+      `recordAudits=${ledger.allRecordAudits}`,
+  );
+}
+/** Exactly one payment, A's, with one creation event and one creation audit. */
+function expectOneLogicalPayment(ledger: Awaited<ReturnType<typeof paymentLedger>>) {
+  expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+  expect(ledger.allRecordAudits).toBe(1);
+}
+
+describe("Order detail: an unresolved payment's retry identity survives the screen unmounting", () => {
+  beforeEach(() => {
+    privateRefSeq += 1;
+    PRIVATE_REF = `PRIVATE-BANK-REF-88${String(privateRefSeq).padStart(4, "0")}`;
+  });
+
+  it("REPRO: Next step → Record payment, dispatch held, unmount → B mounts (same QueryClient) → A again, original released, then A's retry: one payment, one created event, one audit", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // goods with the customer, unpaid: Next step offers Record payment
+    await openOrderDetail(orderId);
+    await typePaymentFromNextStep();
+    holdDispatchNext.add("payment"); // left the screen as A, not yet at the server
+    await submitPaymentSheet();
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentFromNextStep(); // the order still reads unpaid: A re-enters the same payment
+    await releaseDispatch(); // A's original lands now, as A
+    await submitPaymentSheet("Record payment (A's retry from Next step)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("remount B→A, Next step retry", ledger);
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("CONTROL (no remount): the same sequence with the screen kept mounted records one payment", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId);
+    await openOrderDetail(orderId);
+    await typePaymentFromNextStep();
+    holdDispatchNext.add("payment");
+    await submitPaymentSheet();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await typePaymentFromNextStep();
+    await releaseDispatch();
+    await submitPaymentSheet("Record payment (A's retry, no remount)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("no remount control", ledger);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("payment-section entry, committed with the response LOST (uncertain), unmount → B → A, A's retry: one payment, one created event, one audit", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft(); // the payment section's own Record payment button
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await remountAs({ user: USER_B });
+    await releaseResponse(); // A's failure lands while B's screen is mounted
+    await remountAs({ user: USER_A });
+    await typePaymentDraft();
+    await submitPaymentSheet("Record payment (A's retry)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("remount, lost response, payment-section retry", ledger);
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("A's original SUCCESS lands while B's screen is mounted: nothing reaches B, the identity is retired, and A's next identical payment is a new one", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await remountAs({ user: USER_B });
+    await readsSettled();
+    const shownToB = text();
+    await releaseResponse();
+    await readsSettled();
+    expect(dialog()).toBeNull();
+    expect(notices()).not.toContain(paymentNotice);
+    expect(text()).toBe(shownToB);
+    await remountAs({ user: USER_A });
+    expectOneLogicalPayment(await paymentLedger(orderId));
+    // Known outcome: a second identical payment is a legitimate new payment.
+    await typePaymentDraft(PRIVATE_AMOUNT, `${PRIVATE_REF}-2`);
+    await submitPaymentSheet("a legitimate second payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("late success under B, then a new payment", ledger);
+    expect(new Set(paymentKeys()).size).toBe(2);
+    expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([
+      ["A", 12345, 1],
+      ["A", 12345, 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("the original success is known BEFORE A re-enters it (A's screen mounted): the identical entry is a new payment, never a silent replay", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    await submitPaymentSheet();
+    await waitFor(() => notices().includes(paymentNotice), "the recorded notice");
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentDraft(); // same amount, same reference
+    await submitPaymentSheet("the identical second payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("success known, identical entry", ledger);
+    expect(new Set(paymentKeys()).size).toBe(2);
+    expect(ledger.rows).toHaveLength(2);
+  });
+
+  const changes = [
+    { label: "amount", amount: "12346", reference: () => PRIVATE_REF, method: null },
+    {
+      label: "reference",
+      amount: PRIVATE_AMOUNT,
+      reference: () => `${PRIVATE_REF}-X`,
+      method: null,
+    },
+    { label: "method", amount: PRIVATE_AMOUNT, reference: () => PRIVATE_REF, method: "khqr" },
+  ] as const;
+  for (const change of changes) {
+    it(`a CHANGED ${change.label} after the remount never reuses the unresolved identity; the original's own retry still replays it`, async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await typePaymentDraft();
+      holdResponseNext.add("payment");
+      loseNextResponse.add("payment");
+      await submitPaymentSheet();
+      await paymentCommittedAsA();
+      await releaseResponse();
+      await remountAs({ user: USER_B });
+      await remountAs({ user: USER_A });
+      await typePaymentDraft(change.amount, change.reference());
+      if (change.method) await click(button(en.pos.method[change.method], dialog()!), "method");
+      await submitPaymentSheet(`changed ${change.label}`);
+      await waitFor(() => outcomesOf("payment").length === 2, "the changed payment");
+      expect(outcomesOf("payment")).toEqual(["ok", "ok"]); // not a key-conflict refusal
+      const [original, changed] = paymentKeys();
+      expect(changed).not.toBe(original);
+      await waitFor(() => dialog() === null, "the changed payment's sheet to close");
+      // The original logical payment is still unresolved: its retry replays it.
+      await typePaymentDraft();
+      await submitPaymentSheet("the original's retry");
+      await waitFor(() => outcomesOf("payment").length === 3, "the original's retry");
+      expect(paymentKeys()[2]).toBe(original);
+      const ledger = await paymentLedger(orderId);
+      ledgerEvidence(`changed ${change.label}`, ledger);
+      expect(ledger.rows).toHaveLength(2);
+      expect(ledger.rows.every((r) => r.by === "A" && r.createdEvents === 1)).toBe(true);
+      expect(ledger.allRecordAudits).toBe(2);
+    });
+  }
+
+  it("two unresolved payments at once: each one's retry after the remount replays its own identity", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    for (const amount of ["12345", "700"]) {
+      await typePaymentDraft(amount, amount === "700" ? "" : PRIVATE_REF);
+      holdResponseNext.add("payment");
+      loseNextResponse.add("payment");
+      await submitPaymentSheet(`unresolved ${amount}`);
+      await waitFor(() => heldResponses.length === (amount === "700" ? 2 : 1), `held ${amount}`);
+      await releaseResponse(amount === "700" ? 1 : 0);
+      await remountAs({ user: USER_A }); // the failed sheet goes with the screen
+    }
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentDraft("700", "");
+    await submitPaymentSheet("retry 700");
+    await waitFor(() => outcomesOf("payment").length === 3, "retry 700");
+    await waitFor(() => dialog() === null, "sheet closed");
+    await typePaymentDraft("12345", PRIVATE_REF);
+    await submitPaymentSheet("retry 12345");
+    await waitFor(() => outcomesOf("payment").length === 4, "retry 12345");
+    const keys = paymentKeys();
+    expect(keys[2]).toBe(keys[1]);
+    expect(keys[3]).toBe(keys[0]);
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("two unresolved", ledger);
+    expect(ledger.rows.map((r) => [r.amount, r.createdEvents])).toEqual([
+      [12345, 1],
+      [700, 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("isolation: after A's unresolved payment, member B entering the identical payment on the same order gets B's own identity and B's own payment; A's retry still replays A's", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await releaseResponse();
+    await remountAs({ user: USER_B });
+    await typePaymentDraft(); // B types the very same amount and reference
+    await submitPaymentSheet("B's own payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "B's payment");
+    await remountAs({ user: USER_A });
+    await typePaymentDraft();
+    await submitPaymentSheet("A's retry");
+    await waitFor(() => outcomesOf("payment").length === 3, "A's retry");
+    const keys = paymentKeys();
+    expect(keys[1]).not.toBe(keys[0]); // B never received A's identity
+    expect(keys[2]).toBe(keys[0]); // A's retry replays A's
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("member isolation", ledger);
+    expect(ledger.rows.map((r) => [r.by, r.createdEvents])).toEqual([
+      ["A", 1],
+      ["B", 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("isolation: A's unresolved payment on O1 is not O2's — the identical entry on O2 is O2's own payment; back on O1 the retry replays O1's", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openOrderDetail(o1);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await releaseResponse();
+    await act(async () => root!.unmount());
+    routeParams.id = o2;
+    root = createRoot(container!);
+    await rerender();
+    await typePaymentDraft(); // identical amount and reference, on O2
+    await submitPaymentSheet("O2's own payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "O2's payment");
+    await act(async () => root!.unmount());
+    routeParams.id = o1;
+    root = createRoot(container!);
+    await rerender();
+    await typePaymentDraft();
+    await submitPaymentSheet("O1's retry");
+    await waitFor(() => outcomesOf("payment").length === 3, "O1's retry");
+    const keys = paymentKeys();
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[2]).toBe(keys[0]);
+    const l1 = await paymentLedger(o1);
+    const l2 = await paymentLedger(o2);
+    ledgerEvidence("order isolation O1", l1);
+    expect(l1.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+    expect(l2.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+    expect(l1.allRecordAudits).toBe(2); // one creation audit per order's one payment
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mobile: the refusal reason and the Next step action are where the merchant is
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Measured on the actual route in Chromium (320-430px, km and en): a custody
+// refusal tapped from the always-visible sticky Cancel while scrolled down
+// rendered its reason 700-1350px above the viewport; and at 320×568 / 360×640
+// the Next step action sat under the sticky bar's glass at first paint, below
+// the four-step workflow. happy-dom has no layout, so these pin the mechanism:
+// the reason is scrolled into view, and the action precedes the workflow.
+
+describe("Order detail: the refusal reason and the Next step action are on screen", () => {
+  it("a custody refusal brings its reason into view", async () => {
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.textContent ?? "");
+    };
+    try {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await waitFor(() => button(en.order.cancel), "Cancel order");
+      await handOverAtCounter(orderId);
+      await tapCancelOrder();
+      await waitFor(
+        () => text().includes(en.order.error.cancelBlocked.goods_with_customer),
+        "the refusal reason",
+      );
+      expect(
+        scrolled.some((t) => t.includes(en.order.error.cancelBlocked.goods_with_customer)),
+      ).toBe(true);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("the Next step action comes before the four-step workflow", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // unpaid, with the customer: Record payment is the action
+    await openOrderDetail(orderId);
+    await waitFor(
+      () => nextStepSection() && button(en.order.next.action.record_payment, nextStepSection()!),
+      "Next step: Record payment",
+    );
+    const section = nextStepSection()!;
+    const action = button(en.order.next.action.record_payment, section)!;
+    const workflow = section.querySelector(`ol[aria-label="${en.order.next.workflow}"]`)!;
+    expect(workflow).not.toBeNull();
+    expect(
+      action.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

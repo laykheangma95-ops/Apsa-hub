@@ -1360,6 +1360,24 @@ export async function cancelRealOrder(
 }
 
 /**
+ * Complete flow: confirmed -> completed. Moves no stock and no money; the
+ * database refuses it unless payment is paid AND fulfillment is fulfilled
+ * (migration 026), and orders.update is required server-side. `principal`:
+ * the member + organization the completion was started as — a required,
+ * refuse-only precondition, exactly as for confirmRealOrder.
+ */
+export async function completeRealOrder(
+  orderId: string,
+  principal: InitiatingPrincipal,
+): Promise<RealOrderDetail> {
+  const { transitionOrderLifecycleFn } = await import("@/api/orders");
+  const detail = await transitionOrderLifecycleFn({
+    data: { orderId, to: "completed", expectedPrincipal: principal },
+  });
+  return mapOrderDetailToUi(detail);
+}
+
+/**
  * Row shape for the create-order flow's optional customer picker.
  *
  * Deliberately NOT the full mock `Customer` type (identities/tags/orderCount/
