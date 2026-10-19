@@ -50,6 +50,7 @@ import {
   type ServerParcelScanResult,
   type ServerProductScanResult,
 } from "@/lib/pack";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 
 export const Route = createFileRoute("/app/pack/$orderId")({
   head: () => ({
@@ -376,12 +377,22 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
     [handleScan],
   );
 
+  /*
+   * Mark Packed is sent with the member + organization this session shows,
+   * handed to the mutation as its variable at the tap — a refuse-only
+   * precondition: the server refuses it (409 principal_changed, nothing
+   * written) if anyone else is signed in when it handles the request, instead
+   * of packing the order with their permission and in their name
+   * (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum).
+   */
   const markPacked = useMutation({
-    mutationFn: async (): Promise<MarkPackedResult> => {
+    mutationFn: async (startedAs: InitiatingPrincipal): Promise<MarkPackedResult> => {
       const current = sessionRef.current;
       if (!current) return { kind: "incomplete" };
       const { markOrderPackedFn } = await import("@/api/packing");
-      return markOrderPackedFn({ data: { orderId, packedLines: buildPackedLines(current) } });
+      return markOrderPackedFn({
+        data: { orderId, packedLines: buildPackedLines(current), expectedPrincipal: startedAs },
+      });
     },
     onSuccess: async (result) => {
       // A late result for an order/user/organization no longer on screen.
@@ -637,7 +648,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
             className="press-tactile tap-target elevation-action h-12 w-full gap-2 rounded-2xl"
             disabled={!ready || !canMark || markPacked.isPending}
             aria-busy={markPacked.isPending}
-            onClick={() => markPacked.mutate()}
+            onClick={() => markPacked.mutate({ userId, organizationId })}
           >
             {markPacked.isPending ? <Spinner /> : <PackageCheck className="size-5" aria-hidden />}
             {t("packSession.markPacked.action")}

@@ -83,8 +83,10 @@ export type OrderStatusAxis = "lifecycle" | "payment" | "fulfillment" | "refund"
  *                            *** STOCK-CONSUMING TRANSITION (future) ***
  *   draft     -> cancelled   abandoned before it was ever a sale
  *   confirmed -> completed   paid AND fulfilled (guarded — see below)
- *   confirmed -> cancelled   a committed sale is called off
- *                            *** STOCK-RELEASING TRANSITION (future) ***
+ *   confirmed -> cancelled   a committed sale is called off — only while the
+ *                            goods are still in the merchant's custody and no
+ *                            delivery is active (custody guard, migration 063)
+ *                            *** STOCK-RELEASING TRANSITION ***
  *   completed                terminal
  *   cancelled                terminal
  *
@@ -230,6 +232,16 @@ export const STOCK_CONSUMING_TRANSITION = {
  * did consume stock — an order confirmed before that migration shipped has no
  * 'sale' rows, and inventing a restock for it would create units that never
  * existed.
+ *
+ * GUARDED IN THE DATABASE (migration 063, order_cancellation_block_v1), under
+ * the order row lock: the release is only true while the units are still on
+ * the merchant's shelf. The cancellation is refused ('cancel_blocked'), and
+ * nothing is written, when fulfillment is 'fulfilled' (goods_with_customer —
+ * the way back is a customer return), a delivery is in_transit / delivered
+ * (goods_dispatched), or a delivery is pending / preparing / ready
+ * (active_delivery — cancel that shipment first). The same guard covers
+ * fulfillment -> cancelled. A table here cannot express it: it depends on
+ * delivery rows, not on the order's own statuses.
  */
 export const STOCK_RELEASING_TRANSITION = {
   axis: "lifecycle",

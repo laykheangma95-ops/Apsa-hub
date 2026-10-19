@@ -282,6 +282,26 @@ export function isOrderCurrencyMismatch(err: unknown): boolean {
   return /priced in the organization's currency/i.test(messageOf(err));
 }
 
+export type OrderCancelBlockedReason =
+  "goods_with_customer" | "goods_dispatched" | "active_delivery" | "blocked";
+
+const CANCEL_BLOCKED_CODES: Record<string, OrderCancelBlockedReason> = {
+  order_cancel_goods_with_customer: "goods_with_customer",
+  order_cancel_goods_dispatched: "goods_dispatched",
+  order_cancel_active_delivery: "active_delivery",
+  order_cancel_blocked: "blocked",
+};
+
+/**
+ * Why the custody guard (migration 063, src/server/orders/service.ts
+ * cancelBlockedToError) refused a cancellation, from the error's stable code —
+ * or null for any other error. Nothing was written when this is non-null.
+ */
+export function orderCancelBlockedReason(err: unknown): OrderCancelBlockedReason | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? (CANCEL_BLOCKED_CODES[code] ?? null) : null;
+}
+
 // ── Orders list pages ─────────────────────────────────────────────────────────
 
 export type { OrderListCursor };

@@ -41,6 +41,7 @@
  */
 import { publicError } from "@/server/public-domain-error";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import * as ordersRepo from "@/server/orders/repository";
 import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
@@ -363,12 +364,20 @@ export async function validatePackProductScan(
  *     has started"). Arranging a delivery later readies it for handoff.
  *
  * Idempotent: an order already packed reports already_packed.
+ *
+ * Refused first — before the permission checks, any read and any write — when
+ * the request was started as another member or organization (CORRECTIONS.md,
+ * CORRECTION-004, packing and handoff addendum): 428 principal_required / 409
+ * principal_changed, nothing written. The packed marker is ctx's.
  */
 export async function markOrderPacked(
   ctx: AuthorizationContext,
   orderId: string,
   packedLines: readonly PackedLineInput[],
+  /** Refuse-only (assertExpectedPrincipal): who started this Mark Packed. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<MarkPackedResult> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.read");
   ctx.require("delivery.handoff");
 
@@ -457,11 +466,16 @@ export async function readyPackedOrderDelivery(
  *
  * Same grants as Mark Packed (orders.read + delivery.handoff); the packed fact
  * comes from the current trusted packed state, never from the delivery status.
+ * Refused first, like Mark Packed, when started as another member or
+ * organization (CORRECTION-004, packing and handoff addendum).
  */
 export async function retryPackedDeliveryReady(
   ctx: AuthorizationContext,
   orderId: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this retry. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<RetryDeliveryReadyResult> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.read");
   ctx.require("delivery.handoff");
 

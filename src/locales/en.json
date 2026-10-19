@@ -1238,6 +1238,13 @@
       "invalid": {
         "title": "That's not possible right now",
         "body": "This order can't move to that status from where it is."
+      },
+      "cancelBlocked": {
+        "title": "This order can't be cancelled now",
+        "goods_with_customer": "The customer already has the goods. Record a customer return instead.",
+        "goods_dispatched": "The goods are with the courier. Record the delivery outcome first.",
+        "active_delivery": "A delivery is arranged for this order. Cancel the delivery first.",
+        "blocked": "This order can't be cancelled in its current state. Nothing was changed."
       }
     },
     "balanceDue": "{{amount}} still to collect.",
@@ -2448,7 +2455,17 @@
         "amountHint": "This payment is {{amount}}. Refunds are always in the payment's own currency.",
         "note": "How much is still refundable is worked out from this payment's history. A refund larger than that is refused.",
         "submit": "Record refund",
-        "done": "Refund recorded."
+        "done": "Refund recorded.",
+        "recovered": "Your refund of {{amount}} was completed at {{time}}.",
+        "review": {
+          "title": "This payment already has a refund:",
+          "item": "{{amount}} · {{time}} · {{who}}",
+          "byYou": "by you",
+          "byOther": "by another member",
+          "body": "If you were retrying a refund that seemed to fail, it was already made — do not refund again. Continue only if you mean to refund more.",
+          "confirm": "Refund {{amount}} more",
+          "decline": "Don't refund again"
+        }
       },
       "reverse": {
         "label": "Reverse",

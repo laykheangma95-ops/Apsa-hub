@@ -25,7 +25,9 @@
  * Retry safety: one idempotency key is minted per opened sheet and reused for
  * every submit attempt from it, so a double tap, a lost response or an explicit
  * retry all replay onto the SAME payment rather than recording a second one.
- * The key is regenerated only when the sheet is opened again for a new payment.
+ * The key is regenerated only when the sheet is opened again for a new payment
+ * — unless the caller hands back an unresolved key it kept for this member
+ * (`replayKey`), so a retry after a retired sheet still replays.
  */
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -63,6 +65,7 @@ export function RecordOrderPaymentSheet({
   pending,
   error,
   onConfirm,
+  replayKey,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -78,6 +81,12 @@ export function RecordOrderPaymentSheet({
   pending: boolean;
   error: string | null;
   onConfirm: (submit: RecordOrderPaymentSubmit) => void;
+  /**
+   * An unresolved key the caller kept for THIS member from a sheet it had to
+   * retire (a principal switch), used instead of minting one when the sheet
+   * opens, so the member's retry replays onto the same payment. Never shown.
+   */
+  replayKey?: string | undefined;
 }) {
   const { t } = useTranslation();
 
@@ -100,7 +109,7 @@ export function RecordOrderPaymentSheet({
     setAmountText("");
     setReference("");
     setMethod(methods[0] ?? "cash");
-    idempotencyKeyRef.current = newIdempotencyKey();
+    idempotencyKeyRef.current = replayKey ?? newIdempotencyKey();
     // Minting depends only on the sheet opening, not on the derived method list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);

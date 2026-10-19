@@ -61,6 +61,8 @@ export interface PaymentEventRow {
   actor_user_id: string | null;
   reason: string | null;
   metadata: Record<string, unknown> | null;
+  /** The refund's idempotency key (migration 040) — refund events only. */
+  idempotency_key?: string | null;
   created_at: string;
 }
 

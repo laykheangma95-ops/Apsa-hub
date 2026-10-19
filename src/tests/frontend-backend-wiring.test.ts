@@ -257,7 +257,9 @@ describe("5. mutations refresh every screen they make stale", () => {
     expect(keys).toContainEqual([...deliveryKeys.lists("user-a", "org-a")]);
     // And the screen delegates to it rather than keeping a second list.
     const source = code("src/routes/app.deliveries.$id.tsx");
-    const body = source.slice(source.indexOf("function onTransitionSuccess("));
+    const at = source.indexOf("function invalidateAfterTransitionOf(");
+    expect(at).toBeGreaterThan(-1);
+    const body = source.slice(at);
     const fn = body.slice(0, body.indexOf("\n  }\n"));
     expect(fn).toContain("deliveryTransitionInvalidationKeys(");
   });

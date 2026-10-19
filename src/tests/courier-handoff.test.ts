@@ -43,6 +43,7 @@ import {
   type HandoffPreview,
   type HandoffResult,
 } from "../lib/handoff";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 // ── Mock data ──────────────────────────────────────────────────────────────
 
@@ -265,7 +266,7 @@ describe("successful handoff", () => {
     mockDeliveries = [makeReadyDelivery()];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("success");
     if (result.kind === "success") {
@@ -316,7 +317,7 @@ describe("duplicate handoff", () => {
     mockDeliveries = [{ ...makeReadyDelivery(), status: "in_transit" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("already_handed_off");
   });
@@ -328,7 +329,7 @@ describe("duplicate handoff", () => {
     transitionResults = [{ status: "stale", current: "in_transit" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("already_handed_off");
   });
@@ -353,7 +354,11 @@ describe("wrong parcel", () => {
     mockParcels = [];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), "APSA:PCL:v1:nonexistent");
+    const result = await confirmHandoff(
+      mockCtx(ORG_A),
+      "APSA:PCL:v1:nonexistent",
+      principalOf(mockCtx(ORG_A)),
+    );
 
     expect(result.kind).toBe("parcel_not_found");
   });
@@ -362,7 +367,7 @@ describe("wrong parcel", () => {
     mockParcels = [{ ...makeParcel(), status: "void" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("parcel_voided");
   });
@@ -386,7 +391,7 @@ describe("wrong order", () => {
     mockDeliveries = [makeReadyDelivery()];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("order_not_confirmed");
   });
@@ -397,7 +402,7 @@ describe("wrong order", () => {
     mockDeliveries = [makeReadyDelivery()];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("order_not_confirmed");
   });
@@ -408,7 +413,7 @@ describe("wrong order", () => {
     mockDeliveries = [makeReadyDelivery()];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("order_not_confirmed");
   });
@@ -423,9 +428,9 @@ describe("permission denial", () => {
     mockDeliveries = [makeReadyDelivery()];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    await expect(confirmHandoff(mockCtx(ORG_A, []), PARCEL_CODE)).rejects.toThrow(
-      "Missing permission: delivery.handoff",
-    );
+    await expect(
+      confirmHandoff(mockCtx(ORG_A, []), PARCEL_CODE, principalOf(mockCtx(ORG_A, []))),
+    ).rejects.toThrow("Missing permission: delivery.handoff");
   });
 
   it("preview throws ForbiddenError without delivery.handoff", async () => {
@@ -437,9 +442,13 @@ describe("permission denial", () => {
 
   it("having orders.read alone is not enough — delivery.handoff is required", async () => {
     const { confirmHandoff } = await import("../server/handoff/service");
-    await expect(confirmHandoff(mockCtx(ORG_A, ["orders.read"]), PARCEL_CODE)).rejects.toThrow(
-      "Missing permission: delivery.handoff",
-    );
+    await expect(
+      confirmHandoff(
+        mockCtx(ORG_A, ["orders.read"]),
+        PARCEL_CODE,
+        principalOf(mockCtx(ORG_A, ["orders.read"])),
+      ),
+    ).rejects.toThrow("Missing permission: delivery.handoff");
   });
 });
 
@@ -450,7 +459,7 @@ describe("cross-org denial", () => {
     mockParcels = [makeParcel(ORG_B)];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("parcel_not_found");
   });
@@ -474,7 +483,7 @@ describe("lifecycle enforcement", () => {
     mockDeliveries = [{ ...makeReadyDelivery(), status: "pending" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("delivery_not_ready");
     if (result.kind === "delivery_not_ready") {
@@ -488,7 +497,7 @@ describe("lifecycle enforcement", () => {
     mockDeliveries = [{ ...makeReadyDelivery(), status: "preparing" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("delivery_not_ready");
     if (result.kind === "delivery_not_ready") {
@@ -502,7 +511,7 @@ describe("lifecycle enforcement", () => {
     mockDeliveries = [];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("no_active_delivery");
   });
@@ -514,7 +523,7 @@ describe("lifecycle enforcement", () => {
     transitionResults = [{ status: "order_terminal" }];
 
     const { confirmHandoff } = await import("../server/handoff/service");
-    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE);
+    const result = await confirmHandoff(mockCtx(ORG_A), PARCEL_CODE, principalOf(mockCtx(ORG_A)));
 
     expect(result.kind).toBe("transition_failed");
   });

@@ -72,6 +72,8 @@ mock.module("@tanstack/react-start", () => ({
 const USER = "11111111-1111-4111-8111-111111111111";
 const SERVER_ORG = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER_ORG = "bbbbbbbb-0000-4000-8000-000000000001";
+/** The refuse-only principal the screen started the mutation as (CORRECTION-004) — required. */
+const STARTED_AS = { userId: USER, organizationId: SERVER_ORG };
 
 let session: { userId: string; email: string; emailVerified: boolean; accessToken: string } | null;
 let activeOrg: string | null;
@@ -224,6 +226,7 @@ const cases: Case[] = [
       idempotencyKey: TEST_IDEMPOTENCY_KEY,
       deliveryMinor: 150,
       shipping: { name: "Sokha", phone: PHONE, address: ADDRESS },
+      expectedPrincipal: STARTED_AS,
     },
     invalid: { source: "FACEBOOK", items: [], idempotencyKey: TEST_IDEMPOTENCY_KEY },
     sensitive: [PHONE, ADDRESS, "Sokha", VARIANT, TEST_IDEMPOTENCY_KEY],
@@ -233,7 +236,12 @@ const cases: Case[] = [
     fn: createDeliveryFn,
     service: "createDelivery",
     permission: "deliveries.create",
-    valid: { orderId: ORDER, externalTrackingNumber: TRACKING, codAmountMinor: 2500 },
+    valid: {
+      orderId: ORDER,
+      externalTrackingNumber: TRACKING,
+      codAmountMinor: 2500,
+      expectedPrincipal: STARTED_AS,
+    },
     invalid: { orderId: "not-a-uuid" },
     sensitive: [ORDER, TRACKING, "2500"],
   },
@@ -242,7 +250,7 @@ const cases: Case[] = [
     fn: markDeliveryInTransitFn,
     service: "markDeliveryInTransit",
     permission: "deliveries.update",
-    valid: { deliveryId: DELIVERY, reason: "picked up" },
+    valid: { deliveryId: DELIVERY, reason: "picked up", expectedPrincipal: STARTED_AS },
     invalid: { deliveryId: "x" },
     sensitive: [DELIVERY, "picked up"],
   },
@@ -251,7 +259,7 @@ const cases: Case[] = [
     fn: confirmHandoffFn,
     service: "confirmHandoff",
     permission: "deliveries.update",
-    valid: { parcelCode: PARCEL },
+    valid: { parcelCode: PARCEL, expectedPrincipal: STARTED_AS },
     invalid: { parcelCode: "" },
     sensitive: [PARCEL],
   },
@@ -260,7 +268,7 @@ const cases: Case[] = [
     fn: recoverOrderParcelFn,
     service: "recoverOrderParcel",
     permission: "orders.confirm",
-    valid: { orderId: ORDER },
+    valid: { orderId: ORDER, expectedPrincipal: STARTED_AS },
     invalid: { orderId: "nope" },
     sensitive: [ORDER],
   },
@@ -269,7 +277,11 @@ const cases: Case[] = [
     fn: markOrderPackedFn,
     service: "markOrderPacked",
     permission: "orders.pack",
-    valid: { orderId: ORDER, packedLines: [{ orderItemId: ITEM, quantity: 1 }] },
+    valid: {
+      orderId: ORDER,
+      packedLines: [{ orderItemId: ITEM, quantity: 1 }],
+      expectedPrincipal: STARTED_AS,
+    },
     invalid: { orderId: ORDER, packedLines: [] },
     sensitive: [ORDER, ITEM],
   },

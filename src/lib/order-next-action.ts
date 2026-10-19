@@ -29,9 +29,10 @@
  *     move exists server-side but has no guard against an active delivery, so
  *     it is not exposed until that guard exists;
  *   - Cancel once the goods have left the shop (fulfilled, a delivery in
- *     transit or delivered): the server would accept it and restock units the
- *     customer already holds. Hiding it here is a presentation mitigation only;
- *     the server-side fix is a separate, security-reviewed change.
+ *     transit or delivered) or while a delivery is arranged (pending,
+ *     preparing, ready). This mirrors the server's custody guard (migration
+ *     063, order_cancellation_block_v1), which refuses those cancellations
+ *     under the order lock; hiding it here only avoids offering a refusal.
  *
  * Money never enters this function. It reads statuses only, so a USD order and
  * a KHR order derive identically and no amount is ever added, converted or
@@ -381,13 +382,15 @@ export function deriveOrderNextAction(
 
   // ── Confirmed: payment, packing and hand-over are independent axes ─────────
 
-  // Cancel is offered only while the goods are provably still in the shop. An
+  // Cancel is offered only while the goods are provably still in the shop and
+  // no delivery is arranged (the custody guard's own rule, migration 063). An
   // unread deliveries list is not proof, so it waits for the read.
   const secondary: OrderActionItem[] =
     can("orders.cancel") &&
     deliveries !== null &&
     (order.fulfillmentStatus === "unfulfilled" || order.fulfillmentStatus === "processing") &&
-    !goodsHaveLeft(order, deliveries)
+    !goodsHaveLeft(order, deliveries) &&
+    deliveries.activeStatus === null
       ? [{ id: "cancel_order", destination: null }]
       : [];
 
