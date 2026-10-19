@@ -1950,3 +1950,123 @@ describe("L. a short answer ends its read only when the API proved it could have
     }
   });
 });
+
+// ── M. Resets and edits at the edges ─────────────────────────────────────────
+
+/**
+ * Product Detail's archive / edit write, then exactly its invalidation
+ * (src/routes/app.products.$id.tsx invalidate()). The write itself is not
+ * #126's; how the paged list answers the invalidation is.
+ */
+async function afterDetailWrite(org: string, statement: string, params: unknown[]) {
+  await f.db.query(statement, params);
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: [CATALOG_QUERY_ROOT, U1, org] });
+  });
+  await readsSettled();
+}
+
+describe("M. a new question starts at page one; an edit at the edge strands nothing", () => {
+  it("M1. search, a category, and clearing the search each start again at page one", async () => {
+    const { org } = await newOrg();
+    const drinks = await newCategory(org, "ភេសជ្ជៈ", "Drinks");
+    await seedProducts(org, 130, "RST", { categoryId: drinks });
+    signInAs(U1, org);
+    await mount();
+    await loadEverything();
+    expect(shown()).toHaveLength(130);
+
+    await search("item");
+    expect(pageCalls().at(-1)!.data).toEqual({ status: "ACTIVE", search: "item" });
+    expect(shown()).toEqual((await dbOrder(org)).slice(0, 50));
+    expect(buttonNamed(LOAD_MORE)).not.toBeNull();
+
+    const beforeClear = pageCalls().length;
+    await type("");
+    await waitFor(() => pageCalls().length > beforeClear, "cleared search asked");
+    await readsSettled();
+    expect(pageCalls().at(-1)!.data).toEqual({ status: "ACTIVE" });
+    expect(shown()).toEqual((await dbOrder(org)).slice(0, 50));
+
+    await loadEverything();
+    await tap("ភេសជ្ជៈ");
+    await readsSettled();
+    expect(pageCalls().at(-1)!.data).toEqual({ status: "ACTIVE", categoryId: drinks });
+    expect(shown()).toEqual((await dbOrder(org)).slice(0, 50));
+  });
+
+  it("M2. archiving the only product on the last loaded page: the list ends, complete", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 101, "EDGE");
+    signInAs(U1, org);
+    await mount();
+    expect(await loadEverything()).toBe(2);
+    expect(shown()).toEqual(await dbOrder(org));
+    expect(text()).toContain(END);
+
+    await afterDetailWrite(
+      org,
+      `update products set status = 'ARCHIVED' where organization_id = $1 and name_km = 'EDGE-00101'`,
+      [org],
+    );
+    expect(shown()).toEqual(await dbOrder(org));
+    expect(shown()).toHaveLength(100);
+    expect(text()).toContain(END);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+    expect(buttonNamed(RETRY)).toBeNull();
+  });
+
+  it("M3. archiving the last product of all, or of a search: an honest empty state", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 1, "ONLY");
+    await seedProducts(org, 3, "KEEP", { nameEn: (i) => `'Plain ' || ${i}` });
+    signInAs(U1, org);
+    await mount();
+
+    await search("ONLY");
+    expect(shown()).toEqual(["ONLY-00001"]);
+    await afterDetailWrite(
+      org,
+      `update products set status = 'ARCHIVED' where name_km = 'ONLY-00001' and organization_id = $1`,
+      [org],
+    );
+    expect(shown()).toEqual([]);
+    expect(text()).toContain(NO_MATCHES);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+
+    await tap("Clear search");
+    await readsSettled();
+    expect(shown()).toEqual(await dbOrder(org));
+    await afterDetailWrite(
+      org,
+      `update products set status = 'ARCHIVED' where organization_id = $1`,
+      [org],
+    );
+    expect(shown()).toEqual([]);
+    expect(text()).toContain(EMPTY);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+  });
+
+  it("M4. an edit that takes the last match out of a search keeps the rest, then the end", async () => {
+    const { org } = await newOrg();
+    await seedProducts(org, 60, "KTL", { nameEn: (i) => `'Kettle ' || ${i}` });
+    await seedProducts(org, 40, "CUP", { nameEn: (i) => `'Cup ' || ${i}` });
+    signInAs(U1, org);
+    await mount();
+    await search("kettle");
+    await loadEverything();
+    expect(shown()).toEqual(await dbOrder(org, "name_km like 'KTL-%'"));
+
+    await afterDetailWrite(
+      org,
+      `update products set name_en = 'Teapot' where organization_id = $1 and name_km = 'KTL-00060'`,
+      [org],
+    );
+    expect(shown()).toEqual(
+      await dbOrder(org, "name_km like 'KTL-%' and name_en ilike '%kettle%'"),
+    );
+    expect(shown()).toHaveLength(59);
+    expect(text()).toContain(END_SEARCH);
+    expect(buttonNamed(LOAD_MORE)).toBeNull();
+  });
+});
