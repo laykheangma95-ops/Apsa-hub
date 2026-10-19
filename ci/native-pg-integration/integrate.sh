@@ -51,7 +51,9 @@ if [ "${HARNESS_SKIP_PR121:-}" = "1" ]; then
   echo "NEGATIVE CONTROL: PR #121 is NOT merged into this tree"
   git merge --no-ff --no-edit -m "harness: merge PR #128 @ $PR128_SHA (control)" "$PR128_SHA"
 else
-  merge pr121 "$PR121_SHA"
+  # PR #121 already contains the pinned main, so this merge has no known
+  # conflicts: any conflict here is new and must be resolved by a human.
+  git merge --no-ff --no-edit -m "harness: merge PR #121 @ $PR121_SHA" "$PR121_SHA"
   merge pr128 "$PR128_SHA"
   required="$required 062_financial_replay_refund_audit_atomicity"
 fi

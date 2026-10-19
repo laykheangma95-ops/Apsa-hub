@@ -26,10 +26,11 @@ A passing control fails the job.
 
 ## Known integration conflicts
 
-The pinned heads do not merge cleanly. [`resolve-conflicts.ts`](./resolve-conflicts.ts)
-resolves only these, and fails on anything else:
+main + PR #121 merges cleanly (#121's pinned head already contains the pinned
+main); a conflict there fails the run. The PR #128 merge has known conflicts.
+[`resolve-conflicts.ts`](./resolve-conflicts.ts) resolves only these, and fails
+on anything else:
 
-- `src/routes/app.orders.$id.tsx` (main ↔ #121): keeps both sides, #121's principal-reset effects and then main's filter-preserving `back`.
 - Three migration-head pin tests (#121 ↔ #128, predicted in #128's description): takes #128's side (head = 063).
 
 ## Reproduce locally
