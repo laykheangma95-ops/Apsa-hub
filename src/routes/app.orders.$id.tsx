@@ -715,7 +715,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     };
   }, []);
 
-  const back = () => navigate({ to: "/app/orders" });
+  // Back to the list the merchant came from, filter included.
+  const back = () => navigate({ to: "/app/orders", search: (prev) => prev });
 
   if (query.isLoading) {
     return (

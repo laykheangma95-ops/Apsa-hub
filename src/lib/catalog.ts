@@ -22,6 +22,7 @@
  */
 import type { QueryClient } from "@tanstack/react-query";
 import type { Currency, CompanionColor, Money } from "@/types";
+import type { ProductCreateBinding } from "@/lib/business-currency";
 
 // ── Shapes returned by the server (src/server/products/service.ts) ───────────
 
@@ -458,6 +459,8 @@ export interface CreateCatalogProductInput {
   descriptionKm: string | null;
   categoryId: string | null;
   initialVariant: CatalogVariantInput;
+  /** Who and what the form was initiated under; the server refuses a mismatch. */
+  expected: ProductCreateBinding;
 }
 
 export async function createCatalogProduct(
@@ -480,6 +483,7 @@ export async function createCatalogProduct(
         cost_currency: input.initialVariant.costCurrency,
         weight_grams: input.initialVariant.weightGrams,
       },
+      expected: input.expected,
     },
   });
   return result as unknown as CatalogProduct;

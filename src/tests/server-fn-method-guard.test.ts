@@ -73,6 +73,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   getOrderByIdFn: { reason: "detail read" },
   findOrderByCodeFn: { reason: "lookup read" },
   listOrdersFn: { reason: "list read" },
+  listOrdersPageFn: { reason: "paged list read" },
   getPaymentByIdFn: { reason: "detail read" },
   listPaymentsFn: { reason: "list read" },
   getPaymentReconciliationFn: { reason: "summary read" },
@@ -113,6 +114,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   findReturnableOrderFn: { reason: "lookup read" },
   findReturnableOrderByParcelFn: { reason: "lookup read" },
   getOrganizationProfileFn: { reason: "profile read" },
+  getBusinessCurrencyFn: { reason: "reads the business currency for Add Product" },
   listTeamFn: { reason: "list read" },
 };
 

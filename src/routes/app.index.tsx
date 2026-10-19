@@ -1,32 +1,45 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { getOrganizationProfileFn } from "@/api/org";
 import { getHomeSummary, lookupVariantByBarcode } from "@/lib/api";
 import { notifyInfo } from "@/lib/feedback";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
-import { homeQueryKey } from "@/lib/home-query";
-import { attentionDestination, attentionNoticeKey } from "@/lib/home-attention";
-import { resolveHomeSummaryView } from "@/lib/home-summary-view";
-import { formatMoney } from "@/lib/money";
+import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
+import { HomeHeader } from "@/components/home/HomeHeader";
+import { HomeQuickActions } from "@/components/home/HomeQuickActions";
+import { TodaySalesCard } from "@/components/home/TodaySalesCard";
+import { customerKeys } from "@/lib/customers-query";
 import {
-  AppHeader,
-  AttentionCard,
-  BottomNav,
-  BottomSheet,
-  ErrorState,
-  HomeSkeleton,
-  MetricTile,
-  QuickActionGrid,
-  visibleQuickActions,
-  ScreenBleed,
-  SegmentedControl,
-  SkeletonBlock,
-  type QuickActionId,
-  type Segment,
-} from "@/design-system";
-import { useCapabilities } from "@/hooks/use-capabilities";
-import type { AttentionItem, HomeSummary, Metric, MetricRange } from "@/types";
+  enforceHomeFinanceCache,
+  evictHomePrincipal,
+  guardHomeFinance,
+  HOME_QUERY_PREFIX,
+  homeQueryKey,
+  isHomeAccessError,
+  resolveHomeFinanceAccess,
+} from "@/lib/home-query";
+import {
+  attentionDestination,
+  attentionItems,
+  attentionNoticeKey,
+  attentionSummary,
+  attentionSummaryKey,
+} from "@/lib/home-attention";
+import {
+  homeQuickActionAvailable,
+  homeQuickActions,
+  type HomeQuickActionState,
+} from "@/lib/home-quick-actions";
+import { resolveHomeSummaryView } from "@/lib/home-summary-view";
+import { ordersKeys } from "@/lib/orders-query";
+import { ORGANIZATION_PROFILE_QUERY_KEY } from "@/lib/settings-view";
+import { resolveTeamIdentityView } from "@/lib/team-view";
+import { AttentionCard, BottomNav, Disclosure, ScreenBleed, SkeletonBlock } from "@/design-system";
+import { useCapabilities, useSensitiveCapabilityFreshness } from "@/hooks/use-capabilities";
+import { useHeldTileSize } from "@/hooks/use-held-tile-size";
+import type { MetricRange } from "@/types";
 
 export const Route = createFileRoute("/app/")({
   head: () => ({
@@ -46,216 +59,154 @@ export const Route = createFileRoute("/app/")({
   component: BusinessHome,
 });
 
-const RANGES: MetricRange[] = ["today", "week", "month"];
-
-/** Every destination the Home "create" sheet may point at. */
-type CreateActionRoute = "/app/pos" | "/app/orders" | "/app/products";
-
-function attentionItems(summary: HomeSummary): AttentionItem[] {
-  const items: AttentionItem[] = [];
-  if (summary.orders.status === "available") {
-    if (summary.orders.data.awaitingPaymentCount > 0) {
-      items.push({
-        id: "awaiting_payment",
-        count: summary.orders.data.awaitingPaymentCount,
-        tone: "warning",
-      });
-    }
-    if (summary.orders.data.actionNeededCount > 0) {
-      items.push({
-        id: "orders_needing_action",
-        count: summary.orders.data.actionNeededCount,
-        tone: "warning",
-      });
-    }
-  }
-  if (summary.payments.status === "available" && summary.payments.data.needsReviewCount > 0) {
-    items.push({
-      id: "payments_needing_review",
-      count: summary.payments.data.needsReviewCount,
-      tone: "danger",
-    });
-  }
-  if (
-    summary.inventory.status === "available" &&
-    summary.inventory.data.outOfStockVariantCount > 0
-  ) {
-    items.push({
-      id: "low_stock",
-      count: summary.inventory.data.outOfStockVariantCount,
-      tone: "danger",
-    });
-  }
-  if (summary.delivery.status === "available" && summary.delivery.data.actionCount > 0) {
-    items.push({
-      id: "awaiting_delivery",
-      count: summary.delivery.data.actionCount,
-      tone: "info",
-    });
-  }
-  return items;
-}
-
-function metricItems(summary: HomeSummary): Metric[] {
-  const metrics: Metric[] = [];
-  if (summary.orders.status === "available") {
-    metrics.push(
-      {
-        id: "orders",
-        value: String(summary.orders.data.periodCount),
-        deltaPercent: null,
-        series: [],
-      },
-      {
-        id: "awaiting_payment",
-        value: String(summary.orders.data.awaitingPaymentCount),
-        deltaPercent: null,
-        series: [],
-      },
-    );
-  }
-  if (summary.payments.status === "available") {
-    metrics.push({
-      id: "payments_needing_review",
-      value: String(summary.payments.data.needsReviewCount),
-      deltaPercent: null,
-      series: [],
-    });
-  }
-  if (summary.delivery.status === "available") {
-    metrics.push({
-      id: "delivery_actions",
-      value: String(summary.delivery.data.actionCount),
-      deltaPercent: null,
-      series: [],
-    });
-  }
-  if (summary.inventory.status === "available") {
-    metrics.push({
-      id: "low_stock",
-      value: String(summary.inventory.data.outOfStockVariantCount),
-      deltaPercent: null,
-      series: [],
-    });
-  }
-  return metrics;
-}
+/**
+ * Home always shows Today. Week and Month are Analytics' screen (same
+ * net-collected definition, its own range control), linked from the Today card.
+ */
+const HOME_RANGE: MetricRange = "today";
 
 function BusinessHome() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const capabilities = useCapabilities();
   const { session, organizationId } = Route.useRouteContext();
-  const [range, setRange] = useState<MetricRange>("today");
-  const [createOpen, setCreateOpen] = useState(false);
+  const [attentionOpen, setAttentionOpen] = useState(false);
+  const [createOrderOpen, setCreateOrderOpen] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const tiles = useHeldTileSize();
+
+  /*
+   * Re-ask the server while money can be on screen (the same single
+   * capability query; it only polls), and know whether its last successful
+   * answer is still recent — counted from when that request LEFT, so a slow
+   * answer buys no extra time, and a refresh that never answers lapses on a
+   * timer (SENSITIVE_CAPABILITY_MAX_AGE_MS). Keyed on can(), not
+   * canSensitive(), so a snapshot left stale by one failed refresh is retried
+   * and can recover.
+   */
+  const confirmation = useSensitiveCapabilityFreshness(
+    session.userId,
+    organizationId,
+    capabilities.can("orders.read") && capabilities.can("payments.reconcile"),
+  );
+  const confirmationFresh = confirmation === "fresh";
+
+  /*
+   * Today's money is drawn only while the server has recently confirmed this
+   * member still holds the finance keys (src/lib/home-query.ts). The moment
+   * that stops — a revocation, an expired session, a capability refresh that
+   * failed or has not answered in time — this principal's Home entries are
+   * cancelled and dropped, during render and before the read below, so neither
+   * the cache nor a response already in flight can put a grant-era figure back
+   * on screen.
+   */
+  const financeConfirmed =
+    resolveHomeFinanceAccess(capabilities, false, confirmationFresh) === "granted";
+  enforceHomeFinanceCache(queryClient, session.userId, organizationId, financeConfirmed);
 
   const homeQuery = useQuery({
-    queryKey: homeQueryKey(session.userId, organizationId, range),
-    queryFn: () => getHomeSummary(range),
+    queryKey: homeQueryKey(session.userId, organizationId, HOME_RANGE),
+    // Figures that land while access is unconfirmed are never cached.
+    queryFn: async () =>
+      guardHomeFinance(
+        queryClient,
+        session.userId,
+        organizationId,
+        await getHomeSummary(HOME_RANGE),
+      ),
   });
 
-  // The one place allowed to decide whether fetched data may be shown as the
-  // CURRENT range's numbers — see src/lib/home-summary-view.ts. Switching
-  // Today/Week/Month keys a new query; until it resolves, `data` must never
-  // be read as this range's truth just because a query object happens to
-  // hold something (a previous range's placeholder data, or an error next to
-  // stale numbers).
+  /*
+   * A refusal from Home's own read (expired session, revoked membership, no
+   * operational read left) means everything it holds is no longer this
+   * member's to see: nothing retained is drawn, and the entries are dropped.
+   */
+  const homeAccessLost = homeQuery.isError && isHomeAccessError(homeQuery.error);
+  // Only while something is still held, so a refusal that repeats after the
+  // eviction cannot start a remove → refetch → refuse loop.
+  const homeDataHeld = homeQuery.data !== undefined;
+  useEffect(() => {
+    if (homeAccessLost && homeDataHeld) {
+      evictHomePrincipal(queryClient, session.userId, organizationId);
+    }
+  }, [homeAccessLost, homeDataHeld, queryClient, session.userId, organizationId]);
+
+  // The one place allowed to decide whether fetched data may be shown as
+  // Today's numbers — see src/lib/home-summary-view.ts.
   const view = resolveHomeSummaryView({
-    range,
-    data: homeQuery.data,
+    range: HOME_RANGE,
+    data: homeAccessLost ? undefined : homeQuery.data,
     isError: homeQuery.isError,
   });
+  // A failed refresh keeps the last counts on screen; never the last money.
+  const financeAccess = resolveHomeFinanceAccess(
+    capabilities,
+    homeQuery.isError,
+    confirmationFresh,
+  );
   const summary = view.kind === "ready" ? view.summary : undefined;
   const attention = summary ? attentionItems(summary) : [];
-  const metrics = summary ? metricItems(summary) : [];
   // An empty attention list is only reassuring when Home actually knows the
   // list is empty. Anything less says so rather than implying a settled zero.
   const noticeKey = summary ? attentionNoticeKey(summary, attention.length) : null;
-
-  // True only until Home has shown real data once in this mount. A later
-  // range switch or refetch failure keeps the shell — including the
-  // segmented control the merchant just tapped — mounted, and substitutes a
-  // smaller loading/error treatment in place of the numbers instead of
-  // blanking the whole screen. Derived during render, not an effect: it is a
-  // one-way flip read and written in the same pass, so it never schedules an
-  // extra render.
-  const everLoadedRef = useRef(false);
-  if (view.kind === "ready") everLoadedRef.current = true;
-  const isFirstLoad = view.kind === "loading" && !everLoadedRef.current;
-
-  const rangeSegments: Segment<MetricRange>[] = RANGES.map((value) => ({
-    value,
-    label: t(`home.range.${value}`),
-  }));
+  // The collapsed row: kinds of work waiting, never a sum of overlapping counts.
+  const collapsed = attentionSummary(view, attention.length);
 
   /*
-   * Each starting point is keyed to the permission its destination actually
-   * needs server-side. "Send invoice" has no backend yet and opens an honest
-   * "not built" sheet for everyone, so there is no permission to key it to.
+   * The business name in the header comes from the real Organization profile —
+   * the same read, cache entry and organization.read gate as Team's header and
+   * Settings' Business row. Anything short of a successful read shows no name.
    */
-  const quickActionsAvailable: Partial<Record<QuickActionId, boolean>> = {
-    receivePayment: capabilities.can("orders.create"),
-    newOrder: capabilities.can("orders.read"),
-    addProduct: capabilities.can("products.create"),
-  };
-
-  // A heading with nothing under it is worse than no section.
-  const hasQuickActions = visibleQuickActions(quickActionsAvailable).length > 0;
-
-  function handleQuickAction(id: QuickActionId) {
-    if (id === "newOrder") {
-      void navigate({ to: "/app/orders" });
-      return;
-    }
-    if (id === "receivePayment") {
-      void navigate({ to: "/app/pos" });
-      return;
-    }
-    if (id === "addProduct") {
-      // The catalogue screen owns creating a product (its own "+" opens
-      // CreateProductSheet behind the same products.create grant). Sending the
-      // merchant there completes the action rather than opening a sheet that
-      // had no handler for it.
-      void navigate({ to: "/app/products" });
-      return;
-    }
-    // sendInvoice only — no backend exists for it, so it opens the sheet
-    // below, which says so rather than pretending.
-    setCreateOpen(true);
-  }
+  const canReadOrganization = capabilities.can("organization.read");
+  const organizationQuery = useQuery({
+    queryKey: ORGANIZATION_PROFILE_QUERY_KEY,
+    queryFn: () => getOrganizationProfileFn(),
+    retry: false,
+    enabled: canReadOrganization,
+  });
+  const identity = resolveTeamIdentityView(canReadOrganization, organizationQuery);
+  const businessName = identity.kind === "ready" ? identity.organizationName : null;
 
   /*
-   * The "create" sheet's rows, each pointing at the screen that actually
-   * performs the work. Every row here previously just closed the sheet: four
-   * buttons that looked like starting points and did nothing at all.
-   *
-   * A row is offered only with the permission its destination's server
-   * functions require, and a row with no destination is stated as not built —
-   * never rendered as a silent no-op.
+   * Each card is keyed to the permission its destination actually requires
+   * server-side (src/lib/home-quick-actions.ts). A card the member cannot use
+   * keeps its place and says so; it is never a button into a refusal.
    */
-  interface CreateAction {
-    key: string;
-    /** null means no destination exists yet — rendered as such, never as a link. */
-    to: CreateActionRoute | null;
+  const quickActions = homeQuickActions((key) => capabilities.can(key));
+  // The tile's own gate (orders.create AND products.read) — the sheet is never
+  // mounted for a member whose tile is unavailable.
+  const canCreateOrder = homeQuickActionAvailable("newOrder", (key) => capabilities.can(key));
+
+  // Losing either key while the sheet is open closes it, and it stays closed:
+  // regaining access later must not pop it back open uninvited.
+  useEffect(() => {
+    if (!canCreateOrder) setCreateOrderOpen(false);
+  }, [canCreateOrder]);
+
+  function handleQuickAction(action: HomeQuickActionState) {
+    if (!action.available) return;
+    if (action.target.kind === "createOrderSheet") {
+      if (!canCreateOrder) return;
+      setCreateOrderOpen(true);
+      return;
+    }
+    void navigate({ to: action.target.to });
   }
+
+  function toggleAttention(next: boolean) {
+    // Measured in the tap, before the list takes any height from the tiles.
+    if (next) tiles.hold();
+    else tiles.release();
+    setAttentionOpen(next);
+  }
+
   /*
    * Camera scanning resolves exactly as Inventory's scanner does — the same
    * org-scoped lookupVariantByBarcode, behind the same two read grants — and
    * opens the scanned item's stock page.
    */
   const canScan = capabilities.can("inventory.read") && capabilities.can("products.read");
-  const createActions: readonly CreateAction[] = (
-    [
-      { key: "sendInvoice", to: null, available: true },
-      { key: "newSale", to: "/app/pos", available: capabilities.can("orders.create") },
-      { key: "newOrder", to: "/app/orders", available: capabilities.can("orders.read") },
-      { key: "addProduct", to: "/app/products", available: capabilities.can("products.create") },
-      { key: "scanBarcode", to: null, available: canScan },
-    ] as const
-  )
-    .filter((action) => action.available)
-    .map(({ key, to }) => ({ key, to }));
 
   function resolveScan(code: string) {
     void (async () => {
@@ -276,221 +227,146 @@ function BusinessHome() {
   }
 
   return (
-    <ScreenBleed bottom="nav">
-      <AppHeader title={t("brand.name")} action={null}>
-        <div className="pb-1">
-          <h1 className="text-h1 text-text-primary">{t("home.greeting")}</h1>
-          <p className="text-body-sm text-text-secondary">{t("home.subtitle")}</p>
-        </div>
-      </AppHeader>
+    <ScreenBleed bottom="nav" contentClassName="home-column">
+      <HomeHeader
+        businessName={businessName}
+        onScan={canScan ? () => setCameraOpen(true) : undefined}
+      />
 
-      <main className="mx-auto max-w-[var(--screen-max)]">
-        {isFirstLoad ? <HomeSkeleton /> : null}
+      {/* .home-main: header-sized rows, then the rest of the screen for the tiles. */}
+      <main className="home-main screen-gutter mx-auto w-full max-w-[var(--screen-max)] pt-2.5">
+        <TodaySalesCard
+          view={view}
+          financeAccess={financeAccess}
+          // A seeded snapshot's first confirmation is on its way: a placeholder,
+          // not an error, and still no money.
+          financeConfirming={
+            confirmation === "confirming" && financeAccess === "unverified" && !homeQuery.isError
+          }
+          onRetry={() => void homeQuery.refetch()}
+          analyticsAvailable={capabilities.can("analytics.read")}
+        />
 
-        {isFirstLoad ? null : (
-          <div className="content-in stack-section screen-gutter pt-4">
-            <section aria-labelledby="attention-heading">
-              <h2 id="attention-heading" className="text-label px-1 text-text-secondary">
-                {t("home.attention")}
-              </h2>
-              {summary ? (
-                <>
-                  {attention.length > 0 ? (
-                    <div className="list-enter mt-2 grid gap-2 sm:grid-cols-2">
-                      {attention.map((item) => {
-                        /*
-                         * A row is a link only when something owns that work AND
-                         * this member may enter the screen that does. capabilities
-                         * .can is fail-closed, so an unresolved snapshot renders a
-                         * plain card rather than a link into a refusal.
-                         */
-                        const to = attentionDestination(item.id, (key) => capabilities.can(key));
-                        return (
-                          <AttentionCard
-                            key={item.id}
-                            item={item}
-                            onClick={to ? () => void navigate({ to }) : undefined}
-                          />
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                  {noticeKey ? (
-                    <p className="mt-2 px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
-                  ) : null}
-                </>
-              ) : view.kind === "loading" ? (
-                // Range switch in flight, or a same-range background refetch
-                // with nothing cached for this range yet. Never the previous
-                // range's cards — see resolveHomeSummaryView.
-                <div className="mt-2 grid gap-2 sm:grid-cols-2" aria-hidden="true">
-                  <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
-                  <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
-                </div>
-              ) : null}
-            </section>
-
-            <section aria-labelledby="overview-heading" className="stack-group">
-              <h2 id="overview-heading" className="text-label px-1 text-text-secondary">
-                {t("home.overview")}
-              </h2>
-
-              {/*
-               * Always mounted and always reflecting `range` immediately on
-               * tap, whatever the fetch for that range is doing — the control
-               * the merchant just used must never disappear mid-interaction.
-               */}
-              <SegmentedControl
-                segments={rangeSegments}
-                value={range}
-                onChange={setRange}
-                label={t("home.overview")}
-              />
-
-              {summary ? (
-                <>
-                  {summary.finance.status === "available" ? (
-                    <section className="elevation-1 rounded-2xl border border-border-default bg-surface-primary pad-card">
-                      <p className="text-label text-text-secondary">{t("home.revenue")}</p>
-                      <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                        {summary.finance.data.netCollectedForCreatedOrders.length > 0 ? (
-                          summary.finance.data.netCollectedForCreatedOrders.map((amount) => (
-                            <p
-                              key={amount.currency}
-                              className="text-financial-lg min-w-0 text-text-primary"
-                            >
-                              {formatMoney(amount)}
-                            </p>
-                          ))
-                        ) : (
-                          <p className="text-body-sm text-text-secondary">
-                            {t("home.noSettledSales")}
-                          </p>
-                        )}
-                      </div>
-                    </section>
-                  ) : (
-                    <p className="px-1 text-body-sm text-text-secondary">
-                      {t(
-                        summary.finance.status === "permission_denied"
-                          ? "home.financialsUnavailable"
-                          : "home.financialsError",
-                      )}
-                    </p>
-                  )}
-
-                  {metrics.length > 0 ? (
-                    <div className="list-enter grid grid-cols-2 gap-2">
-                      {metrics.map((metric) => (
-                        <MetricTile
-                          key={metric.id}
-                          label={t(`home.metrics.${metric.id}`)}
-                          value={metric.value}
-                          deltaPercent={metric.deltaPercent}
-                          series={metric.series}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-
-                  <div className="space-y-1 px-1" aria-live="polite">
-                    {(["orders", "payments", "inventory", "delivery"] as const).map((domain) => {
-                      const status = summary[domain].status;
-                      if (status === "available") return null;
+        <Disclosure
+          id="home-attention"
+          title={t("home.attention")}
+          summary={t(
+            attentionSummaryKey(collapsed),
+            collapsed.kind === "count" ? { count: collapsed.rows } : {},
+          )}
+          badge={
+            collapsed.kind === "count" ? (
+              // The summary line already says the number; this is its marker.
+              <span
+                aria-hidden
+                className="text-label tnum flex h-7 min-w-7 shrink-0 items-center justify-center rounded-full bg-status-warning-soft px-2 text-status-warning-text"
+              >
+                {collapsed.rows}
+              </span>
+            ) : null
+          }
+          open={attentionOpen}
+          onOpenChange={toggleAttention}
+        >
+          <div className="space-y-2 px-3 pt-0.5 pb-3">
+            {summary ? (
+              <>
+                {attention.length > 0 ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {attention.map((item) => {
+                      /*
+                       * A row is a link only when something owns that work AND
+                       * this member may enter the screen that does. capabilities
+                       * .can is fail-closed, so an unresolved snapshot renders a
+                       * plain card rather than a link into a refusal. A row
+                       * whose count one Orders filter selects exactly opens on
+                       * that filter (see home-attention.ts).
+                       */
+                      const destination = attentionDestination(item.id, (key) =>
+                        capabilities.can(key),
+                      );
                       return (
-                        <p key={domain} className="text-caption text-text-secondary">
-                          {t(`home.sectionState.${status}`, {
-                            domain: t(`home.domains.${domain}`),
-                          })}
-                        </p>
+                        <AttentionCard
+                          key={item.id}
+                          item={item}
+                          onClick={destination ? () => void navigate(destination) : undefined}
+                        />
                       );
                     })}
                   </div>
-                </>
-              ) : view.kind === "loading" ? (
-                <div aria-hidden="true">
-                  <SkeletonBlock className="h-[108px] w-full rounded-2xl" />
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    {[0, 1, 2, 3].map((i) => (
-                      <SkeletonBlock key={i} className="h-[104px] rounded-2xl" />
-                    ))}
-                  </div>
+                ) : null}
+                {noticeKey ? (
+                  <p className="px-1 text-body-sm text-text-secondary">{t(noticeKey)}</p>
+                ) : null}
+                <div className="space-y-1 px-1" aria-live="polite">
+                  {(["orders", "payments", "inventory", "delivery"] as const).map((domain) => {
+                    const status = summary[domain].status;
+                    if (status === "available") return null;
+                    return (
+                      <p key={domain} className="text-caption text-text-secondary">
+                        {t(`home.sectionState.${status}`, {
+                          domain: t(`home.domains.${domain}`),
+                        })}
+                      </p>
+                    );
+                  })}
                 </div>
-              ) : (
-                // A failed fetch for the currently selected range. Stale data
-                // for another range never lands here — resolveHomeSummaryView
-                // only returns "error" when there is nothing safe to show.
-                <ErrorState
-                  title={t("home.error.title")}
-                  body={t("home.error.body")}
-                  onRetry={() => void homeQuery.refetch()}
-                />
-              )}
-            </section>
-
-            {hasQuickActions ? (
-              <section aria-labelledby="actions-heading" className="stack-group">
-                <h2 id="actions-heading" className="text-label px-1 text-text-secondary">
-                  {t("home.quickActions")}
-                </h2>
-                <QuickActionGrid onAction={handleQuickAction} available={quickActionsAvailable} />
-              </section>
-            ) : null}
+              </>
+            ) : view.kind === "loading" ? (
+              <div className="grid gap-2" aria-hidden="true">
+                <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
+                <SkeletonBlock className="h-[62px] w-full rounded-2xl" />
+              </div>
+            ) : (
+              // Nothing for Today to fall back to: say so, and offer the retry.
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+                <p className="text-body-sm min-w-0 flex-1 text-text-secondary">
+                  {t("home.error.body")}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void homeQuery.refetch()}
+                  className="press tap-target text-label shrink-0 rounded-full px-3 text-action-primary underline underline-offset-2"
+                >
+                  {t("common.retry")}
+                </button>
+              </div>
+            )}
           </div>
-        )}
+        </Disclosure>
+
+        <HomeQuickActions
+          actions={quickActions}
+          onAction={handleQuickAction}
+          gridRef={tiles.gridRef}
+          heldSize={tiles.heldSize}
+        />
       </main>
 
-      <BottomNav workspace="business" onCreate={() => setCreateOpen(true)} />
+      <BottomNav workspace="business" />
 
-      <BottomSheet
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        title={t("nav.create")}
-        snap="peek"
-      >
-        <ul className="space-y-2">
-          {createActions.map((action) => (
-            <li key={action.key}>
-              {action.key === "scanBarcode" ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    // Swap sheets, never stack them: each traps focus.
-                    setCreateOpen(false);
-                    setCameraOpen(true);
-                  }}
-                  className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
-                >
-                  {t(`nav.${action.key}`)}
-                </button>
-              ) : action.to ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const to = action.to;
-                    if (!to) return;
-                    setCreateOpen(false);
-                    void navigate({ to });
-                  }}
-                  className="press tap-target text-body flex w-full items-center rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-left"
-                >
-                  {t(`nav.${action.key}`)}
-                </button>
-              ) : (
-                /*
-                 * No destination exists yet (Send invoice). A disabled row that
-                 * says so is an honest answer; a tappable one that closes the
-                 * sheet is not.
-                 */
-                <div className="flex w-full flex-col items-start rounded-2xl border border-border-default bg-surface-secondary px-4 py-3 text-left">
-                  <span className="text-body text-text-secondary">{t(`nav.${action.key}`)}</span>
-                  <span className="text-caption text-text-muted">{t("nav.comingSoon")}</span>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      </BottomSheet>
+      {/*
+       * The manual Create Order flow itself — the same sheet, gate and cache
+       * effects as the Orders list's "+" (src/routes/app.orders.tsx).
+       */}
+      {canCreateOrder ? (
+        <CreateRealOrderSheet
+          open={createOrderOpen && canCreateOrder}
+          onOpenChange={setCreateOrderOpen}
+          userId={session.userId}
+          organizationId={organizationId}
+          onCreated={() => {
+            void queryClient.invalidateQueries({
+              queryKey: ordersKeys.list(session.userId, organizationId),
+            });
+            // A new order is new outstanding work: Home's counts move with it.
+            void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+            void queryClient.invalidateQueries({
+              queryKey: customerKeys.principal(session.userId, organizationId),
+            });
+          }}
+        />
+      ) : null}
 
       {canScan ? (
         <CameraScanSheet open={cameraOpen} onOpenChange={setCameraOpen} onCode={resolveScan} />

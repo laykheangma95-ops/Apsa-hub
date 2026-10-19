@@ -41,10 +41,17 @@ import {
 import { UI_PERMISSION_KEYS, isUiPermissionKey } from "@/lib/capabilities";
 import {
   attentionDestination,
+  attentionOrderFilter,
   attentionRoute,
   attentionRoutePermission,
   type AttentionRoute,
 } from "@/lib/home-attention";
+import {
+  ORDER_LIST_FILTERS,
+  orderMatchesListFilter,
+  parseOrderListFilter,
+  type OrderListFilterAxes,
+} from "@/lib/order-list-filters";
 import { mapOrderSummaryToUi } from "@/lib/orders";
 import type { OrderSummary as ServerOrderSummary } from "@/server/orders/service";
 import type { AttentionItem, UiPermissionKey } from "@/types";
@@ -347,20 +354,93 @@ describe("W5: Home attention destinations", () => {
   it("fails closed: no permission means no link, never a link into a refusal", () => {
     expect(attentionDestination("payments_needing_review", NEVER)).toBeNull();
     expect(attentionDestination("low_stock", NEVER)).toBeNull();
-    expect(attentionDestination("payments_needing_review", ALWAYS)).toBe("/app/payments");
+    expect(attentionDestination("payments_needing_review", ALWAYS)).toEqual({
+      to: "/app/payments",
+    });
+    // The Orders rows, filter or not, are gated on orders.read like the rest.
+    const allBut = (missing: UiPermissionKey) => (key: UiPermissionKey) => key !== missing;
+    expect(attentionDestination("awaiting_payment", allBut("orders.read"))).toBeNull();
+    expect(attentionDestination("orders_needing_action", allBut("orders.read"))).toBeNull();
+    const onlyOrders = (key: UiPermissionKey) => key === "orders.read";
+    expect(attentionDestination("awaiting_payment", onlyOrders)).toEqual({
+      to: "/app/orders",
+      search: { filter: "awaiting_payment" },
+    });
   });
 
-  it("carries no search-param filter it cannot honour", () => {
-    /*
-     * Each count is a union the destination cannot express in one server
-     * query, so a pre-selected filter would show FEWER rows than the number
-     * just tapped. The routes stay bare on purpose.
-     */
-    for (const id of ["awaiting_payment", "payments_needing_review", "low_stock"] as const) {
-      const route = attentionRoute(id);
-      expect({ id, route }).toEqual({ id, route: attentionRoute(id) });
-      expect(route).not.toContain("?");
+  it("Awaiting payment opens the Orders list on the Awaiting payment filter", () => {
+    // The filter is Home's count, predicate for predicate (order-list-filters
+    // .test.ts, and through real SQL in orders-pagination-mounted case HA), so
+    // the list the merchant lands on is the number they tapped.
+    expect(attentionOrderFilter("awaiting_payment")).toBe("awaiting_payment");
+    const destination = attentionDestination("awaiting_payment", ALWAYS);
+    expect(destination).toEqual({ to: "/app/orders", search: { filter: "awaiting_payment" } });
+    // The Orders route reads it back as that filter, not as All.
+    const search = destination && "search" in destination ? destination.search : {};
+    expect(parseOrderListFilter(search.filter)).toBe("awaiting_payment");
+  });
+
+  it("Orders needing action opens All: no one filter holds Drafts and To pack together", () => {
+    // Home: lifecycle not cancelled AND (draft OR fulfillment unfulfilled).
+    const home = (a: OrderListFilterAxes) =>
+      a.lifecycle !== "cancelled" && (a.lifecycle === "draft" || a.fulfillment === "unfulfilled");
+    const every: OrderListFilterAxes[] = [];
+    for (const lifecycle of ["draft", "confirmed", "completed", "cancelled"] as const)
+      for (const payment of ["unpaid", "pending", "paid", "failed"] as const)
+        for (const fulfillment of ["unfulfilled", "processing", "fulfilled", "cancelled"] as const)
+          every.push({ lifecycle, payment, fulfillment });
+    const counted = every.filter(home);
+    // Every filter but All leaves out some order the card counts, so any of
+    // them would show fewer orders than the number just tapped.
+    for (const filter of ORDER_LIST_FILTERS) {
+      const holdsAll = counted.every((axes) => orderMatchesListFilter(filter, axes));
+      expect({ filter, holdsAll }).toEqual({ filter, holdsAll: filter === "all" });
     }
+    // The everyday shape of the gap: a paid draft and a paid order to pack are
+    // both counted, and neither Drafts nor To pack holds the other.
+    const paidDraft: OrderListFilterAxes = {
+      lifecycle: "draft",
+      payment: "paid",
+      fulfillment: "unfulfilled",
+    };
+    const paidToPack: OrderListFilterAxes = { ...paidDraft, lifecycle: "confirmed" };
+    expect(home(paidDraft) && home(paidToPack)).toBe(true);
+    expect(orderMatchesListFilter("draft", paidToPack)).toBe(false);
+    expect(orderMatchesListFilter("to_pack", paidDraft)).toBe(false);
+    expect(attentionOrderFilter("orders_needing_action")).toBeNull();
+    // An explicit empty search: All, never a filter left over in the URL.
+    expect(attentionDestination("orders_needing_action", ALWAYS)).toEqual({
+      to: "/app/orders",
+      search: {},
+    });
+  });
+
+  it("carries no filter it cannot honour", () => {
+    /*
+     * Payment review and out-of-stock are unions their screens cannot express
+     * in one server query, so a pre-selected filter would show FEWER rows than
+     * the number just tapped. They stay bare on purpose, and only the
+     * Awaiting payment row carries an Orders filter at all.
+     */
+    for (const id of ["payments_needing_review", "low_stock", "awaiting_delivery"] as const) {
+      const destination = attentionDestination(id, ALWAYS);
+      expect({ id, destination }).toEqual({ id, destination: { to: attentionRoute(id)! } });
+    }
+    const ids: AttentionItem["id"][] = [
+      "unread_conversations",
+      "awaiting_payment",
+      "payments_needing_review",
+      "awaiting_delivery",
+      "orders_needing_action",
+      "low_stock",
+    ];
+    expect(ids.filter((id) => attentionOrderFilter(id) !== null)).toEqual(["awaiting_payment"]);
+  });
+
+  it("Home navigates to the whole destination, filter included", () => {
+    const home = stripComments(read("src/routes/app.index.tsx"));
+    // The whole object, never a bare `to` that would drop the filter on the way.
+    expect(home).toContain("onClick={destination ? () => void navigate(destination) : undefined}");
   });
 });
 

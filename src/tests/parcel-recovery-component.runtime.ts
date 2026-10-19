@@ -207,10 +207,14 @@ describe("ParcelRecoveryBoundary", () => {
     expect(notifications).toEqual([`success:${DONE}`]);
     const cached = queryClient.getQueryData(ordersKeys.detail(USER_A, ORG_A, ORDER_1)) as any;
     expect(cached.parcelMissing).toBe(false);
-    // Pack state, deliveries and the list — this principal's, this order's.
-    expect(invalidated).toHaveLength(3);
+    // Pack state, deliveries, the list and the Orders screen's paged list —
+    // this principal's, this order's.
+    expect(invalidated).toHaveLength(4);
     for (const key of invalidated) expect(JSON.stringify(key)).toContain(USER_A);
     expect(JSON.stringify(invalidated)).toContain(ORDER_1);
+    expect(JSON.stringify(invalidated)).toContain(
+      JSON.stringify(ordersKeys.listPages(USER_A, ORG_A)),
+    );
   });
 
   it("a refusal because the order was cancelled says so and re-reads the order", async () => {
@@ -403,6 +407,7 @@ describe("ParcelRecoveryBoundary — permission generation", () => {
         ordersKeys.detailDeliveries(USER_A, ORG_A, ORDER_1),
         (await import("@/lib/packing-query")).packingKeys.orderState(USER_A, ORG_A, ORDER_1),
         ordersKeys.list(USER_A, ORG_A),
+        ordersKeys.listPages(USER_A, ORG_A),
       ]),
     );
   });
@@ -424,7 +429,7 @@ describe("ParcelRecoveryBoundary — permission generation", () => {
     await settle();
     expect(notifications).toEqual([`success:${DONE}`]);
     expect((queryClient.getQueryData(detailKey()) as any).parcelMissing).toBe(false);
-    expect(invalidated).toHaveLength(3);
+    expect(invalidated).toHaveLength(4);
   });
 
   it("5. after a revoke/restore cycle with nothing in flight, a new recovery succeeds normally", async () => {
@@ -436,7 +441,7 @@ describe("ParcelRecoveryBoundary — permission generation", () => {
     await clickCreate();
     expect(notifications).toEqual([`success:${DONE}`]);
     expect((queryClient.getQueryData(detailKey()) as any).parcelMissing).toBe(false);
-    expect(invalidated).toHaveLength(3);
+    expect(invalidated).toHaveLength(4);
   });
 
   it("6. an old error after restore cannot overwrite the new request's own notice", async () => {

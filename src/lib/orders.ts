@@ -10,8 +10,10 @@ import type {
   OrderSummary as ServerOrderSummary,
   OrderDetail as ServerOrderDetail,
   OrderLineDetail as ServerOrderLineDetail,
+  OrderListPage as ServerOrderListPage,
 } from "@/server/orders/service";
-import type { OrderSourceDb } from "@/server/orders/types";
+import type { OrderListCursor, OrderSourceDb } from "@/server/orders/types";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 import type { Channel, Order, OrderItem, OrderLifecycleStatus, OrderSource } from "@/types";
 
 // ── Source / channel mapping ──────────────────────────────────────────────────
@@ -278,6 +280,62 @@ export function classifyOrderError(err: unknown): OrderErrorKind {
  */
 export function isOrderCurrencyMismatch(err: unknown): boolean {
   return /priced in the organization's currency/i.test(messageOf(err));
+}
+
+// ── Orders list pages ─────────────────────────────────────────────────────────
+
+export type { OrderListCursor };
+
+/** One page of the Orders list, mapped for the UI and accepted for one principal. */
+export interface RealOrderPage {
+  orders: Order[];
+  /** Null only when the server found nothing older than this page. */
+  nextCursor: OrderListCursor | null;
+}
+
+/**
+ * A page answered for a different member or organization than the cache entry
+ * that asked for it — another tab signed in as someone else, or switched
+ * business, between two requests from this screen. The page is discarded
+ * before React Query can store it.
+ */
+export class OrderListPrincipalChangedError extends Error {
+  constructor() {
+    super("The order list was answered for a different account or business");
+    this.name = "OrderListPrincipalChangedError";
+  }
+}
+
+export function isOrderListPrincipalChanged(err: unknown): boolean {
+  return err instanceof OrderListPrincipalChangedError;
+}
+
+/**
+ * Accept a server page only when the server served it for exactly the principal
+ * this screen's cache entry belongs to — the same identity check the capability
+ * snapshot makes (createCapabilityView). The server authorized the request for
+ * whoever its session cookie names; this decides only whether the answer may
+ * be filed under THIS principal's key.
+ *
+ * The page must also be the answer to the filter this entry asked for. A
+ * mismatch is never a principal change, so it fails as an ordinary error (and
+ * is retried) rather than being shown under the wrong filter.
+ */
+export function acceptOrderListPage(
+  page: ServerOrderListPage,
+  expected: { userId: string; organizationId: string },
+  filter: OrderListFilter,
+): RealOrderPage {
+  if (
+    page.servedAs.userId !== expected.userId ||
+    page.servedAs.organizationId !== expected.organizationId
+  ) {
+    throw new OrderListPrincipalChangedError();
+  }
+  if (page.filter !== filter) {
+    throw new Error("The order list was answered for a different filter");
+  }
+  return { orders: page.orders.map(mapOrderSummaryToUi), nextCursor: page.nextCursor };
 }
 
 // ── Prepare-Order checkout routing ────────────────────────────────────────────

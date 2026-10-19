@@ -395,7 +395,7 @@ describe("Home production truth boundaries", () => {
 
   it("removes fabricated shop/workspace identity and fabricated Apsi insight from Home", () => {
     const route = source("src/routes/app.index.tsx");
-    expect(route).toContain("homeQueryKey(session.userId, organizationId, range)");
+    expect(route).toContain("homeQueryKey(session.userId, organizationId, HOME_RANGE)");
     expect(route).not.toContain("getActiveShop");
     expect(route).not.toContain("WorkspaceSwitcherSheet");
     expect(route).not.toContain("ApsiInsightCard");

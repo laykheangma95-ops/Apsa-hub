@@ -39,8 +39,10 @@ import type {
   UpdateOrderShippingRpcResult,
   OrderShippingSnapshotInput,
   ListOrdersOptions,
+  OrderListCursor,
   OrderStatusAxis,
 } from "./types";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db = supabaseAdmin as any;
@@ -326,22 +328,30 @@ export async function listOrders(
   organizationId: string,
   opts: ListOrdersOptions = {},
 ): Promise<OrderRow[]> {
-  let query = db
-    .from("orders")
-    .select("*")
-    .eq("organization_id", organizationId)
+  const filtered = () => {
+    let query = db.from("orders").select("*").eq("organization_id", organizationId);
+    if (opts.customer_id) query = query.eq("customer_id", opts.customer_id);
+    if (opts.lifecycle_status) query = query.eq("lifecycle_status", opts.lifecycle_status);
+    if (opts.payment_status) query = query.eq("payment_status", opts.payment_status);
+    if (opts.fulfillment_status) query = query.eq("fulfillment_status", opts.fulfillment_status);
+    if (opts.fulfillment_statuses && opts.fulfillment_statuses.length > 0) {
+      query = query.in("fulfillment_status", opts.fulfillment_statuses);
+    }
+    if (opts.list_filter) query = applyOrderListFilter(query, opts.list_filter);
+    return query;
+  };
+
+  if (opts.before) {
+    if (opts.offset) throw new Error("listOrders: a cursor and an offset cannot be combined");
+    return listOrdersBefore(filtered, opts.before, opts.limit);
+  }
+
+  let query = filtered()
     // Secondary sort on id keeps pagination stable when two orders share a
     // created_at — without it, a row can appear on two pages or on neither.
     .order("created_at", { ascending: false })
     .order("id", { ascending: false });
 
-  if (opts.customer_id) query = query.eq("customer_id", opts.customer_id);
-  if (opts.lifecycle_status) query = query.eq("lifecycle_status", opts.lifecycle_status);
-  if (opts.payment_status) query = query.eq("payment_status", opts.payment_status);
-  if (opts.fulfillment_status) query = query.eq("fulfillment_status", opts.fulfillment_status);
-  if (opts.fulfillment_statuses && opts.fulfillment_statuses.length > 0) {
-    query = query.in("fulfillment_status", opts.fulfillment_statuses);
-  }
   if (opts.limit) query = query.limit(opts.limit);
   if (opts.offset && opts.limit) {
     query = query.range(opts.offset, opts.offset + opts.limit - 1);
@@ -350,6 +360,93 @@ export async function listOrders(
   const { data, error } = await query;
   if (error) throw new Error(`listOrders: ${errMessage(error)}`);
   return (data ?? []) as OrderRow[];
+}
+
+/**
+ * One Orders-screen filter as SQL. The meaning of each filter, and why, is in
+ * src/lib/order-list-filters.ts; orderMatchesListFilter there is the
+ * specification this is tested against over every combination of the three
+ * status columns.
+ *
+ * Every value below is a constant of this file: a filter crosses the network
+ * only as one of the eight names, validated by the server function, and the
+ * one `.or()` group is a fixed string. The predicate is ANDed with the
+ * organization and with the cursor's bounds, so it can only narrow the
+ * caller's own list.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the untyped `db` chain, see the file header
+function applyOrderListFilter(query: any, filter: OrderListFilter): any {
+  switch (filter) {
+    case "all":
+      return query;
+    case "awaiting_payment":
+      return query.neq("lifecycle_status", "cancelled").in("payment_status", ["unpaid", "pending"]);
+    case "draft":
+      return query.eq("lifecycle_status", "draft").neq("fulfillment_status", "cancelled");
+    case "to_pack":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "unfulfilled");
+    case "processing":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "processing");
+    case "fulfilled":
+      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "fulfilled");
+    case "completed":
+      return query.eq("lifecycle_status", "completed").neq("fulfillment_status", "cancelled");
+    case "cancelled":
+      return query.or("lifecycle_status.eq.cancelled,fulfillment_status.eq.cancelled");
+    default: {
+      // A name outside the eight is a programming error, never "everything".
+      const unknown: never = filter;
+      throw new Error(`listOrders: unknown list filter ${String(unknown)}`);
+    }
+  }
+}
+
+/**
+ * Keyset continuation of the (created_at DESC, id DESC) list: the orders that
+ * come strictly after `cursor`, newest first.
+ *
+ * Why a keyset and not an offset: an order created while a merchant is paging
+ * lands at the TOP of the list and pushes every row down by one, so "skip 50"
+ * would hand back the last row of the previous page a second time. A position
+ * keyed on the row itself does not move. Orders are never deleted
+ * (orders_no_delete, migration 023) and nothing updates created_at, so every
+ * order keeps one fixed place in this order for its whole life.
+ *
+ * Two reads rather than one `.or()` filter: the boundary is
+ *   created_at = c AND id < i     (orders that share the cursor's instant)
+ *   created_at < c                (everything older)
+ * and the first group sorts entirely before the second. Each read binds the
+ * cursor as an ordinary parameter, so no filter grammar is ever assembled from
+ * a value that crossed the network. Both are index-backed
+ * (idx_orders_org_created_at) and run concurrently.
+ */
+async function listOrdersBefore(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the untyped `db` chain, see the file header
+  filtered: () => any,
+  cursor: OrderListCursor,
+  limit: number | undefined,
+): Promise<OrderRow[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- as above
+  const bounded = (query: any) => (limit ? query.limit(limit) : query);
+  const [sameInstant, older] = await Promise.all([
+    bounded(
+      filtered()
+        .eq("created_at", cursor.createdAt)
+        .lt("id", cursor.id)
+        .order("id", { ascending: false }),
+    ),
+    bounded(
+      filtered()
+        .lt("created_at", cursor.createdAt)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false }),
+    ),
+  ]);
+  for (const result of [sameInstant, older]) {
+    if (result.error) throw new Error(`listOrders: ${errMessage(result.error)}`);
+  }
+  const rows = [...(sameInstant.data ?? []), ...(older.data ?? [])] as OrderRow[];
+  return limit ? rows.slice(0, limit) : rows;
 }
 
 export async function listOrderItems(

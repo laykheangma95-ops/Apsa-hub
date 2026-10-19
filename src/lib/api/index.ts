@@ -3,7 +3,15 @@
  * When a real backend arrives, only the bodies change.
  */
 import { usd } from "@/lib/money";
-import { mapOrderDetailToUi, mapOrderSummaryToUi, type RealOrderDetail } from "@/lib/orders";
+import {
+  acceptOrderListPage,
+  mapOrderDetailToUi,
+  mapOrderSummaryToUi,
+  type OrderListCursor,
+  type RealOrderDetail,
+  type RealOrderPage,
+} from "@/lib/orders";
+import type { OrderListFilter } from "@/lib/order-list-filters";
 import { looksLikeCustomerPhoneQuery } from "@/lib/customer-search";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import {
@@ -1134,11 +1142,40 @@ export async function getOrders(): Promise<Order[]> {
  * derive both from the session, exactly as src/api/orders.ts requires.
  */
 
-/** Production Order list — src/routes/app.orders.tsx. Newest first, org-scoped by the server. */
+/**
+ * The most recent production orders, newest first, org-scoped by the server —
+ * one bounded read, for the bottom nav's "recent orders". The Orders screen
+ * pages through the whole list with listRealOrdersPage() instead.
+ */
 export async function listRealOrders(): Promise<Order[]> {
   const { listOrdersFn } = await import("@/api/orders");
   const rows = await listOrdersFn({ data: {} });
   return rows.map(mapOrderSummaryToUi);
+}
+
+/**
+ * One page of the production Order list — src/routes/app.orders.tsx.
+ *
+ * `before` is the previous page's `nextCursor`, exactly as the server issued
+ * it; null asks for the newest page. `expected` is the principal of the cache
+ * entry this page will be stored under (the /app route guard's server-derived
+ * context). A page the server answered for anyone else is refused here, before
+ * React Query can store it — see acceptOrderListPage(). `filter` is the
+ * screen's filter; the server applies it, and the page must say it did.
+ */
+export async function listRealOrdersPage(input: {
+  before: OrderListCursor | null;
+  expected: { userId: string; organizationId: string };
+  filter: OrderListFilter;
+}): Promise<RealOrderPage> {
+  const { listOrdersPageFn } = await import("@/api/orders");
+  const page = await listOrdersPageFn({
+    data: {
+      ...(input.before ? { before: input.before } : {}),
+      ...(input.filter !== "all" ? { filter: input.filter } : {}),
+    },
+  });
+  return acceptOrderListPage(page, input.expected, input.filter);
 }
 
 /** Production Order detail — src/routes/app.orders.$id.tsx (real-UUID branch). */

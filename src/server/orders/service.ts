@@ -74,6 +74,7 @@ import {
 } from "./state-machine";
 import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
+import { DEFAULT_ORDER_LIST_FILTER, type OrderListFilter } from "@/lib/order-list-filters";
 import { ORDER_SOURCES } from "./types";
 import type {
   OrderRow,
@@ -81,6 +82,7 @@ import type {
   OrderStatusHistoryRow,
   OrderSourceDb,
   ListOrdersOptions,
+  OrderListCursor,
   RecoverParcelRpcResult,
 } from "./types";
 
@@ -1193,4 +1195,70 @@ export async function listOrders(
   ctx.require("orders.read");
   const rows = await repo.listOrders(ctx.organizationId, opts);
   return rows.map(mapOrder);
+}
+
+/** The Orders screen's page size, and the most one page request may ask for. */
+export const ORDER_LIST_PAGE_SIZE = 50;
+export const ORDER_LIST_PAGE_MAX = 100;
+
+/**
+ * One page of the Orders list.
+ *
+ * `nextCursor` is null only when the server looked past this page and found no
+ * older order — that, and nothing else, is what "end of list" means.
+ *
+ * `servedAs` is the principal the server resolved for THIS request. The browser
+ * checks it against the principal its cache entry belongs to and refuses a
+ * page that was answered for someone else (a sign-in in another tab between
+ * two page requests). It authorizes nothing: the server derived it from the
+ * session cookie and the active membership, and it echoes back only identifiers
+ * the browser already holds.
+ *
+ * `filter` is the filter the server applied. The browser files a page only
+ * under the filter it asked for, so a page can never be shown as the answer to
+ * a different question.
+ */
+export interface OrderListPage {
+  orders: OrderSummary[];
+  nextCursor: OrderListCursor | null;
+  servedAs: { userId: string; organizationId: string };
+  filter: OrderListFilter;
+}
+
+/**
+ * The Orders screen's paged read: newest first, `limit` at a time, continuing
+ * strictly after `before` when given, narrowed to one of the screen's filters.
+ *
+ * Completeness is measured, never inferred from a short page: the read asks
+ * for one row more than it returns, and only a read that finds no such row
+ * reports the end of the list. The filter is part of that read, so "end"
+ * means no older order matches it.
+ *
+ * A cursor is a position in the (created_at, id) order and stays valid under
+ * any filter: the next page starts strictly after it whatever the filter.
+ */
+export async function listOrdersPage(
+  ctx: AuthorizationContext,
+  opts: {
+    limit?: number | undefined;
+    before?: OrderListCursor | undefined;
+    filter?: OrderListFilter | undefined;
+  } = {},
+): Promise<OrderListPage> {
+  ctx.require("orders.read");
+  const limit = Math.min(Math.max(opts.limit ?? ORDER_LIST_PAGE_SIZE, 1), ORDER_LIST_PAGE_MAX);
+  const filter = opts.filter ?? DEFAULT_ORDER_LIST_FILTER;
+  const rows = await repo.listOrders(ctx.organizationId, {
+    limit: limit + 1,
+    before: opts.before,
+    list_filter: filter,
+  });
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    orders: page.map(mapOrder),
+    nextCursor: rows.length > limit && last ? { createdAt: last.created_at, id: last.id } : null,
+    servedAs: { userId: ctx.userId, organizationId: ctx.organizationId },
+    filter,
+  };
 }

@@ -16,6 +16,11 @@ interface MoneyAmountFieldProps {
   onChange: (next: string) => void;
   currency: Currency;
   onCurrencyChange: (next: Currency) => void;
+  /**
+   * The currencies the merchant may pick. Defaults to both; Add Product passes
+   * only the business currency so it cannot save a product orders will refuse.
+   */
+  currencies?: readonly Currency[];
   hint?: string | undefined;
   /** Shown instead of the inputs being silently dead — says why they are locked. */
   lockedNote?: string | undefined;
@@ -41,6 +46,7 @@ export function MoneyAmountField({
   onChange,
   currency,
   onCurrencyChange,
+  currencies = CURRENCIES,
   hint,
   lockedNote,
   disabled = false,
@@ -74,7 +80,7 @@ export function MoneyAmountField({
           aria-label={t("catalog.variant.currency")}
           className="flex shrink-0 gap-1.5"
         >
-          {CURRENCIES.map((option) => (
+          {currencies.map((option) => (
             <Chip
               key={option}
               selected={currency === option}

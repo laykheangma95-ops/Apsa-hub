@@ -120,7 +120,14 @@ export function ParcelRecoveryAction({
           ordersKeys.detailDeliveries(userId, organizationId, orderId),
           packingKeys.orderState(userId, organizationId, orderId),
           ordersKeys.list(userId, organizationId),
-        ].map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
+        ]
+          .map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true }))
+          // The Orders screen's paged lists, one entry per filter: the prefix.
+          .concat(
+            queryClient.invalidateQueries({
+              queryKey: ordersKeys.listPages(userId, organizationId),
+            }),
+          ),
       );
     },
     onError: async (error, { token }) => {

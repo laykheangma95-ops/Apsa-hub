@@ -279,6 +279,20 @@ describe("backend failure", () => {
     });
   });
 
+  it("persists a KHR business currency through p_currency", async () => {
+    await createOrganizationFn({ data: { ...VALID_INPUT, currency: "KHR" } });
+
+    expect(rpcCalls[0]!.params["p_currency"]).toBe("KHR");
+  });
+
+  it("rejects an unsupported currency before any request is made", async () => {
+    await expect(
+      createOrganizationFn({ data: { ...VALID_INPUT, currency: "EUR" } }),
+    ).rejects.toThrow();
+
+    expect(rpcCalls).toHaveLength(0);
+  });
+
   it("rejects a malformed slug before any request is made", async () => {
     await expect(
       createOrganizationFn({ data: { ...VALID_INPUT, slug: "-bad-" } }),

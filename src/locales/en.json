@@ -505,7 +505,51 @@
       "title": "Today's numbers didn't load",
       "body": "The data didn't come back. Check your connection and try again."
     },
-    "attentionAction": "{{label}}: {{count}}. Open"
+    "attentionAction": "{{label}}: {{count}}. Open",
+    "greet": {
+      "morning": "Good morning",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening"
+    },
+    "today": {
+      "title": "Today's sales",
+      "definition": "Net collected for orders created today",
+      "none": "No net collection yet for orders created today",
+      "orders_one": "{{count}} order",
+      "orders_other": "{{count}} orders",
+      "analytics": "Analytics",
+      "analyticsLabel": "Analytics: this week and this month"
+    },
+    "attentionSummary": {
+      "loading": "Checking…",
+      "error": "Couldn't check right now",
+      "unavailable": "Not available for your role",
+      "count_one": "{{count}} kind of work waiting",
+      "count_other": "{{count}} kinds of work waiting",
+      "countIncomplete_one": "{{count}} kind of work waiting · some checks didn't finish",
+      "countIncomplete_other": "{{count}} kinds of work waiting · some checks didn't finish",
+      "incomplete": "Some checks didn't finish",
+      "clear": "All clear in the areas you can access"
+    },
+    "quick": {
+      "newSale": {
+        "title": "New sale",
+        "description": "Check out at the counter"
+      },
+      "newOrder": {
+        "title": "New order",
+        "description": "Enter an order by hand"
+      },
+      "packOrders": {
+        "title": "Pack orders",
+        "description": "Confirmed orders to pack"
+      },
+      "inbox": {
+        "title": "Inbox",
+        "description": "Every customer conversation"
+      },
+      "unavailable": "Not available for your role"
+    }
   },
   "status": {
     "unread": "Unread",
@@ -940,7 +984,9 @@
     },
     "empty": {
       "title": "No products yet",
-      "body": "Add products to your catalogue to start selling."
+      "body": "Add your first product in Products, then come back here to sell it.",
+      "bodyNoAccess": "Ask your owner or manager to add products, then they will show up here.",
+      "addProduct": "Go to Products"
     },
     "noResults": {
       "title": "No matching products",
@@ -1157,14 +1203,57 @@
     "newOrder": "New order",
     "empty": {
       "title": "No orders yet",
-      "body": "Orders you create will show up here."
+      "body": "Sales you ring up in POS and orders you create will show up here.",
+      "openPos": "Make a sale in POS"
     },
     "error": {
       "title": "Orders didn't load",
       "body": "Check your connection and try again."
     },
     "hasCustomer": "Linked customer",
-    "noCustomer": "No customer"
+    "noCustomer": "No customer",
+    "loadMore": "Load more orders",
+    "loadingMore": "Loading more orders…",
+    "showing_one": "Showing {{count}} order",
+    "showing_other": "Showing {{count}} orders",
+    "end": {
+      "title": "You've reached your oldest order",
+      "body_one": "{{count}} order shown. New orders appear at the top when the list refreshes.",
+      "body_other": "{{count}} orders shown. New orders appear at the top when the list refreshes."
+    },
+    "moreError": {
+      "title": "More orders didn't load",
+      "body": "This list isn't complete yet. Check your connection and try again."
+    },
+    "refreshError": "This list couldn't refresh, so it may be out of date.",
+    "denied": "You can't view orders",
+    "deniedBody": "Ask the shop owner for permission to view orders.",
+    "principalChanged": {
+      "title": "You switched account or business",
+      "body": "Another tab signed in as someone else or changed business. Reload to see the right orders.",
+      "reload": "Reload"
+    },
+    "filtersLabel": "Filter orders",
+    "filters": {
+      "all": "All",
+      "awaiting_payment": "Awaiting payment",
+      "draft": "Drafts",
+      "to_pack": "To pack",
+      "processing": "Processing",
+      "fulfilled": "Fulfilled, not completed",
+      "completed": "Completed",
+      "cancelled": "Cancelled"
+    },
+    "emptyFilter": {
+      "title": "No orders match this filter",
+      "body": "Try another filter, or show all orders.",
+      "showAll": "Show all orders"
+    },
+    "endFiltered": {
+      "title": "No older orders match this filter",
+      "body_one": "{{count}} matching order shown. Orders that change status move in or out when the list refreshes.",
+      "body_other": "{{count}} matching orders shown. Orders that change status move in or out when the list refreshes."
+    }
   },
   "orderCreate": {
     "title": "New order",
@@ -1520,6 +1609,12 @@
     "slugLabel": "Business address",
     "slugPlaceholder": "angkor-coffee",
     "slugHint": "Lowercase letters, numbers and hyphens. Used in your APSA links.",
+    "currencyLabel": "Main selling currency",
+    "currencyHint": "Your product prices and orders use this currency. It cannot be changed in the app later, so choose the one you price in.",
+    "currency": {
+      "USD": { "label": "US dollar (USD)", "example": "$12.50" },
+      "KHR": { "label": "Khmer riel (KHR)", "example": "50,000៛" }
+    },
     "submit": "Create business",
     "submitting": "Creating your business",
     "errors": {
@@ -1527,6 +1622,7 @@
       "slugRequired": "Enter a business address.",
       "slugFormat": "Use 3 to 63 characters: lowercase letters, numbers and hyphens only.",
       "slugTaken": "That business address is already taken. Please choose another one.",
+      "currencyRequired": "Choose the currency you sell in.",
       "generic": "We could not create your business right now. Please try again."
     }
   },
@@ -1673,6 +1769,11 @@
         "archivedTitle": "Nothing archived",
         "archivedBody": "Products you archive stay here instead of being deleted."
       },
+      "firstProduct": {
+        "title": "Add your first product",
+        "body": "A Khmer name and a price are all you need. The product then appears in POS, ready to sell.",
+        "action": "Add first product"
+      },
       "noMatches": {
         "title": "Nothing matches that",
         "body": "Only the products loaded on this page were searched. Clear the search or pick another category."
@@ -1740,6 +1841,14 @@
       "costWithheld": "Cost is not shown to your account, so it is left unchanged.",
       "invalidPrice": "Enter a price like 12.50 for USD or 4000 for riel.",
       "invalidCost": "Enter a cost like 12.50 for USD or 4000 for riel.",
+      "businessCurrency": {
+        "loading": "Checking your business currency…",
+        "error": "We couldn't confirm your business currency, so prices can't be entered yet.",
+        "denied": "Your account can't add products for this business.",
+        "locked": "Priced in your business currency ({{currency}}).",
+        "changed": "Your business currency is {{currency}}, so the amounts you entered were cleared. Enter them again in {{currency}}.",
+        "confirmFailed": "Your business currency could not be confirmed, so nothing was saved. Check the price and try again."
+      },
       "invalidWeight": "Enter a whole number of grams.",
       "created": "Variant added",
       "saved": "Variant saved",
