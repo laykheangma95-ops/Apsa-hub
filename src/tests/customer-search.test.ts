@@ -762,7 +762,8 @@ describe("No migration was required, and the schema says why", () => {
     // read-only derived function, customer intelligence phase), and 061 (browser
     // table authority hardening — a GRANT/REVOKE-only security fix), and 062
     // (financial replay identity, refund idempotency and audit atomicity — the
-    // PR #121 security repair); anything from 063 up would be new.
-    expect(migrations.filter((f) => /^06[3-9]|^0[7-9]\d/.test(f))).toEqual([]);
+    // PR #121 security repair), and 063 (order cancellation custody guard —
+    // Orders P1 cancellation safety); anything from 064 up would be new.
+    expect(migrations.filter((f) => /^06[4-9]|^0[7-9]\d/.test(f))).toEqual([]);
   });
 });

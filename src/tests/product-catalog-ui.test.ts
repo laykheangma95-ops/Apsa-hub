@@ -1937,8 +1937,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase;
     // 061 (browser table authority hardening) is an unrelated security fix;
     // 062 (financial replay identity, refund idempotency and audit atomicity)
-    // belongs to the PR #121 security repair.
-    expect(migrations.at(-1)).toBe("062_financial_replay_refund_audit_atomicity.sql");
+    // belongs to the PR #121 security repair;
+    // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
+    expect(migrations.at(-1)).toBe("063_order_cancellation_custody_guard.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

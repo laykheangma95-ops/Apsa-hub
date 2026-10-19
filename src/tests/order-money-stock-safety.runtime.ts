@@ -868,10 +868,20 @@ describe("Delivery lifecycle", () => {
     expect((await moveDelivery(f.org, delivery, "pending", "cancelled")).status).toBe("success");
     expect((await orderRow(id)).fulfillment_status).toBe("unfulfilled");
 
+    // Migration 063: an order with an active delivery is not cancelled (that
+    // left the delivery frozen and the stock released while the parcel was
+    // still booked). The delivery stays operable; once it is cancelled through
+    // its own flow the order cancels, and a cancelled order takes no delivery.
     const other = await createConfirmed();
     const d2 = (await createDelivery(f.org, other.id)).delivery_id as string;
+    expect(await transition(f.org, other.id, "confirmed", "cancelled")).toEqual({
+      status: "cancel_blocked",
+      reason: "active_delivery",
+    });
+    expect((await orderRow(other.id)).lifecycle_status).toBe("confirmed");
+    expect((await moveDelivery(f.org, d2, "pending", "cancelled")).status).toBe("success");
     expect((await transition(f.org, other.id, "confirmed", "cancelled")).status).toBe("success");
-    expect((await moveDelivery(f.org, d2, "pending", "preparing")).status).toBe("order_terminal");
+    expect((await createDelivery(f.org, other.id)).status).toBe("order_not_confirmed");
   });
 });
 

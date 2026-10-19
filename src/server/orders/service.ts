@@ -250,8 +250,8 @@ function notFound(message: string): Error {
   return publicError(message, 404);
 }
 
-function conflict(message: string): Error {
-  return publicError(message, 409);
+function conflict(message: string, code?: string): Error {
+  return publicError(message, 409, code);
 }
 
 // ── Shipping destination snapshot (§4, §19) ────────────────────────────────────
@@ -707,8 +707,43 @@ async function loadTransitionTarget(ctx: AuthorizationContext, orderId: string):
   return order;
 }
 
+/**
+ * Cancellation refused by the custody guard (migration 063,
+ * order_cancellation_block_v1), decided under the order lock. Nothing was
+ * written: no status, no history, no stock movement. Each reason names the
+ * flow that actually applies instead of cancelling.
+ */
+function cancelBlockedToError(reason: string | undefined): Error {
+  switch (reason) {
+    case "goods_with_customer":
+      return conflict(
+        "This order cannot be cancelled: the customer already has the goods — record a customer return instead",
+        "order_cancel_goods_with_customer",
+      );
+    case "goods_dispatched":
+      return conflict(
+        "This order cannot be cancelled while its goods are with the courier — record the delivery outcome first",
+        "order_cancel_goods_dispatched",
+      );
+    case "active_delivery":
+      return conflict(
+        "This order cannot be cancelled while a delivery is arranged — cancel the delivery first",
+        "order_cancel_active_delivery",
+      );
+    default:
+      return conflict(
+        "This order cannot be cancelled in its current state",
+        "order_cancel_blocked",
+      );
+  }
+}
+
 /** Maps the transition RPC's non-success envelopes to HTTP-shaped errors. */
-function transitionFailureToError(result: { status: string; current?: string }): Error {
+function transitionFailureToError(result: {
+  status: string;
+  current?: string;
+  reason?: string;
+}): Error {
   switch (result.status) {
     case "not_found":
       return notFound("Order not found");
@@ -727,6 +762,8 @@ function transitionFailureToError(result: { status: string; current?: string }):
       return conflict("Order is in a terminal state and can no longer be modified");
     case "preconditions_unmet":
       return conflict("An order can only be completed once it is both paid and fulfilled");
+    case "cancel_blocked":
+      return cancelBlockedToError(result.reason);
     default:
       return new Error(`Order transition failed: ${result.status}`);
   }
@@ -817,6 +854,10 @@ export async function recoverOrderParcel(
  *   draft -> confirmed              one 'sale'   movement per line (-quantity)
  *   confirmed -> cancelled          one 'return' movement per consumed line (+quantity)
  *   draft -> cancelled              nothing: a draft never consumed anything
+ *
+ * A confirmed order is cancelled only while its goods are still in custody and
+ * no delivery is active; otherwise the DB refuses under the order lock and
+ * writes nothing (migration 063, 'cancel_blocked' -> cancelBlockedToError).
  *
  * The quantity is always the PERSISTED order_items.quantity. There is no
  * quantity parameter on this function, on the repository call, or on the RPC —
