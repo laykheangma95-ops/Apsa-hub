@@ -15,7 +15,22 @@
  *     in (created_at DESC, id DESC) order, and ends only at the true end;
  *   - same-instant bursts larger than the cap are neither skipped nor repeated;
  *   - every variant arrives, under its own product, never another tenant's;
- *   - the `!inner` embed the search uses filters as the emulation assumes.
+ *   - the `!inner` embed the search uses filters as the emulation assumes;
+ *   - through the PRODUCTION principal path (the session's user → its active
+ *     membership → its role's permissions, each read through PostgREST),
+ *     pages past 200 and past the cap end exactly, with exact first, middle
+ *     and last pages, and only the caller's organization;
+ *   - name, SKU, barcode (and Khmer-digit barcode) matches far past the first
+ *     capped range, with filtered totals equal to independent SQL;
+ *   - roles: no products.read is refused, no products.view_cost sees no cost
+ *     on any page, and a suspended or absent membership reaches no catalogue;
+ *   - archiving the cursor's product or a whole last page strands nothing;
+ *   - negative control: the pre-#126 screen (one 200-row read + a browser
+ *     filter) provably misses products these checks find.
+ *
+ * scripts/run-catalog-postgrest-gate.ts provisions all of it (a throwaway
+ * database with every migration, a real PostgREST per row cap) and, with
+ * --negative-controls, proves each named regression makes this file fail.
  *
  * Skipped unless all four variables are set, and refuses any host but the
  * loopback interface, so it can never reach a hosted project:
@@ -62,9 +77,13 @@ if (enabled) {
   loopbackOnly(env.database!);
 
   const { PostgrestClient } = await import("@supabase/postgrest-js");
-  rest = new PostgrestClient(env.url!, {
-    headers: { Authorization: `Bearer ${env.jwt}`, apikey: env.jwt! },
-  });
+  rest = new PostgrestClient(
+    env.url!,
+    {
+      headers: { Authorization: `Bearer ${env.jwt}`, apikey: env.jwt! },
+    },
+    120_000,
+  );
   mock.module("@/lib/supabase/server", () => ({ supabaseAdmin: rest }));
 
   const { SQL } = await import("bun");
@@ -143,18 +162,75 @@ describe.skipIf(!enabled)("Products catalogue against a real PostgREST", () => {
   }
 
   async function walk(org: string, query: Record<string, unknown> = {}) {
+    return walkAs(ctxFor(org), query);
+  }
+
+  async function walkAs(ctx: any, query: Record<string, unknown> = {}) {
     const products: any[] = [];
+    const answered: any[] = [];
     let before: any = query["before"];
-    let pages = 0;
     for (;;) {
-      const page = await service.listProductsPage(ctxFor(org), { ...query, before });
-      pages += 1;
+      const page = await service.listProductsPage(ctx, { ...query, before });
+      answered.push(page);
       products.push(...page.products);
       if (!page.nextCursor) break;
       before = page.nextCursor;
-      if (pages > 1000) throw new Error("walk never ended");
+      if (answered.length > 1000) throw new Error("walk never ended");
     }
-    return { pages, products, ids: products.map((p) => p.id as string) };
+    return {
+      pages: answered.length,
+      answered,
+      products,
+      ids: products.map((p) => p.id as string),
+    };
+  }
+
+  /** A member of `org` in a system role, or (null) a custom role with no permissions. */
+  async function member(org: string, roleName: string | null, status = "active") {
+    const user = crypto.randomUUID();
+    await sql`insert into auth.users(id,email) values(${user}, ${`${user}@test.invalid`})`;
+    let roleId: string;
+    if (roleName === null) {
+      roleId = crypto.randomUUID();
+      await sql`insert into roles(id,organization_id,name) values(${roleId}, ${org}, 'No catalogue')`;
+    } else {
+      roleId = (
+        (await sql`select id from roles where organization_id is null and name = ${roleName}`) as any[]
+      )[0].id;
+    }
+    await sql`insert into memberships(user_id,organization_id,role_id,status)
+              values(${user}, ${org}, ${roleId}, ${status}::membership_status)`;
+    return user;
+  }
+
+  /**
+   * What listProductsPageFn does before the service (src/api/products.ts
+   * resolveAuthContext), after the session: the user's canonical active
+   * membership, then that membership's role and permission keys — every read
+   * through PostgREST. null where the server function would refuse.
+   */
+  async function principal(user: string): Promise<any> {
+    const { resolveActiveOrganizationId } = await import("@/server/auth/active-organization");
+    const { AuthorizationService } = await import("@/server/auth/authorization");
+    const org = await resolveActiveOrganizationId(user);
+    return org ? AuthorizationService.forRequest(user, org) : null;
+  }
+
+  /** A pre-#126 copy of src/lib/catalog.ts searchLoadedProducts (7e7e733). */
+  function legacySearchLoadedProducts(products: any[], query: string): any[] {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return [...products];
+    return products.filter(
+      (product) =>
+        product.nameKm.toLowerCase().includes(needle) ||
+        (product.nameEn ?? "").toLowerCase().includes(needle) ||
+        product.variants.some(
+          (variant: any) =>
+            variant.name.toLowerCase().includes(needle) ||
+            (variant.sku ?? "").toLowerCase().includes(needle) ||
+            (variant.barcode ?? "").toLowerCase().includes(needle),
+        ),
+    );
   }
 
   it(`the cap is real: asking for ${cap + 1} rows returns ${cap}, without an error`, async () => {
@@ -274,4 +350,247 @@ describe.skipIf(!enabled)("Products catalogue against a real PostgREST", () => {
        order by created_at desc, id desc`;
     expect(walked.ids).toEqual((rows as any[]).map((r) => r.id));
   });
+
+  // Larger than the old 200-row read AND larger than this server's cap.
+  const beyond = Math.max(200, cap) + 137;
+
+  it(`the production principal path: ${beyond} products, beyond 200 and beyond the cap, exact pages`, async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    const owner = await member(a, "Owner");
+    await seed(a, beyond, "ALPHA");
+    // The neighbour's rows interleave in time with the caller's.
+    await seed(b, beyond, "ALPHA", { base: "2026-10-01 12:00:00.5+00" });
+
+    const ctx = await principal(owner);
+    expect(ctx.organizationId).toBe(a);
+    const want = await expected(a);
+    expect(want).toHaveLength(beyond);
+
+    const walked = await walkAs(ctx);
+    expect(walked.ids).toEqual(want);
+    expect(new Set(walked.ids).size).toBe(beyond);
+    expect(walked.products.every((p) => p.organizationId === a)).toBe(true);
+
+    const pages = walked.answered;
+    expect(pages).toHaveLength(Math.ceil(beyond / 50));
+    for (const page of pages.slice(0, -1)) {
+      expect(page.products).toHaveLength(50);
+      expect(page.nextCursor).not.toBeNull();
+    }
+    const middle = Math.floor(pages.length / 2);
+    expect(pages[0].products.map((p: any) => p.id)).toEqual(want.slice(0, 50));
+    expect(pages[middle].products.map((p: any) => p.id)).toEqual(
+      want.slice(middle * 50, middle * 50 + 50),
+    );
+    const last = pages.at(-1);
+    expect(last.products.map((p: any) => p.id)).toEqual(want.slice((pages.length - 1) * 50));
+    expect(last.products.length).toBe(beyond - 50 * (pages.length - 1));
+    expect(last.nextCursor).toBeNull();
+    for (const page of pages) {
+      expect(page.servedAs).toEqual({ userId: owner, organizationId: a });
+      expect(page.query).toEqual({ status: "ACTIVE", categoryId: null, search: "" });
+    }
+    // Asking for the last page again, from the cursor that led to it, answers the same.
+    const again = await service.listProductsPage(ctx, { before: pages.at(-2).nextCursor });
+    expect(again.products.map((p: any) => p.id)).toEqual(last.products.map((p: any) => p.id));
+    expect(again.nextCursor).toBeNull();
+  }, 120_000);
+
+  it("SKU, barcode and name matches beyond the early pages and the cap; filtered totals", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    const owner = await member(a, "Owner");
+    const ownerB = await member(b, "Owner");
+    const drinks = await newCategory(a);
+    const matches = Math.max(200, cap) + 23;
+    // Non-matching rows newest, matching rows interleaved through them and beyond.
+    await seed(a, Math.max(200, cap) + 61, "FILL", { nameEn: "Plain" });
+    await seed(a, matches, "KTL", { nameEn: "Steel kettle", base: "2026-10-01 11:59:59.5+00" });
+    // The oldest two products: one found only by SKU, one only by barcode.
+    await seed(a, 1, "DEEPS", { nameEn: null, base: "2020-01-02 00:00:00+00" });
+    await seed(a, 1, "DEEPB", { nameEn: null, base: "2020-01-01 00:00:00+00" });
+    await sql`update product_variants set sku = 'ZX-90417'
+               where organization_id = ${a} and sku = 'DEEPS-00001-V1'`;
+    await sql`update product_variants set barcode = '8850000000777'
+               where organization_id = ${a} and sku = 'DEEPB-00001-V1'`;
+    // The neighbour holds the same names, SKU and barcode, all NEWER.
+    await seed(b, 60, "KTL", { nameEn: "Steel kettle", base: "2026-10-03 12:00:00+00" });
+    await sql`update product_variants set sku = 'ZX-90417'
+               where organization_id = ${b} and sku = 'KTL-00001-V1'`;
+    await sql`update product_variants set barcode = '8850000000777'
+               where organization_id = ${b} and sku = 'KTL-00002-V1'`;
+    const [deepSku] = await expected(a, (r) => r.name_km === "DEEPS-00001");
+    const [deepBarcode] = await expected(a, (r) => r.name_km === "DEEPB-00001");
+    const ctx = await principal(owner);
+
+    const kettles = await expected(a, (r) => r.status === "ACTIVE" && r.name_km.startsWith("KTL-"));
+    expect(kettles).toHaveLength(matches);
+    const byName = await walkAs(ctx, { search: "kettle" });
+    expect(byName.ids).toEqual(kettles);
+    expect(byName.pages).toBe(Math.ceil(matches / 50));
+    // The deep ones are past every early page and past the cap in raw order.
+    const all = await expected(a);
+    expect(all.indexOf(deepSku!)).toBeGreaterThan(Math.max(200, cap));
+    expect(all.indexOf(deepBarcode!)).toBeGreaterThan(Math.max(200, cap));
+
+    for (const text of ["ZX-90417", "zx-90417", "90417"]) {
+      expect((await walkAs(ctx, { search: text })).ids).toEqual([deepSku]);
+    }
+    for (const text of ["8850000000777", "៨៨៥០០០០០០០៧៧៧", "0000777"]) {
+      expect((await walkAs(ctx, { search: text })).ids).toEqual([deepBarcode]);
+    }
+
+    // Category + search, and Archived + search: totals equal independent SQL.
+    await sql`update products set category_id = ${drinks}
+               where organization_id = ${a} and name_km like 'KTL-%'
+                 and substr(name_km, 5)::int % 3 = 0`;
+    await sql`update products set status = 'ARCHIVED'
+               where organization_id = ${a} and name_km like 'KTL-%'
+                 and substr(name_km, 5)::int % 7 = 0`;
+    const inDrinks = await expected(
+      a,
+      (r) => r.status === "ACTIVE" && r.category_id === drinks && r.name_km.startsWith("KTL-"),
+    );
+    expect((await walkAs(ctx, { search: "kettle", categoryId: drinks })).ids).toEqual(inDrinks);
+    const archived = await expected(
+      a,
+      (r) => r.status === "ARCHIVED" && r.name_km.startsWith("KTL-"),
+    );
+    expect(archived.length).toBeGreaterThan(0);
+    expect((await walkAs(ctx, { search: "kettle", status: "ARCHIVED" })).ids).toEqual(archived);
+    expect((await walkAs(ctx, { search: "kettle" })).ids).toEqual(
+      await expected(a, (r) => r.status === "ACTIVE" && r.name_km.startsWith("KTL-")),
+    );
+
+    // The neighbour sees only its own, with the same text.
+    const ctxB = await principal(ownerB);
+    const theirs = await walkAs(ctxB, { search: "kettle" });
+    expect(theirs.ids).toEqual(await expected(b));
+    expect((await walkAs(ctxB, { search: "ZX-90417" })).ids).toHaveLength(1);
+    expect((await walkAs(ctxB, { search: "ZX-90417" })).products[0].organizationId).toBe(b);
+  }, 120_000);
+
+  it("roles through the real membership read: read, cost, no read, suspended, none", async () => {
+    const a = await newOrg();
+    const b = await newOrg();
+    await seed(a, cap + 60, "ROLE");
+    await seed(b, 30, "ROLEB");
+    const owner = await member(a, "Owner");
+    const cashier = await member(a, "Cashier");
+    const noRead = await member(a, null);
+    const suspended = await member(a, "Owner", "suspended");
+    const neighbour = await member(b, "Manager");
+    const stranger = crypto.randomUUID();
+    await sql`insert into auth.users(id,email) values(${stranger}, ${`${stranger}@test.invalid`})`;
+
+    const want = await expected(a);
+    const ownerCtx = await principal(owner);
+    const asOwner = await walkAs(ownerCtx);
+    expect(asOwner.ids).toEqual(want);
+    // Real PostgREST cuts EMBEDDED arrays at max_rows too. The membership read
+    // (src/server/auth/membership.ts, not changed by #126) embeds the role's
+    // permission keys, so under a cap below the Owner's permission count the
+    // Owner resolves with fewer permissions — fail closed, never more. Reported
+    // as a finding; cost visibility for the Owner needs the whole set.
+    const ownerPermissions = (
+      (await sql`select count(*)::int as n from role_permissions rp join roles r on r.id = rp.role_id
+                  where r.organization_id is null and r.name = 'Owner'`) as any[]
+    )[0].n as number;
+    if (cap >= ownerPermissions) {
+      expect(asOwner.products.every((p) => p.variants.every((v: any) => v.cost !== null))).toBe(
+        true,
+      );
+    } else {
+      expect(ownerCtx.can("products.read")).toBe(true);
+      expect(ownerCtx.can("products.view_cost")).toBe(false);
+      expect(asOwner.products.every((p) => p.variants.every((v: any) => v.cost === null))).toBe(
+        true,
+      );
+    }
+
+    const asCashier = await walkAs(await principal(cashier));
+    expect(asCashier.ids).toEqual(want);
+    expect(asCashier.products.flatMap((p) => p.variants)).toHaveLength(want.length);
+    expect(asCashier.products.every((p) => p.variants.every((v: any) => v.cost === null))).toBe(
+      true,
+    );
+    expect(
+      (await walkAs(await principal(cashier), { search: "ROLE-0000" })).products.every((p) =>
+        p.variants.every((v: any) => v.cost === null),
+      ),
+    ).toBe(true);
+
+    const { ForbiddenError } = await import("@/server/auth/authorization");
+    const refused = await principal(noRead);
+    expect(refused.organizationId).toBe(a);
+    await expect(service.listProductsPage(refused)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(service.listProductsPage(refused, { search: "ROLE" })).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
+
+    expect(await principal(suspended)).toBeNull();
+    expect(await principal(stranger)).toBeNull();
+
+    const asNeighbour = await walkAs(await principal(neighbour));
+    expect(asNeighbour.ids).toEqual(await expected(b));
+    expect(asNeighbour.products.every((p) => p.organizationId === b)).toBe(true);
+  }, 120_000);
+
+  it("archiving the cursor's product, or a whole last page, strands nothing", async () => {
+    const a = await newOrg();
+    const ctx = await principal(await member(a, "Owner"));
+    await seed(a, 120, "EDGE");
+    const first = await service.listProductsPage(ctx);
+    const cursor = first.nextCursor!;
+    // The product the cursor names leaves the list; the next page is unchanged.
+    await sql`update products set status = 'ARCHIVED' where id = ${cursor.id}`;
+    const second = await service.listProductsPage(ctx, { before: cursor });
+    expect(second.products.map((p: any) => p.id)).toEqual((await expected(a)).slice(49, 99));
+    // An edit does not move a product.
+    await sql`update products set name_en = 'Renamed' where id = ${second.products[0].id}`;
+    expect((await service.listProductsPage(ctx, { before: cursor })).products[0].id).toBe(
+      second.products[0].id,
+    );
+    // Archive everything from the last page: asking for it again is empty and the end.
+    const last = await service.listProductsPage(ctx, { before: second.nextCursor! });
+    expect(last.nextCursor).toBeNull();
+    for (const p of last.products) {
+      await sql`update products set status = 'ARCHIVED' where id = ${p.id}`;
+    }
+    const emptied = await service.listProductsPage(ctx, { before: second.nextCursor! });
+    expect(emptied.products).toEqual([]);
+    expect(emptied.nextCursor).toBeNull();
+    expect((await walkAs(ctx)).ids).toEqual(await expected(a));
+  });
+
+  it("negative control: the pre-#126 read (200 rows + browser filter) misses what this gate finds", async () => {
+    const a = await newOrg();
+    const ctx = await principal(await member(a, "Owner"));
+    await seed(a, beyond, "OLD");
+    await seed(a, 1, "DEEPS", { nameEn: null, base: "2020-01-01 00:00:00+00" });
+    await sql`update product_variants set sku = 'ZX-55501'
+               where organization_id = ${a} and sku = 'DEEPS-00001-V1'`;
+    const want = await expected(a);
+
+    // The old screen: listProductsFn({ status, limit: 200 }), then a filter in the browser.
+    const old = await service.getProductCatalog(ctx, { status: "ACTIVE", limit: 200 });
+    expect(old).toHaveLength(Math.min(200, cap));
+    const oldIds = new Set(old.map((p: any) => p.id as string));
+    const missing = want.filter((id) => !oldIds.has(id));
+    expect(missing.length).toBe(want.length - old.length);
+    expect(missing.length).toBeGreaterThan(0);
+    expect(legacySearchLoadedProducts(old, "zx-55501")).toEqual([]);
+    // The same expectations this file applies to the new read reject the old one.
+    expect(old.map((p: any) => p.id)).not.toEqual(want);
+
+    // The new read finds everything, and the deep SKU.
+    expect((await walkAs(ctx)).ids).toEqual(want);
+    expect((await walkAs(ctx, { search: "zx-55501" })).ids).toHaveLength(1);
+
+    // Unchanged by #126 and reported as P1: the POS/order-picker whole-catalogue
+    // read is still cut at max_rows, silently.
+    const pos = await service.getProductCatalog(ctx, { status: "ACTIVE" });
+    expect(pos).toHaveLength(Math.min(want.length, cap));
+  }, 120_000);
 });
