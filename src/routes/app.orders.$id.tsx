@@ -89,6 +89,12 @@ import {
   type UiPayment,
   type UiOrderSettlement,
 } from "@/lib/payments";
+import {
+  openPaymentReplay,
+  paymentReplayKeyFor,
+  resolvePaymentReplay,
+  type PaymentReplayOpening,
+} from "@/lib/payment-replay";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { ordersKeys } from "@/lib/orders-query";
@@ -321,18 +327,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   });
 
   /*
-   * Record payment's replay identity, kept apart from its draft. The sheet's
+   * Record payment's replay identity is kept apart from its draft. The sheet's
    * draft (method, amount, reference) is bound to the principal that typed it
    * and the order it was typed for, and is retired the moment another
-   * principal or order is shown. Its idempotency key is not displayed: if a
-   * submitted attempt is still unresolved when the sheet is retired, the key
-   * is parked for THAT principal and order only and handed back when that
-   * principal next opens the sheet on that order, so a retry replays onto the
-   * same payment instead of recording a second one. A success resolves it.
+   * principal or order is shown. The key it is submitted under is not: an
+   * unresolved one lives in src/lib/payment-replay.ts, on the QueryClient,
+   * partitioned by principal and order and bound to the payload, so it
+   * outlives this screen. When that principal re-enters the same payment on
+   * that order — after a switch or a remount — the retry replays onto the same
+   * payment instead of recording a second one. A success resolves it. Each
+   * opening of the sheet keeps what was unresolved at that moment, so a retry
+   * typed while the original was in flight still replays it if the original's
+   * success lands first.
    */
-  const unresolvedPaymentRef = useRef<{ scope: string; key: string } | null>(null);
-  const parkedPaymentKeysRef = useRef(new Map<string, string>());
-  const [paymentReplayKey, setPaymentReplayKey] = useState<string | undefined>(undefined);
+  const paymentOpeningRef = useRef<PaymentReplayOpening | null>(null);
 
   /*
    * Fail closed rather than key a request under a placeholder: if the route's
@@ -621,7 +629,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   /**
    * Called from onMutate, at the tap (see beginLifecycleAttempt). The key the
-   * attempt carries is unresolved until a success answers it.
+   * attempt carries stays unresolved until a success answers it.
    */
   function beginPaymentAttempt(
     submit: RecordOrderPaymentSubmit & OrderActionStart,
@@ -629,7 +637,6 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     const current = lifecycleRef.current;
     current.paymentAttempt += 1;
     const scope = orderActionScopeOf(submit);
-    unresolvedPaymentRef.current = { scope, key: submit.idempotencyKey };
     return { epoch: scope === current.scope ? current.epoch : -1, attempt: current.paymentAttempt };
   }
   function isCurrentPaymentAttempt(attempt: LifecycleAttempt | undefined) {
@@ -638,13 +645,11 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }
   /** A success: the key's payment exists, so nothing is left to replay under it. */
   function resolvePaymentKey(submit: RecordOrderPaymentSubmit & OrderActionStart) {
-    const scope = orderActionScopeOf(submit);
-    if (unresolvedPaymentRef.current?.key === submit.idempotencyKey) {
-      unresolvedPaymentRef.current = null;
-    }
-    if (parkedPaymentKeysRef.current.get(scope) === submit.idempotencyKey) {
-      parkedPaymentKeysRef.current.delete(scope);
-    }
+    resolvePaymentReplay(
+      queryClient,
+      { ...submit.startedAs, orderId: submit.orderId },
+      submit.idempotencyKey,
+    );
   }
   /**
    * A payment recorded for `started` whose answer is not applied (another
@@ -661,9 +666,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
   }
   function openRecordPayment() {
-    const parked = parkedPaymentKeysRef.current;
-    setPaymentReplayKey(parked.get(actionScope));
-    parked.delete(actionScope);
+    paymentOpeningRef.current = openPaymentReplay(queryClient, { ...principal, orderId: id });
     setRecordPaymentOpen(true);
   }
 
@@ -726,8 +729,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * or delivery sheet and no payment draft carries over (the sheets are also
    * keyed by principal and order, so their form state is gone in the same
    * render), and every completion still in flight is stale (see
-   * lifecycleRef). An unresolved payment key is parked for the principal and
-   * order it was submitted for, never handed to the next.
+   * lifecycleRef). An unresolved payment key stays with the principal and
+   * order it was submitted for (src/lib/payment-replay.ts), never the next.
    */
   const { reset: resetConfirm } = confirmMutation;
   const { reset: resetCancel } = cancelMutation;
@@ -736,11 +739,6 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
     if (current.scope === actionScope) return;
-    const unresolved = unresolvedPaymentRef.current;
-    if (recordPaymentOpen && unresolved?.scope === current.scope) {
-      parkedPaymentKeysRef.current.set(unresolved.scope, unresolved.key);
-    }
-    unresolvedPaymentRef.current = null;
     current.scope = actionScope;
     current.epoch += 1;
     resetConfirm();
@@ -752,15 +750,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     setCompleteOpen(false);
     setCreateDeliveryOpen(false);
     setRecordPaymentOpen(false);
-    setPaymentReplayKey(undefined);
-  }, [
-    actionScope,
-    recordPaymentOpen,
-    resetConfirm,
-    resetCancel,
-    resetComplete,
-    resetRecordPayment,
-  ]);
+  }, [actionScope, resetConfirm, resetCancel, resetComplete, resetRecordPayment]);
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
     return () => {
@@ -768,6 +758,20 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       current.epoch += 1;
     };
   }, []);
+
+  /*
+   * Confirm and Cancel are tapped from the sticky bar, which stays on screen
+   * wherever the merchant has scrolled, and Complete from the Next step panel;
+   * their error banner sits near the top. Measured at 320-430px, a custody
+   * refusal tapped from further down rendered 700-1350px above the viewport:
+   * the sheet closed and Cancel disappeared with no visible reason. A new
+   * error is brought into view (role="alert" already announces it).
+   */
+  const lifecycleError = confirmMutation.error ?? cancelMutation.error ?? completeMutation.error;
+  const lifecycleErrorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (lifecycleError) lifecycleErrorRef.current?.scrollIntoView({ block: "center" });
+  }, [lifecycleError]);
 
   // Back to the list the merchant came from, filter included.
   const back = () => navigate({ to: "/app/orders", search: (prev) => prev });
@@ -949,7 +953,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     }));
 
   const mutationErrorBanner = (() => {
-    const err = confirmMutation.error ?? cancelMutation.error ?? completeMutation.error;
+    const err = lifecycleError;
     if (!err) return null;
     const cancelBlocked = err === cancelMutation.error ? orderCancelBlockedReason(err) : null;
     const copy = cancelBlocked
@@ -1036,7 +1040,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
          * failure needs to be visible without the merchant scrolling back up
          * past Items/Customer/Payment/Delivery/History to find out it failed.
          */}
-        {mutationErrorBanner}
+        {mutationErrorBanner ? <div ref={lifecycleErrorRef}>{mutationErrorBanner}</div> : null}
 
         {/*
          * One hero, one dominant reading: the money, then the lifecycle state
@@ -1069,8 +1073,8 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           pendingAction={nextActionPending}
           handlers={{
             complete_order: () => setCompleteOpen(true),
-            // openRecordPayment, never a bare setter: it hands back a parked
-            // replay key so a retry replays onto the same payment.
+            // openRecordPayment, never a bare setter: the opening records the
+            // unresolved identities a retry from it replays.
             ...(showRecordPayment ? { record_payment: openRecordPayment } : {}),
             arrange_delivery: () => setCreateDeliveryOpen(true),
           }}
@@ -1543,7 +1547,6 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         // Bound to the principal and order: neither inherits this draft.
         key={`payment:${actionScope}`}
         open={recordPaymentOpen}
-        replayKey={paymentReplayKey}
         onOpenChange={(next) => {
           setRecordPaymentOpen(next);
           /*
@@ -1560,9 +1563,26 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         canMarkCod={canMarkCod}
         pending={recordPaymentMutation.isPending}
         error={recordPaymentError}
-        onConfirm={(submit) =>
-          recordPaymentMutation.mutate({ ...submit, orderId: order.id, startedAs: principal })
-        }
+        onConfirm={(entered) => {
+          // The same logical payment from this principal on this order
+          // replays its unresolved key, even from a remounted screen.
+          const submit = {
+            ...entered,
+            idempotencyKey: paymentReplayKeyFor(
+              queryClient,
+              { ...principal, orderId: order.id },
+              {
+                method: entered.method,
+                amountMinor: entered.amountMinor,
+                currency: order.total.currency,
+                reference: entered.reference,
+              },
+              entered.idempotencyKey,
+              paymentOpeningRef.current,
+            ),
+          };
+          recordPaymentMutation.mutate({ ...submit, orderId: order.id, startedAs: principal });
+        }}
       />
       <InternalParcelLabelDialog
         open={parcelLabelOpen}

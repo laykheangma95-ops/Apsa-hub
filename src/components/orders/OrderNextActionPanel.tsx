@@ -44,10 +44,13 @@ const PRIMARY_CLASS =
   "press-tactile tap-target text-label flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl px-4 py-2 text-center";
 
 /**
- * Order detail's one "what happens next" area: the four-step workflow (Order →
- * Payment → Packing → Delivery / hand-over), a plain explanation, and at most
- * one primary action. Everything it shows comes from deriveOrderNextAction; it
- * decides nothing itself, and the server re-checks every action it starts.
+ * Order detail's one "what happens next" area: a plain explanation, at most
+ * one primary action, and the four-step workflow (Order → Payment → Packing →
+ * Delivery / hand-over) beneath them. The action comes first: below it, at
+ * 320×568 and 360×640 the workflow pushed it under the sticky Cancel bar's
+ * glass at first paint, where it looked tappable but a tap landed on the bar.
+ * Everything it shows comes from deriveOrderNextAction; it decides nothing
+ * itself, and the server re-checks every action it starts.
  */
 export function OrderNextActionPanel({
   next,
@@ -65,7 +68,55 @@ export function OrderNextActionPanel({
 
   return (
     <Section title={t("order.next.title")}>
-      <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4" aria-label={t("order.next.workflow")}>
+      <div aria-live="polite">
+        {next.status === "loading" ? (
+          <p role="status" className="text-body-sm flex items-center gap-2 text-text-secondary">
+            <Spinner />
+            {t(next.reasonKey)}
+          </p>
+        ) : (
+          <p className="text-body-sm text-text-primary">{t(next.reasonKey)}</p>
+        )}
+
+        {next.retryable ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="tap-target mt-3 h-11 w-full rounded-xl"
+            onClick={onRetry}
+          >
+            {t("common.retry")}
+          </Button>
+        ) : null}
+
+        {next.primary ? (
+          <div className="mt-3">
+            <PrimaryAction item={next.primary} handlers={handlers} pendingAction={pendingAction} />
+          </div>
+        ) : null}
+        {/* Supporting detail, after the action so the action clears the sticky bar. */}
+        {next.paymentNoteKey ? (
+          <p className="text-caption mt-2 text-text-secondary">{t(next.paymentNoteKey)}</p>
+        ) : null}
+
+        {navigating.length > 0 ? (
+          <div className="mt-2 flex flex-col">
+            {navigating.map((item) => (
+              <ActionLink
+                key={item.id}
+                item={item}
+                className="tap-target text-label flex min-h-11 items-center justify-center rounded-xl px-3 text-action-primary"
+              >
+                {t(`order.next.action.${item.id}`)}
+              </ActionLink>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <ol
+        className="mt-4 grid grid-cols-2 gap-2 border-t border-border-default pt-3 sm:grid-cols-4"
+        aria-label={t("order.next.workflow")}
+      >
         {next.steps.map((step) => (
           <li key={step.key} className="flex min-w-0 items-start gap-2">
             <span
@@ -91,51 +142,6 @@ export function OrderNextActionPanel({
           </li>
         ))}
       </ol>
-
-      <div className="mt-4 border-t border-border-default pt-3" aria-live="polite">
-        {next.status === "loading" ? (
-          <p role="status" className="text-body-sm flex items-center gap-2 text-text-secondary">
-            <Spinner />
-            {t(next.reasonKey)}
-          </p>
-        ) : (
-          <p className="text-body-sm text-text-primary">{t(next.reasonKey)}</p>
-        )}
-        {next.paymentNoteKey ? (
-          <p className="text-caption mt-1 text-text-secondary">{t(next.paymentNoteKey)}</p>
-        ) : null}
-
-        {next.retryable ? (
-          <Button
-            type="button"
-            variant="outline"
-            className="tap-target mt-3 h-11 w-full rounded-xl"
-            onClick={onRetry}
-          >
-            {t("common.retry")}
-          </Button>
-        ) : null}
-
-        {next.primary ? (
-          <div className="mt-3">
-            <PrimaryAction item={next.primary} handlers={handlers} pendingAction={pendingAction} />
-          </div>
-        ) : null}
-
-        {navigating.length > 0 ? (
-          <div className="mt-2 flex flex-col">
-            {navigating.map((item) => (
-              <ActionLink
-                key={item.id}
-                item={item}
-                className="tap-target text-label flex min-h-11 items-center justify-center rounded-xl px-3 text-action-primary"
-              >
-                {t(`order.next.action.${item.id}`)}
-              </ActionLink>
-            ))}
-          </div>
-        ) : null}
-      </div>
     </Section>
   );
 }

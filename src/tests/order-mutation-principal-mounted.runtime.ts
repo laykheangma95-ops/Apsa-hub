@@ -2799,3 +2799,376 @@ describe("Order detail: a late lifecycle or payment answer stays with the order 
     expect(s2.payments.map((p) => [p.recorded_by, p.amount_minor])).toEqual([[USER_A, 7000]]);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 — an unresolved payment's retry identity outlives the Order detail screen
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Reproduced on 79f120a: the identity of a submitted-but-unanswered payment
+// lived in Order detail's own refs, so UNMOUNTING the screen (navigate away,
+// another member's screen, back) destroyed it. A's re-entry of the same
+// payment then went out under a NEW key and the server recorded a second
+// pending payment, a second `created` event and a second payments.record
+// audit. Every case asserts those three SQL/audit facts, not only client keys.
+
+const nextStepSection = () =>
+  [...document.querySelectorAll("section")].find(
+    (el) => el.querySelector("h2")?.textContent?.trim() === en.order.next.title,
+  ) ?? null;
+/** Smart Next Action → Record payment, then the draft typed into the sheet. */
+async function typePaymentFromNextStep(amount = PRIVATE_AMOUNT, reference = PRIVATE_REF) {
+  await waitFor(
+    () => nextStepSection() && button(en.order.next.action.record_payment, nextStepSection()!),
+    "Next step: Record payment",
+  );
+  await click(
+    button(en.order.next.action.record_payment, nextStepSection()!),
+    "Next step: Record payment",
+  );
+  await typeInto(document.querySelector("#order-payment-amount"), amount);
+  if (reference) await typeInto(document.querySelector("#order-payment-reference"), reference);
+}
+/** One row per recorded payment, with its own `created` event and payments.record audit. */
+async function paymentLedger(orderId: string) {
+  const rows = (
+    await f.db.query<Json>(
+      `select p.id, p.recorded_by, p.amount_minor, p.method, p.reference, p.idempotency_key,
+              (select count(*)::int from payment_events e
+                where e.payment_id = p.id and e.event_type = 'created') as created_events
+         from payments p where p.order_id = $1 order by p.created_at`,
+      [orderId],
+    )
+  ).rows;
+  return {
+    rows: rows.map((r) => ({
+      by: who(r.recorded_by),
+      amount: Number(r.amount_minor),
+      method: r.method as string,
+      reference: (r.reference as string | null) ?? null,
+      key: r.idempotency_key as string,
+      createdEvents: r.created_events as number,
+    })),
+    allRecordAudits: audits.filter((a) => a.action === "payments.record").length,
+  };
+}
+function ledgerEvidence(label: string, ledger: Awaited<ReturnType<typeof paymentLedger>>) {
+  console.log(
+    `[evidence] ${label}: outcomes=[${outcomesOf("payment")}] keys=${JSON.stringify(paymentKeys())} ` +
+      `payments=${JSON.stringify(ledger.rows.map((r) => [r.by, r.amount, r.method, r.createdEvents]))} ` +
+      `recordAudits=${ledger.allRecordAudits}`,
+  );
+}
+/** Exactly one payment, A's, with one creation event and one creation audit. */
+function expectOneLogicalPayment(ledger: Awaited<ReturnType<typeof paymentLedger>>) {
+  expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+  expect(ledger.allRecordAudits).toBe(1);
+}
+
+describe("Order detail: an unresolved payment's retry identity survives the screen unmounting", () => {
+  beforeEach(() => {
+    privateRefSeq += 1;
+    PRIVATE_REF = `PRIVATE-BANK-REF-88${String(privateRefSeq).padStart(4, "0")}`;
+  });
+
+  it("REPRO: Next step → Record payment, dispatch held, unmount → B mounts (same QueryClient) → A again, original released, then A's retry: one payment, one created event, one audit", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // goods with the customer, unpaid: Next step offers Record payment
+    await openOrderDetail(orderId);
+    await typePaymentFromNextStep();
+    holdDispatchNext.add("payment"); // left the screen as A, not yet at the server
+    await submitPaymentSheet();
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentFromNextStep(); // the order still reads unpaid: A re-enters the same payment
+    await releaseDispatch(); // A's original lands now, as A
+    await submitPaymentSheet("Record payment (A's retry from Next step)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("remount B→A, Next step retry", ledger);
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("CONTROL (no remount): the same sequence with the screen kept mounted records one payment", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId);
+    await openOrderDetail(orderId);
+    await typePaymentFromNextStep();
+    holdDispatchNext.add("payment");
+    await submitPaymentSheet();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await typePaymentFromNextStep();
+    await releaseDispatch();
+    await submitPaymentSheet("Record payment (A's retry, no remount)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("no remount control", ledger);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("payment-section entry, committed with the response LOST (uncertain), unmount → B → A, A's retry: one payment, one created event, one audit", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft(); // the payment section's own Record payment button
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await remountAs({ user: USER_B });
+    await releaseResponse(); // A's failure lands while B's screen is mounted
+    await remountAs({ user: USER_A });
+    await typePaymentDraft();
+    await submitPaymentSheet("Record payment (A's retry)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("remount, lost response, payment-section retry", ledger);
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1);
+    expectOneLogicalPayment(ledger);
+  });
+
+  it("A's original SUCCESS lands while B's screen is mounted: nothing reaches B, the identity is retired, and A's next identical payment is a new one", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await remountAs({ user: USER_B });
+    await readsSettled();
+    const shownToB = text();
+    await releaseResponse();
+    await readsSettled();
+    expect(dialog()).toBeNull();
+    expect(notices()).not.toContain(paymentNotice);
+    expect(text()).toBe(shownToB);
+    await remountAs({ user: USER_A });
+    expectOneLogicalPayment(await paymentLedger(orderId));
+    // Known outcome: a second identical payment is a legitimate new payment.
+    await typePaymentDraft(PRIVATE_AMOUNT, `${PRIVATE_REF}-2`);
+    await submitPaymentSheet("a legitimate second payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("late success under B, then a new payment", ledger);
+    expect(new Set(paymentKeys()).size).toBe(2);
+    expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([
+      ["A", 12345, 1],
+      ["A", 12345, 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("the original success is known BEFORE A re-enters it (A's screen mounted): the identical entry is a new payment, never a silent replay", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    await submitPaymentSheet();
+    await waitFor(() => notices().includes(paymentNotice), "the recorded notice");
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentDraft(); // same amount, same reference
+    await submitPaymentSheet("the identical second payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("success known, identical entry", ledger);
+    expect(new Set(paymentKeys()).size).toBe(2);
+    expect(ledger.rows).toHaveLength(2);
+  });
+
+  const changes = [
+    { label: "amount", amount: "12346", reference: () => PRIVATE_REF, method: null },
+    {
+      label: "reference",
+      amount: PRIVATE_AMOUNT,
+      reference: () => `${PRIVATE_REF}-X`,
+      method: null,
+    },
+    { label: "method", amount: PRIVATE_AMOUNT, reference: () => PRIVATE_REF, method: "khqr" },
+  ] as const;
+  for (const change of changes) {
+    it(`a CHANGED ${change.label} after the remount never reuses the unresolved identity; the original's own retry still replays it`, async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await typePaymentDraft();
+      holdResponseNext.add("payment");
+      loseNextResponse.add("payment");
+      await submitPaymentSheet();
+      await paymentCommittedAsA();
+      await releaseResponse();
+      await remountAs({ user: USER_B });
+      await remountAs({ user: USER_A });
+      await typePaymentDraft(change.amount, change.reference());
+      if (change.method) await click(button(en.pos.method[change.method], dialog()!), "method");
+      await submitPaymentSheet(`changed ${change.label}`);
+      await waitFor(() => outcomesOf("payment").length === 2, "the changed payment");
+      expect(outcomesOf("payment")).toEqual(["ok", "ok"]); // not a key-conflict refusal
+      const [original, changed] = paymentKeys();
+      expect(changed).not.toBe(original);
+      await waitFor(() => dialog() === null, "the changed payment's sheet to close");
+      // The original logical payment is still unresolved: its retry replays it.
+      await typePaymentDraft();
+      await submitPaymentSheet("the original's retry");
+      await waitFor(() => outcomesOf("payment").length === 3, "the original's retry");
+      expect(paymentKeys()[2]).toBe(original);
+      const ledger = await paymentLedger(orderId);
+      ledgerEvidence(`changed ${change.label}`, ledger);
+      expect(ledger.rows).toHaveLength(2);
+      expect(ledger.rows.every((r) => r.by === "A" && r.createdEvents === 1)).toBe(true);
+      expect(ledger.allRecordAudits).toBe(2);
+    });
+  }
+
+  it("two unresolved payments at once: each one's retry after the remount replays its own identity", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    for (const amount of ["12345", "700"]) {
+      await typePaymentDraft(amount, amount === "700" ? "" : PRIVATE_REF);
+      holdResponseNext.add("payment");
+      loseNextResponse.add("payment");
+      await submitPaymentSheet(`unresolved ${amount}`);
+      await waitFor(() => heldResponses.length === (amount === "700" ? 2 : 1), `held ${amount}`);
+      await releaseResponse(amount === "700" ? 1 : 0);
+      await remountAs({ user: USER_A }); // the failed sheet goes with the screen
+    }
+    await remountAs({ user: USER_B });
+    await remountAs({ user: USER_A });
+    await typePaymentDraft("700", "");
+    await submitPaymentSheet("retry 700");
+    await waitFor(() => outcomesOf("payment").length === 3, "retry 700");
+    await waitFor(() => dialog() === null, "sheet closed");
+    await typePaymentDraft("12345", PRIVATE_REF);
+    await submitPaymentSheet("retry 12345");
+    await waitFor(() => outcomesOf("payment").length === 4, "retry 12345");
+    const keys = paymentKeys();
+    expect(keys[2]).toBe(keys[1]);
+    expect(keys[3]).toBe(keys[0]);
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("two unresolved", ledger);
+    expect(ledger.rows.map((r) => [r.amount, r.createdEvents])).toEqual([
+      [12345, 1],
+      [700, 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("isolation: after A's unresolved payment, member B entering the identical payment on the same order gets B's own identity and B's own payment; A's retry still replays A's", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await releaseResponse();
+    await remountAs({ user: USER_B });
+    await typePaymentDraft(); // B types the very same amount and reference
+    await submitPaymentSheet("B's own payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "B's payment");
+    await remountAs({ user: USER_A });
+    await typePaymentDraft();
+    await submitPaymentSheet("A's retry");
+    await waitFor(() => outcomesOf("payment").length === 3, "A's retry");
+    const keys = paymentKeys();
+    expect(keys[1]).not.toBe(keys[0]); // B never received A's identity
+    expect(keys[2]).toBe(keys[0]); // A's retry replays A's
+    const ledger = await paymentLedger(orderId);
+    ledgerEvidence("member isolation", ledger);
+    expect(ledger.rows.map((r) => [r.by, r.createdEvents])).toEqual([
+      ["A", 1],
+      ["B", 1],
+    ]);
+    expect(ledger.allRecordAudits).toBe(2);
+  });
+
+  it("isolation: A's unresolved payment on O1 is not O2's — the identical entry on O2 is O2's own payment; back on O1 the retry replays O1's", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openOrderDetail(o1);
+    await typePaymentDraft();
+    holdResponseNext.add("payment");
+    loseNextResponse.add("payment");
+    await submitPaymentSheet();
+    await paymentCommittedAsA();
+    await releaseResponse();
+    await act(async () => root!.unmount());
+    routeParams.id = o2;
+    root = createRoot(container!);
+    await rerender();
+    await typePaymentDraft(); // identical amount and reference, on O2
+    await submitPaymentSheet("O2's own payment");
+    await waitFor(() => outcomesOf("payment").length === 2, "O2's payment");
+    await act(async () => root!.unmount());
+    routeParams.id = o1;
+    root = createRoot(container!);
+    await rerender();
+    await typePaymentDraft();
+    await submitPaymentSheet("O1's retry");
+    await waitFor(() => outcomesOf("payment").length === 3, "O1's retry");
+    const keys = paymentKeys();
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[2]).toBe(keys[0]);
+    const l1 = await paymentLedger(o1);
+    const l2 = await paymentLedger(o2);
+    ledgerEvidence("order isolation O1", l1);
+    expect(l1.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+    expect(l2.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+    expect(l1.allRecordAudits).toBe(2); // one creation audit per order's one payment
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mobile: the refusal reason and the Next step action are where the merchant is
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Measured on the actual route in Chromium (320-430px, km and en): a custody
+// refusal tapped from the always-visible sticky Cancel while scrolled down
+// rendered its reason 700-1350px above the viewport; and at 320×568 / 360×640
+// the Next step action sat under the sticky bar's glass at first paint, below
+// the four-step workflow. happy-dom has no layout, so these pin the mechanism:
+// the reason is scrolled into view, and the action precedes the workflow.
+
+describe("Order detail: the refusal reason and the Next step action are on screen", () => {
+  it("a custody refusal brings its reason into view", async () => {
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.textContent ?? "");
+    };
+    try {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await waitFor(() => button(en.order.cancel), "Cancel order");
+      await handOverAtCounter(orderId);
+      await tapCancelOrder();
+      await waitFor(
+        () => text().includes(en.order.error.cancelBlocked.goods_with_customer),
+        "the refusal reason",
+      );
+      expect(
+        scrolled.some((t) => t.includes(en.order.error.cancelBlocked.goods_with_customer)),
+      ).toBe(true);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("the Next step action comes before the four-step workflow", async () => {
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // unpaid, with the customer: Record payment is the action
+    await openOrderDetail(orderId);
+    await waitFor(
+      () => nextStepSection() && button(en.order.next.action.record_payment, nextStepSection()!),
+      "Next step: Record payment",
+    );
+    const section = nextStepSection()!;
+    const action = button(en.order.next.action.record_payment, section)!;
+    const workflow = section.querySelector(`ol[aria-label="${en.order.next.workflow}"]`)!;
+    expect(workflow).not.toBeNull();
+    expect(
+      action.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
