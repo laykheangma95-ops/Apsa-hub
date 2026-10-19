@@ -128,14 +128,17 @@ function sqlTransport() {
     let columns = "*";
     let single = false;
     let max: number | undefined;
+    let counted = false;
     let insertRow: Json | null = null;
     const chain: any = {
       insert(row: Json) {
         insertRow = row;
         return chain;
       },
-      select(cols = "*") {
+      select(cols = "*", options?: { count?: "exact" }) {
         columns = cols;
+        // Prefer: count=exact — the whole filtered set (listVariantsByOrg asks).
+        counted = options?.count === "exact";
         return chain;
       },
       eq(key: string, value: unknown) {
@@ -219,7 +222,8 @@ function sqlTransport() {
           const offset = ordering.find((o) => o.startsWith("__offset__"));
           const order = ordering.filter((o) => !o.startsWith("__offset__"));
           let sql = `select ${columns} from ${table}`;
-          if (where.length) sql += ` where ${where.join(" and ")}`;
+          const filtered = where.length ? ` where ${where.join(" and ")}` : "";
+          sql += filtered;
           if (order.length) sql += ` order by ${order.join(",")}`;
           if (max !== undefined) sql += ` limit ${max}`;
           if (offset) sql += ` offset ${Number(offset.slice("__offset__".length))}`;
@@ -229,7 +233,17 @@ function sqlTransport() {
               ? { data: rows[0], error: null }
               : { data: null, error: { code: "PGRST116" } };
           }
-          return { data: rows, error: null };
+          const count = counted
+            ? Number(
+                (
+                  await f.db.query<{ n: number }>(
+                    `select count(*)::int as n from ${table}${filtered}`,
+                    values,
+                  )
+                ).rows[0]!.n,
+              )
+            : null;
+          return { data: rows, error: null, count };
         } catch (error) {
           return { data: null, error };
         }

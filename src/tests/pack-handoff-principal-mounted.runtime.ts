@@ -137,10 +137,13 @@ function sqlTransport() {
     // single() reports PGRST116.
     let maybe = false;
     let max: number | undefined;
+    let counted = false;
     let skip: number | undefined;
     const chain: any = {
-      select(cols = "*") {
+      select(cols = "*", options?: { count?: "exact" }) {
         columns = cols;
+        // Prefer: count=exact — the whole filtered set (listVariantsByOrg asks).
+        counted = options?.count === "exact";
         return chain;
       },
       eq(key: string, value: unknown) {
@@ -189,7 +192,8 @@ function sqlTransport() {
       },
       async execute() {
         let sql = `select ${columns} from ${table}`;
-        if (where.length) sql += ` where ${where.join(" and ")}`;
+        const filtered = where.length ? ` where ${where.join(" and ")}` : "";
+        sql += filtered;
         if (ordering.length) sql += ` order by ${ordering.join(",")}`;
         if (max !== undefined) sql += ` limit ${max}`;
         if (skip !== undefined) sql += ` offset ${skip}`;
@@ -202,7 +206,17 @@ function sqlTransport() {
                 ? { data: null, error: null }
                 : { data: null, error: { code: "PGRST116" } };
           }
-          return { data: rows, error: null };
+          const count = counted
+            ? Number(
+                (
+                  await f.db.query<{ n: number }>(
+                    `select count(*)::int as n from ${table}${filtered}`,
+                    values,
+                  )
+                ).rows[0]!.n,
+              )
+            : null;
+          return { data: rows, error: null, count };
         } catch (error) {
           return { data: null, error };
         }
