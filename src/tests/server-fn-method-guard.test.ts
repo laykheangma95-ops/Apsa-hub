@@ -115,6 +115,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   findReturnableOrderFn: { reason: "lookup read" },
   findReturnableOrderByParcelFn: { reason: "lookup read" },
   getOrganizationProfileFn: { reason: "profile read" },
+  getBusinessCurrencyFn: { reason: "reads the business currency for Add Product" },
   listTeamFn: { reason: "list read" },
 };
 

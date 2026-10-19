@@ -60,6 +60,9 @@ describe("Order detail wiring for a confirmed order missing its APSA Parcel", ()
   it("a failed confirmation re-reads the order so the recovery appears without a manual refresh", () => {
     const confirm = page.slice(page.indexOf("const confirmMutation = useMutation("));
     const block = confirm.slice(0, confirm.indexOf("const cancelMutation"));
-    expect(block).toMatch(/onError: \(\) => \{[\s\S]*?void query\.refetch\(\);/);
+    // The initiator's own entry (PR #121 late-response P2): re-read while it is
+    // shown, never a refetch for whichever principal the screen shows now.
+    expect(block).toMatch(/onError: \(_error, started\) => \{[\s\S]*?rereadDetailOf\(started\);/);
+    expect(block).not.toContain("query.refetch()");
   });
 });

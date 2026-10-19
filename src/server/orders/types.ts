@@ -197,6 +197,11 @@ export interface TransitionRpcResult {
    */
   parcel_id?: string;
   parcel_code?: string;
+  /**
+   * Why a cancellation was refused (status 'cancel_blocked', migration 063):
+   * 'goods_with_customer' | 'goods_dispatched' | 'active_delivery'.
+   */
+  reason?: string;
 }
 
 /**

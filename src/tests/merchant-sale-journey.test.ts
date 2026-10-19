@@ -28,6 +28,10 @@ import * as path from "path";
 import { classifyCheckout, isSellable, type CartLine } from "@/lib/pos-cart";
 import { usd } from "@/lib/money";
 import type { Product } from "@/types";
+import {
+  SANCTIONED_POS_ATTEMPT_PRINCIPAL,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 const readSource = (p: string) => fs.readFileSync(path.resolve(ROOT, p), "utf-8");
@@ -297,9 +301,14 @@ describe("Money stays integer minor units across the sale journey", () => {
 
   it("the POS checkout never sends a price, subtotal or total to the server", () => {
     const source = readSource(CHECKOUT_SHEET);
-    const fn = source.slice(
-      source.indexOf("async function completeReal"),
-      source.indexOf("const realConfirmed"),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const fn = withoutSanctioned(
+      source.slice(
+        source.indexOf("async function completeReal"),
+        source.indexOf("const realConfirmed"),
+      ),
+      SANCTIONED_POS_ATTEMPT_PRINCIPAL,
     );
     for (const forbidden of ["unitPrice", "subtotal:", "total:", "organizationId", "userId"]) {
       expect(fn).not.toContain(forbidden);
@@ -420,9 +429,14 @@ describe("Payment actions are offered on capability and allowed by the server", 
   });
 
   it("the client never sends an organization id — the server derives it from the session", () => {
-    const fn = source.slice(
-      source.indexOf("async function completeReal"),
-      source.indexOf("const realConfirmed"),
+    // CORRECTION-004: the one sanctioned, refuse-only principal is a precondition
+    // the server checks against its own derivation, never an organization it uses.
+    const fn = withoutSanctioned(
+      source.slice(
+        source.indexOf("async function completeReal"),
+        source.indexOf("const realConfirmed"),
+      ),
+      SANCTIONED_POS_ATTEMPT_PRINCIPAL,
     );
     expect(fn).not.toContain("organizationId");
   });
@@ -499,8 +513,8 @@ describe("Failure never renders as success", () => {
     // The re-read is of the order the payment was recorded against — the
     // server's own id, carried on the submit from realDetail (see below).
     expect(source).toContain("const refreshed = await getRealOrderDetail(submit.orderId);");
-    expect(source).toContain(
-      "recordPaymentMutation.mutate({ ...submit, orderId: realDetail.order.id })",
+    expect(source).toMatch(
+      /recordPaymentMutation\.mutate\(\{\s*\.\.\.submit,\s*orderId: realDetail\.order\.id,/,
     );
   });
 

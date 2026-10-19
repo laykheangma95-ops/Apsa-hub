@@ -134,6 +134,12 @@ export const UI_PERMISSION_KEYS = [
   "inventory.adjust",
   // Delivery — src/server/deliveries/service.ts
   "delivery.read",
+  // delivery.create / delivery.update gate Order detail's Next Action offering
+  // "Arrange delivery" (createDelivery requires delivery.create) and "Mark the
+  // delivery outcome" (transitionDeliveryStatus requires delivery.update).
+  // Presentation hints only; the deliveries service requires both again.
+  "delivery.create",
+  "delivery.update",
   // delivery.handoff gates the courier-handoff confirmation affordance
   // (confirmHandoff requires it — src/server/handoff/service.ts, migration 051).
   // A distinct grant from delivery.update: handoff is operational (Cashier/Sales
@@ -206,6 +212,24 @@ export function capabilityQueryKey(
   organizationId: string,
 ): readonly [typeof CAPABILITY_QUERY_ROOT, string, string] {
   return [CAPABILITY_QUERY_ROOT, userId, organizationId] as const;
+}
+
+/**
+ * Whether a confirmation at `confirmedAt` (epoch ms; 0 = never) is still
+ * recent enough at `now` to back a sensitive display. A clock that reads
+ * earlier than the confirmation is not trusted either. The window itself is
+ * SENSITIVE_CAPABILITY_MAX_AGE_MS (src/hooks/use-capabilities.tsx).
+ *
+ * The single-clock rule. The production deadline applies it to the REQUEST's
+ * dispatch instant on two clocks at once (isConfirmationFresh,
+ * src/lib/capability-confirmation.ts), never to a response's arrival.
+ */
+export function isCapabilityConfirmationFresh(
+  confirmedAt: number,
+  now: number,
+  maxAgeMs: number,
+): boolean {
+  return confirmedAt > 0 && now >= confirmedAt && now - confirmedAt < maxAgeMs;
 }
 
 // ── The fail-closed reader ───────────────────────────────────────────────────

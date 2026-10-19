@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,8 +46,10 @@ import {
   canStartPreparingDelivery,
   classifyDeliveryError,
   type DeliveryErrorKind,
+  type RealDeliveryDetail,
   type RealDeliveryStatus,
 } from "@/lib/deliveries";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { fullTimestamp, localName } from "@/lib/format";
 import { deliveryKeys, deliveryTransitionInvalidationKeys } from "@/lib/deliveries-query";
 import { ordersKeys } from "@/lib/orders-query";
@@ -130,11 +132,31 @@ const HISTORY_TONE: Record<RealDeliveryStatus, NonNullable<TimelineItem["tone"]>
   cancelled: "danger",
 };
 
+/**
+ * What one transition tap was started as: the member + organization the screen
+ * showed, and the delivery it showed. Handed to the mutation as its variable,
+ * so it is fixed at the tap and never re-read when the answer lands.
+ */
+interface TransitionStart {
+  deliveryId: string;
+  startedAs: InitiatingPrincipal;
+}
+
+/** One transition tap: the screen's scope epoch and tap number at that moment. */
+interface TransitionAttempt {
+  epoch: number;
+  attempt: number;
+}
+
+const scopeOf = ({ deliveryId, startedAs }: TransitionStart) =>
+  `${startedAs.userId}\u0000${startedAs.organizationId}\u0000${deliveryId}`;
+
 function RealDeliveryDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const errorCopy = useDeliveryErrorCopy();
+  const capabilities = useCapabilities();
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [failOpen, setFailOpen] = useState(false);
@@ -158,6 +180,59 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
    */
   const { session, organizationId: routeOrganizationId } = Route.useRouteContext();
   const userId = session.userId;
+  /*
+   * The principal every transition on this screen is started as, read at the
+   * render the merchant tapped in and handed to the mutation — with the
+   * delivery shown — as a VARIABLE, fixed at mutate() time. This screen stays
+   * mounted across a member or organization switch and across a move to
+   * another delivery, and the server derives who is acting only when it
+   * handles the request; with this refuse-only precondition it refuses (409
+   * principal_changed, nothing written) a transition started as someone else,
+   * instead of executing it with their permissions and in their name
+   * (CORRECTIONS.md, CORRECTION-004, delivery transition addendum).
+   */
+  const principal = { userId, organizationId: routeOrganizationId };
+  const start: TransitionStart = { deliveryId: id, startedAs: principal };
+
+  /*
+   * A transition's ANSWER belongs to the attempt that asked for it — the
+   * principal and the delivery it was tapped for, and that tap's place in this
+   * screen's sequence — never to whatever the screen shows when it lands.
+   * TanStack hands a pending mutation every later render's callbacks, so a
+   * hook-level onSuccess written with this render's keys would put member A's
+   * delivery (tracking number, COD) into member B's cache and screen, or
+   * delivery D1's into D2's entry.
+   *
+   * `epoch` moves on every committed change of member, organization or
+   * delivery, and on unmount (layout effects, in the same commit: no answer can
+   * land in between); `attempt` moves on every tap. Only an answer whose epoch
+   * and attempt are both still current is applied. Any other is written nowhere
+   * and only marks its initiator's own entries stale, to be re-read under the
+   * initiator's own authority if they are shown again.
+   */
+  const transitionScope = scopeOf(start);
+  const transitionRef = useRef({ scope: transitionScope, epoch: 0, attempt: 0 });
+
+  /*
+   * The capability snapshot as of the LATEST commit, for an answer that lands
+   * after it. An answer is the server's reply to an ACTION, not a read: it may
+   * be shown only while the member can still read deliveries — confirmed now
+   * (canSensitive: resolved, its latest refresh did not fail, the key held),
+   * never inferred from an earlier successful read.
+   */
+  const capabilitiesRef = useRef(capabilities);
+  useLayoutEffect(() => {
+    capabilitiesRef.current = capabilities;
+  });
+
+  /*
+   * Fail closed rather than trust a snapshot that has diverged from the route
+   * (a stale snapshot mid organization switch).
+   */
+  const identityOk =
+    Boolean(userId) &&
+    Boolean(routeOrganizationId) &&
+    (capabilities.state !== "ready" || capabilities.organizationId === routeOrganizationId);
 
   const queryKey = deliveryKeys.detail(userId, routeOrganizationId, id);
   const query = useQuery({ queryKey, queryFn: () => getRealDeliveryDetail(id) });
@@ -179,77 +254,205 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
     }
   }, [query.isError, query.error, navigate]);
 
-  function onTransitionSuccess(detail: typeof delivery) {
-    queryClient.setQueryData(queryKey, detail);
-    setNotice(
-      detail
-        ? t("delivery.actionDoneStatus", { status: t(`status.${detail.status}`) })
-        : t("delivery.actionDone"),
-    );
-    /*
-     * A transition changes more than this screen: the order's fulfillment axis
-     * (its own detail AND its row in the Orders list, plus the bottom nav's
-     * order count), every filtered Deliveries list this principal holds, and
-     * Home's delivery-attention count.
-     *
-     * The set lives in the Delivery domain as
-     * `deliveryTransitionInvalidationKeys` (src/lib/deliveries-query.ts) rather
-     * than as four literal calls here, so it is one auditable contract that a
-     * test can assert by value — the Orders-list entry was missing from this
-     * list and no test could see it, because there was no list to look at.
-     *
-     * Each key is scoped to the acting principal from the /app guard's
-     * server-derived context, so nothing reaches another tenant.
-     */
+  /**
+   * Called from onMutate, which TanStack runs synchronously inside mutate() —
+   * at the tap, with that tap's variable. A variable that does not name the
+   * principal and delivery this screen shows can never be current.
+   */
+  function beginTransitionAttempt(started: TransitionStart): TransitionAttempt {
+    const current = transitionRef.current;
+    current.attempt += 1;
+    const shown = scopeOf(started) === current.scope;
+    return { epoch: shown ? current.epoch : -1, attempt: current.attempt };
+  }
+  function isCurrentTransitionAttempt(attempt: TransitionAttempt | undefined) {
+    const current = transitionRef.current;
+    return attempt?.epoch === current.epoch && attempt.attempt === current.attempt;
+  }
+  /** The initiator's own detail entry — refetched only if it is the one shown. */
+  function rereadDeliveryOf({ deliveryId, startedAs }: TransitionStart) {
+    void queryClient.invalidateQueries({
+      queryKey: deliveryKeys.detail(startedAs.userId, startedAs.organizationId, deliveryId),
+      exact: true,
+    });
+  }
+  /**
+   * A transition changes more than this screen: the order's fulfillment axis
+   * (its own detail AND its row in the Orders list, plus the bottom nav's
+   * order count), every filtered Deliveries list this principal holds, and
+   * Home's delivery-attention count.
+   *
+   * The set lives in the Delivery domain as
+   * `deliveryTransitionInvalidationKeys` (src/lib/deliveries-query.ts) rather
+   * than as four literal calls here, so it is one auditable contract that a
+   * test can assert by value — the Orders-list entry was missing from this
+   * list and no test could see it, because there was no list to look at.
+   *
+   * Each key is scoped to the principal the transition was STARTED as (the
+   * /app guard's server-derived context at the tap), so nothing reaches
+   * another member or tenant.
+   */
+  function invalidateAfterTransitionOf({ startedAs }: TransitionStart, orderId: string | null) {
     for (const queryKeyToInvalidate of deliveryTransitionInvalidationKeys(
-      userId,
-      routeOrganizationId,
-      detail?.orderId ?? null,
+      startedAs.userId,
+      startedAs.organizationId,
+      orderId,
     )) {
       void queryClient.invalidateQueries({ queryKey: queryKeyToInvalidate });
     }
   }
-
-  function onTransitionError(error: unknown) {
-    if (classifyDeliveryError(error) === "stale") void query.refetch();
+  /**
+   * Fail closed: the member must be able to read deliveries NOW — the latest
+   * snapshot resolved, not stale, holding delivery.read, for the organization
+   * the transition was started in — and the delivery must still be held as a
+   * successful read (not evicted, not refused by the server's latest read). An
+   * earlier successful read proves nothing.
+   */
+  function mayStillShowDelivery({ deliveryId, startedAs }: TransitionStart) {
+    const view = capabilitiesRef.current;
+    const entry = queryClient.getQueryState(
+      deliveryKeys.detail(startedAs.userId, startedAs.organizationId, deliveryId),
+    );
+    return (
+      view.canSensitive("delivery.read") &&
+      view.organizationId === startedAs.organizationId &&
+      entry?.status === "success"
+    );
   }
 
+  /**
+   * The answer of the CURRENT attempt is written into its initiator's own
+   * detail entry for the delivery it was tapped on — keyed by the attempt's
+   * variable, never by this render — and only while that member may still
+   * read it. Any other answer is written nowhere, announces nothing, and only
+   * marks the initiator's own entries stale. Returns whether it was applied.
+   */
+  function applyTransitionAnswer(
+    started: TransitionStart,
+    attempt: TransitionAttempt | undefined,
+    detail: RealDeliveryDetail,
+  ) {
+    if (!isCurrentTransitionAttempt(attempt) || !mayStillShowDelivery(started)) {
+      rereadDeliveryOf(started);
+      invalidateAfterTransitionOf(started, detail.orderId);
+      return false;
+    }
+    const { deliveryId, startedAs } = started;
+    queryClient.setQueryData(
+      deliveryKeys.detail(startedAs.userId, startedAs.organizationId, deliveryId),
+      detail,
+    );
+    setNotice(t("delivery.actionDoneStatus", { status: t(`status.${detail.status}`) }));
+    invalidateAfterTransitionOf(started, detail.orderId);
+    return true;
+  }
+
+  /*
+   * Re-read on every failure, never only on "stale": a transition can commit
+   * and still fail on its way back (a lost response), and the persisted
+   * delivery must replace the stale one so the same move is not offered
+   * again. The re-read is the initiator's own entry: if another principal or
+   * delivery is shown it is only marked stale.
+   */
   const startPreparingMutation = useMutation({
-    mutationFn: () => startPreparingRealDelivery(id),
-    onSuccess: onTransitionSuccess,
-    onError: onTransitionError,
+    mutationFn: ({ deliveryId, startedAs }: TransitionStart) =>
+      startPreparingRealDelivery(deliveryId, startedAs),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      applyTransitionAnswer(started, attempt, detail);
+    },
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
   const markReadyMutation = useMutation({
-    mutationFn: () => markRealDeliveryReady(id),
-    onSuccess: onTransitionSuccess,
-    onError: onTransitionError,
+    mutationFn: ({ deliveryId, startedAs }: TransitionStart) =>
+      markRealDeliveryReady(deliveryId, startedAs),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      applyTransitionAnswer(started, attempt, detail);
+    },
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
   const markInTransitMutation = useMutation({
-    mutationFn: () => markRealDeliveryInTransit(id),
-    onSuccess: onTransitionSuccess,
-    onError: onTransitionError,
+    mutationFn: ({ deliveryId, startedAs }: TransitionStart) =>
+      markRealDeliveryInTransit(deliveryId, startedAs),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      applyTransitionAnswer(started, attempt, detail);
+    },
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
   const markDeliveredMutation = useMutation({
-    mutationFn: () => markRealDeliveryDelivered(id),
-    onSuccess: onTransitionSuccess,
-    onError: onTransitionError,
+    mutationFn: ({ deliveryId, startedAs }: TransitionStart) =>
+      markRealDeliveryDelivered(deliveryId, startedAs),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      applyTransitionAnswer(started, attempt, detail);
+    },
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
   const markFailedMutation = useMutation({
-    mutationFn: (reason: string) => markRealDeliveryFailed(id, reason),
-    onSuccess: (detail) => {
-      onTransitionSuccess(detail);
-      setFailOpen(false);
+    mutationFn: ({ deliveryId, startedAs, reason }: TransitionStart & { reason: string }) =>
+      markRealDeliveryFailed(deliveryId, startedAs, reason),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      if (applyTransitionAnswer(started, attempt, detail)) setFailOpen(false);
     },
-    onError: onTransitionError,
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
   const cancelMutation = useMutation({
-    mutationFn: (reason: string) => cancelRealDelivery(id, reason),
-    onSuccess: (detail) => {
-      onTransitionSuccess(detail);
-      setCancelOpen(false);
+    mutationFn: ({ deliveryId, startedAs, reason }: TransitionStart & { reason: string }) =>
+      cancelRealDelivery(deliveryId, startedAs, reason),
+    onMutate: beginTransitionAttempt,
+    onSuccess: (detail, started, attempt) => {
+      if (applyTransitionAnswer(started, attempt, detail)) setCancelOpen(false);
     },
-    onError: onTransitionError,
+    onError: (_error, started) => rereadDeliveryOf(started),
   });
+
+  /*
+   * A change of member, organization or delivery, committed: what was started,
+   * typed or announced for the previous one is not the next one's. No pending
+   * or failed transition state, no notice and no open reason sheet carries
+   * over (the sheets are also keyed by this scope, so a typed reason is gone in
+   * the same render), and every answer still in flight is stale (see
+   * transitionRef).
+   */
+  const { reset: resetStartPreparing } = startPreparingMutation;
+  const { reset: resetMarkReady } = markReadyMutation;
+  const { reset: resetMarkInTransit } = markInTransitMutation;
+  const { reset: resetMarkDelivered } = markDeliveredMutation;
+  const { reset: resetMarkFailed } = markFailedMutation;
+  const { reset: resetCancel } = cancelMutation;
+  useLayoutEffect(() => {
+    const current = transitionRef.current;
+    if (current.scope === transitionScope) return;
+    current.scope = transitionScope;
+    current.epoch += 1;
+    resetStartPreparing();
+    resetMarkReady();
+    resetMarkInTransit();
+    resetMarkDelivered();
+    resetMarkFailed();
+    resetCancel();
+    setNotice(null);
+    setFailOpen(false);
+    setCancelOpen(false);
+  }, [
+    transitionScope,
+    resetStartPreparing,
+    resetMarkReady,
+    resetMarkInTransit,
+    resetMarkDelivered,
+    resetMarkFailed,
+    resetCancel,
+  ]);
+  useLayoutEffect(() => {
+    const current = transitionRef.current;
+    return () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      current.epoch += 1;
+    };
+  }, []);
 
   const anyPending =
     startPreparingMutation.isPending ||
@@ -286,6 +489,24 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
           body={copy.body}
           onRetry={() => query.refetch()}
         />
+      </Screen>
+    );
+  }
+
+  /*
+   * In-place revocation: once the server's capability snapshot for THIS
+   * principal says delivery.read is gone, the delivery already on screen (its
+   * tracking number, COD amount and courier) is withdrawn — an earlier
+   * successful read is not proof of access now. A presentation gate only: no
+   * cache entry is written or evicted, and a fresh authorized read shows the
+   * delivery again.
+   */
+  if (identityOk && capabilities.state === "ready" && !capabilities.can("delivery.read")) {
+    const copy = errorCopy("forbidden");
+    return (
+      <Screen bottom="none" contentClassName="!px-0">
+        <AppHeader title={t("delivery.title")} onBack={back} />
+        <OperationalState tone="danger" title={copy.title} body={copy.body} />
       </Screen>
     );
   }
@@ -347,13 +568,13 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
    * now becomes the primary action, and the ways out stay quiet.
    */
   const advanceAction = canStartPreparingDelivery(d.status)
-    ? { label: t("delivery.startPreparing"), run: () => startPreparingMutation.mutate() }
+    ? { label: t("delivery.startPreparing"), run: () => startPreparingMutation.mutate(start) }
     : canMarkDeliveryReady(d.status)
-      ? { label: t("delivery.markReady"), run: () => markReadyMutation.mutate() }
+      ? { label: t("delivery.markReady"), run: () => markReadyMutation.mutate(start) }
       : canMarkDeliveryInTransit(d.status)
-        ? { label: t("delivery.markInTransit"), run: () => markInTransitMutation.mutate() }
+        ? { label: t("delivery.markInTransit"), run: () => markInTransitMutation.mutate(start) }
         : canMarkDeliveryDelivered(d.status)
-          ? { label: t("delivery.markDelivered"), run: () => markDeliveredMutation.mutate() }
+          ? { label: t("delivery.markDelivered"), run: () => markDeliveredMutation.mutate(start) }
           : null;
 
   const exitActions = [
@@ -489,6 +710,10 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
       ) : null}
 
       <DeliveryReasonSheet
+        // Bound to the member, organization and delivery: a typed reason never
+        // survives into another principal's screen or onto another delivery.
+        // (Sibling keys must differ: the cancel sheet is keyed by scope too.)
+        key={`fail:${transitionScope}`}
         open={failOpen}
         onOpenChange={(next) => {
           setFailOpen(next);
@@ -499,10 +724,11 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
         body={t("delivery.failSheet.body")}
         reasonLabel={t("delivery.failSheet.reason")}
         submitLabel={t("delivery.failSheet.submit")}
-        onConfirm={(reason) => markFailedMutation.mutate(reason)}
+        onConfirm={(reason) => markFailedMutation.mutate({ ...start, reason })}
         error={failSheetError}
       />
       <DeliveryReasonSheet
+        key={`cancel:${transitionScope}`}
         open={cancelOpen}
         onOpenChange={(next) => {
           setCancelOpen(next);
@@ -513,7 +739,7 @@ function RealDeliveryDetailScreen({ id }: { id: string }) {
         body={t("delivery.cancelSheet.body")}
         reasonLabel={t("delivery.cancelSheet.reason")}
         submitLabel={t("delivery.cancelSheet.submit")}
-        onConfirm={(reason) => cancelMutation.mutate(reason)}
+        onConfirm={(reason) => cancelMutation.mutate({ ...start, reason })}
         error={cancelSheetError}
       />
     </div>

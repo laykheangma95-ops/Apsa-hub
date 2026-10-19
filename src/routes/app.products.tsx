@@ -494,7 +494,13 @@ function ProductListScreen() {
                 />
               ) : null}
 
-              {/* Empty only when the first page was READ and held nothing. */}
+              {/*
+               * Empty only when the first page was READ and held nothing.
+               * A brand-new catalogue (Active, All categories, no search):
+               * the merchant who can add a product is told the minimum it
+               * takes (Khmer name + price) and handed the same Add Product
+               * sheet as the header's "+", in thumb reach.
+               */}
               {hasPages && products.length === 0 && !productsQuery.hasNextPage ? (
                 searching ? (
                   <OperationalState
@@ -515,6 +521,22 @@ function ProductListScreen() {
                   <OperationalState
                     title={t("catalog.list.emptyCategory.title")}
                     body={t("catalog.list.emptyCategory.body")}
+                    className="rounded-none border-0"
+                  />
+                ) : status === "ACTIVE" && categoryId === null && canCreateProduct ? (
+                  <OperationalState
+                    title={t("catalog.list.firstProduct.title")}
+                    body={t("catalog.list.firstProduct.body")}
+                    action={
+                      <Button
+                        type="button"
+                        className="tap-target h-auto min-h-12 w-full whitespace-normal py-2 sm:w-auto"
+                        onClick={() => setCreateOpen(true)}
+                      >
+                        <Plus className="size-5 shrink-0" aria-hidden />
+                        {t("catalog.list.firstProduct.action")}
+                      </Button>
+                    }
                     className="rounded-none border-0"
                   />
                 ) : (

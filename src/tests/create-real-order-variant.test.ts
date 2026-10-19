@@ -35,6 +35,7 @@ import {
 } from "@/lib/order-draft";
 import { usd } from "@/lib/money";
 import type { Product } from "@/types";
+import { SANCTIONED_NEW_ORDER_CALL_ARG, withoutSanctioned } from "./helpers/refuse-only-principal";
 
 const ROOT = process.cwd();
 const CREATE_SHEET = "src/components/orders/CreateRealOrderSheet.tsx";
@@ -183,9 +184,14 @@ describe("C. the chosen variantId is what is submitted", () => {
 
   it("the client still supplies no price, subtotal, total or organization_id", () => {
     const sheet = readSource(CREATE_SHEET);
-    const call = sheet.slice(
-      sheet.indexOf("await createRealOrder({"),
-      sheet.indexOf("setCreated(detail.order)"),
+    // CORRECTION-004: strip only the one sanctioned, refuse-only principal
+    // (src/tests/helpers/refuse-only-principal.ts); the invariant holds over the rest.
+    const call = withoutSanctioned(
+      sheet.slice(
+        sheet.indexOf("await createRealOrder({"),
+        sheet.indexOf("setCreated(detail.order)"),
+      ),
+      SANCTIONED_NEW_ORDER_CALL_ARG,
     );
     expect(call).not.toMatch(/\bprice\b/);
     expect(call).not.toMatch(/subtotal|totalMinor|unitPrice/);

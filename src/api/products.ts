@@ -173,6 +173,11 @@ export const lookupByBarcodeFn = createServerFn()
   });
 
 // ── createProductFn ───────────────────────────────────────────────────────────
+//
+// `expected` is the user, organization and currency the form was initiated
+// under. It is a consistency check, never authority: the handler still
+// resolves both from the session, and the service refuses the create — before
+// any product or variant write — when they no longer match.
 
 const variantInputSchema = z.object({
   sku: z.string().max(100).nullish(),
@@ -200,31 +205,40 @@ export const createProductFn = createServerFn({ method: "POST" })
         workspace_id: z.string().uuid().nullish(),
         status: z.enum(["DRAFT", "ACTIVE"]).optional(),
         initialVariant: variantInputSchema,
+        expected: z.object({
+          userId: z.string().uuid(),
+          organizationId: z.string().uuid(),
+          currency: currencySchema,
+        }),
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { createProduct } = await import("@/server/products/service");
-    return createProduct(authCtx, {
-      name_km: data.name_km,
-      name_en: data.name_en ?? null,
-      description_km: data.description_km ?? null,
-      description_en: data.description_en ?? null,
-      category_id: data.category_id ?? null,
-      workspace_id: data.workspace_id ?? null,
-      status: data.status,
-      initialVariant: {
-        sku: data.initialVariant.sku ?? null,
-        barcode: data.initialVariant.barcode ?? null,
-        name: data.initialVariant.name ?? "",
-        price_amount: data.initialVariant.price_amount,
-        price_currency: data.initialVariant.price_currency,
-        cost_amount: data.initialVariant.cost_amount ?? null,
-        cost_currency: data.initialVariant.cost_currency ?? null,
-        weight_grams: data.initialVariant.weight_grams ?? null,
+    return createProduct(
+      authCtx,
+      {
+        name_km: data.name_km,
+        name_en: data.name_en ?? null,
+        description_km: data.description_km ?? null,
+        description_en: data.description_en ?? null,
+        category_id: data.category_id ?? null,
+        workspace_id: data.workspace_id ?? null,
+        status: data.status,
+        initialVariant: {
+          sku: data.initialVariant.sku ?? null,
+          barcode: data.initialVariant.barcode ?? null,
+          name: data.initialVariant.name ?? "",
+          price_amount: data.initialVariant.price_amount,
+          price_currency: data.initialVariant.price_currency,
+          cost_amount: data.initialVariant.cost_amount ?? null,
+          cost_currency: data.initialVariant.cost_currency ?? null,
+          weight_grams: data.initialVariant.weight_grams ?? null,
+        },
       },
-    });
+      data.expected,
+    );
   });
 
 // ── updateProductFn ───────────────────────────────────────────────────────────

@@ -24,8 +24,9 @@ it("createRealOrder reuses one key per logical order attempt and parses delivery
 }, 70000);
 
 // The key holder is a required input of createRealOrder (typechecked), so this
-// only pins that each real entry point keeps ONE holder for its lifetime rather
-// than minting one per call — which would silently defeat retry replay.
+// only pins that each real entry point keeps its holder(s) for as long as an
+// unresolved key matters rather than minting one per call — which would
+// silently defeat retry replay.
 it("every real order-creation entry point keeps one idempotency holder per flow", () => {
   for (const file of [
     "src/components/pos/PosCheckoutSheet.tsx",
@@ -50,15 +51,44 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
       expect(source).not.toMatch(/idempotencyKeys(?:\.current)? = createIdempotencyKeyHolder\(\)/);
       expect(source).not.toMatch(/createIdempotencyKeyHolder/);
     } else {
-      expect(source).toMatch(/const idempotencyKeys = useRef\(createIdempotencyKeyHolder\(\)\)/);
+      // POS checkout: one holder per member + organization, looked up per
+      // attempt as the principal its token records (POS checkout replay P2;
+      // behaviour in pos-checkout-replay-mounted). The registry is NOT the
+      // sheet's: the POS route remounts its till — and this sheet — for every
+      // principal (principal isolation; pos-principal-isolation-mounted), so
+      // the registry lives in the route ABOVE the keyed till and is passed in.
+      // Owning it here again would drop an unresolved key on A → B → A.
+      expect(source).toMatch(/replayHolders: ScopedIdempotencyHolders;/);
+      expect(source).not.toMatch(/createScopedIdempotencyHolders\(/);
+      expect(source).toMatch(/flow: "pos-checkout"/);
+      const route = readFileSync(resolve("src/routes/app.pos.tsx"), "utf8");
+      const shell = route.slice(
+        route.indexOf("function PosScreen()"),
+        route.indexOf("function PosTill("),
+      );
+      expect(shell).toMatch(
+        /const \[replayHolders\] = useState\(\(\) => createScopedIdempotencyHolders\(\)\)/,
+      );
+      expect(shell).toMatch(
+        /<PosTill\s+key=\{JSON\.stringify\(\[userId, routeOrganizationId\]\)\}/,
+      );
+      expect(shell).toMatch(/replayHolders=\{replayHolders\}/);
+      expect(route).toMatch(/<PosCheckoutSheet[\s\S]*?replayHolders=\{replayHolders\}[\s\S]*?\/>/);
+      // The claim and the attempt's principal are both taken from the token —
+      // nothing else stands between the attempt and them.
+      expect(source).toMatch(
+        /const token = beginAttempt\(!orderId\);\s+(?:\/\*[\s\S]*?\*\/\s+)?const principal = \{ userId: token\.userId, organizationId: token\.organizationId \};\s+(?:\/\/[^\n]*\n\s+)*const claim = idempotencyKeys\.claim\(token\);/,
+      );
+      expect(source).not.toMatch(/idempotencyKeys(?:\.current)? = createIdempotencyKeyHolder\(\)/);
+      expect(source).not.toMatch(/createIdempotencyKeyHolder/);
     }
     // Attempts in every flow can overlap (close/reopen while a create is
-    // pending), so each attempt sends its own claim on the flow's ONE holder
-    // and retires it only after accepting the response (see the mounted
-    // ownership tests in pos-money-mounted, inbox-order-money-mounted and
-    // orders-new-order-money-mounted). Never the holder itself, which
+    // pending), so each attempt sends its own claim on its scope's holder and
+    // retires it only after accepting the response (see the mounted ownership
+    // tests in pos-money-mounted, pos-checkout-replay-mounted,
+    // inbox-order-money-mounted and orders-new-order-money-mounted). Never the holder itself, which
     // createRealOrder retires on arrival — whichever session that reaches.
-    expect(source).toMatch(/const claim = idempotencyKeys(?:\.current)?\.claim\(\);/);
+    expect(source).toMatch(/const claim = idempotencyKeys(?:\.current)?\.claim\((?:token)?\);/);
     expect(source).toMatch(/idempotency: claim,/);
     expect(source).toMatch(
       /if \(!isCurrent\(token\)\) return;\s+(?:\/\/[^\n]*\n\s+)*claim\.retire\(\);/,
@@ -67,6 +97,12 @@ it("every real order-creation entry point keeps one idempotency holder per flow"
     expect(source).not.toMatch(/idempotency: createIdempotencyKeyHolder\(\)/);
   }
 });
+
+/*
+ * The initiating-principal binding of every protected mutation — order creation
+ * (POS, New Order, Inbox), lifecycle transitions and payment recording — is
+ * pinned at every layer in initiating-principal-contract.test.ts (CORRECTION-004).
+ */
 
 /*
  * One holder per member + organization for a component that stays mounted

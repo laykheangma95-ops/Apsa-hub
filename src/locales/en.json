@@ -505,7 +505,51 @@
       "title": "Today's numbers didn't load",
       "body": "The data didn't come back. Check your connection and try again."
     },
-    "attentionAction": "{{label}}: {{count}}. Open"
+    "attentionAction": "{{label}}: {{count}}. Open",
+    "greet": {
+      "morning": "Good morning",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening"
+    },
+    "today": {
+      "title": "Today's sales",
+      "definition": "Net collected for orders created today",
+      "none": "No net collection yet for orders created today",
+      "orders_one": "{{count}} order",
+      "orders_other": "{{count}} orders",
+      "analytics": "Analytics",
+      "analyticsLabel": "Analytics: this week and this month"
+    },
+    "attentionSummary": {
+      "loading": "Checking…",
+      "error": "Couldn't check right now",
+      "unavailable": "Not available for your role",
+      "count_one": "{{count}} kind of work waiting",
+      "count_other": "{{count}} kinds of work waiting",
+      "countIncomplete_one": "{{count}} kind of work waiting · some checks didn't finish",
+      "countIncomplete_other": "{{count}} kinds of work waiting · some checks didn't finish",
+      "incomplete": "Some checks didn't finish",
+      "clear": "All clear in the areas you can access"
+    },
+    "quick": {
+      "newSale": {
+        "title": "New sale",
+        "description": "Check out at the counter"
+      },
+      "newOrder": {
+        "title": "New order",
+        "description": "Enter an order by hand"
+      },
+      "packOrders": {
+        "title": "Pack orders",
+        "description": "Confirmed orders to pack"
+      },
+      "inbox": {
+        "title": "Inbox",
+        "description": "Every customer conversation"
+      },
+      "unavailable": "Not available for your role"
+    }
   },
   "status": {
     "unread": "Unread",
@@ -940,7 +984,9 @@
     },
     "empty": {
       "title": "No products yet",
-      "body": "Add products to your catalogue to start selling."
+      "body": "Add your first product in Products, then come back here to sell it.",
+      "bodyNoAccess": "Ask your owner or manager to add products, then they will show up here.",
+      "addProduct": "Go to Products"
     },
     "noResults": {
       "title": "No matching products",
@@ -980,6 +1026,98 @@
     "scanError": "Could not look up that barcode. Please try again."
   },
   "order": {
+    "completedNotice": "Order completed",
+    "completing": "Completing…",
+    "completeSheet": {
+      "title": "Complete this order?",
+      "body": "The customer has the goods and the payment is settled. Completing closes the order: it can no longer be cancelled. Returns for delivered orders stay available.",
+      "submit": "Complete order"
+    },
+    "next": {
+      "title": "Next step",
+      "workflow": "Order progress",
+      "stepState": {
+        "done": "done",
+        "current": "in progress",
+        "upcoming": "not started",
+        "cancelled": "cancelled"
+      },
+      "step": {
+        "order": "Order",
+        "payment": "Payment",
+        "packing": "Packing",
+        "handoff": "Delivery / hand-over",
+        "orderDraft": "Not confirmed yet",
+        "orderConfirmed": "Confirmed",
+        "orderCompleted": "Completed",
+        "orderCancelled": "Cancelled",
+        "paymentPaid": "Paid",
+        "paymentPending": "Awaiting confirmation",
+        "paymentFailed": "Payment failed",
+        "paymentCod": "Cash on delivery",
+        "paymentUnpaid": "Not paid yet",
+        "packed": "Packed",
+        "notPacked": "Not packed yet",
+        "handedOver": "With the customer",
+        "inTransit": "With the courier",
+        "readyForCourier": "Ready for the courier",
+        "deliveryArranged": "Delivery arranged",
+        "deliveryFailed": "Delivery failed",
+        "notHandedOver": "Not sent yet"
+      },
+      "reason": {
+        "loading": "Checking what this order needs next…",
+        "identity": "Your access is being refreshed. Actions will appear once it is confirmed.",
+        "unknown": "This order's status could not be read. Refresh to try again.",
+        "draft": "This order is a draft. Confirm it to reserve the stock and start fulfillment.",
+        "draftNoPermission": "This order is a draft. A teammate who can confirm orders needs to confirm it.",
+        "cancelled": "This order was cancelled. Nothing more to do.",
+        "cancelledPaid": "This order was cancelled after payment was received. Check Payments for any refund still to make.",
+        "completed": "This order is complete.",
+        "completedPartRefunded": "This order is complete. Part of the payment was refunded.",
+        "completedRefunded": "This order is complete. The payment was refunded in full.",
+        "parcelMissing": "This order has no APSA Parcel yet. Create it below before packing.",
+        "readyToComplete": "Paid and with the customer. Complete the order to close it.",
+        "readyToCompleteNoPermission": "Paid and with the customer. A manager can complete the order.",
+        "deliveredUnpaid": "The customer has the goods, but no payment is recorded yet. Record the payment received.",
+        "deliveredUnpaidNoPermission": "The customer has the goods, but no payment is recorded yet. A teammate who handles payments needs to record it.",
+        "deliveredPaymentPending": "The customer has the goods. A recorded payment is waiting to be confirmed.",
+        "deliveredPaymentPendingNoPermission": "The customer has the goods. A recorded payment is waiting for a manager to confirm it.",
+        "deliveriesUnavailable": "Delivery details could not be loaded.",
+        "packStateUnavailable": "Packing status could not be loaded.",
+        "inTransit": "The parcel is with the courier. Record the delivery result when you hear back.",
+        "inTransitNoPermission": "The parcel is with the courier. A manager records the delivery result.",
+        "readyToPack": "Ready to pack. Packing does not wait for payment.",
+        "readyToPackNoPermission": "Ready to pack. A teammate who can pack orders needs to pack it.",
+        "readyForCourier": "Packed and ready. Hand the parcel to the courier.",
+        "readyForCourierNoPermission": "Packed and ready. A teammate who can hand over parcels needs to give it to the courier.",
+        "deliveryNotReady": "Packed, but the delivery is not marked ready yet. Use “Retry delivery ready” in Fulfillment below.",
+        "packedNoDelivery": "Packed. Arrange delivery to send it to the customer.",
+        "packedNoDeliveryNoPermission": "Packed. A manager needs to arrange delivery.",
+        "deliveryFailed": "The last delivery failed. Arrange a new delivery when the customer is ready.",
+        "deliveryFailedNoPermission": "The last delivery failed. A manager needs to arrange a new delivery.",
+        "deliveryCancelled": "The last delivery was cancelled. Arrange a new delivery.",
+        "deliveryCancelledNoPermission": "The last delivery was cancelled. A manager needs to arrange a new delivery."
+      },
+      "note": {
+        "cod": "Cash on delivery: the courier collects the payment.",
+        "paymentOutstanding": "Payment is not recorded yet.",
+        "paymentPending": "A recorded payment is waiting to be confirmed."
+      },
+      "action": {
+        "confirm_order": "Confirm order",
+        "complete_order": "Complete order",
+        "cancel_order": "Cancel order",
+        "record_payment": "Record payment",
+        "review_payment": "Confirm payment",
+        "pack_order": "Pack order",
+        "arrange_delivery": "Arrange delivery",
+        "courier_handoff": "Hand to courier",
+        "track_delivery": "Open delivery",
+        "start_return": "Start a return",
+        "open_payments": "Open payments"
+      }
+    },
     "title": "Order",
     "notFound": "Order not available",
     "notFoundBody": "This order no longer exists or was moved.",
@@ -1100,6 +1238,13 @@
       "invalid": {
         "title": "That's not possible right now",
         "body": "This order can't move to that status from where it is."
+      },
+      "cancelBlocked": {
+        "title": "This order can't be cancelled now",
+        "goods_with_customer": "The customer already has the goods. Record a customer return instead.",
+        "goods_dispatched": "The goods are with the courier. Record the delivery outcome first.",
+        "active_delivery": "A delivery is arranged for this order. Cancel the delivery first.",
+        "blocked": "This order can't be cancelled in its current state. Nothing was changed."
       }
     },
     "balanceDue": "{{amount}} still to collect.",
@@ -1157,7 +1302,8 @@
     "newOrder": "New order",
     "empty": {
       "title": "No orders yet",
-      "body": "Orders you create will show up here."
+      "body": "Sales you ring up in POS and orders you create will show up here.",
+      "openPos": "Make a sale in POS"
     },
     "error": {
       "title": "Orders didn't load",
@@ -1562,6 +1708,12 @@
     "slugLabel": "Business address",
     "slugPlaceholder": "angkor-coffee",
     "slugHint": "Lowercase letters, numbers and hyphens. Used in your APSA links.",
+    "currencyLabel": "Main selling currency",
+    "currencyHint": "Your product prices and orders use this currency. It cannot be changed in the app later, so choose the one you price in.",
+    "currency": {
+      "USD": { "label": "US dollar (USD)", "example": "$12.50" },
+      "KHR": { "label": "Khmer riel (KHR)", "example": "50,000៛" }
+    },
     "submit": "Create business",
     "submitting": "Creating your business",
     "errors": {
@@ -1569,6 +1721,7 @@
       "slugRequired": "Enter a business address.",
       "slugFormat": "Use 3 to 63 characters: lowercase letters, numbers and hyphens only.",
       "slugTaken": "That business address is already taken. Please choose another one.",
+      "currencyRequired": "Choose the currency you sell in.",
       "generic": "We could not create your business right now. Please try again."
     }
   },
@@ -1715,6 +1868,11 @@
         "archivedTitle": "Nothing archived",
         "archivedBody": "Products you archive stay here instead of being deleted."
       },
+      "firstProduct": {
+        "title": "Add your first product",
+        "body": "A Khmer name and a price are all you need. The product then appears in POS, ready to sell.",
+        "action": "Add first product"
+      },
       "noMatches": {
         "title": "Nothing matches that",
         "body": "No product in this list has that name, SKU or barcode. Check the spelling, or clear the search.",
@@ -1815,6 +1973,14 @@
       "costWithheld": "Cost is not shown to your account, so it is left unchanged.",
       "invalidPrice": "Enter a price like 12.50 for USD or 4000 for riel.",
       "invalidCost": "Enter a cost like 12.50 for USD or 4000 for riel.",
+      "businessCurrency": {
+        "loading": "Checking your business currency…",
+        "error": "We couldn't confirm your business currency, so prices can't be entered yet.",
+        "denied": "Your account can't add products for this business.",
+        "locked": "Priced in your business currency ({{currency}}).",
+        "changed": "Your business currency is {{currency}}, so the amounts you entered were cleared. Enter them again in {{currency}}.",
+        "confirmFailed": "Your business currency could not be confirmed, so nothing was saved. Check the price and try again."
+      },
       "invalidWeight": "Enter a whole number of grams.",
       "created": "Variant added",
       "saved": "Variant saved",
@@ -2322,7 +2488,17 @@
         "amountHint": "This payment is {{amount}}. Refunds are always in the payment's own currency.",
         "note": "How much is still refundable is worked out from this payment's history. A refund larger than that is refused.",
         "submit": "Record refund",
-        "done": "Refund recorded."
+        "done": "Refund recorded.",
+        "recovered": "Your refund of {{amount}} was completed at {{time}}.",
+        "review": {
+          "title": "This payment already has a refund:",
+          "item": "{{amount}} · {{time}} · {{who}}",
+          "byYou": "by you",
+          "byOther": "by another member",
+          "body": "If you were retrying a refund that seemed to fail, it was already made — do not refund again. Continue only if you mean to refund more.",
+          "confirm": "Refund {{amount}} more",
+          "decline": "Don't refund again"
+        }
       },
       "reverse": {
         "label": "Reverse",

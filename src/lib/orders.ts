@@ -14,6 +14,7 @@ import type {
 } from "@/server/orders/service";
 import type { OrderListCursor, OrderSourceDb } from "@/server/orders/types";
 import type { OrderListFilter } from "@/lib/order-list-filters";
+import { orderCancelBlockedCodeOf, type OrderCancelBlockedCode } from "@/lib/order-cancel-blocked";
 import type { Channel, Order, OrderItem, OrderLifecycleStatus, OrderSource } from "@/types";
 
 // ── Source / channel mapping ──────────────────────────────────────────────────
@@ -280,6 +281,28 @@ export function classifyOrderError(err: unknown): OrderErrorKind {
  */
 export function isOrderCurrencyMismatch(err: unknown): boolean {
   return /priced in the organization's currency/i.test(messageOf(err));
+}
+
+export type OrderCancelBlockedReason =
+  "goods_with_customer" | "goods_dispatched" | "active_delivery" | "blocked";
+
+const CANCEL_BLOCKED_REASONS: Record<OrderCancelBlockedCode, OrderCancelBlockedReason> = {
+  order_cancel_goods_with_customer: "goods_with_customer",
+  order_cancel_goods_dispatched: "goods_dispatched",
+  order_cancel_active_delivery: "active_delivery",
+  order_cancel_blocked: "blocked",
+};
+
+/**
+ * Why the custody guard (migration 063, src/server/orders/service.ts
+ * cancelBlockedToError) refused a cancellation — or null for any other error.
+ * Read from the stable code the message leads with (src/lib/order-cancel-blocked.ts):
+ * only the message survives the server-function wire, never `code`. Nothing
+ * was written when this is non-null.
+ */
+export function orderCancelBlockedReason(err: unknown): OrderCancelBlockedReason | null {
+  const code = orderCancelBlockedCodeOf(messageOf(err));
+  return code ? CANCEL_BLOCKED_REASONS[code] : null;
 }
 
 // ── Orders list pages ─────────────────────────────────────────────────────────

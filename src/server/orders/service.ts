@@ -53,6 +53,7 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { auditLog } from "@/server/auth/audit";
 import { RateLimitedError } from "@/server/rate-limit/errors";
 import { checkRateLimits } from "@/server/rate-limit/limiter";
@@ -72,6 +73,10 @@ import {
   type OrderStatusAxis,
 } from "./state-machine";
 import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
+import {
+  formatOrderCancelBlockedMessage,
+  type OrderCancelBlockedCode,
+} from "@/lib/order-cancel-blocked";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import { DEFAULT_ORDER_LIST_FILTER, type OrderListFilter } from "@/lib/order-list-filters";
 import { ORDER_SOURCES } from "./types";
@@ -249,8 +254,8 @@ function notFound(message: string): Error {
   return publicError(message, 404);
 }
 
-function conflict(message: string): Error {
-  return publicError(message, 409);
+function conflict(message: string, code?: string): Error {
+  return publicError(message, 409, code);
 }
 
 // ── Shipping destination snapshot (§4, §19) ────────────────────────────────────
@@ -473,6 +478,16 @@ export interface CreateOrderServiceInput {
         address?: string | null | undefined;
       }
     | undefined;
+  /**
+   * The member and organization the CLIENT started this order as — a
+   * REQUIRED precondition, never a credential. The server still derives the
+   * acting principal from the session and the member's active organization
+   * (`ctx`), and authorizes only that. This can only REFUSE: when missing,
+   * malformed, or different from `ctx` (the session or the active
+   * organization changed between the tap and the server), nothing is written —
+   * see assertExpectedPrincipal.
+   */
+  expectedPrincipal: ExpectedPrincipal;
 }
 
 /** Provenance identifiers are short opaque ids, never a place to smuggle content. */
@@ -540,6 +555,7 @@ export async function createOrder(
   ctx: AuthorizationContext,
   input: CreateOrderServiceInput,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
   ctx.require("orders.create");
 
   if (
@@ -695,8 +711,44 @@ async function loadTransitionTarget(ctx: AuthorizationContext, orderId: string):
   return order;
 }
 
+/**
+ * Cancellation refused by the custody guard (migration 063,
+ * order_cancellation_block_v1), decided under the order lock. Nothing was
+ * written: no status, no history, no stock movement. Each reason names the
+ * flow that actually applies instead of cancelling.
+ */
+function cancelBlockedToError(reason: string | undefined): Error {
+  // Only the message crosses the server-function wire, so it leads with the
+  // code (src/lib/order-cancel-blocked.ts); `code` stays for server logs.
+  const refuse = (code: OrderCancelBlockedCode, text: string) =>
+    conflict(formatOrderCancelBlockedMessage(code, text), code);
+  switch (reason) {
+    case "goods_with_customer":
+      return refuse(
+        "order_cancel_goods_with_customer",
+        "This order cannot be cancelled: the customer already has the goods — record a customer return instead",
+      );
+    case "goods_dispatched":
+      return refuse(
+        "order_cancel_goods_dispatched",
+        "This order cannot be cancelled while its goods are with the courier — record the delivery outcome first",
+      );
+    case "active_delivery":
+      return refuse(
+        "order_cancel_active_delivery",
+        "This order cannot be cancelled while a delivery is arranged — cancel the delivery first",
+      );
+    default:
+      return refuse("order_cancel_blocked", "This order cannot be cancelled in its current state");
+  }
+}
+
 /** Maps the transition RPC's non-success envelopes to HTTP-shaped errors. */
-function transitionFailureToError(result: { status: string; current?: string }): Error {
+function transitionFailureToError(result: {
+  status: string;
+  current?: string;
+  reason?: string;
+}): Error {
   switch (result.status) {
     case "not_found":
       return notFound("Order not found");
@@ -715,6 +767,8 @@ function transitionFailureToError(result: { status: string; current?: string }):
       return conflict("Order is in a terminal state and can no longer be modified");
     case "preconditions_unmet":
       return conflict("An order can only be completed once it is both paid and fulfilled");
+    case "cancel_blocked":
+      return cancelBlockedToError(result.reason);
     default:
       return new Error(`Order transition failed: ${result.status}`);
   }
@@ -783,7 +837,12 @@ async function auditParcelRecovered(
 export async function recoverOrderParcel(
   ctx: AuthorizationContext,
   orderId: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this recovery. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  // Started as another member or organization: refused before the permission,
+  // the order lock and the parcel / audit write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.confirm");
   const result = await recoverParcelAtomically(ctx, orderId);
   if (result.status === "not_found" || result.status === "not_confirmed") {
@@ -801,6 +860,10 @@ export async function recoverOrderParcel(
  *   confirmed -> cancelled          one 'return' movement per consumed line (+quantity)
  *   draft -> cancelled              nothing: a draft never consumed anything
  *
+ * A confirmed order is cancelled only while its goods are still in custody and
+ * no delivery is active; otherwise the DB refuses under the order lock and
+ * writes nothing (migration 063, 'cancel_blocked' -> cancelBlockedToError).
+ *
  * The quantity is always the PERSISTED order_items.quantity. There is no
  * quantity parameter on this function, on the repository call, or on the RPC —
  * a caller has no way to state how much stock to move, only which order to
@@ -815,8 +878,16 @@ export async function transitionLifecycleStatus(
   ctx: AuthorizationContext,
   orderId: string,
   to: OrderLifecycleStatus,
-  reason?: string | null,
+  reason: string | null | undefined,
+  /**
+   * The member + organization the client started this transition as — a
+   * required, refuse-only precondition (assertExpectedPrincipal). Checked
+   * before the permission, the order read and every write (status, history,
+   * stock, parcel, audit); it never authorizes or attributes anything.
+   */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   const permission = LIFECYCLE_TRANSITION_PERMISSIONS[to];
   if (!permission) {
     throw badRequest(`Orders cannot be moved to lifecycle status '${to}'`);
@@ -937,8 +1008,13 @@ export async function transitionFulfillmentStatus(
   ctx: AuthorizationContext,
   orderId: string,
   to: OrderFulfillmentStatus,
-  reason?: string | null,
+  reason: string | null | undefined,
+  /** Refuse-only (assertExpectedPrincipal): who started this transition. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<OrderDetail> {
+  // Refused before the permission, the order read and every write (status,
+  // history, delivery reopen, audit).
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require(FULFILLMENT_TRANSITION_PERMISSIONS[to]);
   rejectReservedReason(reason);
 
@@ -1031,7 +1107,11 @@ export async function updateOrderShippingSnapshot(
     phone?: string | null | undefined;
     address?: string | null | undefined;
   },
+  /** Refuse-only (assertExpectedPrincipal): who started this edit. */
+  expectedPrincipal: ExpectedPrincipal,
 ): Promise<{ ok: true }> {
+  // Refused before the permission, the order lock and the snapshot / audit write.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.update");
 
   const shipping = normalizeShippingSnapshot(input);
