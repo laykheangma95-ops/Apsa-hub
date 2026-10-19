@@ -43,3 +43,15 @@ d33b7d83f2a781da28e2cea5a207d6151ba08ea6:src/tests/observability.test.ts:stripe-
 # splits the literal so no single string exceeds the entropy threshold; this
 # commit-pinned fingerprint covers only the already-pushed commit.
 2648a6c31e96198b428d9ab709ee505b769369f0:src/tests/parcel-identity.test.ts:generic-api-key:54
+#
+# cb70ea6 (PR #121) added a synthetic refund idempotency key ("refund-click-1")
+# as a test fixture in the two files below — a public test string, not a
+# credential. generic-api-key flagged it (identifier contains "key"). The
+# following commit replaces it with the low-entropy REFUND_IDEMPOTENCY_KEY
+# fixture; these commit-pinned fingerprints only cover the already-pushed
+# commit, which is not rewritten.
+cb70ea632cc926d753a12a7570bd5e0eb7fe093a:src/tests/payment-domain.runtime.ts:generic-api-key:775
+cb70ea632cc926d753a12a7570bd5e0eb7fe093a:src/tests/payment-domain.runtime.ts:generic-api-key:812
+cb70ea632cc926d753a12a7570bd5e0eb7fe093a:src/tests/payments-operations-ui.runtime.ts:generic-api-key:341
+cb70ea632cc926d753a12a7570bd5e0eb7fe093a:src/tests/payments-operations-ui.runtime.ts:generic-api-key:576
+cb70ea632cc926d753a12a7570bd5e0eb7fe093a:src/tests/payments-operations-ui.runtime.ts:generic-api-key:586

@@ -14,6 +14,16 @@ const deliveryStatusSchema = z.enum([
   "cancelled",
 ]);
 
+// The member + organization the client STARTED a delivery creation or a
+// delivery transition as (CORRECTIONS.md, CORRECTION-004, delivery addenda). A
+// refuse-only precondition the service compares with the principal it derives
+// from the session — never authorization, never a tenant selector, never an
+// actor (src/server/auth/expected-principal.ts). REQUIRED: a request without it
+// is refused here, before the handler runs.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 const deliveryIdSchema = z.object({
   deliveryId: z.string().uuid("Invalid delivery ID"),
   reason: z.string().trim().max(1000).nullish(),
@@ -50,6 +60,7 @@ export const createDeliveryFn = createServerFn({ method: "POST" })
         providerName: z.string().trim().min(1).max(200).nullish(),
         externalTrackingNumber: z.string().trim().min(1).max(200).nullish(),
         codAmountMinor: z.number().int().min(0).nullish(),
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
@@ -57,6 +68,7 @@ export const createDeliveryFn = createServerFn({ method: "POST" })
     const authCtx = await resolveAuthContext();
     const { createDelivery } = await import("@/server/deliveries/service");
     return createDelivery(authCtx, {
+      expectedPrincipal: data.expectedPrincipal,
       orderId: data.orderId,
       locationId: data.locationId ?? null,
       providerId: data.providerId ?? null,
@@ -68,35 +80,78 @@ export const createDeliveryFn = createServerFn({ method: "POST" })
   });
 
 export const startPreparingDeliveryFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => deliveryIdSchema.parse(data))
+  .validator((data: unknown) =>
+    deliveryIdSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { startPreparingDelivery } = await import("@/server/deliveries/service");
-    return startPreparingDelivery(authCtx, data.deliveryId, data.reason ?? null);
+    return startPreparingDelivery(
+      authCtx,
+      data.deliveryId,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 export const markDeliveryReadyFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => deliveryIdSchema.parse(data))
+  .validator((data: unknown) =>
+    deliveryIdSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markDeliveryReady } = await import("@/server/deliveries/service");
-    return markDeliveryReady(authCtx, data.deliveryId, data.reason ?? null);
+    return markDeliveryReady(authCtx, data.deliveryId, data.reason ?? null, data.expectedPrincipal);
   });
 
 export const markDeliveryInTransitFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => deliveryIdSchema.parse(data))
+  .validator((data: unknown) =>
+    deliveryIdSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markDeliveryInTransit } = await import("@/server/deliveries/service");
-    return markDeliveryInTransit(authCtx, data.deliveryId, data.reason ?? null);
+    return markDeliveryInTransit(
+      authCtx,
+      data.deliveryId,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 export const markDeliveryDeliveredFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => deliveryIdSchema.parse(data))
+  .validator((data: unknown) =>
+    deliveryIdSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markDeliveryDelivered } = await import("@/server/deliveries/service");
-    return markDeliveryDelivered(authCtx, data.deliveryId, data.reason ?? null);
+    return markDeliveryDelivered(
+      authCtx,
+      data.deliveryId,
+      data.reason ?? null,
+      data.expectedPrincipal,
+    );
   });
 
 const reasonRequiredSchema = z.object({
@@ -105,19 +160,33 @@ const reasonRequiredSchema = z.object({
 });
 
 export const markDeliveryFailedFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => reasonRequiredSchema.parse(data))
+  .validator((data: unknown) =>
+    reasonRequiredSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markDeliveryFailed } = await import("@/server/deliveries/service");
-    return markDeliveryFailed(authCtx, data.deliveryId, data.reason);
+    return markDeliveryFailed(authCtx, data.deliveryId, data.reason, data.expectedPrincipal);
   });
 
 export const cancelDeliveryFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => reasonRequiredSchema.parse(data))
+  .validator((data: unknown) =>
+    reasonRequiredSchema
+      .extend({
+        // Refuse-only: the principal this transition was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { cancelDelivery } = await import("@/server/deliveries/service");
-    return cancelDelivery(authCtx, data.deliveryId, data.reason);
+    return cancelDelivery(authCtx, data.deliveryId, data.reason, data.expectedPrincipal);
   });
 
 export const getDeliveryByIdFn = createServerFn()

@@ -17,6 +17,7 @@ import { Archive, FolderTree, Package, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
@@ -317,7 +318,32 @@ function ProductListScreen() {
                 />
               ) : null}
 
-              {productsQuery.isSuccess && products.length === 0 ? (
+              {/*
+               * A brand-new catalogue: the merchant who can add a product is
+               * told the minimum it takes (Khmer name + price) and handed the
+               * same Add Product sheet as the header's "+", in thumb reach.
+               */}
+              {productsQuery.isSuccess &&
+              products.length === 0 &&
+              status === "ACTIVE" &&
+              categoryId === null &&
+              canCreateProduct ? (
+                <OperationalState
+                  title={t("catalog.list.firstProduct.title")}
+                  body={t("catalog.list.firstProduct.body")}
+                  action={
+                    <Button
+                      type="button"
+                      className="tap-target h-auto min-h-12 w-full whitespace-normal py-2 sm:w-auto"
+                      onClick={() => setCreateOpen(true)}
+                    >
+                      <Plus className="size-5 shrink-0" aria-hidden />
+                      {t("catalog.list.firstProduct.action")}
+                    </Button>
+                  }
+                  className="rounded-none border-0"
+                />
+              ) : productsQuery.isSuccess && products.length === 0 ? (
                 <OperationalState
                   title={t(
                     status === "ACTIVE"

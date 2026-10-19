@@ -32,6 +32,16 @@ async function resolveAuthContext(): Promise<AuthorizationContext> {
   return AuthorizationService.forRequest(session.userId, organizationId);
 }
 
+// The member + organization the client STARTED a courier handoff as
+// (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum). A refuse-only
+// precondition the service compares with the principal it derives from the
+// session — never authorization, never a tenant selector, never an actor
+// (src/server/auth/expected-principal.ts). REQUIRED: a request without it is
+// refused here, before the handler runs.
+const expectedPrincipalSchema = z
+  .object({ userId: z.string().uuid(), organizationId: z.string().uuid() })
+  .strict();
+
 // ── getHandoffPreviewFn ──────────────────────────────────────────────────────
 
 export const getHandoffPreviewFn = createServerFn()
@@ -55,11 +65,13 @@ export const confirmHandoffFn = createServerFn({ method: "POST" })
     z
       .object({
         parcelCode: z.string().min(1, "Parcel code is required").max(100, "Parcel code too long"),
+        // Refuse-only: the principal this handoff was started as.
+        expectedPrincipal: expectedPrincipalSchema,
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { confirmHandoff } = await import("@/server/handoff/service");
-    return confirmHandoff(authCtx, data.parcelCode);
+    return confirmHandoff(authCtx, data.parcelCode, data.expectedPrincipal);
   });

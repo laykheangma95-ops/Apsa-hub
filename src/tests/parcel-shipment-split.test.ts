@@ -32,6 +32,7 @@ import {
   verifyFreshLabels,
 } from "../lib/labels/shipping-print-guard";
 import { returnLookupFor } from "../lib/returns";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 const ORG_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const ORG_B = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -434,12 +435,13 @@ const activeParcels = () => parcels().filter((p) => p["status"] !== "void");
 
 async function confirm() {
   const { transitionLifecycleStatus } = await import("../server/orders/service");
-  return transitionLifecycleStatus(ctx(STAFF), ORDER_A, "confirmed");
+  return transitionLifecycleStatus(ctx(STAFF), ORDER_A, "confirmed", null, principalOf(ctx(STAFF)));
 }
 
 async function arrange(provider = "VET Express", tracking = "VET-42") {
   const { createDelivery } = await import("../server/deliveries/service");
   return createDelivery(ctx(STAFF), {
+    expectedPrincipal: principalOf(ctx(STAFF)),
     orderId: ORDER_A,
     providerName: provider,
     externalTrackingNumber: tracking,
@@ -588,7 +590,11 @@ async function readDetail(perms = STAFF, organizationId = ORG_A) {
 
 async function recover(perms = STAFF, organizationId = ORG_A) {
   const { recoverOrderParcel } = await import("../server/orders/service");
-  return recoverOrderParcel(ctx(perms, organizationId), ORDER_A);
+  return recoverOrderParcel(
+    ctx(perms, organizationId),
+    ORDER_A,
+    principalOf(ctx(perms, organizationId)),
+  );
 }
 
 describe("a confirmed order stranded without its parcel is recoverable after a refresh", () => {
@@ -675,7 +681,13 @@ describe("a confirmed order stranded without its parcel is recoverable after a r
   it("a cancelled order is refused and gets no parcel", async () => {
     await strand();
     const { transitionLifecycleStatus } = await import("../server/orders/service");
-    await transitionLifecycleStatus(ctx([...STAFF, "orders.cancel"]), ORDER_A, "cancelled");
+    await transitionLifecycleStatus(
+      ctx([...STAFF, "orders.cancel"]),
+      ORDER_A,
+      "cancelled",
+      null,
+      principalOf(ctx([...STAFF, "orders.cancel"])),
+    );
     expect(lifecycle()).toBe("cancelled");
     expect((await readDetail()).parcelMissing).toBe(false);
     await expect(recover()).rejects.toThrow(/changed concurrently \(now cancelled\)/);
@@ -717,7 +729,7 @@ describe("Internal APSA Parcel label", () => {
     const a = await arrange();
     const during = (await internalLabel()).parcelCode;
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
     const after = (await internalLabel()).parcelCode;
     expect(during).toBe(before);
     expect(after).toBe(before);
@@ -805,7 +817,7 @@ describe("Arrange Delivery creates a shipment that attaches to the existing parc
     const a = await arrange("VET Express", "VET-42");
     const first = buildParcelLabel(await shippingLabel());
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
     await arrange("J&T Express", "JT-7");
     const second = buildParcelLabel(await shippingLabel());
     expect(second.trackingCode128!.payload).toBe("JT-7");
@@ -821,7 +833,7 @@ describe("Delivery cancellation creates a new shipment only", () => {
     const parcelBefore = { ...activeParcels()[0]! };
     const a = await arrange("VET Express", "VET-42");
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
 
     // Between shipments: no shipping label (A's carrier/tracking are void).
     expect((await shippingLabel()).delivery).toBeNull();
@@ -844,7 +856,7 @@ describe("Delivery cancellation creates a new shipment only", () => {
     const a = await arrange();
     world.packed = true;
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Courier no-show");
+    await cancelDelivery(ctx(STAFF), a.id, "Courier no-show", principalOf(ctx(STAFF)));
     const b = await arrange("J&T Express", "JT-7");
     expect(b.status).toBe("ready");
     expect(b.parcelCode).toBe(a.parcelCode);
@@ -869,7 +881,7 @@ describe("Courier Handoff and returns use the APSA Parcel ID", () => {
     await confirm();
     const a = await arrange();
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
     const b = await arrange("J&T Express", "JT-7");
     const { getHandoffPreview } = await import("../server/handoff/service");
     const preview = await getHandoffPreview(ctx(STAFF), a.parcelCode);
@@ -881,7 +893,7 @@ describe("Courier Handoff and returns use the APSA Parcel ID", () => {
     await confirm();
     const a = await arrange();
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
     await arrange("J&T Express", "JT-7");
     const { resolveParcelCode } = await import("../server/parcels/service");
     const resolved = await resolveParcelCode(ctx(STAFF), a.parcelCode);
@@ -969,7 +981,7 @@ describe("pre-print: fresh server data must match what is shown", () => {
   it("replacement shipment (cancel A, arrange B) → changed, never prints A", async () => {
     const { a, data } = await shown();
     const { cancelDelivery } = await import("../server/deliveries/service");
-    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier");
+    await cancelDelivery(ctx(STAFF), a.id, "Wrong courier", principalOf(ctx(STAFF)));
     await arrange("VET Express", "VET-42"); // even the SAME carrier + tracking
     const fresh = await shippingLabel();
     expect(fresh.delivery?.id).not.toBe(data.delivery?.id);
@@ -1044,7 +1056,7 @@ describe("Returns: APSA Parcel → order → authorized returns workflow", () =>
     let shipment = await arrange();
     if (replaceShipment) {
       const { cancelDelivery } = await import("../server/deliveries/service");
-      await cancelDelivery(ctx(STAFF), shipment.id, "Wrong courier");
+      await cancelDelivery(ctx(STAFF), shipment.id, "Wrong courier", principalOf(ctx(STAFF)));
       shipment = await arrange("J&T Express", "JT-7");
     }
     world.tables["deliveries"]!.find((d) => d["id"] === shipment.id)!["status"] = "delivered";

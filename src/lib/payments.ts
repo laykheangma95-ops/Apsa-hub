@@ -96,6 +96,11 @@ export interface UiPaymentEvent {
   fromVerification: PaymentVerificationState | null;
   toVerification: PaymentVerificationState | null;
   actorUserId: string | null;
+  /**
+   * The idempotency key of the viewer's OWN refund events (null otherwise) —
+   * how a screen recognises the refund it already made after a lost response.
+   */
+  idempotencyKey: string | null;
   reason: string | null;
   metadata: JsonValue | null;
   createdAt: string;
@@ -141,6 +146,7 @@ function mapPaymentEventToUi(row: ServerPaymentEventDetail): UiPaymentEvent {
     fromVerification: row.fromVerification,
     toVerification: row.toVerification,
     actorUserId: row.actorUserId,
+    idempotencyKey: row.idempotencyKey ?? null,
     reason: row.reason,
     metadata: row.metadata,
     createdAt: row.createdAt,
@@ -455,6 +461,16 @@ export function refundEventsOf(detail: UiPaymentDetail): UiPaymentEvent[] {
   return detail.events.filter((event) => event.eventType === "refund");
 }
 
+/**
+ * The refunded total THIS payment's ledger shows: the sum of its refund
+ * events, in integer minor units of the payment's own currency. Sent with a
+ * refund as the total it was started from — the server's own sum is the
+ * authority; a mismatch refuses the refund as stale.
+ */
+export function refundedMinorOf(detail: UiPaymentDetail): number {
+  return refundEventsOf(detail).reduce((sum, event) => sum + (event.amount?.amount ?? 0), 0);
+}
+
 // ── Error classification ──────────────────────────────────────────────────────
 //
 // src/server/payments/service.ts throws Error instances carrying a
@@ -500,6 +516,17 @@ export function classifyPaymentError(err: unknown): PaymentErrorKind {
   }
   if (/required|must be a positive integer|exceeds|invalid/i.test(message)) return "invalid";
   return "server_error";
+}
+
+/**
+ * The server refused a refund because the payment already has a refund the
+ * request did not acknowledge (migration 062): the merchant must review it and
+ * explicitly confirm before refunding again. Matched on the public code, and
+ * on service.ts's own message where a code does not survive the boundary.
+ */
+export function isRefundConfirmationRequired(err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code === "refund_confirmation_required") return true;
+  return statusCodeOf(err) === 409 && /did not acknowledge/i.test(messageOf(err));
 }
 
 /** i18n key for a classified payment error. Mirrors catalogErrorKey. */

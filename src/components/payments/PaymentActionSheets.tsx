@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BottomSheet } from "@/design-system";
+import { fullTimestamp } from "@/lib/format";
 import { MINOR_UNIT_DIGITS, formatMoney, parseMinorUnits } from "@/lib/money";
 import type { PaymentVerificationState } from "@/lib/payments";
 import type { Money } from "@/types";
@@ -112,6 +113,12 @@ export function PaymentVerifySheet({
  * anything from anything: how much of this payment is still refundable is
  * derived in SQL from the refund event ledger, and the server rejects an
  * amount that exceeds it.
+ *
+ * Review step. When the server refuses a refund because the payment already
+ * has refunds the merchant has not seen here (a retry after a reload, another
+ * tab, another member — migration 062), `review` lists them and the merchant
+ * must choose explicitly: refund more, or stop because the refund already made
+ * was the one intended. Nothing is ever refunded again without that choice.
  */
 export function PaymentRefundSheet({
   open,
@@ -119,7 +126,10 @@ export function PaymentRefundSheet({
   principal,
   pending,
   error,
+  review,
   onConfirm,
+  onConfirmBeyond,
+  onDecline,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -127,7 +137,13 @@ export function PaymentRefundSheet({
   principal: Money;
   pending: boolean;
   error: string | null;
+  /** The refunds already on this payment, when the server asked for a review. */
+  review: { id: string; amount: Money | null; createdAt: string; byYou: boolean }[] | null;
   onConfirm: (amountMinor: number, reason: string) => void;
+  /** Refund more, after seeing every refund in `review`. */
+  onConfirmBeyond: (amountMinor: number, reason: string) => void;
+  /** Do not refund again. */
+  onDecline: () => void;
 }) {
   const { t } = useTranslation();
   const [amountText, setAmountText] = useState("");
@@ -163,22 +179,80 @@ export function PaymentRefundSheet({
               {error}
             </p>
           ) : null}
-          <Button
-            className="tap-target h-12 w-full"
-            variant="destructive"
-            disabled={pending || !amountValid || trimmedReason.length === 0}
-            aria-busy={pending}
-            onClick={() => {
-              if (parsed === null) return;
-              onConfirm(parsed, trimmedReason);
-            }}
-          >
-            {pending ? t("payments.actions.working") : t("payments.actions.refund.submit")}
-          </Button>
+          {review ? (
+            <div className="flex flex-col gap-2">
+              <Button
+                className="tap-target h-12 w-full"
+                variant="outline"
+                disabled={pending}
+                aria-busy={pending}
+                onClick={onDecline}
+              >
+                {t("payments.actions.refund.review.decline")}
+              </Button>
+              <Button
+                className="tap-target h-12 w-full"
+                variant="destructive"
+                disabled={pending || !amountValid || trimmedReason.length === 0}
+                aria-busy={pending}
+                onClick={() => {
+                  if (parsed === null) return;
+                  onConfirmBeyond(parsed, trimmedReason);
+                }}
+              >
+                {pending
+                  ? t("payments.actions.working")
+                  : t("payments.actions.refund.review.confirm", {
+                      amount: amountValid ? formatMoney({ amount: parsed, currency }) : "",
+                    })}
+              </Button>
+            </div>
+          ) : (
+            <Button
+              className="tap-target h-12 w-full"
+              variant="destructive"
+              disabled={pending || !amountValid || trimmedReason.length === 0}
+              aria-busy={pending}
+              onClick={() => {
+                if (parsed === null) return;
+                onConfirm(parsed, trimmedReason);
+              }}
+            >
+              {pending ? t("payments.actions.working") : t("payments.actions.refund.submit")}
+            </Button>
+          )}
         </div>
       }
     >
       <div className="flex flex-col gap-4">
+        {review ? (
+          <div
+            className="flex flex-col gap-2 rounded-xl border border-status-warning-border bg-status-warning-soft p-3"
+            role="alert"
+          >
+            <p className="text-label text-text-primary">
+              {t("payments.actions.refund.review.title")}
+            </p>
+            <ul className="flex flex-col gap-1">
+              {review.map((refund) => (
+                <li key={refund.id} className="text-body-sm tnum text-text-primary">
+                  {t("payments.actions.refund.review.item", {
+                    amount: refund.amount ? formatMoney(refund.amount) : "—",
+                    time: fullTimestamp(refund.createdAt),
+                    who: t(
+                      refund.byYou
+                        ? "payments.actions.refund.review.byYou"
+                        : "payments.actions.refund.review.byOther",
+                    ),
+                  })}
+                </li>
+              ))}
+            </ul>
+            <p className="text-caption text-text-secondary">
+              {t("payments.actions.refund.review.body")}
+            </p>
+          </div>
+        ) : null}
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="payment-refund-amount" className="text-label text-text-secondary">
             {t("payments.actions.refund.amountLabel", { currency })}

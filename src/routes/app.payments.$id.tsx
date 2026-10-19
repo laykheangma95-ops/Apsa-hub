@@ -35,7 +35,7 @@ import {
   UserCheck,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ActionRow,
@@ -71,6 +71,15 @@ import {
   verifyRealPayment,
 } from "@/lib/api";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
+import {
+  abandonPendingRefund,
+  acknowledgeRefunds,
+  beginRefund,
+  readRefundIntent,
+  refundSucceeded,
+  type RefundIntentScope,
+} from "@/lib/refund-intent";
 import { ordersKeys } from "@/lib/orders-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { notifyError, notifySuccess } from "@/lib/feedback";
@@ -82,10 +91,12 @@ import {
   canReverseUiPayment,
   classifyPaymentError,
   isPaymentId,
+  isRefundConfirmationRequired,
   isTerminalUiPaymentStatus,
   paymentErrorKey,
   paymentNeedsReview,
   refundEventsOf,
+  refundedMinorOf,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
   type PaymentVerificationState,
   type UiPaymentDetail,
@@ -127,6 +138,34 @@ const EVENT_TONE: Record<string, TimelineItem["tone"]> = {
   refund: "warning",
   duplicate_flagged: "warning",
 };
+
+/** What every action on this screen is started for: the payment shown, as the member shown. */
+interface PaymentActionStart {
+  paymentId: string;
+  startedAs: InitiatingPrincipal;
+}
+
+/** One logical refund, as the merchant started it. */
+interface RefundAttempt extends PaymentActionStart {
+  amountMinor: number;
+  reason: string;
+  /** The refunded total on screen when it was started. */
+  expectedRefundedMinor: number;
+  /** The logical refund's durable key (src/lib/refund-intent.ts). */
+  idempotencyKey: string;
+  /** Every refund on this payment the merchant has seen. */
+  acknowledgedRefundIds: string[];
+  scope: RefundIntentScope;
+}
+
+/** One action tap: the screen's scope epoch and tap number at that moment. */
+interface PaymentActionAttempt {
+  epoch: number;
+  attempt: number;
+}
+
+const actionScopeOf = ({ paymentId, startedAs }: PaymentActionStart) =>
+  `${startedAs.userId}\u0000${startedAs.organizationId}\u0000${paymentId}`;
 
 function PaymentDetailScreen() {
   const { id } = Route.useParams();
@@ -181,6 +220,19 @@ function PaymentDetailScreen() {
 
   const [verifyTarget, setVerifyTarget] = useState<PaymentVerificationState | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  /*
+   * The server refused a new refund because the payment already has refunds
+   * the merchant has not seen here (a retry after a reload, another tab,
+   * another member): the sheet then shows them and asks for an explicit
+   * decision instead of refunding again.
+   */
+  const [refundReview, setRefundReview] = useState(false);
+  /** Where this screen's logical refunds are remembered — this member, this organization, this payment. */
+  const refundScope: RefundIntentScope = {
+    userId,
+    organizationId: routeOrganizationId,
+    paymentId: id,
+  };
   const [reverseOpen, setReverseOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -215,40 +267,204 @@ function PaymentDetailScreen() {
     notifyError(message);
   }
 
+  /*
+   * The member + organization this screen acts as. Each action hands it to its
+   * mutation as a VARIABLE at the tap (CORRECTIONS.md, CORRECTION-004): the
+   * request carries the principal it was started as, and the server refuses it
+   * — writing nothing — if a member or organization switch lands before it is
+   * handled. Never authorization; the server derives that itself.
+   */
+  const memberPrincipal = { userId, organizationId: routeOrganizationId };
+  const start: PaymentActionStart = { paymentId: id, startedAs: memberPrincipal };
+
+  /*
+   * An action's ANSWER belongs to the attempt that asked for it — the member,
+   * organization and payment it was tapped for, and that tap's place in this
+   * screen's sequence — never to whatever the screen shows when it lands.
+   * This screen stays mounted across a member or organization switch and
+   * across a move to another payment, and TanStack hands a pending mutation
+   * every later render's callbacks: written with this render's state, member
+   * A's late refund success was announced to member B, closed B's sheet, and —
+   * worst — marked A's pending refund done and its refund SEEN although A
+   * never saw it, so A's identical retry got a new key, acknowledged that
+   * refund, and refunded a second time.
+   *
+   * `epoch` moves on every committed change of member, organization or
+   * payment, and on unmount (layout effects, in the same commit: no answer can
+   * land in between); `attempt` moves on every tap. Only an answer whose epoch
+   * and attempt are both still current is applied. Any other is written
+   * nowhere, announces nothing and leaves the refund intent untouched — the
+   * refund stays pending under its key, so the screen reports it as made once
+   * it is shown again and the same refund replays — and only marks its
+   * initiator's own entries stale.
+   */
+  const actionScope = actionScopeOf(start);
+  const actionRef = useRef({ scope: actionScope, epoch: 0, attempt: 0 });
+
+  /**
+   * Called from onMutate, which TanStack runs synchronously inside mutate() —
+   * at the tap, with that tap's variable. A variable that does not name the
+   * member and payment this screen shows can never be current.
+   */
+  function beginActionAttempt(started: PaymentActionStart): PaymentActionAttempt {
+    const current = actionRef.current;
+    current.attempt += 1;
+    const shown = actionScopeOf(started) === current.scope;
+    return { epoch: shown ? current.epoch : -1, attempt: current.attempt };
+  }
+  function isCurrentActionAttempt(attempt: PaymentActionAttempt | undefined) {
+    const current = actionRef.current;
+    return attempt?.epoch === current.epoch && attempt.attempt === current.attempt;
+  }
+  /**
+   * An answer that is not applied: nothing of whoever is shown is touched;
+   * only what the action made stale for its INITIATOR is marked so, to be
+   * re-read under the initiator's own authority if it is shown again.
+   */
+  function invalidatePaymentsOf({ startedAs }: PaymentActionStart) {
+    const { userId: startedBy, organizationId: startedIn } = startedAs;
+    void queryClient.invalidateQueries({ queryKey: ["payments", startedBy, startedIn] });
+    void queryClient.invalidateQueries({ queryKey: ordersKeys.principal(startedBy, startedIn) });
+    void queryClient.invalidateQueries({ queryKey: HOME_QUERY_PREFIX });
+    evictShippingLabels(queryClient, startedBy, startedIn);
+  }
+
   const verifyMutation = useMutation({
-    mutationFn: ({ to, reason }: { to: PaymentVerificationState; reason: string | undefined }) =>
-      verifyRealPayment(id, to, reason),
-    onSuccess: (_detail, variables) => {
+    mutationFn: ({
+      paymentId,
+      to,
+      reason,
+      startedAs,
+    }: PaymentActionStart & {
+      to: PaymentVerificationState;
+      reason: string | undefined;
+    }) => verifyRealPayment(paymentId, to, startedAs, reason),
+    onMutate: beginActionAttempt,
+    onSuccess: (_detail, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
       setVerifyTarget(null);
       setActionError(null);
       invalidatePayments();
       notifySuccess(t(`payments.actions.verify.${variables.to}.done`));
     },
-    onError: handleActionError,
+    onError: (err, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
+      handleActionError(err);
+    },
   });
 
   const refundMutation = useMutation({
-    mutationFn: ({ amountMinor, reason }: { amountMinor: number; reason: string }) =>
-      refundRealPayment(id, amountMinor, reason),
-    onSuccess: () => {
+    mutationFn: (attempt: RefundAttempt) =>
+      refundRealPayment(attempt.paymentId, attempt.startedAs, {
+        amountMinor: attempt.amountMinor,
+        reason: attempt.reason,
+        expectedRefundedMinor: attempt.expectedRefundedMinor,
+        idempotencyKey: attempt.idempotencyKey,
+        acknowledgedRefundIds: attempt.acknowledgedRefundIds,
+      }),
+    onMutate: beginActionAttempt,
+    onSuccess: (detail, attempt, tap) => {
+      // Not seen by the member who started it (another member, organization
+      // or payment is shown, the screen is gone, or a newer tap superseded
+      // it): the refund stays pending under its key — never acknowledged here.
+      if (!isCurrentActionAttempt(tap)) return invalidatePaymentsOf(attempt);
+      // Accepted — made now or replayed: that logical refund is done, the
+      // merchant has seen it succeed, and the next refund gets a new key.
+      const made = refundEventsOf(detail).find(
+        (event) => event.idempotencyKey === attempt.idempotencyKey,
+      );
+      refundSucceeded(attempt.scope, made?.id ?? null);
+      setRefundReview(false);
       setRefundOpen(false);
       setActionError(null);
       invalidatePayments();
       notifySuccess(t("payments.actions.refund.done"));
     },
-    onError: handleActionError,
+    onError: (err, attempt, tap) => {
+      // The key stays pending either way: an uncertain outcome is retried
+      // under the same key (a replay if it committed).
+      if (!isCurrentActionAttempt(tap)) return invalidatePaymentsOf(attempt);
+      if (isRefundConfirmationRequired(err)) {
+        // Nothing was written. Show the refunds already made, re-read.
+        setActionError(null);
+        setRefundReview(true);
+        invalidatePayments();
+        return;
+      }
+      handleActionError(err);
+    },
   });
 
+  /**
+   * Submit one refund: the durable key of the logical refund the merchant is
+   * making (a retry of the same amount and reason reuses it, even after a
+   * reload), the refunded total on screen, and the refunds already seen.
+   */
+  function submitRefund(current: UiPaymentDetail, amountMinor: number, reason: string) {
+    const pending = beginRefund(refundScope, amountMinor, reason);
+    refundMutation.mutate({
+      ...start,
+      amountMinor,
+      reason,
+      expectedRefundedMinor: refundedMinorOf(current),
+      idempotencyKey: pending.key,
+      acknowledgedRefundIds: readRefundIntent(refundScope).acknowledged,
+      scope: refundScope,
+    });
+  }
+
   const reverseMutation = useMutation({
-    mutationFn: (reason: string) => reverseRealPayment(id, reason),
-    onSuccess: () => {
+    mutationFn: ({ paymentId, reason, startedAs }: PaymentActionStart & { reason: string }) =>
+      reverseRealPayment(paymentId, startedAs, reason),
+    onMutate: beginActionAttempt,
+    onSuccess: (_detail, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
       setReverseOpen(false);
       setActionError(null);
       invalidatePayments();
       notifySuccess(t("payments.actions.reverse.done"));
     },
-    onError: handleActionError,
+    onError: (err, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
+      handleActionError(err);
+    },
   });
+
+  /*
+   * A change of member, organization or payment, committed: what was started,
+   * typed or reported for the previous one is not the next one's. No pending or
+   * failed action state, no error and no open sheet carries over — the sheets
+   * are also keyed by this scope, so a typed amount or reason is gone in the
+   * same render, whether or not the next screen first shows a skeleton — and
+   * every answer still in flight is stale (see actionRef). A refund's replay
+   * identity is not in any of this: it lives in the refund intent, scoped to
+   * its own member, organization and payment, and is still there when that
+   * member comes back to that payment.
+   */
+  const { reset: resetVerify } = verifyMutation;
+  const { reset: resetRefund } = refundMutation;
+  const { reset: resetReverse } = reverseMutation;
+  useLayoutEffect(() => {
+    const current = actionRef.current;
+    if (current.scope === actionScope) return;
+    current.scope = actionScope;
+    current.epoch += 1;
+    resetVerify();
+    resetRefund();
+    resetReverse();
+    setVerifyTarget(null);
+    setRefundOpen(false);
+    setRefundReview(false);
+    setReverseOpen(false);
+    setActionError(null);
+  }, [actionScope, resetVerify, resetRefund, resetReverse]);
+  useLayoutEffect(() => {
+    const current = actionRef.current;
+    return () => {
+      // Unmounted: whatever is still in flight has no screen left to update.
+      current.epoch += 1;
+    };
+  }, []);
 
   const queryErrorKind = paymentQuery.isError ? classifyPaymentError(paymentQuery.error) : null;
 
@@ -323,6 +539,12 @@ function PaymentDetailScreen() {
   if (!payment) return shell(<DetailSkeleton />);
 
   const refunds = refundEventsOf(payment);
+  // A refund this screen started, whose response was lost, that the server
+  // did commit (recognised by its own key — after a reload too).
+  const pendingRefund = readRefundIntent(refundScope).pending;
+  const recoveredRefund = pendingRefund
+    ? (refunds.find((event) => event.idempotencyKey === pendingRefund.key) ?? null)
+    : null;
   const frozen = isTerminalUiPaymentStatus(payment.status);
   const verificationTargets = availableVerificationTargets(payment).filter((target) =>
     capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]),
@@ -495,6 +717,14 @@ function PaymentDetailScreen() {
 
         {/* ── Refunds on THIS payment, straight from the immutable ledger ── */}
         <Section title={t("payments.refunds.title")}>
+          {recoveredRefund?.amount ? (
+            <p className="text-body-sm mb-2 text-text-primary" role="status">
+              {t("payments.actions.refund.recovered", {
+                amount: formatMoney(recoveredRefund.amount),
+                time: fullTimestamp(recoveredRefund.createdAt),
+              })}
+            </p>
+          ) : null}
           {refunds.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("payments.refunds.empty")}</p>
           ) : (
@@ -645,6 +875,10 @@ function PaymentDetailScreen() {
       </main>
 
       <PaymentVerifySheet
+        // Bound to the member, organization and payment: a typed reason never
+        // survives into another principal's screen or onto another payment.
+        // (Sibling keys must differ: the other two sheets are keyed by scope too.)
+        key={`verify:${actionScope}`}
         open={verifyTarget !== null}
         onOpenChange={(open) => {
           if (!open) setVerifyTarget(null);
@@ -654,25 +888,54 @@ function PaymentDetailScreen() {
         error={actionError}
         onConfirm={(reason) => {
           if (!verifyTarget) return;
-          verifyMutation.mutate({ to: verifyTarget, reason });
+          verifyMutation.mutate({ ...start, to: verifyTarget, reason });
         }}
       />
 
       <PaymentRefundSheet
+        key={`refund:${actionScope}`}
         open={refundOpen}
-        onOpenChange={setRefundOpen}
+        onOpenChange={(open) => {
+          setRefundOpen(open);
+          if (!open) setRefundReview(false);
+        }}
         principal={payment.amount}
         pending={refundMutation.isPending}
         error={actionError}
-        onConfirm={(amountMinor, reason) => refundMutation.mutate({ amountMinor, reason })}
+        review={
+          refundReview
+            ? refunds.map((event) => ({
+                id: event.id,
+                amount: event.amount,
+                createdAt: event.createdAt,
+                byYou: event.actorUserId === userId,
+              }))
+            : null
+        }
+        onConfirm={(amountMinor, reason) => submitRefund(payment, amountMinor, reason)}
+        onConfirmBeyond={(amountMinor, reason) => {
+          // An explicit decision, after seeing every refund listed: refund more.
+          acknowledgeRefunds(
+            refundScope,
+            refunds.map((event) => event.id),
+          );
+          submitRefund(payment, amountMinor, reason);
+        }}
+        onDecline={() => {
+          // The refund already made was the one intended: nothing more to do.
+          abandonPendingRefund(refundScope);
+          setRefundReview(false);
+          setRefundOpen(false);
+        }}
       />
 
       <PaymentReverseSheet
+        key={`reverse:${actionScope}`}
         open={reverseOpen}
         onOpenChange={setReverseOpen}
         pending={reverseMutation.isPending}
         error={actionError}
-        onConfirm={(reason) => reverseMutation.mutate(reason)}
+        onConfirm={(reason) => reverseMutation.mutate({ ...start, reason })}
       />
     </ScreenBleed>
   );

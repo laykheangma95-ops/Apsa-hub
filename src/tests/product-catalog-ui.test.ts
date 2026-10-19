@@ -1936,7 +1936,8 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 059 (APSA Parcel recovery under the order lock) belongs to the parcel post-merge repair;
     // 060 (Customer Intelligence purchase profile) belongs to the customer intelligence phase;
     // 061 (browser table authority hardening) is an unrelated security fix;
-    // 062 is reserved for the PR #121 financial security repair;
+    // 062 (financial replay identity, refund idempotency and audit atomicity)
+    // belongs to the PR #121 security repair;
     // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
     expect(migrations.at(-1)).toBe("063_order_cancellation_custody_guard.sql");
     for (const required of [

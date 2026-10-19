@@ -5,6 +5,11 @@ import * as path from "path";
 import { ForbiddenError } from "../server/auth/authorization";
 import type { AuthorizationContext } from "../server/auth/authorization";
 import type { DeliveryStatus } from "../server/deliveries/state-machine";
+import {
+  principalOf,
+  SANCTIONED_DELIVERY_FN_SCHEMA,
+  withoutSanctioned,
+} from "./helpers/refuse-only-principal";
 
 const ORG_A = "aaaaaaaa-0000-0000-0000-000000000001";
 const USER_A = "aaaaaaaa-1111-0000-0000-000000000001";
@@ -70,6 +75,8 @@ interface FakeOptions {
   tables?: Record<string, QueryResult[]>;
   rpc?: Record<string, QueryResult>;
   rpcHandler?: (name: string, args: Record<string, unknown>) => Promise<QueryResult>;
+  /** Every table read, as it is made. */
+  onRead?: (table: string) => void;
 }
 
 async function withDb<T>(options: FakeOptions, run: (calls: RpcCall[]) => Promise<T>): Promise<T> {
@@ -79,7 +86,10 @@ async function withDb<T>(options: FakeOptions, run: (calls: RpcCall[]) => Promis
   ) as Record<string, QueryResult[]>;
   const calls: RpcCall[] = [];
   const testDb = {
-    from: (table: string) => fakeQuery(queues[table]?.shift() ?? empty),
+    from: (table: string) => {
+      options.onRead?.(table);
+      return fakeQuery(queues[table]?.shift() ?? empty);
+    },
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ fn: name, args });
       if (options.rpcHandler) return options.rpcHandler(name, args);
@@ -243,6 +253,7 @@ describe("Create Delivery", () => {
       },
       async (recorded) => {
         const result = await createDelivery(makeCtx(allPermissions), {
+          expectedPrincipal: principalOf(makeCtx(allPermissions)),
           orderId: ORDER_A,
           providerId: PROVIDER_A,
           providerName: "client cannot override this",
@@ -270,7 +281,11 @@ describe("Create Delivery", () => {
     const { createDelivery } = await import("../server/deliveries/service");
     const calls = await withDb({ tables: { orders: [noRow] } }, async (recorded) => {
       await expect(
-        createDelivery(makeCtx(allPermissions), { orderId: ORDER_A, providerName: "Manual" }),
+        createDelivery(makeCtx(allPermissions), {
+          expectedPrincipal: principalOf(makeCtx(allPermissions)),
+          orderId: ORDER_A,
+          providerName: "Manual",
+        }),
       ).rejects.toMatchObject({ statusCode: 404 });
       return recorded;
     });
@@ -287,7 +302,11 @@ describe("Create Delivery", () => {
     ]) {
       await withDb({ tables: { orders: [row] } }, async () => {
         await expect(
-          createDelivery(makeCtx(allPermissions), { orderId: ORDER_A, providerName: "Manual" }),
+          createDelivery(makeCtx(allPermissions), {
+            expectedPrincipal: principalOf(makeCtx(allPermissions)),
+            orderId: ORDER_A,
+            providerName: "Manual",
+          }),
         ).rejects.toMatchObject({ statusCode: 409 });
       });
     }
@@ -299,7 +318,11 @@ describe("Create Delivery", () => {
       { tables: { orders: [order()], locations: [location], deliveries: [delivery()] } },
       async (recorded) => {
         await expect(
-          createDelivery(makeCtx(allPermissions), { orderId: ORDER_A, providerName: "Manual" }),
+          createDelivery(makeCtx(allPermissions), {
+            expectedPrincipal: principalOf(makeCtx(allPermissions)),
+            orderId: ORDER_A,
+            providerName: "Manual",
+          }),
         ).rejects.toMatchObject({ statusCode: 409 });
         return recorded;
       },
@@ -313,6 +336,7 @@ describe("Create Delivery", () => {
     await withDb({ tables: { orders: [order()], locations: [noRow] } }, async () => {
       await expect(
         createDelivery(makeCtx(allPermissions), {
+          expectedPrincipal: principalOf(makeCtx(allPermissions)),
           orderId: ORDER_A,
           locationId: LOCATION_A,
           providerName: "Manual",
@@ -324,6 +348,7 @@ describe("Create Delivery", () => {
       async () => {
         await expect(
           createDelivery(makeCtx(allPermissions), {
+            expectedPrincipal: principalOf(makeCtx(allPermissions)),
             orderId: ORDER_A,
             providerId: PROVIDER_A,
           }),
@@ -337,6 +362,7 @@ describe("Create Delivery", () => {
     await withDb({ tables: { orders: [order()], locations: [location] } }, async () => {
       await expect(
         createDelivery(makeCtx(allPermissions), {
+          expectedPrincipal: principalOf(makeCtx(allPermissions)),
           orderId: ORDER_A,
           providerName: "Manual",
           codAmountMinor: 1.5,
@@ -372,7 +398,12 @@ describe("Transitions and history", () => {
           },
         },
         async (recorded) => {
-          await service[functionName](makeCtx(allPermissions), DELIVERY_A);
+          await service[functionName](
+            makeCtx(allPermissions),
+            DELIVERY_A,
+            null,
+            principalOf(makeCtx(allPermissions)),
+          );
           return recorded;
         },
       );
@@ -396,7 +427,12 @@ describe("Transitions and history", () => {
           rpc: { transition_delivery_status_v1: { data: { status: "success" }, error: null } },
         },
         async (calls) => {
-          await call(makeCtx(allPermissions), DELIVERY_A, "operational reason");
+          await call(
+            makeCtx(allPermissions),
+            DELIVERY_A,
+            "operational reason",
+            principalOf(makeCtx(allPermissions)),
+          );
           expect(calls[0]?.args["p_reason"]).toBe("operational reason");
         },
       );
@@ -408,7 +444,12 @@ describe("Transitions and history", () => {
       await import("../server/deliveries/service");
     await withDb({ tables: { deliveries: [delivery()] } }, async () => {
       await expect(
-        markDeliveryDelivered(makeCtx(allPermissions), DELIVERY_A),
+        markDeliveryDelivered(
+          makeCtx(allPermissions),
+          DELIVERY_A,
+          null,
+          principalOf(makeCtx(allPermissions)),
+        ),
       ).rejects.toMatchObject({
         statusCode: 409,
       });
@@ -416,7 +457,12 @@ describe("Transitions and history", () => {
     for (const terminal of ["delivered", "failed", "cancelled"] as const) {
       await withDb({ tables: { deliveries: [delivery({ status: terminal })] } }, async () => {
         await expect(
-          startPreparingDelivery(makeCtx(allPermissions), DELIVERY_A),
+          startPreparingDelivery(
+            makeCtx(allPermissions),
+            DELIVERY_A,
+            null,
+            principalOf(makeCtx(allPermissions)),
+          ),
         ).rejects.toMatchObject({ statusCode: 409 });
       });
     }
@@ -424,10 +470,11 @@ describe("Transitions and history", () => {
 
   it("requires a reason for failure and cancellation", async () => {
     const { cancelDelivery, markDeliveryFailed } = await import("../server/deliveries/service");
-    expect(() => cancelDelivery(makeCtx(allPermissions), DELIVERY_A, " ")).toThrow(
+    const ctx = makeCtx(allPermissions);
+    await expect(cancelDelivery(ctx, DELIVERY_A, " ", principalOf(ctx))).rejects.toThrow(
       "A cancellation reason is required",
     );
-    expect(() => markDeliveryFailed(makeCtx(allPermissions), DELIVERY_A, "")).toThrow(
+    await expect(markDeliveryFailed(ctx, DELIVERY_A, "", principalOf(ctx))).rejects.toThrow(
       "A failure reason is required",
     );
   });
@@ -478,9 +525,14 @@ describe("Order fulfillment atomicity", () => {
         },
       },
       async () => {
-        await expect(markDeliveryDelivered(makeCtx(allPermissions), DELIVERY_A)).rejects.toThrow(
-          "transaction rolled back",
-        );
+        await expect(
+          markDeliveryDelivered(
+            makeCtx(allPermissions),
+            DELIVERY_A,
+            null,
+            principalOf(makeCtx(allPermissions)),
+          ),
+        ).rejects.toThrow("transaction rolled back");
       },
     );
     expect(state).toEqual({ delivery: "in_transit", fulfillment: "processing", history: 4 });
@@ -579,10 +631,12 @@ describe("Golden merchant fulfillment flow", () => {
           makeCtx(allPermissions),
           DELIVERY_A,
           "Replace courier",
+          principalOf(makeCtx(allPermissions)),
         );
         expect(cancelled.status).toBe("cancelled");
 
         const replacement = await createDelivery(makeCtx(allPermissions), {
+          expectedPrincipal: principalOf(makeCtx(allPermissions)),
           orderId: ORDER_A,
           providerName: "Replacement courier",
         });
@@ -602,17 +656,132 @@ describe("Golden merchant fulfillment flow", () => {
 });
 
 describe("Authorization, tenant isolation and concurrency", () => {
+  it("createDelivery: a request without its initiating principal is refused (428) before the permission check, any read and any write", async () => {
+    const { createDelivery } = await import("../server/deliveries/service");
+    const calls = await withDb({ tables: { orders: [noRow] } }, async (recorded) => {
+      await expect(
+        createDelivery(makeCtx([]), { orderId: ORDER_A, providerName: "Manual" } as never),
+      ).rejects.toMatchObject({ statusCode: 428, code: "principal_required" });
+      return recorded;
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("createDelivery: a request started as another member or organization is refused (409 principal_changed) before the permission check, any read and any write", async () => {
+    const { createDelivery } = await import("../server/deliveries/service");
+    const ORG_OTHER = "bbbbbbbb-0000-0000-0000-000000000001";
+    const USER_OTHER = "bbbbbbbb-1111-0000-0000-000000000001";
+    for (const startedAs of [
+      { userId: USER_OTHER, organizationId: ORG_A }, // another member, same organization
+      { userId: USER_A, organizationId: ORG_OTHER }, // the same member, another organization
+    ]) {
+      // Handled as a member WITH delivery.create, and as one without it: the
+      // handling member's grant never decides another principal's request.
+      for (const permissions of [allPermissions, []]) {
+        const calls = await withDb({ tables: { orders: [noRow] } }, async (recorded) => {
+          await expect(
+            createDelivery(makeCtx(permissions), {
+              expectedPrincipal: startedAs,
+              orderId: ORDER_A,
+              providerName: "Manual",
+            }),
+          ).rejects.toMatchObject({ statusCode: 409, code: "principal_changed" });
+          return recorded;
+        });
+        expect(calls).toHaveLength(0); // no create_delivery_v1, nothing else
+      }
+    }
+  });
+
+  // The six transitions (CORRECTIONS.md, CORRECTION-004, delivery transition
+  // addendum): refused before the permission check, the delivery read and every
+  // write — so the handling member's grant never decides another principal's
+  // request, and nothing is attributed to them.
+  const TRANSITION_CALLS = [
+    ["startPreparingDelivery", null],
+    ["markDeliveryReady", null],
+    ["markDeliveryInTransit", null],
+    ["markDeliveryDelivered", null],
+    ["markDeliveryFailed", "Courier no-show"],
+    ["cancelDelivery", "Wrong courier"],
+  ] as const;
+
+  for (const [name, reason] of TRANSITION_CALLS) {
+    it(`${name}: a request without its initiating principal is refused (428) before the permission check, any read and any write`, async () => {
+      const service = (await import("../server/deliveries/service")) as unknown as Record<
+        string,
+        (...args: unknown[]) => Promise<unknown>
+      >;
+      for (const missing of [undefined, null, {}, { userId: USER_A }]) {
+        // Held by a member WITHOUT delivery.update, and by one with it.
+        for (const permissions of [[], allPermissions]) {
+          const reads: string[] = [];
+          const calls = await withDb(
+            { tables: { deliveries: [delivery()] }, onRead: (table) => reads.push(table) },
+            async (recorded) => {
+              await expect(
+                service[name]!(makeCtx(permissions), DELIVERY_A, reason, missing),
+              ).rejects.toMatchObject({ statusCode: 428, code: "principal_required" });
+              return recorded;
+            },
+          );
+          expect({ reads, calls }).toEqual({ reads: [], calls: [] });
+        }
+      }
+    });
+
+    it(`${name}: a request started as another member or organization is refused (409 principal_changed) before the permission check, any read and any write`, async () => {
+      const service = (await import("../server/deliveries/service")) as unknown as Record<
+        string,
+        (...args: unknown[]) => Promise<unknown>
+      >;
+      const ORG_OTHER = "bbbbbbbb-0000-0000-0000-000000000001";
+      const USER_OTHER = "bbbbbbbb-1111-0000-0000-000000000001";
+      for (const startedAs of [
+        { userId: USER_OTHER, organizationId: ORG_A }, // another member, same organization
+        { userId: USER_A, organizationId: ORG_OTHER }, // the same member, another organization
+      ]) {
+        for (const permissions of [allPermissions, []]) {
+          const reads: string[] = [];
+          const calls = await withDb(
+            {
+              tables: { deliveries: [delivery()] },
+              rpc: { transition_delivery_status_v1: { data: { status: "success" }, error: null } },
+              onRead: (table) => reads.push(table),
+            },
+            async (recorded) => {
+              await expect(
+                service[name]!(makeCtx(permissions), DELIVERY_A, reason, startedAs),
+              ).rejects.toMatchObject({ statusCode: 409, code: "principal_changed" });
+              return recorded;
+            },
+          );
+          // No delivery read, no transition_delivery_status_v1, nothing else.
+          expect({ reads, calls }).toEqual({ reads: [], calls: [] });
+        }
+      }
+    });
+  }
+
   it("enforces read/create/update permissions server-side", async () => {
     const { createDelivery, getDeliveryById, startPreparingDelivery } =
       await import("../server/deliveries/service");
     await expect(
-      withDb({}, () => createDelivery(makeCtx([]), { orderId: ORDER_A, providerName: "Manual" })),
+      withDb({}, () =>
+        createDelivery(makeCtx([]), {
+          expectedPrincipal: principalOf(makeCtx([])),
+          orderId: ORDER_A,
+          providerName: "Manual",
+        }),
+      ),
     ).rejects.toBeInstanceOf(ForbiddenError);
     await expect(withDb({}, () => getDeliveryById(makeCtx([]), DELIVERY_A))).rejects.toBeInstanceOf(
       ForbiddenError,
     );
     await expect(
-      withDb({}, () => startPreparingDelivery(makeCtx([]), DELIVERY_A)),
+      withDb({}, () =>
+        startPreparingDelivery(makeCtx([]), DELIVERY_A, null, principalOf(makeCtx([]))),
+      ),
     ).rejects.toBeInstanceOf(ForbiddenError);
   });
 
@@ -627,7 +796,12 @@ describe("Authorization, tenant isolation and concurrency", () => {
     });
     await withDb({ tables: { deliveries: [noRow] } }, async (calls) => {
       await expect(
-        startPreparingDelivery(makeCtx(allPermissions), DELIVERY_A),
+        startPreparingDelivery(
+          makeCtx(allPermissions),
+          DELIVERY_A,
+          null,
+          principalOf(makeCtx(allPermissions)),
+        ),
       ).rejects.toMatchObject({ statusCode: 404 });
       expect(calls).toHaveLength(0);
     });
@@ -647,7 +821,12 @@ describe("Authorization, tenant isolation and concurrency", () => {
       },
       async () => {
         await expect(
-          startPreparingDelivery(makeCtx(allPermissions), DELIVERY_A),
+          startPreparingDelivery(
+            makeCtx(allPermissions),
+            DELIVERY_A,
+            null,
+            principalOf(makeCtx(allPermissions)),
+          ),
         ).rejects.toMatchObject({ statusCode: 409 });
       },
     );
@@ -705,7 +884,10 @@ describe("RLS, RPC and browser boundary", () => {
   });
 
   it("never accepts client organization_id or user_id authority", () => {
-    const api = source("src/api/deliveries.ts");
+    // The one sanctioned crossing is createDeliveryFn's refuse-only
+    // expectedPrincipal (CORRECTION-004): stripped exactly once, then the
+    // invariant holds over everything else.
+    const api = withoutSanctioned(source("src/api/deliveries.ts"), SANCTIONED_DELIVERY_FN_SCHEMA);
     const service = source("src/server/deliveries/service.ts");
     expect(api).not.toMatch(/organizationId:\s*z\./);
     expect(api).not.toMatch(/userId:\s*z\./);

@@ -352,6 +352,7 @@ export function ParcelLabelDialog({
           }}
           orderId={confirmTarget.order.id}
           orderNumber={confirmTarget.order.orderNumber}
+          principal={{ userId, organizationId }}
           initial={{
             name: confirmTarget.customer.name ?? "",
             phone: confirmTarget.customer.phone ?? "",

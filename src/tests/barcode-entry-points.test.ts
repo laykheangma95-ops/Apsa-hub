@@ -136,18 +136,22 @@ describe("Apsi console wiring", () => {
   });
 });
 
-describe("Home create sheet scan row", () => {
+/*
+ * Home's scan entry point moved from the old "create" sheet row (reachable only
+ * through the Send-invoice tile) to a scan control in Home's own header. The
+ * guarantees are the same: it opens the real camera, only behind canScan, and
+ * there is no "Coming soon" placeholder anywhere on Home.
+ */
+describe("Home header scan control", () => {
   const home = read("routes/app.index.tsx");
+  const header = read("components/home/HomeHeader.tsx");
 
-  it("opens the camera instead of the disabled Coming soon row", () => {
-    expect(home).toMatch(
-      /action\.key === "scanBarcode" \? \([\s\S]*?setCreateOpen\(false\);\s*setCameraOpen\(true\);/,
-    );
-    expect(home).toContain('{ key: "scanBarcode", to: null, available: canScan }');
-    // The camera branch is evaluated before the to: null "not built" branch.
-    expect(home.indexOf('action.key === "scanBarcode"')).toBeLessThan(
-      home.indexOf('{t("nav.comingSoon")}'),
-    );
+  it("opens the camera directly, never a disabled Coming soon row", () => {
+    expect(home).toContain("onScan={canScan ? () => setCameraOpen(true) : undefined}");
+    expect(home).not.toContain("nav.comingSoon");
+    // The header renders the control only when it was handed an onScan.
+    expect(header).toMatch(/\{onScan \? \(\s*<button[\s\S]*?onClick=\{onScan\}/);
+    expect(header).toContain('aria-label={t("nav.scanBarcode")}');
   });
 
   it("resolves exactly like Inventory, behind the same read grants", () => {
