@@ -8,7 +8,8 @@
  *
  *   - baseline: Supabase's default grants (EXECUTE on new functions and ALL on
  *     new tables for anon, authenticated and service_role), then every
- *     migration in order, through 062, into a fresh throwaway database;
+ *     migration in order up to and including 062, into a fresh throwaway
+ *     database (later migrations are not applied);
  *   - service_role CAN call every financial entry point, and a real
  *     record_payment_v2 / refund_payment_v2 as service_role writes through the
  *     internal helpers it may not call directly;
@@ -75,6 +76,7 @@ const PROTECTED_TABLES = [
 /** Payment ledger tables: RPC-only, even for service_role (040). */
 const LEDGER_TABLES = ["payments", "payment_events", "payment_evidence"];
 
+const MIGRATION_062 = "062_financial_replay_refund_audit_atomicity.sql";
 const dbName = `apsa_062_roles_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: SQL;
 let sql: SQL;
@@ -106,11 +108,12 @@ beforeAll(async () => {
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
   `);
+  // Every migration up to and including 062, in order: this suite proves
+  // 062's authority, so a later migration never changes what it measures.
   const migrations = readdirSync("supabase/migrations")
-    .filter((n) => /^\d+.*\.sql$/.test(n))
+    .filter((n) => /^\d+.*\.sql$/.test(n) && n <= MIGRATION_062)
     .sort();
-  // This suite pins #121's schema: through migration 062.
-  expect(migrations.at(-1)).toBe("062_financial_replay_refund_audit_atomicity.sql");
+  expect(migrations.at(-1)).toBe(MIGRATION_062);
   for (const name of migrations) {
     try {
       await sql.unsafe(readFileSync(`supabase/migrations/${name}`, "utf8"));
