@@ -25,6 +25,7 @@ import {
 } from "@/lib/handoff";
 import type { HandoffResult, HandoffPreview as HandoffPreviewType } from "@/lib/handoff";
 import { handoffKeys, syncHandoffResultCaches } from "@/lib/handoff-query";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { fullTimestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { StatusKey } from "@/types";
@@ -121,8 +122,13 @@ function CourierHandoffState({
     retry: false,
   });
 
+  // Sent with the member + organization this instance shows, handed to the
+  // mutation at the tap: the server refuses it (409 principal_changed, nothing
+  // written) if anyone else is signed in when it handles the request
+  // (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum).
   const confirmMutation = useMutation({
-    mutationFn: () => confirmHandoffFn({ data: { parcelCode } }),
+    mutationFn: (startedAs: InitiatingPrincipal) =>
+      confirmHandoffFn({ data: { parcelCode, expectedPrincipal: startedAs } }),
     onSuccess: (result) => {
       setHandoffResult(result);
       void syncHandoffResultCaches(queryClient, userId, organizationId, parcelCode, result);
@@ -200,7 +206,7 @@ function CourierHandoffState({
               ? t("courierHandoff.error.body")
               : null
         }
-        onConfirm={() => confirmMutation.mutate()}
+        onConfirm={() => confirmMutation.mutate({ userId, organizationId })}
         onBack={onBack}
       />
     );

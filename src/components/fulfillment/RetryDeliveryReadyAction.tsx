@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { notifySuccess } from "@/lib/feedback";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { ordersKeys } from "@/lib/orders-query";
 import { packingKeys } from "@/lib/packing-query";
 
@@ -54,10 +55,14 @@ export function RetryDeliveryReadyAction({
     };
   }, []);
 
+  // Sent with the member + organization this instance shows, handed to the
+  // mutation at the tap: the server refuses it (409 principal_changed, nothing
+  // written) if anyone else is signed in when it handles the request
+  // (CORRECTIONS.md, CORRECTION-004, packing and handoff addendum).
   const retry = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (startedAs: InitiatingPrincipal) => {
       const { retryPackedDeliveryReadyFn } = await import("@/api/packing");
-      return retryPackedDeliveryReadyFn({ data: { orderId } });
+      return retryPackedDeliveryReadyFn({ data: { orderId, expectedPrincipal: startedAs } });
     },
     onSuccess: async (result) => {
       if (!activeRef.current) return;
@@ -90,7 +95,7 @@ export function RetryDeliveryReadyAction({
         aria-describedby="order-retry-ready-hint"
         onClick={() => {
           setNotice(null);
-          retry.mutate();
+          retry.mutate({ userId, organizationId });
         }}
       >
         <RotateCw className="size-4" aria-hidden />

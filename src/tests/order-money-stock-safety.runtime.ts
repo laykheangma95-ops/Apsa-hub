@@ -27,6 +27,7 @@ import {
 import { calculateDraftTotals, draftBlock } from "../lib/order-draft";
 import type { Money } from "../types";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { principalOf } from "./helpers/refuse-only-principal";
 
 type Fixture = Awaited<ReturnType<typeof financialFixture>>;
 type Json = Record<string, unknown>;
@@ -1186,8 +1187,11 @@ describe("Order service through the real database", () => {
       idempotencyKey: crypto.randomUUID(),
     };
     const auditsBefore = audits.length;
-    const first = await service.createOrder(ctx, input);
-    const second = await service.createOrder(ctx, input);
+    const first = await service.createOrder(ctx, { ...input, expectedPrincipal: principalOf(ctx) });
+    const second = await service.createOrder(ctx, {
+      ...input,
+      expectedPrincipal: principalOf(ctx),
+    });
     expect(second.id).toBe(first.id);
     expect(second.orderNumber).toBe(first.orderNumber);
     expect(first.delivery).toEqual({ amount: 250, currency: "USD" });
@@ -1195,7 +1199,11 @@ describe("Order service through the real database", () => {
     expect(audits.length).toBe(auditsBefore + 1);
 
     await expect(
-      service.createOrder(ctx, { ...input, items: [{ variantId: A.variant2, quantity: 3 }] }),
+      service.createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
+        ...input,
+        items: [{ variantId: A.variant2, quantity: 3 }],
+      }),
     ).rejects.toMatchObject({ statusCode: 409, code: "idempotency_conflict" });
   });
 
@@ -1206,6 +1214,7 @@ describe("Order service through the real database", () => {
     for (const idempotencyKey of [undefined, "", "nope"]) {
       await expect(
         service.createOrder(ctx, {
+          expectedPrincipal: principalOf(ctx),
           source: "POS",
           items: [{ variantId: A.variant1, quantity: 1 }],
           idempotencyKey: idempotencyKey as unknown as string,
@@ -1214,6 +1223,7 @@ describe("Order service through the real database", () => {
     }
     await expect(
       service.createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
         source: "POS",
         items: [{ variantId: A.variant1, quantity: 1 }],
         deliveryMinor: 1.5,
@@ -1227,6 +1237,7 @@ describe("Order service through the real database", () => {
     const service = await import("../server/orders/service");
     const ctx = context(f.org, f.actor, perms);
     const created = await service.createOrder(ctx, {
+      expectedPrincipal: principalOf(ctx),
       source: "POS",
       items: [{ variantId: A.variant1, quantity: 1 }],
       idempotencyKey: crypto.randomUUID(),
@@ -1236,6 +1247,7 @@ describe("Order service through the real database", () => {
 
     await expect(
       service.createOrder(ctx, {
+        expectedPrincipal: principalOf(ctx),
         source: "POS",
         items: [{ variantId: B.variant1, quantity: 1 }],
         idempotencyKey: crypto.randomUUID(),
@@ -1248,6 +1260,7 @@ describe("Order service through the real database", () => {
     const before = await orderCount(f.org);
     await expect(
       service.createOrder(context(f.org, f.actor, ["orders.read"]), {
+        expectedPrincipal: principalOf(context(f.org, f.actor, ["orders.read"])),
         source: "POS",
         items: [{ variantId: A.variant1, quantity: 1 }],
         idempotencyKey: crypto.randomUUID(),
@@ -1255,6 +1268,7 @@ describe("Order service through the real database", () => {
     ).rejects.toMatchObject({ statusCode: 403 });
     await expect(
       service.createOrder(context(f.org, f.actor, ["orders.create", "orders.read"]), {
+        expectedPrincipal: principalOf(context(f.org, f.actor, ["orders.create", "orders.read"])),
         source: "POS",
         items: [{ variantId: A.variant1, quantity: 1 }],
         discountMinor: 100,
@@ -1324,6 +1338,7 @@ describe("POS money: cart preview agrees with the persisted order", () => {
     const totals = calculateCartTotals(lines, input);
     if (totals.kind !== "priced" || checkoutBlock(totals)) throw new Error("cart refused");
     const detail = await service.createOrder(context(org, f.actor, perms), {
+      expectedPrincipal: principalOf(context(org, f.actor, perms)),
       source: "POS",
       items: lines.map((l) => ({ variantId: l.variantId!, quantity: l.quantity })),
       ...(totals.discount.amount > 0 ? { discountMinor: totals.discount.amount } : {}),
@@ -1427,6 +1442,7 @@ describe("POS money: cart preview agrees with the persisted order", () => {
     let caught: unknown;
     try {
       await service.createOrder(context(orgK, f.actor, perms), {
+        expectedPrincipal: principalOf(context(orgK, f.actor, perms)),
         source: "POS",
         items: lines.map((l) => ({ variantId: l.variantId!, quantity: l.quantity })),
         idempotencyKey: crypto.randomUUID(),
@@ -1449,6 +1465,7 @@ describe("POS money: cart preview agrees with the persisted order", () => {
     const before = await orderCount(f.org);
     await expect(
       service.createOrder(context(f.org, f.actor, perms), {
+        expectedPrincipal: principalOf(context(f.org, f.actor, perms)),
         source: "POS",
         items: [{ variantId: A.variant1, quantity: 1 }],
         discountMinor: 1501,
@@ -1528,6 +1545,7 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
     const totals = calculateDraftTotals(lines, undefined, { text: feeText, currency });
     if (totals.kind !== "priced" || draftBlock(totals)) throw new Error("draft refused");
     const detail = await service.createOrder(context(org, f.actor, perms), {
+      expectedPrincipal: principalOf(context(org, f.actor, perms)),
       source: "FACEBOOK",
       items: lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })),
       customerId,
@@ -1625,7 +1643,10 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
       organizationId: f.orgB,
       idempotencyKey: crypto.randomUUID(),
     } as unknown as Parameters<typeof service.createOrder>[1];
-    const detail = await service.createOrder(context(orgK, f.actor, perms), forged);
+    const detail = await service.createOrder(context(orgK, f.actor, perms), {
+      ...forged,
+      expectedPrincipal: principalOf(context(orgK, f.actor, perms)),
+    });
     expect(await orderRow(detail.id)).toMatchObject({
       organization_id: orgK,
       currency: "KHR",
@@ -1641,6 +1662,7 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
     for (const deliveryMinor of [4_000_001, 1.5, -1]) {
       await expect(
         service.createOrder(context(orgK, f.actor, perms), {
+          expectedPrincipal: principalOf(context(orgK, f.actor, perms)),
           source: "FACEBOOK",
           items: [{ variantId: water, quantity: 1 }],
           customerId: kCustomer,
@@ -1657,6 +1679,7 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
     const before = await orderCount(orgK);
     await expect(
       service.createOrder(context(orgK, f.actor, perms), {
+        expectedPrincipal: principalOf(context(orgK, f.actor, perms)),
         source: "FACEBOOK",
         items: [{ variantId: water, quantity: 1 }],
         customerId: B.customer,
@@ -1677,6 +1700,7 @@ describe("Inbox money: Prepare Order preview agrees with the persisted order", (
     let caught: unknown;
     try {
       await service.createOrder(context(orgK, f.actor, perms), {
+        expectedPrincipal: principalOf(context(orgK, f.actor, perms)),
         source: "FACEBOOK",
         items: [
           { variantId: water, quantity: 1 },
@@ -1755,6 +1779,8 @@ describe("Inbox replay identity through the real create_order_v3", () => {
     mock.module("../api/orders", () => ({
       createOrderFn: async ({ data }: { data: Record<string, unknown> }) => {
         const service = await import("../server/orders/service");
+        // Forwards what the browser sent, its expectedPrincipal included — as
+        // the real createOrderFn handler does.
         return service.createOrder(
           context(transportOrg, f.actor, perms),
           data as Parameters<typeof service.createOrder>[1],
@@ -1765,6 +1791,8 @@ describe("Inbox replay identity through the real create_order_v3", () => {
 
   /** Exactly the request PrepareOrderSheet builds for 2 × ៛5,000 from conversation A. */
   const request = () => ({
+    // The replay scope's principal, sent as the required refuse-only precondition.
+    principal: { userId: f.actor, organizationId: orgK },
     source: "FACEBOOK" as const,
     items: [{ variantId: water, quantity: 2, productId: waterProduct }],
     customerId: kCustomer,

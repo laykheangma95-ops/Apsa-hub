@@ -10,10 +10,17 @@
  *
  * Client never supplies organization_id or user_id — createRealDelivery()'s
  * input (src/lib/api/index.ts) has no field for either; the server derives
- * both from the session. COD amount is operational only: it is never read
- * as, or converted into, an order payment status.
+ * both from the session. The one identity the request carries is the
+ * refuse-only `principal` it was started as (CORRECTION-004): the server
+ * refuses the request, writing nothing, if anyone else is signed in when it
+ * handles it. COD amount is operational only: it is never read as, or
+ * converted into, an order payment status.
+ *
+ * The draft belongs to the member who typed it: the host keys this sheet by
+ * principal, so a member or organization switch discards it, and an answer
+ * that arrives after this sheet is gone reaches no one.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +28,7 @@ import { Label } from "@/components/ui/label";
 import { BottomSheet } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { createRealDelivery, type CreateRealDeliveryInput } from "@/lib/api";
+import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 import { classifyDeliveryError, type RealDeliveryDetail } from "@/lib/deliveries";
 import { codDiffersFromTotal, parseCodAmount } from "@/lib/delivery-fee";
 import { MINOR_UNIT_DIGITS, formatMoney } from "@/lib/money";
@@ -51,6 +59,8 @@ interface CreateDeliverySheetProps {
    * there is no honest COD field without knowing which currency that is.
    */
   orderTotal: Money;
+  /** The host's server-derived route principal; sent as the request's precondition. */
+  principal: InitiatingPrincipal;
   onCreated: (delivery: RealDeliveryDetail) => void;
 }
 
@@ -59,9 +69,19 @@ export function CreateDeliverySheet({
   onOpenChange,
   orderId,
   orderTotal,
+  principal,
   onCreated,
 }: CreateDeliverySheetProps) {
   const { t } = useTranslation();
+
+  // Whether the sheet that sent a request still exists when its answer lands.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const [providerName, setProviderName] = useState("");
   const [providerKey, setProviderKey] = useState("");
@@ -95,19 +115,25 @@ export function CreateDeliverySheet({
   async function submit() {
     const name = providerName.trim();
     if (!name || codInvalid) return;
+    // The principal this attempt is started as — fixed at the tap.
+    const startedAs = principal;
     setSubmitting(true);
     setFailure(null);
     try {
-      const input: CreateRealDeliveryInput = { orderId, providerName: name };
+      const input: Omit<CreateRealDeliveryInput, "principal"> = { orderId, providerName: name };
       const key = providerKey.trim();
       if (key) input.providerKey = key;
       const tracking = trackingNumber.trim();
       if (tracking) input.externalTrackingNumber = tracking;
       if (codEnabled && codMinor !== null && codMinor > 0) input.codAmountMinor = codMinor;
-      const detail = await createRealDelivery(input);
+      const detail = await createRealDelivery({ ...input, principal: startedAs });
+      // This sheet is gone (a principal switch or the screen left): nothing of
+      // the answer — navigation, cache refresh, closing — reaches who is shown.
+      if (!mountedRef.current) return;
       onCreated(detail);
       handleOpenChange(false);
     } catch (error) {
+      if (!mountedRef.current) return;
       setFailure(classifyCreateFailure(error));
       setSubmitting(false);
     }

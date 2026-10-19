@@ -33,6 +33,8 @@ function readSource(relPath: string): string {
   return fs.readFileSync(path.resolve(ROOT, relPath), "utf-8").replace(/\r\n/g, "\n");
 }
 
+const count = (source: string, needle: string) => source.split(needle).length - 1;
+
 const API_INDEX = "src/lib/api/index.ts";
 const DELIVERIES_LIB = "src/lib/deliveries.ts";
 const DELIVERY_DETAIL_ROUTE = "src/routes/app.deliveries.$id.tsx";
@@ -228,10 +230,19 @@ describe("Delivery transitions call the matching production server function", ()
     expect(lib).toMatch(/never a substitute for server authorization/i);
   });
 
-  it("a stale (409, changed concurrently) transition error triggers a refetch of authoritative data", () => {
+  it("a failed transition — stale (409), or committed with its response lost — re-reads the initiator's own authoritative delivery", () => {
     const route = readSource(DELIVERY_DETAIL_ROUTE);
-    expect(route).toMatch(/classifyDeliveryError\(error\) === "stale"/);
-    expect(route).toMatch(/query\.refetch\(\)/);
+    // Every failure, not only "stale": a lost response may have committed.
+    expect(count(route, "onError: (_error, started) => rereadDeliveryOf(started),")).toBe(6);
+    const reread = route.slice(
+      route.indexOf("function rereadDeliveryOf("),
+      route.indexOf("function invalidateAfterTransitionOf("),
+    );
+    // The initiator's own entry for the delivery it tapped — never this render's key.
+    expect(reread).toMatch(
+      /deliveryKeys\.detail\(startedAs\.userId, startedAs\.organizationId, deliveryId\)/,
+    );
+    expect(reread).toContain("exact: true");
   });
 });
 
@@ -424,9 +435,15 @@ describe("Loading states use the existing APSA visual system", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Successful transitions refresh the on-screen delivery", () => {
-  it("all six transition mutations write the fresh detail into the query cache via onTransitionSuccess", () => {
+  it("all six transition mutations write the fresh detail into the query cache via applyTransitionAnswer", () => {
     const route = readSource(DELIVERY_DETAIL_ROUTE);
-    expect(route).toMatch(/queryClient\.setQueryData\(queryKey, detail\)/);
+    // Into the initiator's own entry for the delivery it tapped — keyed by the
+    // attempt's variable, never by the render the answer lands in.
+    expect(route).toMatch(
+      /queryClient\.setQueryData\(\s*deliveryKeys\.detail\(startedAs\.userId, startedAs\.organizationId, deliveryId\),\s*detail,\s*\)/,
+    );
+    expect(route).not.toMatch(/queryClient\.setQueryData\(queryKey, detail\)/);
+    expect(count(route, "applyTransitionAnswer(started, attempt, detail)")).toBe(6);
     for (const mutationVar of [
       "startPreparingMutation",
       "markReadyMutation",

@@ -171,6 +171,7 @@ const i18n = (await import("@/lib/i18n")).default;
 const en = (await import("@/locales/en.json")).default as any;
 const { Route } = await import("@/routes/app.pos");
 const sheetModule = await import("@/components/pos/PosCheckoutSheet");
+const idempotencyModule = await import("@/lib/idempotency");
 const posCartModule = await import("@/lib/pos-cart");
 const PosScreen = (Route as any).component as () => React.ReactElement;
 
@@ -736,6 +737,9 @@ describe("P2 #3: <PosCheckoutSheet> bound to the cart it was submitted for", () 
   let completed = 0;
 
   function Harness() {
+    const [replayHolders] = React.useState(() =>
+      idempotencyModule.createScopedIdempotencyHolders(),
+    );
     const [props, set] = React.useState({
       lines: [cartLine(0)],
       userId: "3f2504e0-4f89-41d3-9a0c-00000000a001",
@@ -753,6 +757,8 @@ describe("P2 #3: <PosCheckoutSheet> bound to the cart it was submitted for", () 
       },
       userId: props.userId,
       organizationId: "3f2504e0-4f89-41d3-9a0c-00000000b001",
+      // Owned above the sheet, as the POS screen owns it (src/routes/app.pos.tsx).
+      replayHolders,
     });
   }
 
