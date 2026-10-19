@@ -14,6 +14,7 @@ import type {
 } from "@/server/orders/service";
 import type { OrderListCursor, OrderSourceDb } from "@/server/orders/types";
 import type { OrderListFilter } from "@/lib/order-list-filters";
+import { orderCancelBlockedCodeOf, type OrderCancelBlockedCode } from "@/lib/order-cancel-blocked";
 import type { Channel, Order, OrderItem, OrderLifecycleStatus, OrderSource } from "@/types";
 
 // ── Source / channel mapping ──────────────────────────────────────────────────
@@ -285,7 +286,7 @@ export function isOrderCurrencyMismatch(err: unknown): boolean {
 export type OrderCancelBlockedReason =
   "goods_with_customer" | "goods_dispatched" | "active_delivery" | "blocked";
 
-const CANCEL_BLOCKED_CODES: Record<string, OrderCancelBlockedReason> = {
+const CANCEL_BLOCKED_REASONS: Record<OrderCancelBlockedCode, OrderCancelBlockedReason> = {
   order_cancel_goods_with_customer: "goods_with_customer",
   order_cancel_goods_dispatched: "goods_dispatched",
   order_cancel_active_delivery: "active_delivery",
@@ -294,12 +295,14 @@ const CANCEL_BLOCKED_CODES: Record<string, OrderCancelBlockedReason> = {
 
 /**
  * Why the custody guard (migration 063, src/server/orders/service.ts
- * cancelBlockedToError) refused a cancellation, from the error's stable code —
- * or null for any other error. Nothing was written when this is non-null.
+ * cancelBlockedToError) refused a cancellation — or null for any other error.
+ * Read from the stable code the message leads with (src/lib/order-cancel-blocked.ts):
+ * only the message survives the server-function wire, never `code`. Nothing
+ * was written when this is non-null.
  */
 export function orderCancelBlockedReason(err: unknown): OrderCancelBlockedReason | null {
-  const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === "string" ? (CANCEL_BLOCKED_CODES[code] ?? null) : null;
+  const code = orderCancelBlockedCodeOf(messageOf(err));
+  return code ? CANCEL_BLOCKED_REASONS[code] : null;
 }
 
 // ── Orders list pages ─────────────────────────────────────────────────────────

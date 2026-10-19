@@ -690,6 +690,8 @@ describe("order service: cancellation through the real database", () => {
       expect(error.statusCode).toBe(409);
       expect(error.code).toBe(code);
       expect(error.message).toMatch(/cannot be cancelled/);
+      // Only the message crosses the server-function wire: it leads with the code.
+      expect(error.message.startsWith(`${code}: `)).toBe(true);
       expect(await footprint(id)).toEqual(before);
       expect(await onHand()).toBe(stock);
       expect(audits.length).toBe(auditsBefore);

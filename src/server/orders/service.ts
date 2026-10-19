@@ -73,6 +73,10 @@ import {
   type OrderStatusAxis,
 } from "./state-machine";
 import { ORDER_CODE_MAX_LENGTH, normalizeOrderCode } from "@/lib/order-code";
+import {
+  formatOrderCancelBlockedMessage,
+  type OrderCancelBlockedCode,
+} from "@/lib/order-cancel-blocked";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
 import { DEFAULT_ORDER_LIST_FILTER, type OrderListFilter } from "@/lib/order-list-filters";
 import { ORDER_SOURCES } from "./types";
@@ -714,27 +718,28 @@ async function loadTransitionTarget(ctx: AuthorizationContext, orderId: string):
  * flow that actually applies instead of cancelling.
  */
 function cancelBlockedToError(reason: string | undefined): Error {
+  // Only the message crosses the server-function wire, so it leads with the
+  // code (src/lib/order-cancel-blocked.ts); `code` stays for server logs.
+  const refuse = (code: OrderCancelBlockedCode, text: string) =>
+    conflict(formatOrderCancelBlockedMessage(code, text), code);
   switch (reason) {
     case "goods_with_customer":
-      return conflict(
-        "This order cannot be cancelled: the customer already has the goods — record a customer return instead",
+      return refuse(
         "order_cancel_goods_with_customer",
+        "This order cannot be cancelled: the customer already has the goods — record a customer return instead",
       );
     case "goods_dispatched":
-      return conflict(
-        "This order cannot be cancelled while its goods are with the courier — record the delivery outcome first",
+      return refuse(
         "order_cancel_goods_dispatched",
+        "This order cannot be cancelled while its goods are with the courier — record the delivery outcome first",
       );
     case "active_delivery":
-      return conflict(
-        "This order cannot be cancelled while a delivery is arranged — cancel the delivery first",
+      return refuse(
         "order_cancel_active_delivery",
+        "This order cannot be cancelled while a delivery is arranged — cancel the delivery first",
       );
     default:
-      return conflict(
-        "This order cannot be cancelled in its current state",
-        "order_cancel_blocked",
-      );
+      return refuse("order_cancel_blocked", "This order cannot be cancelled in its current state");
   }
 }
 

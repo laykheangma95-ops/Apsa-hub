@@ -39,6 +39,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import { financialFixture } from "./helpers/payment-order-fixture";
 import { principalOf } from "./helpers/refuse-only-principal";
+import { overServerFnWire } from "./helpers/server-fn-wire";
+import { markPublicDomainError } from "@/server/public-domain-error";
 
 type Json = Record<string, any>;
 
@@ -120,7 +122,10 @@ function contextFor(userId: string, organizationId: string): AuthorizationContex
     can: granted,
     require: (key: string) => {
       if (!granted(key)) {
-        throw Object.assign(new Error(`Missing permission: ${key}`), { statusCode: 403 });
+        // ForbiddenError: public, so the boundary passes it to the browser.
+        throw markPublicDomainError(
+          Object.assign(new Error(`Missing permission: ${key}`), { statusCode: 403 }),
+        );
       }
     },
   } as unknown as AuthorizationContext;
@@ -128,7 +133,8 @@ function contextFor(userId: string, organizationId: string): AuthorizationContex
 /** resolveAuthContext(): the session's member, its active organization — or 401. */
 function serverContext(): AuthorizationContext {
   if (!server.signedIn) {
-    throw Object.assign(new Error("Not authenticated"), { statusCode: 401 });
+    // UnauthorizedError: public, so the boundary passes it to the browser.
+    throw markPublicDomainError(Object.assign(new Error("Not authenticated"), { statusCode: 401 }));
   }
   return contextFor(server.userId, server.organizationId);
 }
@@ -283,6 +289,8 @@ const loseNextResponse = new Set<Gated>();
 /** The next request of this kind commits server-side, then its response waits for release(). */
 const holdResponseNext = new Set<Gated>();
 const heldResponses: (() => void)[] = [];
+/** The next request of this kind fails on the server with this error instead of running. */
+const failNextWith = new Map<Gated, unknown>();
 
 async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) => Promise<T>) {
   if (holdDispatchNext.has(fn)) {
@@ -302,6 +310,11 @@ async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) 
         server: { userId: ctx.userId, organizationId: ctx.organizationId },
       }) - 1;
     try {
+      const injected = failNextWith.get(fn);
+      if (injected !== undefined) {
+        failNextWith.delete(fn);
+        throw injected;
+      }
       outcome = { value: await run(ctx) };
       outcomes[index] = "ok";
     } catch (error) {
@@ -315,9 +328,16 @@ async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) 
   }
   if (holdResponse) await new Promise<void>((release) => heldResponses.push(release));
   if (lose) throw new TypeError("Failed to fetch");
-  if ("error" in outcome) throw outcome.error;
+  // What the screen receives is what the real boundary and TanStack's
+  // serialization deliver: only the message (src/tests/helpers/server-fn-wire.ts).
+  if ("error" in outcome) throw await overServerFnWire(outcome.error, WIRE_FILE[fn]);
   return outcome.value;
 }
+const WIRE_FILE: Record<Gated, string> = {
+  lifecycle: "src/api/orders.ts",
+  payment: "src/api/payments.ts",
+  delivery: "src/api/deliveries.ts",
+};
 
 mock.module("@/api/orders", () => ({
   createOrderFn: async ({ data }: { data: Json }) => {
@@ -386,8 +406,15 @@ mock.module("@/api/packing", () => ({
     return getOrderPackState(serverContext(), data.orderId);
   },
 }));
+/** This case reads the order's deliveries from the database (as A's grants allow). */
+let realDeliveryReads = false;
 mock.module("@/api/deliveries", () => ({
-  listDeliveriesFn: async () => [],
+  // src/api/deliveries.ts listDeliveriesFn's handler — only when the case asks.
+  listDeliveriesFn: async ({ data }: { data?: Json } = {}) => {
+    if (!realDeliveryReads) return [];
+    const { listDeliveries } = await import("@/server/deliveries/service");
+    return listDeliveries(serverContext(), { order_id: data?.orderId, limit: 50 });
+  },
   // src/api/deliveries.ts createDeliveryFn's handler, field for field.
   createDeliveryFn: async ({ data }: { data: Json }) =>
     serve("delivery", data, async (ctx) => {
@@ -527,6 +554,7 @@ const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query
 const { CapabilityProvider } = await import("@/hooks/use-capabilities");
 const i18n = (await import("@/lib/i18n")).default;
 const en = (await import("@/locales/en.json")).default as any;
+const km = (await import("@/locales/km.json")).default as any;
 const OrderDetailScreen = ((await import("@/routes/app.orders.$id")).Route as any)
   .component as () => React.ReactElement;
 const ConversationScreen = ((await import("@/routes/app.inbox.$id")).Route as any)
@@ -628,6 +656,8 @@ afterEach(async () => {
   holdResponseNext.clear();
   for (const release of heldResponses) release();
   heldResponses.length = 0;
+  failNextWith.clear();
+  realDeliveryReads = false;
   resetGrants();
   route.userId = server.userId = USER_A;
   route.organizationId = server.organizationId = ORG_A;
@@ -1756,6 +1786,201 @@ describe("Order detail: the custody guard's cancellation refusal reaches the mer
     // The sheet closes so the reason is visible; its submit would be refused again.
     await waitFor(() => dialog() === null, "the cancel sheet closed");
     await waitFor(() => !button(en.order.cancel), "Cancel withdrawn after the re-read");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The custody refusal as the browser actually receives it
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// serve() hands the screen what the real server-function boundary and
+// TanStack's ShallowErrorPlugin deliver (src/tests/helpers/server-fn-wire.ts):
+// a bare Error carrying only the message. Each custody refusal is made real —
+// the goods or a delivery move behind the screen's back, then the guard in the
+// database refuses — and must still close the sheet, say why in both
+// languages, and re-read the order so Cancel is withdrawn.
+
+/** A delivery for the order, created behind the screen's back and moved to `status`. */
+async function deliveryBehindScreen(orderId: string, status: "pending" | "in_transit") {
+  const created = await f.rpc("create_delivery_v1", [
+    ORG_A,
+    orderId,
+    USER_A,
+    null,
+    null,
+    null,
+    "Courier",
+    null,
+    null,
+  ]);
+  if (created.status !== "success") throw new Error(JSON.stringify(created));
+  const chain = ["pending", "preparing", "ready", "in_transit"];
+  for (let i = 0; chain[i] !== status; i++) {
+    const to = chain[i + 1]!;
+    // '→ ready' is the step Mark Packed makes (054); packing is not under test.
+    const moved = await f.rpc("transition_delivery_status_v1", [
+      ORG_A,
+      created.delivery_id,
+      chain[i],
+      to,
+      USER_A,
+      to === "ready" ? "pack_order_packed" : null,
+    ]);
+    if (moved.status !== "success") throw new Error(JSON.stringify(moved));
+  }
+}
+
+const CUSTODY_REFUSALS = [
+  {
+    code: "order_cancel_goods_with_customer",
+    reason: "goods_with_customer",
+    behindScreen: (orderId: string) => handOverAtCounter(orderId),
+  },
+  {
+    code: "order_cancel_goods_dispatched",
+    reason: "goods_dispatched",
+    behindScreen: (orderId: string) => deliveryBehindScreen(orderId, "in_transit"),
+  },
+  {
+    code: "order_cancel_active_delivery",
+    reason: "active_delivery",
+    behindScreen: (orderId: string) => deliveryBehindScreen(orderId, "pending"),
+  },
+] as const;
+
+/** A's confirmed order on screen, Cancel offered — the screen has read its (empty) deliveries. */
+async function openCancellableOrder(orderId: string) {
+  grants.get(USER_A)!.add("delivery.read");
+  realDeliveryReads = true;
+  await openOrderDetail(orderId);
+  await waitFor(() => button(en.order.cancel), "Cancel order");
+  await readsSettled();
+}
+
+describe("Order detail: a custody refusal across the real server-function wire", () => {
+  for (const refusal of CUSTODY_REFUSALS) {
+    it(`${refusal.reason}: the sheet closes, the reason shows in English and Khmer, the order is re-read and Cancel is withdrawn — nothing written`, async () => {
+      const orderId = await seedConfirmed();
+      await openCancellableOrder(orderId);
+      await refusal.behindScreen(orderId);
+      const readAt = client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))!.dataUpdatedAt;
+      const before = await writeSurface();
+      await tapCancelOrder();
+      await waitFor(() => outcomes.length === 1, "the server's answer");
+      await waitFor(() => dialog() === null, "the cancel sheet closed");
+      await waitFor(() => !button(en.order.cancel), "Cancel withdrawn after the re-read");
+      await readsSettled();
+      const wrote = wroteSince(before, await writeSurface());
+      const s = await orderState(orderId);
+      const rereadAt = client.getQueryState(detailKeyOf(USER_A, ORG_A, orderId))!.dataUpdatedAt;
+      console.log(
+        `[evidence] wire custody refusal ${refusal.reason}: server=[${outcomes}] wrote=[${wrote}] ` +
+          `reread=${rereadAt > readAt} cancelOffered=${Boolean(button(en.order.cancel))}`,
+      );
+      expect(outcomes).toEqual([`refused:${refusal.code}`]);
+      expect(wrote).toEqual([]); // no status, history, stock, payment, event, token or audit
+      expect(audits).toEqual([]);
+      expect(s.lifecycle).toBe("confirmed");
+      expect(s.movements.filter((m) => m.quantity_delta > 0)).toEqual([]);
+      expect(rereadAt).toBeGreaterThan(readAt);
+      expect(text()).toContain(en.order.error.cancelBlocked.title);
+      expect(text()).toContain(en.order.error.cancelBlocked[refusal.reason]);
+      expect(text()).not.toContain(en.error.title);
+      expect(text()).not.toContain(refusal.code); // the wire code is never shown
+      expect(notices()).not.toContain(en.order.cancelledNotice);
+      try {
+        await act(async () => {
+          await i18n.changeLanguage("km");
+        });
+        await settle(6);
+        expect(text()).toContain(km.order.error.cancelBlocked.title);
+        expect(text()).toContain(km.order.error.cancelBlocked[refusal.reason]);
+      } finally {
+        await act(async () => {
+          await i18n.changeLanguage("en");
+        });
+      }
+    });
+  }
+
+  it("delayed refusal, O1 → O2: O2's screen, sheet and Cancel are untouched; back on O1 Cancel is withdrawn", async () => {
+    const o1 = await seedConfirmed();
+    const o2 = await seedConfirmed();
+    await openCancellableOrder(o2);
+    await navigateOrder(o1);
+    await deliveryBehindScreen(o1, "in_transit");
+    holdResponseNext.add("lifecycle");
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "O1's refusal, held");
+    await navigateOrder(o2);
+    await waitFor(() => button(en.order.cancel), "O2's Cancel");
+    await click(button(en.order.cancel), "O2's Cancel"); // O2's own sheet, open
+    const shownBefore = text();
+    await releaseResponse(); // O1's refusal, while O2 is shown
+    await readsSettled();
+    console.log(
+      `[evidence] delayed custody refusal O1→O2: server=[${outcomes}] o2Unchanged=${text() === shownBefore} ` +
+        `o2SheetOpen=${dialog() !== null} o2Writes=[${writesIntoDetailOf(o2)}]`,
+    );
+    expect(outcomes).toEqual(["refused:order_cancel_goods_dispatched"]);
+    expect(text()).toBe(shownBefore);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(dialog()).not.toBeNull(); // O2's own sheet stays open
+    expect(writesIntoDetailOf(o2)).toEqual([]);
+    expect(await lifecycleOf(o2)).toBe("confirmed");
+    await act(async () => {
+      dialog()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await waitFor(() => dialog() === null, "O2's sheet dismissed");
+    await navigateOrder(o1);
+    await waitFor(() => !button(en.order.cancel), "O1's Cancel withdrawn by its own re-read");
+    expect(await lifecycleOf(o1)).toBe("confirmed");
+  });
+
+  it("delayed refusal, member A → B: nothing of A's refusal reaches B's screen", async () => {
+    const orderId = await seedConfirmed();
+    grants.get(USER_B)!.add("delivery.read");
+    await openCancellableOrder(orderId);
+    await handOverAtCounter(orderId);
+    holdResponseNext.add("lifecycle");
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "A's refusal, held");
+    await switchTo({ user: USER_B });
+    await readsSettled();
+    const shownBefore = text();
+    await releaseResponse();
+    await readsSettled();
+    console.log(
+      `[evidence] delayed custody refusal A→B: server=[${outcomes}] bUnchanged=${text() === shownBefore} ` +
+        `writesForB=[${writesInto(USER_B, ORG_A)}]`,
+    );
+    expect(outcomes).toEqual(["refused:order_cancel_goods_with_customer"]);
+    expect(sent[0]!.server).toEqual({ userId: USER_A, organizationId: ORG_A });
+    expect(text()).toBe(shownBefore);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(writesInto(USER_B, ORG_A)).toEqual([]);
+  });
+
+  it("an unexpected server error carrying a custody code is sanitized: generic copy, the sheet stays open, nothing written", async () => {
+    const orderId = await seedConfirmed();
+    await openCancellableOrder(orderId);
+    failNextWith.set(
+      "lifecycle",
+      Object.assign(new Error('duplicate key value violates "orders_pkey"'), {
+        statusCode: 409,
+        code: "order_cancel_goods_with_customer",
+      }),
+    );
+    const before = await writeSurface();
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    await waitFor(() => text().includes(en.error.title), "the generic error");
+    const wrote = wroteSince(before, await writeSurface());
+    expect(wrote).toEqual([]);
+    expect(text()).not.toContain(en.order.error.cancelBlocked.title);
+    expect(text()).not.toContain("orders_pkey");
+    expect(dialog()).not.toBeNull(); // not a custody refusal: the sheet stays for a retry
+    expect(button(en.order.cancel)).toBeTruthy();
   });
 });
 
