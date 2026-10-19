@@ -425,6 +425,37 @@ describe("Cancel is offered only while the goods are provably in the shop", () =
     expect(offersCancel(deriveOrderNextAction(order(), OWNER, ctx()))).toBe(true);
     expect(offersCancel(deriveOrderNextAction(order(), CASHIER, ctx()))).toBe(false);
   });
+
+  // The server's custody guard (migration 063, order_cancellation_block_v1)
+  // refuses these; offering Cancel would only offer a refusal.
+  for (const status of ["pending", "preparing", "ready", "in_transit", "delivered"] as const) {
+    it(`not while a delivery is ${status}, packed or not`, () => {
+      for (const packed of [true, false]) {
+        const next = deriveOrderNextAction(
+          order({ fulfillmentStatus: status === "pending" ? "unfulfilled" : "processing" }),
+          OWNER,
+          ctx({ deliveries: delivery(status), packed }),
+        );
+        expect(offersCancel(next)).toBe(false);
+      }
+    });
+  }
+
+  for (const status of ["failed", "cancelled"] as const) {
+    it(`yes again after the delivery ${status} (the goods are back in custody)`, () => {
+      const next = deriveOrderNextAction(
+        order({ fulfillmentStatus: "processing" }),
+        OWNER,
+        ctx({ deliveries: delivery(status), packed: true }),
+      );
+      expect(offersCancel(next)).toBe(true);
+    });
+  }
+
+  it("not once handed over at the counter (fulfilled, no delivery)", () => {
+    const next = deriveOrderNextAction(order({ fulfillmentStatus: "fulfilled" }), OWNER, ctx());
+    expect(offersCancel(next)).toBe(false);
+  });
 });
 
 describe("principal isolation and delayed responses", () => {
@@ -541,10 +572,12 @@ describe("every offered action is permitted and is a valid move", () => {
   const deliveryStates = [
     NO_DELIVERY,
     delivery("pending"),
+    delivery("preparing"),
     delivery("ready"),
     delivery("in_transit"),
     delivery("delivered"),
     delivery("failed"),
+    delivery("cancelled"),
   ];
   const roles: CapabilityView[] = [
     OWNER,
@@ -581,7 +614,8 @@ describe("every offered action is permitted and is a valid move", () => {
                 if (offersCancel(next) && lifecycleStatus === "confirmed") {
                   expect(["unfulfilled", "processing"]).toContain(fulfillmentStatus);
                   expect(deliveries.anyDelivered).toBe(false);
-                  expect(deliveries.activeStatus).not.toBe("in_transit");
+                  // Migration 063: no pending / preparing / ready / in-transit delivery.
+                  expect(deliveries.activeStatus).toBeNull();
                 }
                 if (lifecycleStatus === "completed" || lifecycleStatus === "cancelled") {
                   expect(next.primary).toBeNull();

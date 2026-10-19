@@ -740,6 +740,28 @@ async function seedConfirmed(): Promise<string> {
   audits.length = 0;
   return orderId;
 }
+/** Confirmed, paid (a verified cash payment) and handed over at the counter: ready to complete. */
+async function seedReadyToComplete(): Promise<string> {
+  const orderId = await seedConfirmed();
+  const payment = await f.record(10000, "cash", null, orderId, ORG_A);
+  await f.verify(payment, "staff_confirmed", "unverified", ORG_A);
+  await handOverAtCounter(orderId);
+  audits.length = 0;
+  return orderId;
+}
+/** The fulfillment move behind the screen's back: unfulfilled → fulfilled (goods with the customer). */
+async function handOverAtCounter(orderId: string) {
+  const r = await f.rpc("transition_order_status_v1", [
+    ORG_A,
+    orderId,
+    "fulfillment",
+    "unfulfilled",
+    "fulfilled",
+    USER_A,
+    null,
+  ]);
+  if (r.status !== "success") throw new Error(JSON.stringify(r));
+}
 
 // Order detail.
 
@@ -757,6 +779,15 @@ async function tapCancelOrder() {
   await waitFor(() => button(en.order.cancel), "Cancel order");
   await click(button(en.order.cancel), "Cancel order");
   await click(button(en.order.cancelSheet.submit, dialog()!), "Cancel order (sheet)");
+}
+const completeActionButton = () => button(en.order.next.action.complete_order);
+async function tapCompleteOrder() {
+  await waitFor(
+    () => completeActionButton() && !completeActionButton()!.disabled,
+    "Complete order (Next step)",
+  );
+  await click(completeActionButton(), "Complete order (Next step)");
+  await click(button(en.order.completeSheet.submit, dialog()!), "Complete order (sheet)");
 }
 async function tapRecordPayment(amount: string) {
   await waitFor(() => button(en.order.recordPayment), "Record payment");
@@ -1266,7 +1297,7 @@ function lateEvidence(label: string, orderId: string, other: { user: string; org
 }
 
 interface LifecycleAction {
-  name: "Confirm" | "Cancel";
+  name: "Confirm" | "Cancel" | "Complete";
   seed: () => Promise<string>;
   tap: () => Promise<void>;
   from: string;
@@ -1302,6 +1333,31 @@ const LIFECYCLE_ACTIONS: LifecycleAction[] = [
       ]);
     },
   },
+  {
+    name: "Complete",
+    seed: seedReadyToComplete,
+    tap: tapCompleteOrder,
+    from: "confirmed",
+    to: "completed",
+    notice: en.order.completedNotice,
+    expectDoneByA: (s) => {
+      expect(s.lifecycle).toBe("completed");
+      const completes = s.history.filter((h) => h.to_status === "completed");
+      expect(completes.map((h) => `${h.axis}:${who(h.changed_by)}`)).toEqual(["lifecycle:A"]);
+      // Completing moves no stock and no money: only the confirm's sale, one payment.
+      expect(s.movements.map((m) => m.movement_type)).toEqual(["sale"]);
+      expect(s.payments).toHaveLength(1);
+    },
+  },
+];
+/** Every grant that could let B act on the order's lifecycle or payments. */
+const B_ACTION_GRANTS = [
+  "orders.confirm",
+  "orders.cancel",
+  "orders.update",
+  "payments.read",
+  "payments.record",
+  "payments.mark_cod",
 ];
 
 describe("Order detail: a late confirm / cancel response stays with the principal that started it", () => {
@@ -1330,15 +1386,7 @@ describe("Order detail: a late confirm / cancel response stays with the principa
         await action.tap();
         await committedAsA();
         const bGrants = grants.get(USER_B)!;
-        for (const key of [
-          "orders.confirm",
-          "orders.cancel",
-          "payments.read",
-          "payments.record",
-          "payments.mark_cod",
-        ]) {
-          bGrants.delete(key);
-        }
+        for (const key of B_ACTION_GRANTS) bGrants.delete(key);
         if (!to.read) bGrants.delete("orders.read");
         await switchTo({ user: to.user, org: to.org });
         if (to.read)
@@ -1422,15 +1470,7 @@ describe("Order detail: a late confirm / cancel response stays with the principa
         loseNextResponse.add("lifecycle"); // committed, then the response fails
         await action.tap();
         await committedAsA();
-        for (const key of [
-          "orders.confirm",
-          "orders.cancel",
-          "payments.read",
-          "payments.record",
-          "payments.mark_cod",
-        ]) {
-          grants.get(USER_B)!.delete(key);
-        }
+        for (const key of B_ACTION_GRANTS) grants.get(USER_B)!.delete(key);
         if (!to.read) grants.get(USER_B)!.delete("orders.read");
         await switchTo({ user: to.user, org: to.org });
         if (to.read)
@@ -1597,6 +1637,126 @@ describe("Order detail: a late confirm / cancel response stays with the principa
       if (!to.read) expect(holdingOrder(to.user, to.org, orderId)).toEqual([]);
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Order detail Smart Next Action: Complete, and the custody guard's refusals
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Order detail: Complete runs as the member who asked, and a stale screen is refused", () => {
+  it("member A → B during Complete: never completed as B; A's retry is A's", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    holdDispatchNext.add("lifecycle");
+    await tapCompleteOrder();
+    await switchTo({ user: USER_B });
+    const before = await writeSurface();
+    await releaseDispatch();
+    const wrote = wroteSince(before, await writeSurface());
+    const during = await orderState(orderId);
+    evidence("order detail: complete, member A→B while dispatching", during, wrote);
+
+    await switchTo({ user: USER_A });
+    await tapCompleteOrder();
+    const after = await orderState(orderId);
+    expect(sent[0]!.data.expectedPrincipal).toEqual({ userId: USER_A, organizationId: ORG_A });
+    expect(outcomes[0]).toBe("refused:principal_changed");
+    expect(wrote).toEqual([]);
+    expect(during.lifecycle).toBe("confirmed");
+    expect(outcomes[1]).toBe("ok");
+    LIFECYCLE_ACTIONS[2]!.expectDoneByA(after);
+  });
+
+  it("A stays signed in: Complete is written into A's own entry once, closes the sheet and is announced", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await tapCompleteOrder();
+    await waitFor(() => notices().includes(en.order.completedNotice), "the completed notice");
+    expect(cachedLifecycle(USER_A, ORG_A, orderId)).toBe("completed");
+    expect(dialog()).toBeNull();
+    expect(completeActionButton()).toBeUndefined(); // a completed order offers no Complete
+    const detailKey = JSON.stringify(detailKeyOf(USER_A, ORG_A, orderId));
+    expect(writesInto(USER_A, ORG_A)).toEqual([`${detailKey}=completed`]);
+    expect(outcomes).toEqual(["ok"]);
+  });
+
+  it("the sheet cannot submit twice while Complete is in flight", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    holdResponseNext.add("lifecycle");
+    await tapCompleteOrder();
+    await committedAsA();
+    const submit = buttonContaining(en.order.completing, dialog()!);
+    expect(submit?.disabled).toBe(true);
+    await click(submit, "Complete order (sheet, again)");
+    await releaseResponse();
+    await waitFor(() => notices().includes(en.order.completedNotice), "the completed notice");
+    expect(sent.filter((s) => s.fn === "lifecycle")).toHaveLength(1);
+  });
+
+  it("stale screen: the payment is reversed after the screen read it — the server refuses Complete, nothing is announced, the order is re-read", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await waitFor(() => completeActionButton(), "Complete order (Next step)");
+    const [payment] = (
+      await f.db.query<{ id: string }>("select id from payments where order_id = $1", [orderId])
+    ).rows;
+    await f.reverse(payment!.id, ORG_A); // behind the screen's back: no longer paid
+    const before = await writeSurface();
+    await tapCompleteOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    const wrote = wroteSince(before, await writeSurface());
+    console.log(
+      `[evidence] stale Complete after reversal: server=[${outcomes.join(",")}] wrote=[${wrote}]`,
+    );
+    expect(outcomes[0]).toMatch(/^refused:/);
+    expect(wrote).toEqual([]);
+    expect((await orderState(orderId)).lifecycle).toBe("confirmed");
+    expect(notices()).not.toContain(en.order.completedNotice);
+    expect(dialog()).toBeNull();
+    // The re-read withdraws Complete: the order is no longer paid.
+    await waitFor(() => !completeActionButton(), "Complete withdrawn after the re-read");
+  });
+
+  it("stale screen: A's orders.update is revoked — Complete is refused by A's own permission (403), nothing written", async () => {
+    const orderId = await seedReadyToComplete();
+    await openOrderDetail(orderId);
+    await waitFor(() => completeActionButton(), "Complete order (Next step)");
+    grants.get(USER_A)!.delete("orders.update");
+    const before = await writeSurface();
+    await tapCompleteOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    expect(outcomes[0]).toBe("refused:403");
+    expect(wroteSince(before, await writeSurface())).toEqual([]);
+    expect(notices()).not.toContain(en.order.completedNotice);
+  });
+});
+
+describe("Order detail: the custody guard's cancellation refusal reaches the merchant", () => {
+  it("handed over at the counter after the screen read it: Cancel is refused (goods_with_customer), no stock returns, the reason is shown and Cancel is withdrawn", async () => {
+    const orderId = await seedConfirmed();
+    await openOrderDetail(orderId);
+    await waitFor(() => button(en.order.cancel), "Cancel order");
+    await handOverAtCounter(orderId); // behind the screen's back
+    const before = await writeSurface();
+    await tapCancelOrder();
+    await waitFor(() => outcomes.length === 1, "the server's answer");
+    const wrote = wroteSince(before, await writeSurface());
+    const s = await orderState(orderId);
+    console.log(
+      `[evidence] stale Cancel after hand-over: server=[${outcomes.join(",")}] wrote=[${wrote}]`,
+    );
+    expect(outcomes[0]).toBe("refused:order_cancel_goods_with_customer");
+    expect(wrote).toEqual([]);
+    expect(s.lifecycle).toBe("confirmed");
+    expect(s.movements.filter((m) => m.quantity_delta > 0)).toEqual([]); // nothing restocked
+    expect(text()).toContain(en.order.error.cancelBlocked.title);
+    expect(text()).toContain(en.order.error.cancelBlocked.goods_with_customer);
+    expect(notices()).not.toContain(en.order.cancelledNotice);
+    // The sheet closes so the reason is visible; its submit would be refused again.
+    await waitFor(() => dialog() === null, "the cancel sheet closed");
+    await waitFor(() => !button(en.order.cancel), "Cancel withdrawn after the re-read");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1902,6 +2062,44 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     );
     expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
     expect(new Set(paymentKeys()).size).toBe(1); // the same key: a replay, not a second payment
+    expectOnePaymentByA(after, 12345);
+  });
+
+  it("opened from the Next step panel, A → B → A while A's submit is still in flight: the retry reuses A's key, so the late original and the retry are one payment", async () => {
+    const nextStep = () =>
+      [...document.querySelectorAll("section")].find(
+        (el) => el.querySelector("h2")?.textContent?.trim() === en.order.next.title,
+      ) ?? null;
+    const openFromNextStep = async () => {
+      await waitFor(
+        () => nextStep() && button(en.order.next.action.record_payment, nextStep()!),
+        "Next step: Record payment",
+      );
+      await click(
+        button(en.order.next.action.record_payment, nextStep()!),
+        "Next step: Record payment",
+      );
+      await typeInto(document.querySelector("#order-payment-amount"), PRIVATE_AMOUNT);
+      await typeInto(document.querySelector("#order-payment-reference"), PRIVATE_REF);
+    };
+    const orderId = await seedConfirmed();
+    await handOverAtCounter(orderId); // goods with the customer, unpaid: the panel offers Record payment
+    await openOrderDetail(orderId);
+    await openFromNextStep();
+    holdDispatchNext.add("payment"); // left the screen as A, not yet at the server
+    await submitPaymentSheet();
+    await switchTo({ user: USER_B });
+    await switchTo({ user: USER_A });
+    await openFromNextStep(); // the order still reads unpaid: A re-enters the payment
+    await releaseDispatch(); // A's original lands now, as A
+    await submitPaymentSheet("Record payment (A's retry from Next step)");
+    await waitFor(() => outcomesOf("payment").length === 2, "A's retry");
+    const after = await orderState(orderId);
+    console.log(
+      `[evidence] Next step retry during in-flight submit: outcomes=[${outcomesOf("payment")}] keys=${JSON.stringify(paymentKeys())} payments=${after.payments.length}`,
+    );
+    expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
+    expect(new Set(paymentKeys()).size).toBe(1); // the parked key came back: a replay
     expectOnePaymentByA(after, 12345);
   });
 
