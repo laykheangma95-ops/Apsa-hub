@@ -485,6 +485,8 @@ export interface Message {
   body: string;
   at: string;
   state?: DeliveryState;
+  /** Production path only: what the provider delivered (a photo with no caption has an empty body). */
+  messageType?: "text" | "image" | "video" | "audio" | "file" | "system";
 }
 
 export type ConversationStatus =

@@ -64,6 +64,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   listConversationCountsFn: { reason: "count read" },
   getConversationDetailFn: { reason: "detail read" },
   listConversationMessagesFn: { reason: "list read" },
+  listChannelConnectionsFn: { reason: "list read" },
   findCustomerConversationFn: { reason: "lookup read" },
   getCustomer360Fn: { reason: "detail read" },
   getCustomerInsightsFn: { reason: "derived purchase-profile read (migration 060)" },

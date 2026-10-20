@@ -96,7 +96,7 @@ export interface ConversationListPage {
   nextCursor: string | null;
 }
 
-function toMessageSummary(row: MessageRow): ConversationMessageSummary {
+export function toMessageSummary(row: MessageRow): ConversationMessageSummary {
   const summary: ConversationMessageSummary = {
     id: row.id,
     direction: row.direction,

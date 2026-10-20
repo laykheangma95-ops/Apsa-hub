@@ -763,7 +763,9 @@ describe("No migration was required, and the schema says why", () => {
     // table authority hardening — a GRANT/REVOKE-only security fix), and 062
     // (financial replay identity, refund idempotency and audit atomicity — the
     // PR #121 security repair), and 063 (order cancellation custody guard —
-    // Orders P1 cancellation safety); anything from 064 up would be new.
-    expect(migrations.filter((f) => /^06[4-9]|^0[7-9]\d/.test(f))).toEqual([]);
+    // Orders P1 cancellation safety), and 064 (Telegram channel connections and
+    // its first-contact Customer creation — the Telegram provider phase, not
+    // this search phase); anything from 065 up would be new.
+    expect(migrations.filter((f) => /^06[5-9]|^0[7-9]\d/.test(f))).toEqual([]);
   });
 });

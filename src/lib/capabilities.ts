@@ -25,9 +25,19 @@
  * create a UI-only gate that pretends to be authorization.
  */
 export const UI_PERMISSION_KEYS = [
-  // Inbox / conversations — src/server/conversations/service.ts
+  // Inbox / conversations — src/server/conversations/service.ts; messages.reply
+  // is also what sendConversationReply requires (src/server/channels/service.ts).
   "messages.read",
   "messages.reply",
+  // Messaging channels — src/server/channels/service.ts. listChannelConnections
+  // requires integrations.read, connectTelegramBot integrations.connect and
+  // disconnectChannel integrations.disconnect; migration 064 seeds them per
+  // PERMISSIONS_MATRIX.md §25 (connect/disconnect: Owner only).
+  // integrations.view_health is deliberately NOT here: the server omits the
+  // health fields itself rather than trusting the browser to hide them.
+  "integrations.read",
+  "integrations.connect",
+  "integrations.disconnect",
   // Orders — src/server/orders/service.ts (confirm/cancel via the lifecycle
   // transition map in src/server/orders/state-machine.ts)
   "orders.read",

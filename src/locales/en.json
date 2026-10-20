@@ -827,6 +827,20 @@
       "attachmentBody": "Sending photos is not in the app yet.",
       "paymentBody": "Record or check payment on {{code}}.",
       "deliveryBody": "Arrange or track delivery for {{code}}."
+    },
+    "replyError": {
+      "blocked_by_user": "Not delivered: this customer has blocked your bot. Tap Send to try again.",
+      "chat_not_found": "Not delivered: Telegram can't find this chat anymore.",
+      "channel_unavailable": "This channel is no longer connected. Reconnect it in Settings to reply.",
+      "rate_limited": "You're sending too fast. Wait a moment, then tap Send again.",
+      "principal_changed": "You switched account or business. Reload the page, then send again.",
+      "generic": "Not delivered. Tap Send to try again."
+    },
+    "media": {
+      "image": "Photo",
+      "video": "Video",
+      "audio": "Voice message",
+      "file": "File"
     }
   },
   "createOrder": {
@@ -1786,7 +1800,8 @@
       "business": "Business",
       "personal": "Personal",
       "securityAccess": "Security & Access",
-      "security": "Security"
+      "security": "Security",
+      "channels": "Messaging channels"
     },
     "business": {
       "rowLabel": "Business Profile",
@@ -1831,6 +1846,51 @@
       "signOutConfirmAction": "Sign out",
       "signingOut": "Signing out…",
       "signOutError": "Could not sign you out. Check your connection and try again."
+    },
+    "channels": {
+      "telegram": {
+        "label": "Telegram",
+        "sheetDescription": "Customers message your Telegram bot; you read and reply in the APSA Inbox.",
+        "notConnected": "Not connected",
+        "connectedAs": "Connected · {{handle}}",
+        "unavailable": "Status unavailable",
+        "errorTitle": "Couldn't load your Telegram connection",
+        "errorBody": "Check your connection and try again.",
+        "bot": "Bot",
+        "handle": "Username",
+        "status": "Status",
+        "statusValue": {
+          "connected": "Connected",
+          "error": "Needs attention",
+          "disconnected": "Disconnected"
+        },
+        "lastInbound": "Last customer message",
+        "never": "None yet",
+        "step1": "In Telegram, open @BotFather and send /newbot.",
+        "step2": "Choose your shop's bot name and username.",
+        "step3": "Copy the token BotFather gives you and paste it below.",
+        "tokenLabel": "Bot token",
+        "connect": "Connect Telegram",
+        "connecting": "Connecting…",
+        "connected": "Telegram is connected. New messages will appear in your Inbox.",
+        "ownerOnly": "Only the business owner can connect a channel.",
+        "disconnect": "Disconnect Telegram",
+        "disconnectConfirmBody": "New Telegram messages will stop arriving in APSA and you won't be able to reply from here. Your past conversations stay.",
+        "disconnectAction": "Disconnect",
+        "disconnected": "Telegram is disconnected.",
+        "disconnectError": "Telegram could not be disconnected. Try again.",
+        "connectError": {
+          "invalid_token": "That doesn't look like a valid bot token. Copy it again from @BotFather.",
+          "not_a_bot": "This token doesn't belong to a bot. Create a bot with @BotFather.",
+          "account_in_use": "This bot is already connected to another APSA business.",
+          "webhook_url_unavailable": "APSA isn't set up to receive Telegram messages on this site yet. Contact support.",
+          "webhook_failed": "Telegram didn't accept the connection. Try again in a moment.",
+          "credential_unavailable": "APSA can't store this connection securely right now. Contact support.",
+          "provider_unavailable": "Telegram didn't respond. Try again in a moment.",
+          "rate_limited": "Too many attempts. Wait a while and try again.",
+          "generic": "The bot could not be connected. Try again."
+        }
+      }
     }
   },
   "capability": {

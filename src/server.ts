@@ -3,6 +3,7 @@ import "./lib/error-capture";
 import { consumeCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { healthResponse, isHealthRequest } from "./lib/health";
+import { isTelegramWebhookRequest } from "./server/channels/telegram/paths";
 import { missingServerEnv } from "./server/observability/env-check";
 import { reportServerError } from "./server/observability/errors";
 import { serverLog } from "./server/observability/logger";
@@ -74,6 +75,12 @@ export default {
     // log line, and its capture slot holds only this request's swallowed error.
     return runWithRequestContext({ requestId: newRequestId(), capture: {} }, async () => {
       try {
+        // Provider webhooks never reach the app router: no session, no SSR,
+        // no server-function CSRF — their own secret is the only credential.
+        if (isTelegramWebhookRequest(request)) {
+          const { handleTelegramWebhook } = await import("./server/channels/telegram/webhook");
+          return await handleTelegramWebhook(request);
+        }
         const handler = await getServerEntry();
         const response = await handler.fetch(request, env, ctx);
         return await normalizeCatastrophicSsrResponse(response);

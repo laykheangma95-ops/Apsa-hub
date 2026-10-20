@@ -19,6 +19,7 @@ import {
 import { OperationalState } from "@/components/common/OperationalState";
 import { Button } from "@/components/ui/button";
 import { EditBusinessProfileSheet } from "@/components/settings/EditBusinessProfileSheet";
+import { TelegramChannelRow } from "@/components/settings/TelegramChannelRow";
 import { getOrganizationProfileFn } from "@/api/org";
 import { getAccountProfileFn, signOutFn } from "@/api/auth";
 import { useCapabilities } from "@/hooks/use-capabilities";
@@ -315,6 +316,9 @@ function SettingsScreen() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const capabilities = useCapabilities();
+  // The /app guard's server-derived principal — the channel list cache key.
+  const { session, organizationId } = Route.useRouteContext();
 
   const [securityOpen, setSecurityOpen] = useState(false);
   const [signOutOpen, setSignOutOpen] = useState(false);
@@ -368,6 +372,12 @@ function SettingsScreen() {
           <BusinessProfileRow />
           <TeamRow />
         </Section>
+
+        {capabilities.can("integrations.read") ? (
+          <Section title={t("settings.section.channels")} variant="plain" bodyClassName="space-y-2">
+            <TelegramChannelRow userId={session.userId} organizationId={organizationId} />
+          </Section>
+        ) : null}
 
         <Section title={t("settings.section.personal")} variant="plain" bodyClassName="space-y-2">
           <AccountProfileRow />

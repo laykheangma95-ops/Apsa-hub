@@ -38,6 +38,8 @@ import {
   getMostRecentRealOrderForCustomer,
   getProducts,
   isProductionId,
+  REPLYABLE_CHANNELS,
+  sendRealConversationReply,
 } from "@/api/inbox";
 import {
   buildSmartActionSuggestion,
@@ -48,6 +50,7 @@ import {
   type PrepareOrderItemInput,
   type SmartActionId,
 } from "@/lib/conversation/smart-actions";
+import { classifyReplyError, type ReplyErrorKind } from "@/lib/conversation/reply-errors";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { customerKeys } from "@/lib/customers-query";
 import { conversationKeys } from "@/lib/inbox-query";
@@ -99,6 +102,9 @@ const STATUSES: ConversationStatus[] = [
 ];
 
 const SAVED_REPLY_KEYS = ["greeting", "price", "stock", "delivery"] as const;
+
+/** Provider media the thread labels (the file itself is not fetched yet). */
+const MEDIA_TYPES: ReadonlySet<string> = new Set(["image", "video", "audio", "file"]);
 
 function ConversationScreen() {
   const { id } = Route.useParams();
@@ -171,6 +177,15 @@ function ConversationScreen() {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [prepareOpen, setPrepareOpen] = useState(false);
   const [prepareItems, setPrepareItems] = useState<PrepareOrderItemInput[]>([]);
+  const [sendingReply, setSendingReply] = useState(false);
+  const [replyError, setReplyError] = useState<ReplyErrorKind | null>(null);
+  /*
+   * The identity of the reply being sent. A retry of the SAME text in the
+   * same thread, by the same member, reuses its key, so the server never
+   * sends it twice (migration 064 begin_outbound_message); any other text,
+   * thread or principal starts a new submission.
+   */
+  const replyAttemptRef = useRef<{ scope: string; body: string; key: string } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const conversationQuery = useQuery({
@@ -215,6 +230,15 @@ function ConversationScreen() {
   ];
   const currentStatus = status ?? conversation?.status ?? "needs_reply";
 
+  /*
+   * Whether this thread's channel can be answered from APSA today (Telegram).
+   * Presentation only: the server refuses a reply into a conversation with no
+   * live connection, whatever this says.
+   */
+  const replyAvailable =
+    !isProductionId(id) ||
+    (conversation !== undefined && REPLYABLE_CHANNELS.has(conversation.channel));
+
   // Deterministic, client-side only — never a security decision (§
   // SECURITY / TENANT ISOLATION: "intent/suggestion layer is never
   // security-authoritative"). Every action it names still goes through the
@@ -238,17 +262,17 @@ function ConversationScreen() {
   // strip. The engine still runs the same way — only the offer narrows.
   //
   // Reply-only actions ("Check stock", "Send price", …) are then dropped too
-  // on a production conversation: outbound sending is not wired up for any
-  // provider channel yet (the composer disables its own submit for the same
-  // reason), so offering a chip that only fills the composer with no way to
+  // on a production conversation whose channel cannot be answered from APSA
+  // yet (every channel but Telegram — the composer disables its own submit
+  // for the same reason): a chip that only fills the composer with no way to
   // send it promises something the screen cannot deliver.
   const suggestion = useMemo(
     () =>
       filterUnsendableSmartActions(
         filterSmartActionSuggestion(rawSuggestion, capabilities),
-        !isProductionId(id),
+        replyAvailable,
       ),
-    [rawSuggestion, capabilities, id],
+    [rawSuggestion, capabilities, replyAvailable],
   );
 
   useEffect(() => {
@@ -260,6 +284,8 @@ function ConversationScreen() {
     setDraft("");
     setLastOrder(null);
     setActionsOpen(false);
+    setReplyError(null);
+    replyAttemptRef.current = null;
   }, [id]);
 
   /*
@@ -348,6 +374,10 @@ function ConversationScreen() {
     setAppended((list) => [...list, message]);
   }
 
+  /*
+   * Production saved replies and Smart Actions only fill the composer: the
+   * merchant reads what will go to the customer, then taps Send.
+   */
   function send(body: string) {
     if (isProductionId(id)) {
       setDraft(body);
@@ -363,6 +393,45 @@ function ConversationScreen() {
       state: "sent",
     });
     setDraft("");
+  }
+
+  async function deliverReply(raw: string) {
+    const body = raw.trim();
+    if (!body || sendingReply || !replyAvailable || !canReply) return;
+    const scope = `${userId}\u0000${routeOrganizationId}\u0000${id}`;
+    const previous = replyAttemptRef.current;
+    const key =
+      previous && previous.scope === scope && previous.body === body
+        ? previous.key
+        : crypto.randomUUID();
+    replyAttemptRef.current = { scope, body, key };
+    setSendingReply(true);
+    setReplyError(null);
+    try {
+      const result = await sendRealConversationReply({
+        conversationId: id,
+        clientMessageId: key,
+        body,
+        expectedPrincipal: { userId, organizationId: routeOrganizationId },
+      });
+      if (activeIdRef.current !== id) return;
+      append(result.message);
+      void queryClient.invalidateQueries({
+        queryKey: conversationKeys.principal(userId, routeOrganizationId),
+      });
+      if (result.deliveryError) {
+        // Keep the draft and its key: tapping Send again retries THIS reply.
+        setReplyError(classifyReplyError(result.deliveryError));
+        return;
+      }
+      replyAttemptRef.current = null;
+      setDraft("");
+    } catch (error) {
+      if (activeIdRef.current !== id) return;
+      setReplyError(classifyReplyError(error));
+    } finally {
+      setSendingReply(false);
+    }
   }
 
   /**
@@ -570,7 +639,17 @@ function ConversationScreen() {
         ) : null}
         <div className="space-y-2">
           {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
+            <MessageBubble
+              key={message.id}
+              message={message}
+              attachment={
+                message.messageType && MEDIA_TYPES.has(message.messageType) ? (
+                  <span className="text-caption opacity-80">
+                    {t(`conversation.media.${message.messageType}`)}
+                  </span>
+                ) : undefined
+              }
+            />
           ))}
         </div>
         <div ref={endRef} />
@@ -601,9 +680,15 @@ function ConversationScreen() {
           >
             {t("capability.actionDenied")}
           </p>
-        ) : isProductionId(id) ? (
+        ) : !replyAvailable ? (
           <p className="text-caption px-4 pt-2 text-text-secondary">
             {t("conversation.providerPending")}
+          </p>
+        ) : null}
+
+        {replyError ? (
+          <p role="alert" className="text-caption px-4 pt-2 text-status-danger-text">
+            {t(`conversation.replyError.${replyError}`)}
           </p>
         ) : null}
 
@@ -611,7 +696,8 @@ function ConversationScreen() {
           className="flex items-end gap-1.5 px-3 pt-2"
           onSubmit={(event) => {
             event.preventDefault();
-            send(draft);
+            if (isProductionId(id)) void deliverReply(draft);
+            else send(draft);
           }}
         >
           <button
@@ -647,7 +733,8 @@ function ConversationScreen() {
           <button
             type="submit"
             aria-label={t("conversation.send")}
-            disabled={!canReply || isProductionId(id) || draft.trim().length === 0}
+            aria-busy={sendingReply}
+            disabled={!canReply || !replyAvailable || sendingReply || draft.trim().length === 0}
             className="press-tactile tap-target flex shrink-0 items-center justify-center rounded-full bg-action-primary px-4 text-text-on-action disabled:opacity-40"
           >
             <Send className="size-5" aria-hidden />
@@ -701,11 +788,11 @@ function ConversationScreen() {
             description={
               !canReply
                 ? t("capability.actionDenied")
-                : isProductionId(id)
+                : !replyAvailable
                   ? t("conversation.providerPending")
                   : t("conversation.actions.savedRepliesBody")
             }
-            disabled={!canReply || isProductionId(id)}
+            disabled={!canReply || !replyAvailable}
             onClick={() => {
               setActionsOpen(false);
               setSavedOpen(true);
