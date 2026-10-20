@@ -363,6 +363,60 @@ describe("begin / complete_outbound_message", () => {
     expect(health.rows[0]!.last_error_code).toBe("provider_timeout");
   });
 
+  it("a reply stuck in 'sending' over 2 minutes is failed as send_stuck and may be retried", async () => {
+    const fresh = await begin(crypto.randomUUID(), "still sending");
+    const key = crypto.randomUUID();
+    const stuck = await begin(key, "stuck reply");
+    expect(stuck.message.metadata as Row).toHaveProperty("sending_since");
+    await db.query(
+      `update messages set metadata = metadata || jsonb_build_object('sending_since', now() - interval '3 minutes') where id = $1`,
+      [stuck.message.id],
+    );
+    const swept = await db.query<{ n: number }>("select fail_stuck_outbound_messages($1,$2) as n", [
+      org,
+      conversationId,
+    ]);
+    expect(swept.rows[0]!.n).toBe(1);
+    const rows = await db.query<Row>(
+      "select id, state, metadata from messages where id = any($1)",
+      [[stuck.message.id, fresh.message.id]],
+    );
+    const byId = new Map(rows.rows.map((row) => [row.id, row]));
+    expect(byId.get(stuck.message.id)).toMatchObject({ state: "failed" });
+    expect((byId.get(stuck.message.id)!.metadata as Row).send_error).toBe("send_stuck");
+    expect(byId.get(fresh.message.id)).toMatchObject({ state: "sending" });
+    // Another tenant cannot sweep this conversation.
+    const other = await db.query<{ n: number }>("select fail_stuck_outbound_messages($1,$2) as n", [
+      orgB,
+      conversationId,
+    ]);
+    expect(other.rows[0]!.n).toBe(0);
+
+    // The retry button re-sends under the same key; send_error is cleared.
+    const retry = await begin(key, "stuck reply");
+    expect(retry.should_send).toBe(true);
+    expect(retry.message).toMatchObject({ state: "sending" });
+    expect(retry.message.metadata as Row).not.toHaveProperty("send_error");
+  });
+
+  it("a send that finishes after it was marked send_stuck still records the truth", async () => {
+    const stuck = await begin(crypto.randomUUID(), "late reply");
+    await db.query(
+      `update messages set metadata = metadata || jsonb_build_object('sending_since', now() - interval '3 minutes') where id = $1`,
+      [stuck.message.id],
+    );
+    await db.query("select fail_stuck_outbound_messages($1,$2)", [org, conversationId]);
+    const late = await call("complete_outbound_message", [
+      org,
+      stuck.message.id,
+      connectionId,
+      true,
+      "993",
+      null,
+    ]);
+    expect(late).toMatchObject({ state: "sent" });
+  });
+
   it("the same key with a different body is stale_state", async () => {
     const key = crypto.randomUUID();
     await begin(key, "first");
@@ -413,6 +467,11 @@ describe("browser roles", () => {
         expect(
           await errorOf(
             db.query("select begin_outbound_message($1,$1,$1,$1,'x')", [crypto.randomUUID()]),
+          ),
+        ).toContain("permission denied");
+        expect(
+          await errorOf(
+            db.query("select fail_stuck_outbound_messages($1,$1)", [crypto.randomUUID()]),
           ),
         ).toContain("permission denied");
       } finally {

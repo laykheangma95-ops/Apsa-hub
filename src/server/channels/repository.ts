@@ -176,6 +176,19 @@ export async function beginOutboundMessage(input: {
   return data as OutboundClaim;
 }
 
+/** Marks this conversation's replies stuck in 'sending' for over 2 minutes as failed ('send_stuck'). */
+export async function failStuckOutboundMessages(
+  organizationId: string,
+  conversationId: string,
+): Promise<number> {
+  const { data, error } = await db.rpc("fail_stuck_outbound_messages", {
+    p_org: organizationId,
+    p_conversation: conversationId,
+  });
+  if (error) throw channelDatabaseError(error);
+  return Number(data ?? 0);
+}
+
 export async function completeOutboundMessage(input: {
   organizationId: string;
   messageId: string;

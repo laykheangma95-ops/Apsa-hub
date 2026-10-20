@@ -18,7 +18,7 @@ import {
 import { TelegramApiError, TelegramBotApi } from "@/server/channels/telegram/api";
 import { telegramWebhookUrl } from "@/server/channels/service";
 import { isTelegramWebhookRequest } from "@/server/channels/telegram/paths";
-import { classifyReplyError } from "@/lib/conversation/reply-errors";
+import { classifyReplyError, replyMayHaveBeenSent } from "@/lib/conversation/reply-errors";
 import { classifyConnectError, looksLikeTelegramToken } from "@/lib/channels-view";
 
 const TOKEN = "7123456789:AAH-test_token_value_0123456789abcdefXYZ";
@@ -245,6 +245,16 @@ describe("browser refusal copy", () => {
       ),
     ).toBe("principal_changed");
     expect(classifyReplyError(new Error("Something went wrong on the server."))).toBe("generic");
+  });
+
+  it("flags only failures that may have reached Telegram anyway", () => {
+    expect(classifyReplyError("send_stuck")).toBe("send_stuck");
+    expect(replyMayHaveBeenSent("send_stuck")).toBe(true);
+    expect(replyMayHaveBeenSent("provider_unavailable")).toBe(true);
+    expect(replyMayHaveBeenSent("unknown")).toBe(true);
+    expect(replyMayHaveBeenSent("blocked_by_user")).toBe(false);
+    expect(replyMayHaveBeenSent("channel_unavailable")).toBe(false);
+    expect(replyMayHaveBeenSent(undefined)).toBe(false);
   });
 
   it("classifies connect refusals and pre-checks the token shape", () => {

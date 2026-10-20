@@ -50,7 +50,11 @@ import {
   type PrepareOrderItemInput,
   type SmartActionId,
 } from "@/lib/conversation/smart-actions";
-import { classifyReplyError, type ReplyErrorKind } from "@/lib/conversation/reply-errors";
+import {
+  classifyReplyError,
+  replyMayHaveBeenSent,
+  type ReplyErrorKind,
+} from "@/lib/conversation/reply-errors";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { customerKeys } from "@/lib/customers-query";
 import { conversationKeys } from "@/lib/inbox-query";
@@ -102,6 +106,12 @@ const STATUSES: ConversationStatus[] = [
 ];
 
 const SAVED_REPLY_KEYS = ["greeting", "price", "stock", "delivery"] as const;
+
+/** A staff reply's stored key: 'apsa:<the composer's client uuid>' (migration 064). */
+const REPLY_KEY_RE = /^apsa:([0-9a-f-]{36})$/;
+
+/** While a reply shows "sending", re-read the thread so a stuck one turns failed (server: 2 minutes). */
+const SENDING_REFETCH_MS = 30_000;
 
 /** Provider media the thread labels (the file itself is not fetched yet). */
 const MEDIA_TYPES: ReadonlySet<string> = new Set(["image", "video", "audio", "file"]);
@@ -186,11 +196,17 @@ function ConversationScreen() {
    * thread or principal starts a new submission.
    */
   const replyAttemptRef = useRef<{ scope: string; body: string; key: string } | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const conversationQuery = useQuery({
     queryKey: conversationKeys.detail(userId, routeOrganizationId, id),
     queryFn: () => getConversation(id),
+    refetchInterval: (query) =>
+      isProductionId(id) &&
+      query.state.data?.messages.some((m) => m.direction === "outbound" && m.state === "sending")
+        ? SENDING_REFETCH_MS
+        : false,
   });
   const conversation = conversationQuery.data;
 
@@ -434,6 +450,40 @@ function ConversationScreen() {
     }
   }
 
+  /*
+   * Retry a failed reply from its own bubble, under the key it was first sent
+   * with: the server re-sends only a 'failed' row, never a 'sending' or
+   * 'sent' one (begin_outbound_message).
+   */
+  async function retryReply(message: Message) {
+    const key = REPLY_KEY_RE.exec(message.providerMessageId ?? "")?.[1];
+    if (!key || retryingId || sendingReply || !canReply) return;
+    setRetryingId(message.id);
+    setReplyError(null);
+    try {
+      const result = await sendRealConversationReply({
+        conversationId: id,
+        clientMessageId: key,
+        body: message.body,
+        expectedPrincipal: { userId, organizationId: routeOrganizationId },
+      });
+      if (activeIdRef.current !== id) return;
+      append(result.message);
+      void queryClient.invalidateQueries({
+        queryKey: conversationKeys.principal(userId, routeOrganizationId),
+      });
+      if (!result.deliveryError && replyAttemptRef.current?.key === key) {
+        replyAttemptRef.current = null;
+        setDraft("");
+      }
+    } catch (error) {
+      if (activeIdRef.current !== id) return;
+      setReplyError(classifyReplyError(error));
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   /**
    * The one place the chat→order flow starts, wherever it is triggered from.
    * Production threads go through Prepare Order (a review step the merchant
@@ -638,19 +688,54 @@ function ConversationScreen() {
           </div>
         ) : null}
         <div className="space-y-2">
-          {messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              attachment={
-                message.messageType && MEDIA_TYPES.has(message.messageType) ? (
-                  <span className="text-caption opacity-80">
-                    {t(`conversation.media.${message.messageType}`)}
-                  </span>
-                ) : undefined
-              }
-            />
-          ))}
+          {messages.flatMap((message) => {
+            const bubble = (
+              <MessageBubble
+                key={message.id}
+                message={message}
+                attachment={
+                  message.messageType && MEDIA_TYPES.has(message.messageType) ? (
+                    <span className="text-caption opacity-80">
+                      {t(`conversation.media.${message.messageType}`)}
+                    </span>
+                  ) : undefined
+                }
+              />
+            );
+            const retryable =
+              isProductionId(id) &&
+              message.direction === "outbound" &&
+              message.state === "failed" &&
+              REPLY_KEY_RE.test(message.providerMessageId ?? "");
+            if (!retryable) return [bubble];
+            return [
+              bubble,
+              <div
+                key={`${message.id}-failed`}
+                className="flex flex-col items-end gap-1 pl-[22%] text-right"
+              >
+                <p className="text-caption text-status-danger-text">
+                  {t(`conversation.replyError.${classifyReplyError(message.sendError ?? "")}`)}
+                </p>
+                {replyMayHaveBeenSent(message.sendError) ? (
+                  <p className="text-caption text-text-secondary">
+                    {t("conversation.mayHaveBeenSent")}
+                  </p>
+                ) : null}
+                {canReply ? (
+                  <button
+                    type="button"
+                    onClick={() => void retryReply(message)}
+                    disabled={retryingId !== null || sendingReply}
+                    aria-busy={retryingId === message.id}
+                    className="text-caption tap-target rounded-full px-3 font-medium text-action-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary disabled:opacity-40"
+                  >
+                    {t("conversation.retrySend")}
+                  </button>
+                ) : null}
+              </div>,
+            ];
+          })}
         </div>
         <div ref={endRef} />
       </div>

@@ -834,8 +834,11 @@
       "channel_unavailable": "This channel is no longer connected. Reconnect it in Settings to reply.",
       "rate_limited": "You're sending too fast. Wait a moment, then tap Send again.",
       "principal_changed": "You switched account or business. Reload the page, then send again.",
+      "send_stuck": "Not delivered: sending took too long and was stopped.",
       "generic": "Not delivered. Tap Send to try again."
     },
+    "mayHaveBeenSent": "It may have been sent — check Telegram before retrying.",
+    "retrySend": "Retry",
     "media": {
       "image": "Photo",
       "video": "Video",

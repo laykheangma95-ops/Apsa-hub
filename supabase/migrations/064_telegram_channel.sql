@@ -17,6 +17,7 @@
 --          public.connect_channel_account (NEW), public.disconnect_channel_account (NEW),
 --          public.ingest_telegram_inbound (NEW),
 --          public.begin_outbound_message (NEW), public.complete_outbound_message (NEW),
+--          public.fail_stuck_outbound_messages (NEW),
 --          public.permissions / public.role_permissions (rows only)
 --
 -- ADDITIVE ONLY. No existing table, function, policy or grant is changed.
@@ -319,9 +320,35 @@ $$;
 --                            A retry of a reply that is 'sending' or 'sent'
 --                            gets the stored row and must not send again.
 --   complete_outbound_message records the provider outcome, only from
---                            'sending'.
+--                            'sending' (or from a 'send_stuck' failure, so a
+--                            send that finished late still records the truth).
+--   fail_stuck_outbound_messages marks a reply 'sending' for over 2 minutes
+--                            (its sender died mid-send) as failed with
+--                            'send_stuck', so the composer can offer a retry.
 -- Both hold the conversation row lock, so concurrent identical submissions
 -- serialize and exactly one is told to send.
+
+CREATE FUNCTION public.fail_stuck_outbound_messages(
+  p_org          UUID,
+  p_conversation UUID
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_count INTEGER;
+BEGIN
+  UPDATE messages SET
+    state = 'failed'::message_state,
+    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('send_error', 'send_stuck')
+  WHERE organization_id = p_org AND conversation_id = p_conversation
+    AND direction = 'outbound' AND state = 'sending'
+    AND COALESCE((metadata->>'sending_since')::timestamptz, created_at) < now() - interval '2 minutes';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
 
 CREATE FUNCTION public.begin_outbound_message(
   p_org          UUID,
@@ -360,6 +387,8 @@ BEGIN
       AND status <> 'disconnected';
   IF NOT FOUND THEN RAISE EXCEPTION 'channel_unavailable'; END IF;
 
+  PERFORM fail_stuck_outbound_messages(p_org, p_conversation);
+
   SELECT * INTO v_message FROM messages
     WHERE organization_id = p_org AND conversation_id = p_conversation AND provider_message_id = v_ref;
 
@@ -368,13 +397,18 @@ BEGIN
     IF v_message.body IS DISTINCT FROM p_body OR v_message.sender_user_id IS DISTINCT FROM p_actor
        OR v_message.direction <> 'outbound' THEN RAISE EXCEPTION 'stale_state'; END IF;
     IF v_message.state = 'failed' THEN
-      UPDATE messages SET state = 'sending' WHERE id = v_message.id RETURNING * INTO v_message;
+      UPDATE messages SET state = 'sending',
+          metadata = (COALESCE(metadata, '{}'::jsonb) - 'send_error')
+            || jsonb_build_object('sending_since', now())
+        WHERE id = v_message.id RETURNING * INTO v_message;
       v_send := true;
     END IF;
   ELSE
     v_message := ingest_conversation_message(p_org, p_conversation, v_ref, 'outbound', 'staff',
       p_body, now(), p_actor, NULL, 'text', NULL);
-    UPDATE messages SET state = 'sending' WHERE id = v_message.id RETURNING * INTO v_message;
+    UPDATE messages SET state = 'sending',
+        metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('sending_since', now())
+      WHERE id = v_message.id RETURNING * INTO v_message;
     v_send := true;
   END IF;
 
@@ -411,7 +445,8 @@ BEGIN
     metadata = COALESCE(metadata, '{}'::jsonb) || CASE WHEN p_sent
       THEN jsonb_build_object('telegram_message_id', p_provider_ref)
       ELSE jsonb_build_object('send_error', p_error_code) END
-  WHERE organization_id = p_org AND id = p_message AND direction = 'outbound' AND state = 'sending'
+  WHERE organization_id = p_org AND id = p_message AND direction = 'outbound'
+    AND (state = 'sending' OR (state = 'failed' AND metadata->>'send_error' = 'send_stuck'))
   RETURNING * INTO v_message;
   IF NOT FOUND THEN RAISE EXCEPTION 'stale_state'; END IF;
 
@@ -429,6 +464,7 @@ REVOKE ALL ON FUNCTION
   public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT),
   public.disconnect_channel_account(UUID, UUID, UUID),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB),
+  public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),
   public.complete_outbound_message(UUID, UUID, UUID, BOOLEAN, TEXT, TEXT)
   FROM PUBLIC, anon, authenticated;
@@ -436,6 +472,7 @@ GRANT EXECUTE ON FUNCTION
   public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT),
   public.disconnect_channel_account(UUID, UUID, UUID),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB),
+  public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),
   public.complete_outbound_message(UUID, UUID, UUID, BOOLEAN, TEXT, TEXT)
   TO service_role;

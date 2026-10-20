@@ -17,6 +17,7 @@ export type ReplyErrorKind =
   | "channel_unavailable"
   | "rate_limited"
   | "principal_changed"
+  | "send_stuck"
   | "generic";
 
 const KNOWN: ReadonlySet<string> = new Set([
@@ -24,7 +25,20 @@ const KNOWN: ReadonlySet<string> = new Set([
   "chat_not_found",
   "channel_unavailable",
   "rate_limited",
+  "send_stuck",
 ]);
+
+/*
+ * Failures where Telegram may have accepted the message before APSA heard
+ * back (a timeout, a dropped connection, a sender that died mid-send).
+ * Telegram's sendMessage is not idempotent, so a retry can duplicate it.
+ */
+const AMBIGUOUS: ReadonlySet<string> = new Set(["provider_unavailable", "unknown", "send_stuck"]);
+
+/** Whether a failed reply might have reached the customer anyway. */
+export function replyMayHaveBeenSent(code: string | undefined): boolean {
+  return code !== undefined && AMBIGUOUS.has(code);
+}
 
 const PRINCIPAL_CHANGED = /^The signed-in member or organization changed/;
 
