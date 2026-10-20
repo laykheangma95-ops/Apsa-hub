@@ -258,12 +258,6 @@ interface Check {
   /** A failure already present on main, outside #126: listed, never hidden. */
   known?: string;
 }
-/**
- * ProductRow (src/routes/app.products.tsx) is main's markup, unchanged by #126.
- * In the English UI a long Khmer name is not wrapped inside its column.
- */
-const KNOWN_LONG_KHMER_NAME =
-  "pre-existing on main (ProductRow unchanged by #126): long Khmer name overruns the price/row in the English UI";
 const checks: Check[] = [];
 const consoleErrors: string[] = [];
 /** The page in use, so a failure can leave its screenshot, URL and HTML behind. */
@@ -456,7 +450,6 @@ async function run() {
         "long name: every line of the Khmer name clears the price and the row edge",
         nameOverrun === "",
         nameOverrun,
-        KNOWN_LONG_KHMER_NAME,
       );
       await shot(page, lang, width, "list");
 

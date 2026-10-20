@@ -28,6 +28,8 @@
  *   I. No production mock/fallback path in the catalog data layer.
  *   J. No browser-boundary regression — no server-only import reachable from
  *      the new routes or components.
+ *   N. A Khmer product name wraps inside its row in either interface language
+ *      (geometry: catalog-khmer-name-fit.browser.ts).
  *
  * Run: bun test src/tests/product-catalog-ui.test.ts
  */
@@ -1939,5 +1941,47 @@ describe("Product detail does not reserve dead space for a nav it never renders"
   it('wraps its screen with bottom="none", matching Orders/Deliveries detail convention', () => {
     const detail = read(DETAIL_ROUTE);
     expect(detail).toMatch(/<ScreenBleed surface="raised" bottom="none">/);
+  });
+});
+
+/*
+ * N. A Khmer product name wraps inside its row in either interface language.
+ *
+ * In the English UI a long Khmer name kept `.chip-text`'s nowrap and painted
+ * across the price and out of the row (Chromium, Kantumruy Pro loaded: x=513
+ * in a row ending at 303 at 320px, the same at 360/390/430). The geometry is
+ * measured in catalog-khmer-name-fit.browser.ts against the built stylesheet,
+ * with this markup; these checks pin the markup and the rule it relies on, so
+ * neither can drift from the browser fixture silently.
+ */
+describe("N. a Khmer product name wraps inside its row in either interface language", () => {
+  const css = read("src/styles.css");
+  const rule = /\.text-label\[lang="km"\]\s*>\s*\.chip-text\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+
+  it("the stylesheet wraps Khmer label content by its own language, not the interface's", () => {
+    expect(rule).toMatch(/white-space:\s*normal/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).toMatch(/overflow:\s*visible/);
+    expect(rule).toMatch(/text-overflow:\s*clip/);
+    // Khmer-mode label line height, so wrapped lines keep their stacked marks.
+    expect(rule).toMatch(/line-height:\s*19px/);
+  });
+
+  it("ProductRow marks the name as Khmer content in the label the rule targets", () => {
+    expect(read(LIST_ROUTE)).toContain(
+      '<span className="text-label min-w-0 flex-1 text-text-primary" lang="km">\n          <span className="chip-text">{product.nameKm}</span>',
+    );
+  });
+
+  it("InventoryListRow marks the name the same way", () => {
+    expect(read("src/routes/app.inventory.tsx")).toContain(
+      '<span className="text-label min-w-0 text-text-primary" lang="km">\n          <span className="chip-text">{row.productNameKm}</span>',
+    );
+  });
+
+  it("the price keeps its own width beside the name", () => {
+    expect(read(LIST_ROUTE)).toContain(
+      '<span className="text-financial tnum shrink-0 text-text-primary">',
+    );
   });
 });
