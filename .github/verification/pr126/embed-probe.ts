@@ -38,7 +38,7 @@ const { provision } = (await import(path.resolve(checkout, "scripts/lib/local-po
   }>;
 };
 
-// src/server/auth/membership.ts MEMBERSHIP_CONTEXT_SELECT at f42c4ff.
+// src/server/auth/membership.ts MEMBERSHIP_CONTEXT_SELECT at f42c4ff and 5042656 (unchanged).
 const SELECT = "*, role:roles(*, role_permissions(permission:permissions(key)))";
 const CAPS = [40, 150, 1000];
 const ROLES = ["Owner", "Manager", "Cashier"];

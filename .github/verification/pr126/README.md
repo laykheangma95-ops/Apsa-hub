@@ -3,7 +3,7 @@
 `.github/workflows/pr126-verification.yml` runs PR #126's committed native
 PostgREST gate and mobile harness, unchanged, at one fixed commit:
 
-- target: `f42c4ff2d5e4ae80479f6712daf677fb367698e9` (checked out by SHA and
+- target: `5042656b8acf1f8389ed0ba8a6ff06bdf324e41e` (checked out by SHA and
   verified before any test; `47c8627e48bf179d0309d84fc06e3ba3d18f3f21` must be
   its ancestor)
 - trigger: `workflow_dispatch`, or `pull_request` on PR #133 only (same-repo

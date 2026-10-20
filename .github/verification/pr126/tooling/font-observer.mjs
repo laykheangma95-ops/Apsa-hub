@@ -44,7 +44,7 @@ const probe = () => {
 
 /**
  * The harness's own long-name check (scripts/products-mobile-harness.ts at
- * f42c4ff, "every line of the Khmer name clears the price and the row edge"),
+ * 5042656, "every line of the Khmer name clears the price and the row edge"),
  * repeated as-is at the `*-list.png` screenshot, i.e. moments later on the same
  * page with nothing done in between. The harness's verdict is untouched; this
  * records what the same check reads once the page's fonts have had that time.

@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TARGET_SHA: f42c4ff2d5e4ae80479f6712daf677fb367698e9
+  TARGET_SHA: 5042656b8acf1f8389ed0ba8a6ff06bdf324e41e
   EXPECTED_MAIN: 47c8627e48bf179d0309d84fc06e3ba3d18f3f21
   # As .github/workflows/ci.yml on main.
   BUN_VERSION: "1.4.2"

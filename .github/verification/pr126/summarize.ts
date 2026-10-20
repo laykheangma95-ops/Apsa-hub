@@ -32,7 +32,7 @@ const sections: { name: string; verdict: Verdict; reasons: string[] }[] = [];
 const md: string[] = [];
 
 /**
- * Each case in src/tests/products-catalog-postgrest.test.ts at f42c4ff, by the
+ * Each case in src/tests/products-catalog-postgrest.test.ts at 5042656, by the
  * authorization context it runs under (static reading of the file):
  * - FIXTURE: ctxFor(org) — require() is a no-op and can() is always true; the
  *   organization id is handed in. It shows pagination/search over real
