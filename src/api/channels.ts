@@ -53,21 +53,29 @@ export const listChannelConnectionsFn = createServerFn().handler(async () => {
 // ── connectTelegramBotFn ──────────────────────────────────────────────────────
 
 export const connectTelegramBotFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => z.object({ token: z.string().min(1).max(200) }).parse(data))
+  .validator((data: unknown) =>
+    z
+      .object({ token: z.string().min(1).max(200), expectedPrincipal: expectedPrincipalSchema })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { connectTelegramBot } = await import("@/server/channels/service");
-    return connectTelegramBot(authCtx, data.token);
+    return connectTelegramBot(authCtx, data.token, data.expectedPrincipal);
   });
 
 // ── disconnectChannelFn ───────────────────────────────────────────────────────
 
 export const disconnectChannelFn = createServerFn({ method: "POST" })
-  .validator((data: unknown) => z.object({ connectionId: z.string().uuid() }).parse(data))
+  .validator((data: unknown) =>
+    z
+      .object({ connectionId: z.string().uuid(), expectedPrincipal: expectedPrincipalSchema })
+      .parse(data),
+  )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { disconnectChannel } = await import("@/server/channels/service");
-    return disconnectChannel(authCtx, data.connectionId);
+    return disconnectChannel(authCtx, data.connectionId, data.expectedPrincipal);
   });
 
 // ── sendConversationReplyFn ───────────────────────────────────────────────────

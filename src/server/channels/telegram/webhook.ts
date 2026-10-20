@@ -8,8 +8,19 @@
  *
  * Runs on the shared webhook boundary (src/server/webhooks/security.ts), in
  * its order: method → rate limit → bounded raw body → signature → event id →
- * replay claim. Telegram does not sign a timestamp, so there is no tolerance
+ * replay check. Telegram does not sign a timestamp, so there is no tolerance
  * check; replay is bounded by the receipt store instead.
+ *
+ * Replay is NOT a claim-then-process sequence here. A receipt claimed before
+ * ingestion survives a crash between the two, and Telegram's retry would then
+ * be acknowledged as a duplicate and the message lost for good. Instead:
+ *   - the boundary only LOOKS UP a committed receipt (a hit is a duplicate);
+ *   - ingest_telegram_inbound writes the receipt in the SAME transaction as
+ *     the message, so both commit or neither does;
+ *   - concurrent copies of one update both reach ingestion, which is
+ *     idempotent per message and per receipt — one row, one receipt.
+ * Updates APSA deliberately ignores have nothing to lose and are claimed in
+ * the shared receipt store as before.
  *
  *   signature  sha256(header secret) compared in constant time with the
  *              connection's stored digest. Unknown, disconnected and
@@ -22,7 +33,7 @@
  *   200  processed, duplicate, or deliberately ignored (group chat, bot
  *        sender, unsupported content) — Telegram must not retry these.
  *   401/405/413/429/400  the shared generic rejection.
- *   500/503  ingestion or receipt store failed; the claim is released so
+ *   500/503  ingestion or receipt lookup failed; nothing was committed, so
  *        Telegram's own retry is processed, never lost as a "duplicate".
  *
  * Payload bodies are never logged (API_AND_EVENTS.md §68).
@@ -63,16 +74,34 @@ const PERMANENT: ReadonlySet<string> = new Set([
 ]);
 
 export interface TelegramWebhookOptions {
+  /** Claims receipts for deliberately ignored updates only. */
   receipts?: WebhookReceiptStore;
   clientIp?: string | null;
   nowMs?: number;
+  /** Test seam: runs after verification, before ingestion (crash injection). */
+  beforeIngest?: () => Promise<void> | void;
 }
+
+/**
+ * The boundary's replay step as a pure lookup: "first sight" means no
+ * committed receipt. Nothing is written, so there is nothing to release.
+ */
+const committedReceiptLookup: WebhookReceiptStore = {
+  async claim(_provider, eventId) {
+    return !(await repo.isTelegramUpdateRecorded(eventId));
+  },
+  async release() {},
+};
 
 export async function handleTelegramWebhook(
   request: Request,
   options: TelegramWebhookOptions = {},
 ): Promise<Response> {
-  const connectionId = new URL(request.url).pathname.slice(TELEGRAM_WEBHOOK_PATH_PREFIX.length);
+  // Lower-cased so the event id matches the receipt the database writes
+  // ('<uuid as text>:<update_id>').
+  const connectionId = new URL(request.url).pathname
+    .slice(TELEGRAM_WEBHOOK_PATH_PREFIX.length)
+    .toLowerCase();
   if (!UUID_RE.test(connectionId)) return webhookRejection(404);
 
   const receipts = options.receipts ?? new PostgresWebhookReceiptStore();
@@ -96,7 +125,7 @@ export async function handleTelegramWebhook(
         },
       },
       {
-        receipts,
+        receipts: committedReceiptLookup,
         clientIp:
           options.clientIp !== undefined
             ? options.clientIp
@@ -115,21 +144,28 @@ export async function handleTelegramWebhook(
   if (!verification.ok) return webhookRejection(verification.status);
   if (verification.duplicate) return acknowledged();
 
+  const eventId = verification.eventId;
+  const updateId = eventId.slice(connectionId.length + 1);
+
+  /** Ignored updates: claim (best effort) so a replay short-circuits; nothing is lost either way. */
+  async function ignore(reason: string): Promise<Response> {
+    serverLog.info("channels.telegram.ignored", { reason });
+    await receipts.claim("telegram", eventId).catch(() => undefined);
+    return acknowledged();
+  }
+
   let update: unknown;
   try {
     update = JSON.parse(new TextDecoder().decode(verification.rawBody));
   } catch {
-    serverLog.warn("channels.telegram.ignored", { reason: "malformed" });
-    return acknowledged();
+    return ignore("malformed");
   }
   const parsed = parseTelegramUpdate(update);
-  if (parsed.kind === "ignored") {
-    serverLog.info("channels.telegram.ignored", { reason: parsed.reason });
-    return acknowledged();
-  }
+  if (parsed.kind === "ignored") return ignore(parsed.reason);
 
   try {
-    await repo.ingestTelegramInbound(connectionId, parsed);
+    if (options.beforeIngest) await options.beforeIngest();
+    await repo.ingestTelegramInbound(connectionId, updateId, parsed);
     serverLog.info("channels.telegram.ingested", { connectionId, type: parsed.type });
     return acknowledged();
   } catch (error) {
@@ -138,8 +174,8 @@ export async function handleTelegramWebhook(
       serverLog.warn("channels.telegram.ingest_refused", { connectionId, code });
       return acknowledged();
     }
+    // The receipt commits only with the message: nothing to release.
     serverLog.error("channels.telegram.ingest_failed", { connectionId, code });
-    await receipts.release("telegram", verification.eventId).catch(() => undefined);
     return webhookRejection(500);
   }
 }

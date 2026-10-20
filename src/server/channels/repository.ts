@@ -57,6 +57,8 @@ export async function connectAccount(input: {
   ciphertext: string;
   keyVersion: number;
   secretHash: string;
+  /** This connect operation; only it may later finish or abort the connect lease. */
+  operationId: string;
 }): Promise<ChannelConnectionRow> {
   const { data, error } = await db
     .rpc("connect_channel_account", {
@@ -69,10 +71,49 @@ export async function connectAccount(input: {
       p_ciphertext: input.ciphertext,
       p_key_version: input.keyVersion,
       p_secret_hash: input.secretHash,
+      p_operation: input.operationId,
     })
     .single();
   if (error || !data) throw channelDatabaseError(error);
   return publicRow(first(data));
+}
+
+/** setWebhook succeeded: release the connect lease. connect_superseded if this operation no longer holds it. */
+export async function finishConnect(
+  organizationId: string,
+  connectionId: string,
+  operationId: string,
+): Promise<ChannelConnectionRow> {
+  const { data, error } = await db
+    .rpc("finish_channel_connect", {
+      p_org: organizationId,
+      p_connection: connectionId,
+      p_operation: operationId,
+    })
+    .single();
+  if (error || !data) throw channelDatabaseError(error);
+  return publicRow(first(data));
+}
+
+/**
+ * setWebhook failed: disconnect (audited) — only if this operation still holds
+ * the connect lease. Returns false, touching nothing, when a newer connect or a
+ * disconnect has superseded it.
+ */
+export async function abortConnect(
+  organizationId: string,
+  actorUserId: string,
+  connectionId: string,
+  operationId: string,
+): Promise<boolean> {
+  const { data, error } = await db.rpc("abort_channel_connect", {
+    p_org: organizationId,
+    p_actor: actorUserId,
+    p_connection: connectionId,
+    p_operation: operationId,
+  });
+  if (error) throw channelDatabaseError(error);
+  return data === true;
 }
 
 export async function disconnectAccount(
@@ -129,8 +170,29 @@ export async function findLiveCredential(
   return data ?? null;
 }
 
+/**
+ * Whether Telegram update '<connection id>:<update_id>' has a committed replay
+ * receipt. A LOOKUP, never a claim: the receipt is written by
+ * ingest_telegram_inbound in the same transaction as the message.
+ */
+export async function isTelegramUpdateRecorded(eventId: string): Promise<boolean> {
+  const { data, error } = await db
+    .from("webhook_event_receipts")
+    .select("event_id")
+    .eq("provider", "telegram")
+    .eq("event_id", eventId)
+    .maybeSingle();
+  if (error) throw channelDatabaseError(error);
+  return data !== null && data !== undefined;
+}
+
+/**
+ * Stores one inbound message AND its webhook replay receipt
+ * ('telegram', '<connection id>:<update_id>') in one transaction.
+ */
 export async function ingestTelegramInbound(
   connectionId: string,
+  updateId: string,
   message: TelegramInbound,
 ): Promise<MessageRow> {
   const { data, error } = await db
@@ -145,6 +207,7 @@ export async function ingestTelegramInbound(
       p_type: message.type,
       p_occurred_at: message.occurredAt,
       p_attachments: message.attachments,
+      p_update_id: updateId,
     })
     .single();
   if (error || !data) throw channelDatabaseError(error);
@@ -154,6 +217,8 @@ export async function ingestTelegramInbound(
 export interface OutboundClaim {
   message: MessageRow;
   should_send: boolean;
+  /** The sending attempt this claim minted; null when should_send is false. */
+  attempt: string | null;
   connection_id: string;
   chat_id: string;
 }
@@ -193,6 +258,8 @@ export async function completeOutboundMessage(input: {
   organizationId: string;
   messageId: string;
   connectionId: string;
+  /** The attempt from beginOutboundMessage; any other is refused stale_state. */
+  attempt: string;
   sent: boolean;
   providerRef?: string;
   errorCode?: string;
@@ -202,6 +269,7 @@ export async function completeOutboundMessage(input: {
       p_org: input.organizationId,
       p_message: input.messageId,
       p_connection: input.connectionId,
+      p_attempt: input.attempt,
       p_sent: input.sent,
       p_provider_ref: input.providerRef ?? null,
       p_error_code: input.errorCode ?? null,

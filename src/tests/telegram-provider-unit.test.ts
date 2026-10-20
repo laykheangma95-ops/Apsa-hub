@@ -19,6 +19,8 @@ import { TelegramApiError, TelegramBotApi } from "@/server/channels/telegram/api
 import { telegramWebhookUrl } from "@/server/channels/service";
 import { isTelegramWebhookRequest } from "@/server/channels/telegram/paths";
 import { classifyReplyError, replyMayHaveBeenSent } from "@/lib/conversation/reply-errors";
+import en from "@/locales/en.json";
+import km from "@/locales/km.json";
 import { classifyConnectError, looksLikeTelegramToken } from "@/lib/channels-view";
 
 const TOKEN = "7123456789:AAH-test_token_value_0123456789abcdefXYZ";
@@ -234,7 +236,9 @@ describe("webhook URL and route", () => {
 describe("browser refusal copy", () => {
   it("classifies reply outcomes from the wire message", () => {
     expect(classifyReplyError("blocked_by_user")).toBe("blocked_by_user");
-    expect(classifyReplyError("provider_unavailable")).toBe("generic");
+    // A timeout cannot prove non-delivery: unconfirmed, never "not delivered".
+    expect(classifyReplyError("provider_unavailable")).toBe("unconfirmed");
+    expect(classifyReplyError("provider_rejected")).toBe("not_delivered");
     expect(classifyReplyError(new Error("channel_unavailable"))).toBe("channel_unavailable");
     expect(
       classifyReplyError(new Error("rate_limited: Too many requests. Try again in 5 seconds.")),
@@ -248,7 +252,8 @@ describe("browser refusal copy", () => {
   });
 
   it("flags only failures that may have reached Telegram anyway", () => {
-    expect(classifyReplyError("send_stuck")).toBe("send_stuck");
+    expect(classifyReplyError("send_stuck")).toBe("unconfirmed");
+    expect(classifyReplyError("unknown")).toBe("unconfirmed");
     expect(replyMayHaveBeenSent("send_stuck")).toBe(true);
     expect(replyMayHaveBeenSent("provider_unavailable")).toBe(true);
     expect(replyMayHaveBeenSent("unknown")).toBe(true);
@@ -259,10 +264,33 @@ describe("browser refusal copy", () => {
 
   it("classifies connect refusals and pre-checks the token shape", () => {
     expect(classifyConnectError(new Error("account_in_use"))).toBe("account_in_use");
+    expect(classifyConnectError(new Error("connect_in_progress"))).toBe("connect_in_progress");
+    expect(classifyConnectError(new Error("connect_superseded"))).toBe("connect_superseded");
     expect(classifyConnectError(new Error("Missing permission: integrations.connect"))).toBe(
       "generic",
     );
     expect(looksLikeTelegramToken(` ${TOKEN} `)).toBe(true);
     expect(looksLikeTelegramToken("hello")).toBe(false);
+  });
+});
+
+describe("uncertain-delivery copy (en + km)", () => {
+  it("never says 'not delivered' for a timeout or a sweep, in either language", () => {
+    for (const locale of [en, km]) {
+      const conversation = locale.conversation as Record<string, unknown>;
+      const copy = conversation["replyError"] as Record<string, string | undefined>;
+      expect(copy.unconfirmed).toBeTruthy();
+      expect(copy.send_stuck).toBeUndefined();
+      expect(copy.unconfirmed).not.toBe(copy.not_delivered);
+      expect(conversation["mayHaveBeenSent"]).toBeUndefined();
+    }
+    expect(en.conversation.replyError.unconfirmed.toLowerCase()).not.toContain("not delivered");
+    expect(km.conversation.replyError.unconfirmed).not.toContain("មិនបានផ្ញើទេ");
+    expect(Object.keys(en.conversation.replyError).sort()).toEqual(
+      Object.keys(km.conversation.replyError).sort(),
+    );
+    expect(Object.keys(en.settings.channels.telegram.connectError).sort()).toEqual(
+      Object.keys(km.settings.channels.telegram.connectError).sort(),
+    );
   });
 });

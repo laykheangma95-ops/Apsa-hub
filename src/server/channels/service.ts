@@ -134,8 +134,12 @@ export async function listChannelConnections(
 export async function connectTelegramBot(
   ctx: AuthorizationContext,
   rawToken: string,
+  expectedPrincipal: ExpectedPrincipal,
   api: TelegramApiFactory = defaultApi,
 ): Promise<ChannelConnectionSummary> {
+  // The connection is attributed to (and audited as) the member who pasted the
+  // token: refuse before anything else if the session changed under the form.
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("integrations.connect");
   const token = rawToken.trim();
   if (!TELEGRAM_TOKEN_RE.test(token)) throw new ChannelError("invalid_token");
@@ -171,6 +175,9 @@ export async function connectTelegramBot(
     throw error;
   }
   const secret = generateWebhookSecret();
+  // This operation's identity: the connect lease it takes is the only thing
+  // that lets it finish or undo this connect later (migration 064 §2).
+  const operationId = crypto.randomUUID();
 
   const row = await repo.connectAccount({
     organizationId: ctx.organizationId,
@@ -181,15 +188,23 @@ export async function connectTelegramBot(
     ciphertext,
     keyVersion: CREDENTIAL_KEY_VERSION,
     secretHash: await sha256Hex(secret),
+    operationId,
   });
 
   // The row now holds the NEW secret's digest, so Telegram must be pointed at
   // it. If that fails the connection cannot receive anything: disconnect it
-  // (audited) rather than leave a row that silently drops every message.
+  // (audited) rather than leave a row that silently drops every message —
+  // but only while this operation still holds the connect lease. A newer
+  // connect (after this one's lease expired) or a member's disconnect owns the
+  // row now, and an older operation's cleanup must not touch it.
   try {
     await bot.setWebhook(telegramWebhookUrl(row.id), secret);
   } catch (error) {
-    await repo.disconnectAccount(ctx.organizationId, ctx.userId, row.id).catch(() => undefined);
+    const aborted = await repo
+      .abortConnect(ctx.organizationId, ctx.userId, row.id, operationId)
+      .catch(() => false);
+    if (!aborted)
+      serverLog.warn("channels.telegram.connect_abort_skipped", { connectionId: row.id });
     if (error instanceof ChannelError) throw error;
     serverLog.warn("channels.telegram.set_webhook_failed", {
       code: error instanceof TelegramApiError ? error.code : "unknown",
@@ -197,8 +212,19 @@ export async function connectTelegramBot(
     throw new ChannelError("webhook_failed");
   }
 
+  let finished: repo.ChannelConnectionRow;
+  try {
+    finished = await repo.finishConnect(ctx.organizationId, row.id, operationId);
+  } catch (error) {
+    // Superseded while Telegram was answering: the newer operation (or the
+    // disconnect) decides what the bot points at. Report, never undo.
+    serverLog.warn("channels.telegram.connect_superseded", { connectionId: row.id });
+    if (error instanceof ChannelError) throw error;
+    throw new ChannelError("connect_superseded");
+  }
+
   serverLog.info("channels.telegram.connected", { connectionId: row.id });
-  return summarize(row, ctx.can("integrations.view_health"));
+  return summarize(finished, ctx.can("integrations.view_health"));
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────
@@ -206,8 +232,10 @@ export async function connectTelegramBot(
 export async function disconnectChannel(
   ctx: AuthorizationContext,
   connectionId: string,
+  expectedPrincipal: ExpectedPrincipal,
   api: TelegramApiFactory = defaultApi,
 ): Promise<ChannelConnectionSummary> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("integrations.disconnect");
   const live = await repo.findLiveCredential(connectionId, ctx.organizationId);
   if (live) {
@@ -241,7 +269,12 @@ export interface SendReplyInput {
 
 export interface SendReplyResult {
   message: ConversationMessageSummary;
-  /** Present when the provider refused or failed; the message is then state 'failed' and may be retried with the same clientMessageId. */
+  /**
+   * Present when the stored reply is 'failed' after this call; the SAME
+   * clientMessageId may be retried. For a timeout or 'send_stuck' this does
+   * not mean the customer did not receive it — only that delivery is
+   * unconfirmed.
+   */
   deliveryError?: string;
 }
 
@@ -277,7 +310,7 @@ export async function sendConversationReply(
   });
   // Someone (this submission's earlier attempt, or a concurrent duplicate)
   // already sent or is sending it: report what is stored, send nothing.
-  if (!claim.should_send) return { message: toMessageSummary(claim.message) };
+  if (!claim.should_send || !claim.attempt) return { message: toMessageSummary(claim.message) };
 
   let providerRef: string | undefined;
   let errorCode: string | undefined;
@@ -297,12 +330,21 @@ export async function sendConversationReply(
     organizationId: ctx.organizationId,
     messageId: claim.message.id,
     connectionId: claim.connection_id,
+    // Bound to THIS attempt: a late answer after a sweep and a retry is
+    // recorded against the attempt that sent it, never the newer one.
+    attempt: claim.attempt,
     sent: providerRef !== undefined,
     ...(providerRef !== undefined ? { providerRef } : {}),
     ...(errorCode !== undefined ? { errorCode } : {}),
   });
 
+  // Report what is stored, not what this attempt saw: a superseded attempt
+  // does not decide the reply's state.
   const result: SendReplyResult = { message: toMessageSummary(completed) };
-  if (errorCode) result.deliveryError = errorCode;
+  const storedError =
+    completed.state === "failed"
+      ? (completed.metadata as { send_error?: unknown } | null)?.send_error
+      : undefined;
+  if (typeof storedError === "string") result.deliveryError = storedError;
   return result;
 }

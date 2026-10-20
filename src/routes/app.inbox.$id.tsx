@@ -50,11 +50,15 @@ import {
   type PrepareOrderItemInput,
   type SmartActionId,
 } from "@/lib/conversation/smart-actions";
+import { classifyReplyError, type ReplyErrorKind } from "@/lib/conversation/reply-errors";
 import {
-  classifyReplyError,
-  replyMayHaveBeenSent,
-  type ReplyErrorKind,
-} from "@/lib/conversation/reply-errors";
+  hasUnresolvedOutbound,
+  reconcileThreadMessages,
+  replyCompletion,
+  sameScope,
+  type AppendedMessage,
+  type OperationScope,
+} from "@/lib/conversation/reply-session";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { customerKeys } from "@/lib/customers-query";
 import { conversationKeys } from "@/lib/inbox-query";
@@ -131,6 +135,30 @@ function ConversationScreen() {
   const userId = session.userId;
   const activeIdRef = useRef(id);
   activeIdRef.current = id;
+  /*
+   * Who/where this screen is NOW. A send or retry captures it when it starts
+   * and applies its result only if member, organization, conversation and
+   * screen epoch are unchanged (sameScope): a reply started as member A in
+   * thread X never lands in member B's view, in thread Y, or in a later visit
+   * to X whose state it does not know.
+   */
+  const scopeKey = `${userId}\u0000${routeOrganizationId}\u0000${id}`;
+  const epochRef = useRef({ key: scopeKey, operation: 0 });
+  if (epochRef.current.key !== scopeKey) {
+    epochRef.current = { key: scopeKey, operation: epochRef.current.operation + 1 };
+  }
+  const scopeRef = useRef<OperationScope>({
+    userId,
+    organizationId: routeOrganizationId,
+    conversationId: id,
+    operation: epochRef.current.operation,
+  });
+  scopeRef.current = {
+    userId,
+    organizationId: routeOrganizationId,
+    conversationId: id,
+    operation: epochRef.current.operation,
+  };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -177,7 +205,12 @@ function ConversationScreen() {
   const canViewCustomer = capabilities.can("customers.read");
 
   const [draft, setDraft] = useState("");
-  const [appended, setAppended] = useState<Message[]>([]);
+  const [appended, setAppended] = useState<AppendedMessage[]>([]);
+  /** The composer text now — a finished send compares against it, never a stale closure. */
+  const draftRef = useRef("");
+  draftRef.current = draft;
+  /** Whether the thread shows a reply still 'sending' (server thread or appended). */
+  const unresolvedRef = useRef(false);
   const [status, setStatus] = useState<ConversationStatus | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
   const [customerOpen, setCustomerOpen] = useState(false);
@@ -204,7 +237,7 @@ function ConversationScreen() {
     queryFn: () => getConversation(id),
     refetchInterval: (query) =>
       isProductionId(id) &&
-      query.state.data?.messages.some((m) => m.direction === "outbound" && m.state === "sending")
+      (unresolvedRef.current || hasUnresolvedOutbound(query.state.data?.messages ?? []))
         ? SENDING_REFETCH_MS
         : false,
   });
@@ -236,14 +269,15 @@ function ConversationScreen() {
   });
   const products = productsQuery.data ?? [];
 
-  const messages = [
-    ...new Map(
-      [...olderMessages, ...(conversation?.messages ?? []), ...appended].map((message) => [
-        message.id,
-        message,
-      ]),
-    ).values(),
-  ];
+  // A refreshed server row replaces an older appended send result, so a
+  // sweep's failure (and its Retry) shows without a remount.
+  const messages = reconcileThreadMessages(
+    olderMessages,
+    conversation?.messages ?? [],
+    conversationQuery.dataUpdatedAt,
+    appended,
+  );
+  unresolvedRef.current = isProductionId(id) && hasUnresolvedOutbound(messages);
   const currentStatus = status ?? conversation?.status ?? "needs_reply";
 
   /*
@@ -301,8 +335,11 @@ function ConversationScreen() {
     setLastOrder(null);
     setActionsOpen(false);
     setReplyError(null);
+    setSendingReply(false);
+    setRetryingId(null);
     replyAttemptRef.current = null;
-  }, [id]);
+    // A new member, organization or thread starts from a clean composer.
+  }, [id, userId, routeOrganizationId]);
 
   /*
    * An order draft belongs to ONE conversation's customer, for ONE member of
@@ -387,7 +424,7 @@ function ConversationScreen() {
   }
 
   function append(message: Message) {
-    setAppended((list) => [...list, message]);
+    setAppended((list) => [...list, { message, receivedAt: Date.now() }]);
   }
 
   /*
@@ -414,7 +451,8 @@ function ConversationScreen() {
   async function deliverReply(raw: string) {
     const body = raw.trim();
     if (!body || sendingReply || !replyAvailable || !canReply) return;
-    const scope = `${userId}\u0000${routeOrganizationId}\u0000${id}`;
+    const started = scopeRef.current;
+    const scope = `${started.userId}\u0000${started.organizationId}\u0000${started.conversationId}`;
     const previous = replyAttemptRef.current;
     const key =
       previous && previous.scope === scope && previous.body === body
@@ -425,28 +463,35 @@ function ConversationScreen() {
     setReplyError(null);
     try {
       const result = await sendRealConversationReply({
-        conversationId: id,
+        conversationId: started.conversationId,
         clientMessageId: key,
         body,
-        expectedPrincipal: { userId, organizationId: routeOrganizationId },
+        expectedPrincipal: { userId: started.userId, organizationId: started.organizationId },
       });
-      if (activeIdRef.current !== id) return;
+      if (!sameScope(started, scopeRef.current)) return;
       append(result.message);
       void queryClient.invalidateQueries({
-        queryKey: conversationKeys.principal(userId, routeOrganizationId),
+        queryKey: conversationKeys.principal(started.userId, started.organizationId),
       });
-      if (result.deliveryError) {
-        // Keep the draft and its key: tapping Send again retries THIS reply.
-        setReplyError(classifyReplyError(result.deliveryError));
-        return;
-      }
-      replyAttemptRef.current = null;
-      setDraft("");
+      if (result.deliveryError) setReplyError(classifyReplyError(result.deliveryError));
+      // Only a terminal 'sent' of THIS key resolves it; a newer draft or key
+      // is never discarded, and a replay still 'sending' keeps its key so the
+      // next tap reuses it.
+      const effects = replyCompletion({
+        submittedBody: body,
+        currentDraft: draftRef.current,
+        key,
+        currentKey: replyAttemptRef.current?.key ?? null,
+        resultState: result.message.state,
+        failed: Boolean(result.deliveryError),
+      });
+      if (effects.clearKey) replyAttemptRef.current = null;
+      if (effects.clearDraft) setDraft("");
     } catch (error) {
-      if (activeIdRef.current !== id) return;
+      if (!sameScope(started, scopeRef.current)) return;
       setReplyError(classifyReplyError(error));
     } finally {
-      setSendingReply(false);
+      if (sameScope(started, scopeRef.current)) setSendingReply(false);
     }
   }
 
@@ -458,29 +503,36 @@ function ConversationScreen() {
   async function retryReply(message: Message) {
     const key = REPLY_KEY_RE.exec(message.providerMessageId ?? "")?.[1];
     if (!key || retryingId || sendingReply || !canReply) return;
+    const started = scopeRef.current;
     setRetryingId(message.id);
     setReplyError(null);
     try {
       const result = await sendRealConversationReply({
-        conversationId: id,
+        conversationId: started.conversationId,
         clientMessageId: key,
         body: message.body,
-        expectedPrincipal: { userId, organizationId: routeOrganizationId },
+        expectedPrincipal: { userId: started.userId, organizationId: started.organizationId },
       });
-      if (activeIdRef.current !== id) return;
+      if (!sameScope(started, scopeRef.current)) return;
       append(result.message);
       void queryClient.invalidateQueries({
-        queryKey: conversationKeys.principal(userId, routeOrganizationId),
+        queryKey: conversationKeys.principal(started.userId, started.organizationId),
       });
-      if (!result.deliveryError && replyAttemptRef.current?.key === key) {
-        replyAttemptRef.current = null;
-        setDraft("");
-      }
+      const effects = replyCompletion({
+        submittedBody: message.body,
+        currentDraft: draftRef.current,
+        key,
+        currentKey: replyAttemptRef.current?.key ?? null,
+        resultState: result.message.state,
+        failed: Boolean(result.deliveryError),
+      });
+      if (effects.clearKey) replyAttemptRef.current = null;
+      if (effects.clearDraft) setDraft("");
     } catch (error) {
-      if (activeIdRef.current !== id) return;
+      if (!sameScope(started, scopeRef.current)) return;
       setReplyError(classifyReplyError(error));
     } finally {
-      setRetryingId(null);
+      if (sameScope(started, scopeRef.current)) setRetryingId(null);
     }
   }
 
@@ -717,11 +769,6 @@ function ConversationScreen() {
                 <p className="text-caption text-status-danger-text">
                   {t(`conversation.replyError.${classifyReplyError(message.sendError ?? "")}`)}
                 </p>
-                {replyMayHaveBeenSent(message.sendError) ? (
-                  <p className="text-caption text-text-secondary">
-                    {t("conversation.mayHaveBeenSent")}
-                  </p>
-                ) : null}
                 {canReply ? (
                   <button
                     type="button"

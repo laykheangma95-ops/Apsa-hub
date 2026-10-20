@@ -70,6 +70,8 @@ interface Call {
 }
 const calls: Call[] = [];
 let nextFailure: { method: string; status: number; description: string } | null = null;
+/** Holds the next call of `method` until `release` resolves (a slow Telegram). */
+let gate: { method: string; release: Promise<void> } | null = null;
 let webhookSecret = "";
 let nextMessageId = 500;
 
@@ -78,6 +80,11 @@ async function fakeFetch(url: string, init: RequestInit): Promise<Response> {
   expect(url.startsWith(`https://api.telegram.org/bot${TOKEN}/`)).toBe(true);
   const body = JSON.parse(String(init.body)) as Record<string, unknown>;
   calls.push({ method, body });
+  if (gate && gate.method === method) {
+    const held = gate;
+    gate = null;
+    await held.release;
+  }
   if (nextFailure && nextFailure.method === method) {
     const failure = nextFailure;
     nextFailure = null;
@@ -103,6 +110,23 @@ async function fakeFetch(url: string, init: RequestInit): Promise<Response> {
   return Response.json({ ok: false, error_code: 404, description: "Not Found" }, { status: 404 });
 }
 const api = (token: string) => new TelegramBotApi(token, fakeFetch);
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/** The principal a context was started as — the normal, matching case. */
+function principalOf(c: AuthorizationContext) {
+  return { userId: c.userId, organizationId: c.organizationId };
+}
+function connectAs(c: AuthorizationContext, token: string, factory = api) {
+  return service.connectTelegramBot(c, token, principalOf(c), factory);
+}
+function disconnectAs(c: AuthorizationContext, id: string, factory = api) {
+  return service.disconnectChannel(c, id, principalOf(c), factory);
+}
 const sent = () => calls.filter((c) => c.method === "sendMessage");
 
 // ── Webhook delivery helper ───────────────────────────────────────────────────
@@ -157,38 +181,32 @@ afterAll(async () => {
 
 describe("connect", () => {
   it("refuses a member without integrations.connect before any network call", async () => {
-    await expect(
-      service.connectTelegramBot(ctx(owner, org, ["integrations.read"]), TOKEN, api),
-    ).rejects.toThrow("integrations.connect");
+    await expect(connectAs(ctx(owner, org, ["integrations.read"]), TOKEN, api)).rejects.toThrow(
+      "integrations.connect",
+    );
     expect(calls).toHaveLength(0);
   });
 
   it("refuses a malformed token before any network call", async () => {
-    await expect(service.connectTelegramBot(ctx(owner, org), "not-a-token", api)).rejects.toThrow(
-      "invalid_token",
-    );
+    await expect(connectAs(ctx(owner, org), "not-a-token", api)).rejects.toThrow("invalid_token");
     expect(calls).toHaveLength(0);
   });
 
   it("maps a revoked token to invalid_token", async () => {
     nextFailure = { method: "getMe", status: 401, description: "Unauthorized" };
-    await expect(service.connectTelegramBot(ctx(owner, org), TOKEN, api)).rejects.toThrow(
-      "invalid_token",
-    );
+    await expect(connectAs(ctx(owner, org), TOKEN, api)).rejects.toThrow("invalid_token");
   });
 
   it("a refused webhook leaves no live connection", async () => {
     nextFailure = { method: "setWebhook", status: 400, description: "bad webhook" };
-    await expect(service.connectTelegramBot(ctx(owner, org), TOKEN, api)).rejects.toThrow(
-      "webhook_failed",
-    );
+    await expect(connectAs(ctx(owner, org), TOKEN, api)).rejects.toThrow("webhook_failed");
     const live = await db.query("select 1 from channel_connections where status <> 'disconnected'");
     expect(live.rows).toHaveLength(0);
   });
 
   it("connects: token encrypted at rest, webhook registered with a secret only its digest is stored for", async () => {
     calls.length = 0;
-    const summary = await service.connectTelegramBot(ctx(owner, org), `  ${TOKEN}  `, api);
+    const summary = await connectAs(ctx(owner, org), `  ${TOKEN}  `, api);
     connectionId = summary.id;
     expect(summary).toMatchObject({
       provider: "TELEGRAM",
@@ -214,10 +232,103 @@ describe("connect", () => {
     expect(stored.webhook_secret_hash).not.toBe(webhookSecret);
   });
 
-  it("another organization cannot take the same bot", async () => {
-    await expect(service.connectTelegramBot(ctx(ownerB, orgB), TOKEN, api)).rejects.toThrow(
-      "account_in_use",
+  it("refuses a changed initiating principal before any network call or write", async () => {
+    calls.length = 0;
+    for (const expected of [
+      { userId: ownerB, organizationId: org },
+      { userId: owner, organizationId: orgB },
+    ]) {
+      await expect(
+        service.connectTelegramBot(ctx(owner, org), TOKEN, expected, api),
+      ).rejects.toThrow();
+    }
+    expect(calls).toHaveLength(0);
+    // Positive control: the matching principal proceeds (proved by the connect above).
+  });
+
+  it("serializes overlapping connects: the second is refused while the first is at Telegram", async () => {
+    calls.length = 0;
+    const slow = deferred();
+    gate = { method: "setWebhook", release: slow.promise };
+    const first = connectAs(ctx(owner, org), TOKEN);
+    // Wait until the first connect is parked inside setWebhook.
+    while (!calls.some((c) => c.method === "setWebhook")) await Bun.sleep(1);
+    await expect(connectAs(ctx(owner, org), TOKEN)).rejects.toThrow("connect_in_progress");
+    expect(calls.filter((c) => c.method === "setWebhook")).toHaveLength(1);
+    slow.resolve();
+    const done = await first;
+    expect(done.status).toBe("connected");
+    const stored = (
+      await db.query<{ webhook_secret_hash: string; pending_connect_op: string | null }>(
+        "select webhook_secret_hash, pending_connect_op from channel_connections where id=$1",
+        [done.id],
+      )
+    ).rows[0]!;
+    // Telegram holds exactly the secret the database verifies against.
+    expect(await sha256Hex(webhookSecret)).toBe(stored.webhook_secret_hash);
+    expect(stored.pending_connect_op).toBeNull();
+  });
+
+  it("an older connect that fails after its lease was taken over leaves the newer connection live", async () => {
+    calls.length = 0;
+    const slow = deferred();
+    gate = { method: "setWebhook", release: slow.promise };
+    const older = connectAs(ctx(owner, org), TOKEN);
+    while (!calls.some((c) => c.method === "setWebhook")) await Bun.sleep(1);
+    // The older server stalls past its lease; a newer connect takes over.
+    await db.query(
+      "update channel_connections set pending_connect_until = now() - interval '1 second' where status <> 'disconnected'",
     );
+    const newer = await connectAs(ctx(owner, org), TOKEN);
+    const newerSecret = webhookSecret;
+    // The older setWebhook now fails: its cleanup must not disconnect the newer connect.
+    nextFailure = { method: "setWebhook", status: 400, description: "bad webhook" };
+    slow.resolve();
+    await expect(older).rejects.toThrow("webhook_failed");
+    const row = (
+      await db.query<{ status: string; webhook_secret_hash: string }>(
+        "select status, webhook_secret_hash from channel_connections where id=$1",
+        [newer.id],
+      )
+    ).rows[0]!;
+    expect(row.status).toBe("connected");
+    expect(row.webhook_secret_hash).toBe(await sha256Hex(newerSecret));
+    webhookSecret = newerSecret;
+  });
+
+  it("an older connect whose setWebhook SUCCEEDS after takeover reports connect_superseded and changes nothing", async () => {
+    calls.length = 0;
+    const slow = deferred();
+    gate = { method: "setWebhook", release: slow.promise };
+    const older = connectAs(ctx(owner, org), TOKEN);
+    while (!calls.some((c) => c.method === "setWebhook")) await Bun.sleep(1);
+    await db.query(
+      "update channel_connections set pending_connect_until = now() - interval '1 second' where status <> 'disconnected'",
+    );
+    const newer = await connectAs(ctx(owner, org), TOKEN);
+    const before = (
+      await db.query<{ webhook_secret_hash: string }>(
+        "select webhook_secret_hash from channel_connections where id=$1",
+        [newer.id],
+      )
+    ).rows[0]!;
+    slow.resolve();
+    await expect(older).rejects.toThrow("connect_superseded");
+    const after = (
+      await db.query<{ status: string; webhook_secret_hash: string }>(
+        "select status, webhook_secret_hash from channel_connections where id=$1",
+        [newer.id],
+      )
+    ).rows[0]!;
+    expect(after).toEqual({ status: "connected", webhook_secret_hash: before.webhook_secret_hash });
+    // Re-point Telegram at the live secret for the rest of the journey (the
+    // residual risk this case documents: a superseded setWebhook that lands
+    // last must be repaired by reconnecting).
+    await connectAs(ctx(owner, org), TOKEN);
+  });
+
+  it("another organization cannot take the same bot", async () => {
+    await expect(connectAs(ctx(ownerB, orgB), TOKEN, api)).rejects.toThrow("account_in_use");
   });
 
   it("lists connections; health only with integrations.view_health", async () => {
@@ -287,6 +398,77 @@ describe("webhook → Inbox", () => {
       "select count(*)::int n from messages where provider_message_id='tg:2'",
     );
     expect(count.rows[0]!.n).toBe(1);
+  });
+
+  it("a crash after verification loses nothing: Telegram's retry of the update is processed", async () => {
+    const id = 88_001;
+    // 1) The process dies between verification and ingestion: the request
+    //    never completes (a never-settling promise stands in for the kill).
+    const abandoned = handleTelegramWebhook(
+      delivery(connectionId, customerText("Still in stock?", 30), { id }),
+      { clientIp: null, beforeIngest: () => new Promise<void>(() => undefined) },
+    );
+    void abandoned;
+    await Bun.sleep(20);
+    const receipt = await db.query(
+      "select 1 from webhook_event_receipts where provider='telegram' and event_id=$1",
+      [`${connectionId}:${id}`],
+    );
+    expect(receipt.rows).toHaveLength(0);
+
+    // 2) An ingestion that throws (database dropped mid-write) — 500, no receipt.
+    const failed = await handleTelegramWebhook(
+      delivery(connectionId, customerText("Still in stock?", 30), { id }),
+      {
+        clientIp: null,
+        beforeIngest: () => {
+          throw new Error("connection reset");
+        },
+      },
+    );
+    expect(failed.status).toBe(500);
+
+    // 3) Telegram retries: processed, stored exactly once, receipt now committed.
+    const retried = await handleTelegramWebhook(
+      delivery(connectionId, customerText("Still in stock?", 30), { id }),
+      { clientIp: null },
+    );
+    expect(retried.status).toBe(200);
+    const rows = await db.query<{ n: number }>(
+      "select count(*)::int n from messages where provider_message_id='tg:30'",
+    );
+    expect(rows.rows[0]!.n).toBe(1);
+    const committed = await db.query(
+      "select 1 from webhook_event_receipts where provider='telegram' and event_id=$1",
+      [`${connectionId}:${id}`],
+    );
+    expect(committed.rows).toHaveLength(1);
+
+    // 4) A further replay is a duplicate: acknowledged, nothing new stored,
+    //    and ingestion is not even attempted.
+    let reached = false;
+    const replay = await handleTelegramWebhook(
+      delivery(connectionId, customerText("Still in stock?", 30), { id }),
+      { clientIp: null, beforeIngest: () => void (reached = true) },
+    );
+    expect(replay.status).toBe(200);
+    expect(reached).toBe(false);
+  });
+
+  it("an upper-case connection id in the URL maps to the same receipt", async () => {
+    const id = 88_002;
+    const upper = await handleTelegramWebhook(
+      delivery(connectionId.toUpperCase(), customerText("Case?", 31), { id }),
+      { clientIp: null },
+    );
+    expect(upper.status).toBe(200);
+    let reached = false;
+    const lower = await handleTelegramWebhook(
+      delivery(connectionId, customerText("Case?", 31), { id }),
+      { clientIp: null, beforeIngest: () => void (reached = true) },
+    );
+    expect(lower.status).toBe(200);
+    expect(reached).toBe(false);
   });
 
   it("acknowledges and ignores group chats, bot senders and malformed updates", async () => {
@@ -445,15 +627,99 @@ describe("reply", () => {
   });
 });
 
+describe("reply attempts across a sweep and a retry", () => {
+  let conversationId: string;
+  const principal = () => ({ userId: owner, organizationId: org });
+
+  beforeAll(async () => {
+    conversationId = (await conversations.listConversations(ctx(owner, org))).conversations[0]!.id;
+  });
+
+  async function stuckThenRetry(body: string, retryOutcome: "ok" | "blocked") {
+    calls.length = 0;
+    const input = {
+      conversationId,
+      clientMessageId: crypto.randomUUID(),
+      body,
+      expectedPrincipal: principal(),
+    };
+    // Attempt A: Telegram hangs.
+    const slow = deferred();
+    gate = { method: "sendMessage", release: slow.promise };
+    const attemptA = service.sendConversationReply(ctx(owner, org), input, api);
+    while (sent().length < 1) await Bun.sleep(1);
+    // Over 2 minutes later the reply is swept, and the merchant retries (B).
+    await db.query(
+      `update messages set metadata = metadata || jsonb_build_object('sending_since', now() - interval '3 minutes')
+       where provider_message_id = $1`,
+      [`apsa:${input.clientMessageId}`],
+    );
+    if (retryOutcome === "blocked") {
+      nextFailure = {
+        method: "sendMessage",
+        status: 403,
+        description: "Forbidden: bot was blocked by the user",
+      };
+    }
+    const attemptB = await service.sendConversationReply(ctx(owner, org), input, api);
+    return { attemptA, attemptB, release: slow.resolve };
+  }
+
+  it("B sent first, then A's late success: still sent once in the ledger, duplicate recorded", async () => {
+    const r = await stuckThenRetry("late success after retry", "ok");
+    expect(r.attemptB.message.state).toBe("sent");
+    r.release();
+    const a = await r.attemptA;
+    expect(a.message.state).toBe("sent");
+    expect(a.deliveryError).toBeUndefined();
+    const row = (
+      await db.query<{ state: string; metadata: { delivered_refs: string[] } }>(
+        "select state, metadata from messages where id=$1",
+        [a.message.id],
+      )
+    ).rows[0]!;
+    expect(row.state).toBe("sent");
+    expect(row.metadata.delivered_refs).toHaveLength(2);
+  });
+
+  it("B refused first, then A's late success: becomes sent — the customer has it", async () => {
+    const r = await stuckThenRetry("late success after refused retry", "blocked");
+    expect(r.attemptB.message.state).toBe("failed");
+    expect(r.attemptB.deliveryError).toBe("blocked_by_user");
+    r.release();
+    const a = await r.attemptA;
+    expect(a.message.state).toBe("sent");
+    expect(a.deliveryError).toBeUndefined();
+  });
+
+  it("A's late failure after B succeeded changes nothing", async () => {
+    const r = await stuckThenRetry("late failure after retry", "ok");
+    nextFailure = { method: "sendMessage", status: 500, description: "Internal Server Error" };
+    r.release();
+    const a = await r.attemptA;
+    expect(a.message.state).toBe("sent");
+    expect(a.deliveryError).toBeUndefined();
+  });
+});
+
 describe("disconnect", () => {
   it("unregisters the webhook, clears the credential, and stops both directions", async () => {
     calls.length = 0;
     const oldSecret = webhookSecret;
     await expect(
-      service.disconnectChannel(ctx(owner, org, ["integrations.read"]), connectionId, api),
+      disconnectAs(ctx(owner, org, ["integrations.read"]), connectionId, api),
     ).rejects.toThrow("integrations.disconnect");
 
-    const result = await service.disconnectChannel(ctx(owner, org), connectionId, api);
+    await expect(
+      service.disconnectChannel(
+        ctx(owner, org),
+        connectionId,
+        { userId: owner, organizationId: orgB },
+        api,
+      ),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+    const result = await disconnectAs(ctx(owner, org), connectionId, api);
     expect(result.status).toBe("disconnected");
     expect(calls.map((c) => c.method)).toEqual(["deleteWebhook"]);
 

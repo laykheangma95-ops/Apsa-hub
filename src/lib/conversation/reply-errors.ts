@@ -17,7 +17,11 @@ export type ReplyErrorKind =
   | "channel_unavailable"
   | "rate_limited"
   | "principal_changed"
-  | "send_stuck"
+  /** A timeout, a lost connection or a 'send_stuck' sweep: delivery is UNKNOWN, not failed. */
+  | "unconfirmed"
+  /** The provider (or APSA, before sending) definitely did not deliver it. */
+  | "not_delivered"
+  /** The call itself failed; nothing is known about this reply. */
   | "generic";
 
 const KNOWN: ReadonlySet<string> = new Set([
@@ -25,13 +29,14 @@ const KNOWN: ReadonlySet<string> = new Set([
   "chat_not_found",
   "channel_unavailable",
   "rate_limited",
-  "send_stuck",
 ]);
 
 /*
  * Failures where Telegram may have accepted the message before APSA heard
- * back (a timeout, a dropped connection, a sender that died mid-send).
- * Telegram's sendMessage is not idempotent, so a retry can duplicate it.
+ * back (a timeout, a dropped connection, a sender that died mid-send, a sweep
+ * of a reply left 'sending'). None of them proves the message was NOT
+ * delivered, so their copy never says "not delivered". Telegram's sendMessage
+ * is not idempotent, so a retry can duplicate it.
  */
 const AMBIGUOUS: ReadonlySet<string> = new Set(["provider_unavailable", "unknown", "send_stuck"]);
 
@@ -42,10 +47,11 @@ export function replyMayHaveBeenSent(code: string | undefined): boolean {
 
 const PRINCIPAL_CHANGED = /^The signed-in member or organization changed/;
 
-/** A deliveryError code or a thrown error → the kind of copy to show. */
+/** A stored/delivery error code or a thrown error → the kind of copy to show. */
 export function classifyReplyError(outcome: unknown): ReplyErrorKind {
   if (typeof outcome === "string") {
-    return KNOWN.has(outcome) ? (outcome as ReplyErrorKind) : "generic";
+    if (KNOWN.has(outcome)) return outcome as ReplyErrorKind;
+    return AMBIGUOUS.has(outcome) || outcome === "" ? "unconfirmed" : "not_delivered";
   }
   if (isRateLimitedError(outcome)) return "rate_limited";
   const message = outcome instanceof Error ? outcome.message : "";

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Send } from "lucide-react";
@@ -28,6 +28,7 @@ import {
   looksLikeTelegramToken,
   type ConnectErrorKind,
 } from "@/lib/channels-view";
+import { sameScope, type OperationScope } from "@/lib/conversation/reply-session";
 
 interface TelegramChannelRowProps {
   userId: string;
@@ -58,6 +59,42 @@ export function TelegramChannelRow({ userId, organizationId }: TelegramChannelRo
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
+  /*
+   * Every connect/disconnect carries the member + organization it was started
+   * as (the server refuses it if the session changed), and applies its result
+   * — the form, the toast, the cache — only if this row still shows that same
+   * principal and no newer operation started (sameScope).
+   */
+  const operationRef = useRef(0);
+  const scopeRef = useRef<OperationScope>({
+    userId,
+    organizationId,
+    conversationId: "",
+    operation: 0,
+  });
+  scopeRef.current = {
+    userId,
+    organizationId,
+    conversationId: "",
+    operation: operationRef.current,
+  };
+  function beginOperation(): OperationScope {
+    operationRef.current += 1;
+    scopeRef.current = { ...scopeRef.current, operation: operationRef.current };
+    return scopeRef.current;
+  }
+
+  // A principal switch abandons whatever this row was doing for the old one.
+  useEffect(() => {
+    operationRef.current += 1;
+    setOpen(false);
+    setToken("");
+    setConnecting(false);
+    setConnectError(null);
+    setConfirmDisconnect(false);
+    setDisconnecting(false);
+  }, [userId, organizationId]);
+
   const queryKey = channelKeys.list(userId, organizationId);
   const query = useQuery({
     queryKey,
@@ -77,32 +114,58 @@ export function TelegramChannelRow({ userId, organizationId }: TelegramChannelRo
       setConnectError("invalid_token");
       return;
     }
+    const started = beginOperation();
     setConnecting(true);
     setConnectError(null);
     try {
-      await connectTelegramBotFn({ data: { token: token.trim() } });
+      await connectTelegramBotFn({
+        data: {
+          token: token.trim(),
+          expectedPrincipal: { userId: started.userId, organizationId: started.organizationId },
+        },
+      });
+      if (!sameScope(started, scopeRef.current)) return;
       setToken("");
-      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({
+        queryKey: channelKeys.list(started.userId, started.organizationId),
+      });
+      if (!sameScope(started, scopeRef.current)) return;
       notifySuccess(t("settings.channels.telegram.connected"));
     } catch (error) {
+      if (!sameScope(started, scopeRef.current)) return;
       setConnectError(classifyConnectError(error));
+      // A refused or superseded connect may still have changed the row.
+      void queryClient.invalidateQueries({
+        queryKey: channelKeys.list(started.userId, started.organizationId),
+      });
     } finally {
-      setConnecting(false);
+      if (sameScope(started, scopeRef.current)) setConnecting(false);
     }
   }
 
   async function disconnect() {
     if (!telegram || disconnecting) return;
+    const started = beginOperation();
     setDisconnecting(true);
     try {
-      await disconnectChannelFn({ data: { connectionId: telegram.id } });
+      await disconnectChannelFn({
+        data: {
+          connectionId: telegram.id,
+          expectedPrincipal: { userId: started.userId, organizationId: started.organizationId },
+        },
+      });
+      if (!sameScope(started, scopeRef.current)) return;
       setConfirmDisconnect(false);
-      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({
+        queryKey: channelKeys.list(started.userId, started.organizationId),
+      });
+      if (!sameScope(started, scopeRef.current)) return;
       notifySuccess(t("settings.channels.telegram.disconnected"));
     } catch {
+      if (!sameScope(started, scopeRef.current)) return;
       notifyError(t("settings.channels.telegram.disconnectError"));
     } finally {
-      setDisconnecting(false);
+      if (sameScope(started, scopeRef.current)) setDisconnecting(false);
     }
   }
 

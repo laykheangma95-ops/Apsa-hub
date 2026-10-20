@@ -13,6 +13,8 @@ export type ChannelErrorCode =
   | "connection_not_found"
   | "webhook_url_unavailable" //  VITE_APP_URL is not a public https origin
   | "webhook_failed" //           Telegram refused the webhook registration
+  | "connect_in_progress" //      another connect of this bot holds the connect lease
+  | "connect_superseded" //       a newer connect or a disconnect replaced this one
   | "credential_unavailable" //   CHANNEL_CREDENTIAL_KEY missing / ciphertext unreadable
   | "channel_unavailable" //      the conversation has no live connection to reply through
   | "conversation_not_found"
@@ -29,6 +31,8 @@ const STATUS: Record<ChannelErrorCode, number> = {
   connection_not_found: 404,
   webhook_url_unavailable: 503,
   webhook_failed: 502,
+  connect_in_progress: 409,
+  connect_superseded: 409,
   credential_unavailable: 503,
   channel_unavailable: 409,
   conversation_not_found: 404,
@@ -51,6 +55,8 @@ export class ChannelError extends Error {
 const SQL_CODES: ChannelErrorCode[] = [
   "permission_denied",
   "account_in_use",
+  "connect_in_progress",
+  "connect_superseded",
   "connection_not_found",
   "channel_unavailable",
   "conversation_not_found",

@@ -13,10 +13,16 @@
  *     under concurrency), reuses it afterwards, is idempotent per message,
  *     refuses a conflicting replay, refuses a disconnected connection, and
  *     reopens a parked thread;
+ *   - connect lease: an overlapping connect of the same bot is refused
+ *     connect_in_progress; only the operation holding the lease may finish
+ *     or abort it, so an older failed connect never disconnects a newer one;
+ *   - the webhook replay receipt commits WITH the message (a rolled-back
+ *     ingest leaves no receipt, so a retry is processed);
  *   - begin/complete_outbound_message: exactly one caller is told to send,
  *     a sent reply is never sent again, a failed one may be retried once per
- *     failure, a reused key with a different body is stale_state, tenant and
- *     channel are enforced;
+ *     failure, completion is bound to its sending attempt (late success /
+ *     failure after a sweep and a retry, in both orders), a reused key with a
+ *     different body is stale_state, tenant and channel are enforced;
  *   - browser roles can neither read the table nor execute the functions;
  *   - the integrations.* vocabulary reaches Owner/Manager as PERMISSIONS_MATRIX
  *     §25 says, and never Cashier/Sales/Customer Service.
@@ -79,7 +85,13 @@ async function errorOf(promise: Promise<unknown>): Promise<string> {
   return "no error";
 }
 
-function connect(tenant: string, actor: string, bot = BOT, hash = HASH) {
+function startConnect(
+  tenant: string,
+  actor: string,
+  bot = BOT,
+  hash = HASH,
+  operation: string = crypto.randomUUID(),
+) {
   return call("connect_channel_account", [
     tenant,
     actor,
@@ -90,14 +102,28 @@ function connect(tenant: string, actor: string, bot = BOT, hash = HASH) {
     CIPHER,
     1,
     hash,
+    operation,
   ]);
+}
+
+/** A whole successful connect: take the lease, then finish it (setWebhook succeeded). */
+async function connect(tenant: string, actor: string, bot = BOT, hash = HASH) {
+  const operation = crypto.randomUUID();
+  const row = await startConnect(tenant, actor, bot, hash, operation);
+  return call("finish_channel_connect", [tenant, row.id, operation]);
 }
 
 function inbound(
   connection: string,
   messageId: number,
   body: string,
-  { chat = "555001", sender = "555001", name = "Sokha", handle = "sokha" } = {},
+  {
+    chat = "555001",
+    sender = "555001",
+    name = "Sokha",
+    handle = "sokha",
+    update = String(messageId),
+  } = {},
 ) {
   return call("ingest_telegram_inbound", [
     connection,
@@ -110,6 +136,7 @@ function inbound(
     "text",
     "2026-10-20T03:00:00Z",
     null,
+    update,
   ]);
 }
 
@@ -177,6 +204,142 @@ describe("connect / disconnect", () => {
   });
 });
 
+describe("connect lease", () => {
+  const LEASE_BOT = "7000000077";
+
+  async function live(id: unknown): Promise<Row> {
+    const r = await db.query<Row>(
+      "select status, webhook_secret_hash, pending_connect_op, connect_generation from channel_connections where id=$1",
+      [id],
+    );
+    return r.rows[0]!;
+  }
+
+  it("an overlapping connect of the same bot is refused while the first holds the lease", async () => {
+    const opA = crypto.randomUUID();
+    const a = await startConnect(org, owner, LEASE_BOT, "c".repeat(64), opA);
+    expect(await errorOf(startConnect(org, owner, LEASE_BOT, "d".repeat(64)))).toContain(
+      "connect_in_progress",
+    );
+    // The refused overlap changed nothing.
+    expect(await live(a.id)).toMatchObject({
+      webhook_secret_hash: "c".repeat(64),
+      pending_connect_op: opA,
+    });
+    // Once A finishes, a new connect may rotate.
+    await call("finish_channel_connect", [org, a.id, opA]);
+    const b = await connect(org, owner, LEASE_BOT, "d".repeat(64));
+    expect(b.id).toBe(a.id);
+    expect(b).toMatchObject({ webhook_secret_hash: "d".repeat(64), pending_connect_op: null });
+    expect(Number(b.connect_generation)).toBe(Number(a.connect_generation) + 1);
+  });
+
+  it("an older connect whose lease expired and was taken over can neither abort nor finish the newer one", async () => {
+    const opOld = crypto.randomUUID();
+    const old = await startConnect(org, owner, LEASE_BOT, "e".repeat(64), opOld);
+    // The older operation's server stalls past its lease.
+    await db.query(
+      "update channel_connections set pending_connect_until = now() - interval '1 second' where id=$1",
+      [old.id],
+    );
+    const opNew = crypto.randomUUID();
+    await startConnect(org, owner, LEASE_BOT, "f".repeat(64), opNew);
+
+    // The older setWebhook then fails: its cleanup must not disconnect the newer connect.
+    const aborted = await db.query<{ ok: boolean }>(
+      "select abort_channel_connect($1,$2,$3,$4) ok",
+      [org, owner, old.id, opOld],
+    );
+    expect(aborted.rows[0]!.ok).toBe(false);
+    expect(await live(old.id)).toMatchObject({
+      status: "connected",
+      webhook_secret_hash: "f".repeat(64),
+      pending_connect_op: opNew,
+    });
+    // Nor may it claim success for the newer secret.
+    expect(await errorOf(call("finish_channel_connect", [org, old.id, opOld]))).toContain(
+      "connect_superseded",
+    );
+    // The newer operation still owns it.
+    const finished = await call("finish_channel_connect", [org, old.id, opNew]);
+    expect(finished).toMatchObject({ status: "connected", pending_connect_op: null });
+  });
+
+  it("the operation holding the lease aborts its own failed connect, audited", async () => {
+    const op = crypto.randomUUID();
+    const row = await startConnect(org, owner, "7000000078", "1".repeat(64), op);
+    // Negative controls: another org, another actor, another operation.
+    expect(
+      (
+        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
+          orgB,
+          ownerB,
+          row.id,
+          op,
+        ])
+      ).rows[0]!.ok,
+    ).toBe(false);
+    expect(
+      await errorOf(
+        db.query("select abort_channel_connect($1,$2,$3,$4)", [org, outsider, row.id, op]),
+      ),
+    ).toContain("permission_denied");
+    expect(
+      (
+        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
+          org,
+          owner,
+          row.id,
+          crypto.randomUUID(),
+        ])
+      ).rows[0]!.ok,
+    ).toBe(false);
+    expect((await live(row.id)).status).toBe("connected");
+
+    const ok = await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
+      org,
+      owner,
+      row.id,
+      op,
+    ]);
+    expect(ok.rows[0]!.ok).toBe(true);
+    expect(await live(row.id)).toMatchObject({ status: "disconnected", webhook_secret_hash: null });
+    const audit = await db.query<{ after_json: Row }>(
+      "select after_json from audit_logs where resource_id=$1 and action='integrations.disconnect'",
+      [row.id],
+    );
+    expect(audit.rows[0]!.after_json).toMatchObject({ reason: "connect_failed" });
+  });
+
+  it("a member's disconnect during a pending connect wins: the connect can no longer finish", async () => {
+    const op = crypto.randomUUID();
+    const row = await startConnect(org, owner, "7000000079", "2".repeat(64), op);
+    await call("disconnect_channel_account", [org, owner, row.id]);
+    expect(await errorOf(call("finish_channel_connect", [org, row.id, op]))).toContain(
+      "connect_superseded",
+    );
+    expect(
+      (
+        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
+          org,
+          owner,
+          row.id,
+          op,
+        ])
+      ).rows[0]!.ok,
+    ).toBe(false);
+  });
+
+  it("finish is tenant-bound", async () => {
+    const op = crypto.randomUUID();
+    const row = await startConnect(org, owner, "7000000080", "3".repeat(64), op);
+    expect(await errorOf(call("finish_channel_connect", [orgB, row.id, op]))).toContain(
+      "connect_superseded",
+    );
+    await call("finish_channel_connect", [org, row.id, op]);
+  });
+});
+
 describe("ingest_telegram_inbound", () => {
   let connectionId: string;
 
@@ -219,7 +382,48 @@ describe("ingest_telegram_inbound", () => {
       [again.conversation_id],
     );
     expect(count.rows[0]!.n).toBe(1);
-    expect(await errorOf(inbound(connectionId, 1, "edited"))).toContain("stale_state");
+    // The same update id is the same update: its replay returns the stored row.
+    const replay = await inbound(connectionId, 1, "edited");
+    expect(replay.id).toBe(again.id);
+    expect(replay.body).toBe("តើមានទំហំ M ទេ?");
+    // A DIFFERENT update carrying the same message with other content is refused.
+    expect(await errorOf(inbound(connectionId, 1, "edited", { update: "100001" }))).toContain(
+      "stale_state",
+    );
+  });
+
+  it("records the webhook replay receipt in the same transaction as the message", async () => {
+    await inbound(connectionId, 40, "receipt check", { update: "9040" });
+    const receipt = await db.query(
+      "select 1 from webhook_event_receipts where provider='telegram' and event_id=$1",
+      [`${connectionId}:9040`],
+    );
+    expect(receipt.rows).toHaveLength(1);
+
+    // A rolled-back ingest (the process dies before COMMIT) leaves neither the
+    // message nor the receipt, so Telegram's retry is processed.
+    await db.exec("begin");
+    await inbound(connectionId, 41, "lost?", { update: "9041" });
+    await db.exec("rollback");
+    const none = await db.query(
+      "select 1 from webhook_event_receipts where provider='telegram' and event_id=$1",
+      [`${connectionId}:9041`],
+    );
+    expect(none.rows).toHaveLength(0);
+    const retried = await inbound(connectionId, 41, "lost?", { update: "9041" });
+    expect(retried.body).toBe("lost?");
+    // A refused ingest commits no receipt either.
+    expect(
+      await errorOf(inbound(connectionId, 42, "x", { chat: "abc", update: "9042" })),
+    ).toContain("invalid_reference");
+    const refused = await db.query(
+      "select 1 from webhook_event_receipts where provider='telegram' and event_id=$1",
+      [`${connectionId}:9042`],
+    );
+    expect(refused.rows).toHaveLength(0);
+    expect(await errorOf(inbound(connectionId, 43, "x", { update: "not-a-number" }))).toContain(
+      "invalid_reference",
+    );
   });
 
   it("the next message reuses the Customer and the conversation", async () => {
@@ -296,9 +500,40 @@ describe("begin / complete_outbound_message", () => {
     return result.rows[0]!.r as {
       message: Row;
       should_send: boolean;
+      attempt: string | null;
       connection_id: string;
       chat_id: string;
     };
+  }
+
+  function complete(
+    messageId: unknown,
+    attempt: string | null,
+    outcome: { sent: true; ref: string } | { sent: false; error: string },
+  ) {
+    return call("complete_outbound_message", [
+      org,
+      messageId,
+      connectionId,
+      attempt,
+      outcome.sent,
+      outcome.sent ? outcome.ref : null,
+      outcome.sent ? null : outcome.error,
+    ]);
+  }
+
+  /** Age a reply past the 2-minute sweep and run the sweep. */
+  async function sweep(messageId: unknown) {
+    await db.query(
+      `update messages set metadata = metadata || jsonb_build_object('sending_since', now() - interval '3 minutes') where id = $1`,
+      [messageId],
+    );
+    await db.query("select fail_stuck_outbound_messages($1,$2)", [org, conversationId]);
+  }
+
+  async function stored(messageId: unknown): Promise<Row> {
+    const r = await db.query<Row>("select state, metadata from messages where id=$1", [messageId]);
+    return r.rows[0]!;
   }
 
   it("exactly one caller is told to send; the reply is recorded as staff-attributed", async () => {
@@ -321,39 +556,29 @@ describe("begin / complete_outbound_message", () => {
     const key = crypto.randomUUID();
     const started = await begin(key);
     expect(started.should_send).toBe(true);
-    await call("complete_outbound_message", [
-      org,
-      started.message.id,
-      connectionId,
-      false,
-      null,
-      "provider_timeout",
-    ]);
+    expect(started.attempt).toMatch(/^[0-9a-f-]{36}$/);
+    await complete(started.message.id, started.attempt, { sent: false, error: "provider_timeout" });
     const retry = await begin(key);
     expect(retry.should_send).toBe(true);
-    const sent = await call("complete_outbound_message", [
-      org,
-      started.message.id,
-      connectionId,
-      true,
-      "991",
-      null,
-    ]);
+    expect(retry.attempt).not.toBe(started.attempt);
+    const sent = await complete(started.message.id, retry.attempt, { sent: true, ref: "991" });
     expect(sent).toMatchObject({ state: "sent" });
     expect((sent.metadata as Row).telegram_message_id).toBe("991");
-    expect((await begin(key)).should_send).toBe(false);
-    // Completing twice is refused — only 'sending' may complete.
+    const replay = await begin(key);
+    expect(replay.should_send).toBe(false);
+    expect(replay.attempt).toBeNull();
+    // Negative controls: an attempt this message never issued, and a missing
+    // attempt, are refused — a completion cannot be forged or misdirected.
     expect(
-      await errorOf(
-        call("complete_outbound_message", [
-          org,
-          started.message.id,
-          connectionId,
-          true,
-          "992",
-          null,
-        ]),
-      ),
+      await errorOf(complete(started.message.id, crypto.randomUUID(), { sent: true, ref: "992" })),
+    ).toContain("stale_state");
+    expect(await errorOf(complete(started.message.id, null, { sent: true, ref: "992" }))).toContain(
+      "invalid_reference",
+    );
+    // Another reply's attempt cannot complete this one.
+    const other = await begin(crypto.randomUUID(), "another reply");
+    expect(
+      await errorOf(complete(started.message.id, other.attempt, { sent: true, ref: "992" })),
     ).toContain("stale_state");
     const health = await db.query<Row>(
       "select last_outbound_at, last_error_code from channel_connections where id=$1",
@@ -401,20 +626,98 @@ describe("begin / complete_outbound_message", () => {
 
   it("a send that finishes after it was marked send_stuck still records the truth", async () => {
     const stuck = await begin(crypto.randomUUID(), "late reply");
-    await db.query(
-      `update messages set metadata = metadata || jsonb_build_object('sending_since', now() - interval '3 minutes') where id = $1`,
-      [stuck.message.id],
-    );
-    await db.query("select fail_stuck_outbound_messages($1,$2)", [org, conversationId]);
-    const late = await call("complete_outbound_message", [
-      org,
-      stuck.message.id,
-      connectionId,
-      true,
-      "993",
-      null,
-    ]);
+    await sweep(stuck.message.id);
+    const late = await complete(stuck.message.id, stuck.attempt, { sent: true, ref: "993" });
     expect(late).toMatchObject({ state: "sent" });
+  });
+
+  describe("attempt binding after a sweep and a retry", () => {
+    /** Attempt A swept as send_stuck, then retried as attempt B (now 'sending'). */
+    async function sweptAndRetried(body: string) {
+      const key = crypto.randomUUID();
+      const a = await begin(key, body);
+      await sweep(a.message.id);
+      const b = await begin(key, body);
+      expect(b.should_send).toBe(true);
+      expect(b.attempt).not.toBe(a.attempt);
+      return { id: a.message.id, a: a.attempt, b: b.attempt };
+    }
+
+    it("late A success, then B success: sent, both deliveries recorded", async () => {
+      const r = await sweptAndRetried("order 1");
+      const mid = await complete(r.id, r.a, { sent: true, ref: "1001" });
+      // B is still in flight: A's success is remembered, B decides.
+      expect(mid).toMatchObject({ state: "sending" });
+      const done = await complete(r.id, r.b, { sent: true, ref: "1002" });
+      expect(done).toMatchObject({ state: "sent" });
+      expect((done.metadata as Row).delivered_refs).toEqual(["1001", "1002"]);
+    });
+
+    it("late A success, then B failure: still sent — A reached the customer", async () => {
+      const r = await sweptAndRetried("order 2");
+      await complete(r.id, r.a, { sent: true, ref: "1011" });
+      const done = await complete(r.id, r.b, { sent: false, error: "blocked_by_user" });
+      expect(done).toMatchObject({ state: "sent" });
+      expect((done.metadata as Row).telegram_message_id).toBe("1011");
+      expect(done.metadata as Row).not.toHaveProperty("send_error");
+    });
+
+    it("late A failure, then B success: A's failure changes nothing", async () => {
+      const r = await sweptAndRetried("order 3");
+      const mid = await complete(r.id, r.a, { sent: false, error: "provider_unavailable" });
+      expect(mid).toMatchObject({ state: "sending" });
+      expect(mid.metadata as Row).not.toHaveProperty("send_error");
+      const done = await complete(r.id, r.b, { sent: true, ref: "1021" });
+      expect(done).toMatchObject({ state: "sent" });
+    });
+
+    it("late A failure, then B failure: failed with B's reason", async () => {
+      const r = await sweptAndRetried("order 4");
+      await complete(r.id, r.a, { sent: false, error: "provider_unavailable" });
+      const done = await complete(r.id, r.b, { sent: false, error: "blocked_by_user" });
+      expect(done).toMatchObject({ state: "failed" });
+      expect((done.metadata as Row).send_error).toBe("blocked_by_user");
+    });
+
+    it("B success, then late A success: sent stays, the duplicate is recorded", async () => {
+      const r = await sweptAndRetried("order 5");
+      await complete(r.id, r.b, { sent: true, ref: "1041" });
+      const late = await complete(r.id, r.a, { sent: true, ref: "1040" });
+      expect(late).toMatchObject({ state: "sent" });
+      expect((late.metadata as Row).telegram_message_id).toBe("1041");
+      expect((late.metadata as Row).delivered_refs).toEqual(["1041", "1040"]);
+    });
+
+    it("B success, then late A failure: sent stays", async () => {
+      const r = await sweptAndRetried("order 6");
+      await complete(r.id, r.b, { sent: true, ref: "1051" });
+      const late = await complete(r.id, r.a, { sent: false, error: "provider_unavailable" });
+      expect(late).toMatchObject({ state: "sent" });
+      expect(late.metadata as Row).not.toHaveProperty("send_error");
+    });
+
+    it("B failure, then late A success: becomes sent — the customer has it", async () => {
+      const r = await sweptAndRetried("order 7");
+      await complete(r.id, r.b, { sent: false, error: "provider_unavailable" });
+      const late = await complete(r.id, r.a, { sent: true, ref: "1060" });
+      expect(late).toMatchObject({ state: "sent" });
+      expect((late.metadata as Row).telegram_message_id).toBe("1060");
+    });
+
+    it("B failure, then late A failure: B's failure stands", async () => {
+      const r = await sweptAndRetried("order 8");
+      await complete(r.id, r.b, { sent: false, error: "blocked_by_user" });
+      const late = await complete(r.id, r.a, { sent: false, error: "provider_unavailable" });
+      expect(late).toMatchObject({ state: "failed" });
+      expect((late.metadata as Row).send_error).toBe("blocked_by_user");
+    });
+
+    it("a sweep of B after A's late success records sent, not send_stuck", async () => {
+      const r = await sweptAndRetried("order 9");
+      await complete(r.id, r.a, { sent: true, ref: "1080" });
+      await sweep(r.id);
+      expect(await stored(r.id)).toMatchObject({ state: "sent" });
+    });
   });
 
   it("the same key with a different body is stale_state", async () => {
@@ -459,7 +762,7 @@ describe("browser roles", () => {
         expect(
           await errorOf(
             db.query(
-              "select ingest_telegram_inbound($1,'1','1','a','a','tg:1','x','text',now(),null)",
+              "select ingest_telegram_inbound($1,'1','1','a','a','tg:1','x','text',now(),null,'1')",
               [crypto.randomUUID()],
             ),
           ),
@@ -472,6 +775,14 @@ describe("browser roles", () => {
         expect(
           await errorOf(
             db.query("select fail_stuck_outbound_messages($1,$1)", [crypto.randomUUID()]),
+          ),
+        ).toContain("permission denied");
+        expect(
+          await errorOf(db.query("select finish_channel_connect($1,$1,$1)", [crypto.randomUUID()])),
+        ).toContain("permission denied");
+        expect(
+          await errorOf(
+            db.query("select abort_channel_connect($1,$1,$1,$1)", [crypto.randomUUID()]),
           ),
         ).toContain("permission denied");
       } finally {

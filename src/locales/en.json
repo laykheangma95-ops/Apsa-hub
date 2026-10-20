@@ -834,10 +834,10 @@
       "channel_unavailable": "This channel is no longer connected. Reconnect it in Settings to reply.",
       "rate_limited": "You're sending too fast. Wait a moment, then tap Send again.",
       "principal_changed": "You switched account or business. Reload the page, then send again.",
-      "send_stuck": "Not delivered: sending took too long and was stopped.",
-      "generic": "Not delivered. Tap Send to try again."
+      "unconfirmed": "Delivery not confirmed — it may already have reached the customer. Check Telegram before you tap Retry.",
+      "not_delivered": "Not delivered. Tap Send to try again.",
+      "generic": "We couldn't confirm this reply. Tap Send to try again."
     },
-    "mayHaveBeenSent": "It may have been sent — check Telegram before retrying.",
     "retrySend": "Retry",
     "media": {
       "image": "Photo",
@@ -1888,6 +1888,8 @@
           "account_in_use": "This bot is already connected to another APSA business.",
           "webhook_url_unavailable": "APSA isn't set up to receive Telegram messages on this site yet. Contact support.",
           "webhook_failed": "Telegram didn't accept the connection. Try again in a moment.",
+          "connect_in_progress": "This bot is already being connected. Wait a minute, then check again.",
+          "connect_superseded": "Another connect or disconnect replaced this one. Check the channel's current status.",
           "credential_unavailable": "APSA can't store this connection securely right now. Contact support.",
           "provider_unavailable": "Telegram didn't respond. Try again in a moment.",
           "rate_limited": "Too many attempts. Wait a while and try again.",
