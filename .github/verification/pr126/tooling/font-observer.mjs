@@ -11,7 +11,8 @@
  *
  * It never waits for fonts or changes the page, so the harness measures what it
  * would have measured anyway; this only reports whether the web fonts had
- * loaded by then.
+ * loaded by then. At each `*-list.png` screenshot it also repeats the
+ * harness's long-Khmer-name check read-only (see longNameOverrun).
  */
 import { appendFileSync } from "node:fs";
 import path from "node:path";
@@ -38,9 +39,63 @@ const probe = () => {
   };
 };
 
+/**
+ * The harness's own long-name check (scripts/products-mobile-harness.ts at
+ * f42c4ff, "every line of the Khmer name clears the price and the row edge"),
+ * repeated as-is at the `*-list.png` screenshot, i.e. moments later on the same
+ * page with nothing done in between. The harness's verdict is untouched; this
+ * records what the same check reads once the page's fonts have had that time.
+ * Runs in the page.
+ */
+const longNameOverrun = (prefix) => {
+  const row = [...document.querySelectorAll('main a[href^="/app/products/"]')].find((a) =>
+    (a.textContent ?? "").includes(prefix),
+  );
+  if (!row) return "row not found";
+  const name = row.querySelector('[lang="km"] .chip-text');
+  const price = row.querySelector(".text-financial");
+  if (!name || !price) return "name or price not found";
+  const range = document.createRange();
+  range.selectNodeContents(name);
+  const priceBox = price.getBoundingClientRect();
+  const rowBox = row.getBoundingClientRect();
+  const lines = [...range.getClientRects()];
+  const bad = lines.filter(
+    (line) =>
+      line.right > rowBox.right + 0.5 ||
+      (line.right > priceBox.left + 0.5 &&
+        line.top < priceBox.bottom &&
+        line.bottom > priceBox.top),
+  );
+  return bad.length
+    ? `${bad.length}/${lines.length} lines overrun (max right ${Math.round(Math.max(...bad.map((b) => b.right)))}, price left ${Math.round(priceBox.left)}, row right ${Math.round(rowBox.right)})`
+    : "";
+};
+// The harness's LONG_KM, and the 12-character prefix it finds the row by.
+const LONG_KM_PREFIX =
+  "ទឹកក្រូចច្របាច់ស្រស់ធម្មជាតិគ្មានជាតិស្ករបន្ថែម ខ្ចប់ក្នុងដបកែវធំសម្រាប់គ្រួសារ និងការជប់លៀងពិសេស".slice(
+    0,
+    12,
+  );
+
 function observe(page) {
   const evaluate = page.evaluate.bind(page);
   const screenshot = page.screenshot.bind(page);
+  const remeasure = async (file) => {
+    try {
+      const state = await evaluate(probe);
+      const overrun = await evaluate(longNameOverrun, LONG_KM_PREFIX);
+      write({
+        kind: "long-name-remeasure",
+        file,
+        viewport: page.viewportSize(),
+        ...state,
+        overrun,
+      });
+    } catch (error) {
+      write({ kind: "long-name-remeasure", file, error: String(error).slice(0, 300) });
+    }
+  };
   const record = async (kind, file) => {
     try {
       write({ kind, file, viewport: page.viewportSize(), ...(await evaluate(probe)) });
@@ -53,7 +108,9 @@ function observe(page) {
     return evaluate(...args);
   };
   page.screenshot = async (options = {}) => {
-    await record("screenshot", options.path ? path.basename(options.path) : undefined);
+    const file = options.path ? path.basename(options.path) : undefined;
+    await record("screenshot", file);
+    if (file?.endsWith("-list.png")) await remeasure(file);
     return screenshot(options);
   };
   return page;

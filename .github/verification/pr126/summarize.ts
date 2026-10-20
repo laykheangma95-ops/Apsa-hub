@@ -254,7 +254,8 @@ function suiteResult(log: string) {
         .filter(Boolean)
         .map((l) => JSON.parse(l) as Record<string, any>);
       const browser = entries.find((e) => e.kind === "browser");
-      const observed = entries.filter((e) => e.kind !== "browser");
+      const observed = entries.filter((e) => e.kind === "evaluate" || e.kind === "screenshot");
+      const remeasured = entries.filter((e) => e.kind === "long-name-remeasure");
       // Kantumruy Pro leads the stack and has its own Latin subset, so Plus
       // Jakarta Sans may rightly never load; it is reported, not required.
       const ready = (e: Record<string, any>) =>
@@ -271,16 +272,37 @@ function suiteResult(log: string) {
       );
       if (notReady.length) {
         reasons.push(`fonts not ready at ${notReady.length} observed points`);
+        // Where each one sits: the next screenshot the harness took after it.
+        const nextShot = (e: Record<string, any>) =>
+          observed.slice(observed.indexOf(e) + 1).find((n) => n.kind === "screenshot")?.file ??
+          "none";
         md.push(
           ...notReady
             .slice(0, 40)
             .map(
               (e) =>
-                `- ${e.kind} ${e.file ?? ""} ${e.lang ?? ""}@${e.viewport?.width ?? "?"}: status=${e.status} kantumruy=${e.kantumruyLoaded} jakarta=${e.jakartaLoaded} ${e.error ?? ""}`,
+                `- ${e.kind} ${e.file ?? ""} ${e.lang ?? ""}@${e.viewport?.width ?? "?"} (next screenshot: ${nextShot(e)}): status=${e.status} kantumruy=${e.kantumruyLoaded} jakarta=${e.jakartaLoaded} ${e.error ?? ""}`,
             ),
           "",
         );
       }
+      // Supplemental, never part of the verdict: the harness's long-name check
+      // repeated read-only at the list screenshot (font-observer.mjs).
+      md.push(
+        "### Supplemental: long-Khmer-name check repeated at the list screenshot",
+        "",
+        "Read-only, moments after the harness's own measurement on the same page. It does not change any verdict above.",
+        "",
+        "| lang@width | fonts | Kantumruy faces loaded | result |",
+        "|---|---|---|---|",
+        ...remeasured.map(
+          (e) =>
+            `| ${e.lang ?? "?"}@${e.viewport?.width ?? "?"} | ${e.status ?? "?"} | ${e.kantumruyLoaded ?? "?"} | ${e.error ?? (e.overrun === "" ? "clears price and row" : `**${e.overrun}**`)} |`,
+        ),
+        "",
+      );
+      if (remeasured.length !== 8)
+        reasons.push(`${remeasured.length} long-name re-measurements (want 8)`);
       if (!browser) reasons.push("browser version not recorded");
     }
     const screenshots = existsSync(path.join(inDir, "mobile", "evidence"))

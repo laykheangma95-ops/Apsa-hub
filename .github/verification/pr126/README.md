@@ -51,7 +51,10 @@ The harness does not wait for web fonts. `font-observer.mjs` is the module the
 harness loads as `APSA_PLAYWRIGHT_CORE`. It wraps the real `playwright-core`
 and, before every `page.evaluate` and screenshot, records `document.fonts.status`
 and the Kantumruy Pro / Plus Jakarta Sans face states to `fonts.jsonl`. It also
-records the browser version. It observes only and never waits.
+records the browser version. It observes only and never waits. At each
+`*-list.png` screenshot it also repeats the harness's long-Khmer-name check,
+read-only, with the font state at that moment. This is a supplemental table
+and changes no verdict.
 
 ## Authorization coverage of the gate's 14 cases
 
