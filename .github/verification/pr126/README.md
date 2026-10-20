@@ -24,12 +24,19 @@ PostgREST gate and mobile harness, unchanged, at one fixed commit:
 | `summary`                | `summarize.ts` over the three artifacts; also written to the run's summary page                                                       | `pr126-summary`                |
 
 Every job uploads its evidence with `if: always()`. Each test step keeps its
-command's real exit code, and `summarize.ts` passes a section only when the
-content matches too: 14/14 cases with 0 skips at each cap, 8/8 controls
-caught with the checkout restored, and 162 mobile checks with only
-harness-marked pre-existing failures and 0 console errors. It also requires
-`document.fonts` to be loaded, with a Kantumruy Pro face loaded on Khmer
-text, at every observed measurement.
+command's real exit code. `summarize.ts` gives three separate verdicts, each
+passing only when the content matches too, and the overall result is PASS
+only when all three pass:
+
+- **Native PostgREST gate:** 14/14 cases with 0 skips at each cap, and 8/8
+  controls caught with the checkout restored.
+- **Authorization:** the 3 PRINCIPAL-AUTHZ cases at each cap, and the
+  org-scope, `products.read` and `products.view_cost` controls. Embedded-
+  permission truncation is listed as a finding.
+- **Mobile:** 162 checks, all passing, with 0 console errors. A failure the
+  harness marks as pre-existing on main still fails the verdict and is named.
+  Fonts must be settled and loaded, with a Kantumruy Pro face on Khmer text,
+  at every measurement.
 
 ## Runner setup (`setup-runner.sh`)
 
@@ -49,9 +56,12 @@ text, at every observed measurement.
 
 The harness does not wait for web fonts. `font-observer.mjs` is the module the
 harness loads as `APSA_PLAYWRIGHT_CORE`. It wraps the real `playwright-core`
-and, before every `page.evaluate` and screenshot, records `document.fonts.status`
-and the Kantumruy Pro / Plus Jakarta Sans face states to `fonts.jsonl`. It also
-records the browser version. It observes only and never waits. At each
+and, before every `page.evaluate` and screenshot, waits up to 15 s for the
+Khmer web font (when the page shows Khmer) and `document.fonts.ready`. It then
+records the wait, `document.fonts.status` and the Kantumruy Pro / Plus Jakarta
+Sans face states to `fonts.jsonl`, plus the browser version. It changes no page
+state and no assertion; it only delays. Run 39348541760 showed the harness
+measuring before the font had loaded without this wait. At each
 `*-list.png` screenshot it also repeats the harness's long-Khmer-name check,
 read-only, with the font state at that moment. This is a supplemental table
 and changes no verdict.

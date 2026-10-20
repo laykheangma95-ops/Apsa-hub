@@ -1,18 +1,21 @@
 /**
- * Observe-only wrapper around playwright-core for PR #126's mobile harness.
+ * Font-settling wrapper around playwright-core for PR #126's mobile harness.
  *
  * scripts/products-mobile-harness.ts loads Playwright from APSA_PLAYWRIGHT_CORE
  * and uses only `chromium.launch`. Pointing that variable here runs the
- * committed harness unchanged while recording, to APSA_FONT_LOG (JSON lines):
+ * committed harness unchanged, except that before every page.evaluate (the
+ * harness's layout measurements) and every screenshot it waits, at most
+ * FONT_WAIT_MS, for the Khmer web font (when the page shows Khmer) and for
+ * document.fonts.ready. Run 39348541760 showed the harness otherwise measuring
+ * before Kantumruy Pro had loaded. It records, to APSA_FONT_LOG (JSON lines):
  *   - the browser's version and executable;
- *   - before every page.evaluate (the harness's layout measurements) and every
- *     screenshot: document.fonts.status and the Kantumruy Pro / Plus Jakarta
- *     Sans faces' load states.
+ *   - at each of those points: how long it waited, whether the wait timed out,
+ *     then document.fonts.status and the Kantumruy Pro / Plus Jakarta Sans
+ *     faces' load states.
  *
- * It never waits for fonts or changes the page, so the harness measures what it
- * would have measured anyway; this only reports whether the web fonts had
- * loaded by then. At each `*-list.png` screenshot it also repeats the
- * harness's long-Khmer-name check read-only (see longNameOverrun).
+ * It changes no page state and no assertion; it only delays. At each
+ * `*-list.png` screenshot it also repeats the harness's long-Khmer-name check
+ * read-only (see longNameOverrun).
  */
 import { appendFileSync } from "node:fs";
 import path from "node:path";
@@ -78,6 +81,23 @@ const LONG_KM_PREFIX =
     12,
   );
 
+const FONT_WAIT_MS = 15_000;
+
+// Runs in the page. Never rejects: a failed or slow load is reported, and the
+// readiness check in summarize.ts then fails the point.
+const settleFonts = async (timeoutMs) => {
+  const started = performance.now();
+  const khmer = /[ក-៿]/.test(document.body?.innerText ?? "");
+  const settle = (async () => {
+    if (khmer) await document.fonts.load('16px "Kantumruy Pro"', "ក");
+    await document.fonts.ready;
+    return "settled";
+  })().catch((error) => `load failed: ${String(error).slice(0, 120)}`);
+  const timer = new Promise((resolve) => setTimeout(() => resolve("timed out"), timeoutMs));
+  const outcome = await Promise.race([settle, timer]);
+  return { fontWait: outcome, fontWaitMs: Math.round(performance.now() - started) };
+};
+
 function observe(page) {
   const evaluate = page.evaluate.bind(page);
   const screenshot = page.screenshot.bind(page);
@@ -98,7 +118,8 @@ function observe(page) {
   };
   const record = async (kind, file) => {
     try {
-      write({ kind, file, viewport: page.viewportSize(), ...(await evaluate(probe)) });
+      const settled = await evaluate(settleFonts, FONT_WAIT_MS);
+      write({ kind, file, viewport: page.viewportSize(), ...settled, ...(await evaluate(probe)) });
     } catch (error) {
       write({ kind, file, error: String(error).slice(0, 300) });
     }

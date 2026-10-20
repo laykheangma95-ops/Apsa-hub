@@ -77,6 +77,11 @@ function suiteResult(log: string) {
   return { pass: count("pass"), fail: count("fail"), skip: Number.isNaN(skip) ? 0 : skip, cases };
 }
 
+// Kept for the separate authorization verdict below.
+const perCapAll: Record<string, ReturnType<typeof suiteResult>> = {};
+let probeRows: Record<string, unknown>[] | null = null;
+let negLines: string[] | null = null;
+
 // ── PostgREST gate: caps ─────────────────────────────────────────────────────
 {
   const reasons: string[] = [];
@@ -97,6 +102,7 @@ function suiteResult(log: string) {
       }
       const result = suiteResult(log);
       perCap[cap] = result;
+      perCapAll[cap] = result;
       if (result.pass !== CASES.length || result.fail !== 0 || result.skip !== 0) {
         reasons.push(
           `cap ${cap}: ${result.pass} pass / ${result.fail} fail / ${result.skip} skip (want ${CASES.length}/0/0)`,
@@ -124,6 +130,7 @@ function suiteResult(log: string) {
       md.push("Probe missing or failed.", "");
     } else {
       const rows = (JSON.parse(probe) as { rows: Record<string, unknown>[] }).rows;
+      probeRows = rows;
       md.push(
         "| cap | role | permissions (SQL) | embedded rows | truncated | products.read | products.view_cost |",
         "|---|---|---|---|---|---|---|",
@@ -150,6 +157,7 @@ function suiteResult(log: string) {
   } else {
     if (code !== 0) reasons.push(`gate exited ${code}`);
     const lines = log.split("\n").filter((l) => l.includes("negative control (cap"));
+    negLines = lines;
     const caught = lines.filter((l) => /: CAUGHT$/.test(l.trim()));
     if (lines.length !== 8) reasons.push(`${lines.length} negative controls ran (want 8)`);
     if (caught.length !== 8) reasons.push(`${caught.length}/8 caught`);
@@ -200,6 +208,10 @@ function suiteResult(log: string) {
     if (code !== 0) reasons.push(`harness exited ${code}`);
     if (results.checks.length !== 162) reasons.push(`${results.checks.length} checks (want 162)`);
     if (unexpected.length) reasons.push(`${unexpected.length} unexpected failures`);
+    // A failure the harness marks as pre-existing on main is still a failure.
+    for (const c of failed.filter((f) => f.known)) {
+      reasons.push(`${c.lang}@${c.width} FAILED (pre-existing on main): ${c.name}`);
+    }
     if (results.consoleErrors.length)
       reasons.push(`${results.consoleErrors.length} console errors`);
 
@@ -261,8 +273,13 @@ function suiteResult(log: string) {
       const remeasured = entries.filter((e) => e.kind === "long-name-remeasure");
       // Kantumruy Pro leads the stack and has its own Latin subset, so Plus
       // Jakarta Sans may rightly never load; it is reported, not required.
+      // font-observer.mjs waits for fonts before each point; a wait that timed
+      // out or failed, or fonts still not loaded after it, fails the point.
       const ready = (e: Record<string, any>) =>
-        !e.error && e.status === "loaded" && (!e.hasKhmerText || e.kantumruyLoaded > 0);
+        !e.error &&
+        e.fontWait === "settled" &&
+        e.status === "loaded" &&
+        (!e.hasKhmerText || e.kantumruyLoaded > 0);
       const notReady = observed.filter((e) => !ready(e));
       const shots = observed.filter((e) => e.kind === "screenshot");
       md.push(
@@ -270,7 +287,9 @@ function suiteResult(log: string) {
         "",
         `Font state observed at ${observed.length} points (${shots.length} screenshots): ` +
           `${observed.length - notReady.length} with document.fonts loaded and (on Khmer text) a Kantumruy Pro face loaded; ${notReady.length} not. ` +
-          `Plus Jakarta Sans faces loaded at ${observed.filter((e) => e.jakartaLoaded > 0).length} of them.`,
+          `Plus Jakarta Sans faces loaded at ${observed.filter((e) => e.jakartaLoaded > 0).length} of them. ` +
+          `Font wait before each point: max ${Math.max(0, ...observed.map((e) => e.fontWaitMs ?? 0))} ms; ` +
+          `${observed.filter((e) => e.fontWait !== "settled").length} not settled.`,
         "",
       );
       if (notReady.length) {
@@ -284,7 +303,7 @@ function suiteResult(log: string) {
             .slice(0, 40)
             .map(
               (e) =>
-                `- ${e.kind} ${e.file ?? ""} ${e.lang ?? ""}@${e.viewport?.width ?? "?"} (next screenshot: ${nextShot(e)}): status=${e.status} kantumruy=${e.kantumruyLoaded} jakarta=${e.jakartaLoaded} ${e.error ?? ""}`,
+                `- ${e.kind} ${e.file ?? ""} ${e.lang ?? ""}@${e.viewport?.width ?? "?"} (next screenshot: ${nextShot(e)}): wait=${e.fontWait ?? "none"} status=${e.status} kantumruy=${e.kantumruyLoaded} jakarta=${e.jakartaLoaded} ${e.error ?? ""}`,
             ),
           "",
         );
@@ -316,6 +335,59 @@ function suiteResult(log: string) {
   }
 }
 
+// ── Authorization (a separate verdict over the same evidence) ────────────────
+const authorization: { verdict: Verdict; reasons: string[]; findings: string[] } = {
+  verdict: "PASS",
+  reasons: [],
+  findings: [],
+};
+{
+  md.push("## Authorization", "");
+  const authzCases = CASES.filter(([, kind]) => kind === "PRINCIPAL-AUTHZ").map(([f]) => f);
+  for (const cap of ["40", "150", "1000"]) {
+    const result = perCapAll[cap];
+    for (const fragment of authzCases) {
+      const outcome = result?.cases.find((c) => c.fragment === fragment)?.result ?? "absent";
+      if (outcome !== "pass") authorization.reasons.push(`cap ${cap}: "${fragment}" ${outcome}`);
+    }
+  }
+  // The controls that remove an authorization or tenancy protection.
+  const AUTHZ_CONTROLS = [
+    "the product read is not scoped to the caller's organization",
+    "the page read does not require products.read",
+    "cost is shown to a member without products.view_cost",
+  ];
+  for (const control of AUTHZ_CONTROLS) {
+    const line = negLines?.find((l) => l.includes(control));
+    if (!line || !/: CAUGHT$/.test(line.trim())) {
+      authorization.reasons.push(`negative control not caught: ${control}`);
+    }
+  }
+  if (probeRows === null) authorization.reasons.push("embedded-permission probe missing");
+  for (const r of probeRows ?? []) {
+    if (r.truncated) {
+      authorization.findings.push(
+        `cap ${r.cap}: ${r.role} resolves ${r.embeddedRows}/${r.permissionsInSql} permission keys (fails closed${r.hasProductsViewCost ? "" : "; products.view_cost lost"})`,
+      );
+    }
+  }
+  if (authorization.reasons.length) authorization.verdict = "FAIL";
+  md.push(
+    `Verdict: **${authorization.verdict}**. It covers the 3 PRINCIPAL-AUTHZ cases at each cap (real membership → role → permission read through PostgREST) and the 3 authorization/tenancy negative controls. The 8 FIXTURE cases are excluded: they use a permissive context.`,
+    "",
+    "Not exercised: database RLS (every read uses a service_role JWT, as the server does) and the session/cookie layer before the principal is resolved.",
+    "",
+    ...(authorization.reasons.length
+      ? ["Failures:", ...authorization.reasons.map((r) => `- ${r}`), ""]
+      : []),
+    authorization.findings.length
+      ? "Finding (pre-existing, `src/server/auth/membership.ts`): PostgREST's db-max-rows also cuts the role's embedded permission keys:"
+      : "No embedded-permission truncation at any cap.",
+    ...authorization.findings.map((f) => `- ${f}`),
+    "",
+  );
+}
+
 // ── Provenance ───────────────────────────────────────────────────────────────
 md.push("## Provenance", "");
 for (const job of ["gate-caps", "gate-negative-controls", "mobile"]) {
@@ -323,20 +395,43 @@ for (const job of ["gate-caps", "gate-negative-controls", "mobile"]) {
   md.push(`### ${job}`, "", "```", (provenance ?? "missing").trim(), "```", "");
 }
 
-const allPass = sections.length === 3 && sections.every((s) => s.verdict === "PASS");
+// Three separate verdicts. The native gate is the caps run plus the negative
+// controls; any section MISSING or FAIL makes it so.
+const part = (name: string) => sections.find((s) => s.name === name);
+const gateParts = [part("gate-caps"), part("negative-controls")];
+const nativeGate = {
+  verdict: (gateParts.some((s) => !s)
+    ? "MISSING"
+    : gateParts.some((s) => s!.verdict === "MISSING")
+      ? "MISSING"
+      : gateParts.every((s) => s!.verdict === "PASS")
+        ? "PASS"
+        : "FAIL") as Verdict,
+  reasons: gateParts.flatMap((s) => (s ? s.reasons.map((r) => `${s.name}: ${r}`) : [])),
+};
+const mobile = part("mobile") ?? { verdict: "MISSING" as Verdict, reasons: ["no evidence"] };
+const verdicts = [
+  { name: "Native PostgREST gate", ...nativeGate, findings: [] as string[] },
+  { name: "Authorization", ...authorization },
+  { ...mobile, name: "Mobile", findings: [] as string[] },
+];
+const allPass = verdicts.every((v) => v.verdict === "PASS");
 const head = [
   "# PR #126 verification — summary",
   "",
   `Overall: **${allPass ? "PASS" : "NOT PASS"}**`,
   "",
-  "| Section | Verdict | Reasons |",
-  "|---|---|---|",
-  ...sections.map((s) => `| ${s.name} | ${s.verdict} | ${s.reasons.join("; ")} |`),
-  "",
-  "A mobile PASS allows exactly the failures the harness itself marks as pre-existing on main; they are listed above, not hidden.",
+  "| Verdict | Result | Reasons | Findings |",
+  "|---|---|---|---|",
+  ...verdicts.map(
+    (v) => `| ${v.name} | ${v.verdict} | ${v.reasons.join("; ")} | ${v.findings.join("; ")} |`,
+  ),
   "",
 ];
 writeFileSync(path.join(outDir, "summary.md"), [...head, ...md].join("\n"));
-writeFileSync(path.join(outDir, "summary.json"), JSON.stringify({ allPass, sections }, null, 2));
+writeFileSync(
+  path.join(outDir, "summary.json"),
+  JSON.stringify({ allPass, verdicts, sections }, null, 2),
+);
 console.info([...head, ...md].join("\n"));
 process.exit(allPass ? 0 : 1);
