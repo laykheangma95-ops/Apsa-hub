@@ -1,5 +1,5 @@
 /**
- * POST /api/webhooks/telegram/<connection id> — Telegram → APSA Inbox.
+ * POST /api/webhooks/telegram/<connection id>/<webhook generation> — Telegram → APSA Inbox.
  *
  * Dispatched from src/server.ts before the application router (like
  * /api/health): no session, no cookies, no server-function CSRF — the only
@@ -22,9 +22,14 @@
  * Updates APSA deliberately ignores have nothing to lose and are claimed in
  * the shared receipt store as before.
  *
- *   signature  sha256(header secret) compared in constant time with the
- *              connection's stored digest. Unknown, disconnected and
- *              wrong-secret requests are the same generic 401.
+ *   signature  for the connection's CURRENT generation: sha256(header secret)
+ *              compared in constant time with the stored digest. For an
+ *              OLDER generation of the same live connection: the header
+ *              compared with that generation's derived secret — proof that
+ *              Telegram still holds an older connect. Such a delivery is
+ *              stored (never lost) and the disagreement is flagged
+ *              (observe_channel_webhook, migration 064 §2 rule 5). Unknown,
+ *              disconnected and wrong-secret requests are the same generic 401.
  *   event id   "<connection id>:<update_id>" — update_id is unique per bot.
  *   tenant     the organization is the connection row's, taken in SQL
  *              (ingest_telegram_inbound). Nothing in the payload selects it.
@@ -48,7 +53,7 @@ import {
   webhookRejection,
 } from "@/server/webhooks/security";
 import { PostgresWebhookReceiptStore, type WebhookReceiptStore } from "@/server/webhooks/receipts";
-import { sha256Hex } from "../credentials";
+import { deriveWebhookSecret, sha256Hex } from "../credentials";
 import { ChannelError } from "../errors";
 import * as repo from "../repository";
 import { TELEGRAM_WEBHOOK_PATH_PREFIX } from "./paths";
@@ -99,10 +104,15 @@ export async function handleTelegramWebhook(
 ): Promise<Response> {
   // Lower-cased so the event id matches the receipt the database writes
   // ('<uuid as text>:<update_id>').
-  const connectionId = new URL(request.url).pathname
+  const [connectionId = "", generation = "", ...rest] = new URL(request.url).pathname
     .slice(TELEGRAM_WEBHOOK_PATH_PREFIX.length)
-    .toLowerCase();
-  if (!UUID_RE.test(connectionId)) return webhookRejection(404);
+    .toLowerCase()
+    .split("/");
+  if (rest.length > 0 || !UUID_RE.test(connectionId) || !UUID_RE.test(generation)) {
+    return webhookRejection(404);
+  }
+  /** Set once the secret is verified: which generation Telegram delivered for. */
+  let verifiedGeneration: string | null = null;
 
   const receipts = options.receipts ?? new PostgresWebhookReceiptStore();
   let verification;
@@ -117,7 +127,15 @@ export async function handleTelegramWebhook(
           if (!provided || provided.length > 256) return false;
           const connection = await repo.findLiveCredential(connectionId);
           if (!connection) return false;
-          return timingSafeEqual(await sha256Hex(provided), connection.webhook_secret_hash);
+          const ok =
+            generation === connection.webhook_generation.toLowerCase()
+              ? timingSafeEqual(await sha256Hex(provided), connection.webhook_secret_hash)
+              : await deriveWebhookSecret(connectionId, generation).then(
+                  (expected) => timingSafeEqual(provided, expected),
+                  () => false,
+                );
+          if (ok) verifiedGeneration = generation;
+          return ok;
         },
         eventId(rawBody) {
           const updateId = telegramUpdateId(rawBody);
@@ -142,6 +160,10 @@ export async function handleTelegramWebhook(
   }
 
   if (!verification.ok) return webhookRejection(verification.status);
+  // A verified delivery shows which generation Telegram holds (best effort).
+  if (verifiedGeneration) {
+    await repo.observeWebhook(connectionId, verifiedGeneration).catch(() => undefined);
+  }
   if (verification.duplicate) return acknowledged();
 
   const eventId = verification.eventId;

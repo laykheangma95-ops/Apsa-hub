@@ -15,7 +15,11 @@
  * rotation can re-encrypt row by row.
  *
  * The webhook secret a provider echoes back on every delivery is stored only
- * as its SHA-256 hex digest; the plaintext exists once, in the setWebhook call.
+ * as its SHA-256 hex digest. It is DERIVED (deriveWebhookSecret) from the
+ * connection id and that connect's webhook generation with a subkey of
+ * CHANNEL_CREDENTIAL_KEY, so the server can re-point Telegram at the current
+ * generation (repair) and recognise a delivery for an older generation of the
+ * same connection, without ever storing a usable secret.
  */
 
 export const CREDENTIAL_KEY_VERSION = 1;
@@ -104,9 +108,37 @@ export async function decryptCredential(
   }
 }
 
-/** 32 random bytes, base64url — within Telegram's secret_token alphabet [A-Za-z0-9_-]{1,256}. */
-export function generateWebhookSecret(): string {
-  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+async function hmac(
+  key: Uint8Array<ArrayBuffer>,
+  message: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const imported = await crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return new Uint8Array(
+    await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(message)),
+  );
+}
+
+/**
+ * The webhook secret for one connect of one connection: base64url of
+ * HMAC-SHA256(subkey, "<connection id>:<webhook generation>"), the subkey
+ * being HMAC(CHANNEL_CREDENTIAL_KEY, a fixed label) so the AES key is never
+ * used directly for MACs. Within Telegram's [A-Za-z0-9_-]{1,256}.
+ */
+export async function deriveWebhookSecret(
+  connectionId: string,
+  generation: string,
+  key: Uint8Array<ArrayBuffer> = readCredentialKey(),
+): Promise<string> {
+  const subkey = await hmac(key, "apsa:channel-webhook-secret:v1");
+  return base64UrlEncode(
+    await hmac(subkey, `${connectionId.toLowerCase()}:${generation.toLowerCase()}`),
+  );
 }
 
 export async function sha256Hex(value: string): Promise<string> {

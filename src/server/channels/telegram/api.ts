@@ -129,6 +129,17 @@ export class TelegramBotApi {
     await this.call<boolean>("deleteWebhook", { drop_pending_updates: false });
   }
 
+  /**
+   * What Telegram holds NOW: the webhook URL ("" when none). Read-only. The
+   * URL carries the connect's generation, so this is how APSA SEES which
+   * connect Telegram is using (the secret itself is never returned).
+   */
+  async getWebhookInfo(): Promise<{ url: string }> {
+    const result = await this.call<{ url?: unknown }>("getWebhookInfo", {});
+    if (typeof result?.url !== "string") throw new TelegramApiError("provider_unavailable");
+    return { url: result.url };
+  }
+
   /** Plain text only — no parse_mode, so merchant text is never interpreted as markup. */
   async sendMessage(chatId: string, text: string): Promise<{ messageId: number }> {
     const result = await this.call<{ message_id?: unknown }>("sendMessage", {

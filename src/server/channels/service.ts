@@ -19,8 +19,8 @@ import {
   ChannelCredentialKeyError,
   CREDENTIAL_KEY_VERSION,
   decryptCredential,
+  deriveWebhookSecret,
   encryptCredential,
-  generateWebhookSecret,
   sha256Hex,
 } from "./credentials";
 import { ChannelError } from "./errors";
@@ -83,6 +83,7 @@ function summarize(row: repo.ChannelConnectionRow, withHealth: boolean): Channel
  */
 export function telegramWebhookUrl(
   connectionId: string,
+  generation: string,
   env: Record<string, string | undefined> = process.env,
 ): string {
   const base = (env["CHANNEL_WEBHOOK_BASE_URL"] || env["VITE_APP_URL"] || "").trim();
@@ -100,7 +101,7 @@ export function telegramWebhookUrl(
   ) {
     throw new ChannelError("webhook_url_unavailable");
   }
-  return `${origin.origin}${TELEGRAM_WEBHOOK_PATH_PREFIX}${connectionId}`;
+  return `${origin.origin}${TELEGRAM_WEBHOOK_PATH_PREFIX}${connectionId}/${generation}`;
 }
 
 async function openCredential(ciphertext: string): Promise<string> {
@@ -129,6 +130,145 @@ export async function listChannelConnections(
   return rows.map((row) => summarize(row, withHealth));
 }
 
+// ── Provider operations (migration 064 §2) ─────────────────────────────────
+
+/*
+ * Every Telegram-side change of a bot runs under that bot's operation lease
+ * (120 s). A request may only be STARTED inside this window from the moment
+ * the lease was taken; with the client's 10 s timeout every request this
+ * operation sends has an answer — or is declared unknown — at least 80 s
+ * before the lease could lapse, and an unknown one keeps the lease in doubt
+ * for 5 minutes more. That ordering, not any check after Telegram answers, is
+ * what keeps an older request from landing after a newer operation.
+ */
+export const PROVIDER_WRITE_WINDOW_MS = 30_000;
+
+export interface ProviderOperationOptions {
+  /** Clock for the write window; tests advance it. */
+  nowMs?: () => number;
+}
+
+type Outcome = repo.ProviderOutcome;
+
+/** Telegram answered "no" (any 4xx) → not applied. No answer → unknown. */
+function outcomeOf(error: unknown): Outcome {
+  return error instanceof TelegramApiError && error.code !== "provider_unavailable"
+    ? "refused"
+    : "unknown";
+}
+
+/**
+ * setWebhook, then SEE it. 'verified' when Telegram shows exactly `url` (this
+ * generation, so this generation's secret) — or, if getWebhookInfo cannot be
+ * read, when setWebhook itself answered OK (Telegram confirming it applied
+ * THIS request). Any other URL seen, or no answer at all, is 'unknown'.
+ */
+async function pointWebhook(
+  bot: TelegramBotApi,
+  url: string,
+  secret: string,
+  startedAt: number,
+  nowMs: () => number,
+): Promise<Outcome> {
+  if (nowMs() - startedAt > PROVIDER_WRITE_WINDOW_MS) return "refused"; // never sent
+  let sent: Outcome = "verified";
+  try {
+    await bot.setWebhook(url, secret);
+  } catch (error) {
+    sent = outcomeOf(error);
+    if (sent === "refused") return sent;
+  }
+  try {
+    return (await bot.getWebhookInfo()).url === url ? "verified" : "unknown";
+  } catch {
+    return sent;
+  }
+}
+
+/** deleteWebhook, then SEE no webhook. */
+async function removeWebhook(
+  bot: TelegramBotApi,
+  startedAt: number,
+  nowMs: () => number,
+): Promise<Outcome> {
+  if (nowMs() - startedAt > PROVIDER_WRITE_WINDOW_MS) return "refused"; // never sent
+  let sent: Outcome = "verified";
+  try {
+    await bot.deleteWebhook();
+  } catch (error) {
+    sent = outcomeOf(error);
+    if (sent === "refused") return sent;
+  }
+  try {
+    return (await bot.getWebhookInfo()).url === "" ? "verified" : "unknown";
+  } catch {
+    return sent;
+  }
+}
+
+/**
+ * Rule 4: a superseded operation whose own Telegram request may have been
+ * applied AFTER a newer one re-checks Telegram under a fresh lease and points
+ * it back at what APSA stores — the bot's live connection's current
+ * generation, or no webhook at all. Skipped (not needed) while any other
+ * operation holds the bot: that operation verifies Telegram itself.
+ */
+async function reconcileBot(
+  ctx: AuthorizationContext,
+  bot: TelegramBotApi,
+  externalAccountId: string,
+  nowMs: () => number,
+): Promise<void> {
+  const operationId = crypto.randomUUID();
+  try {
+    await repo.beginOperation({
+      organizationId: ctx.organizationId,
+      actorUserId: ctx.userId,
+      externalAccountId,
+      kind: "repair",
+      operationId,
+    });
+  } catch (error) {
+    serverLog.info("channels.telegram.reconcile_deferred", {
+      code: error instanceof ChannelError ? error.code : "unknown",
+    });
+    return;
+  }
+  const startedAt = nowMs();
+  let connectionId: string | null = null;
+  let generation: string | null = null;
+  let outcome: Outcome = "unknown";
+  try {
+    const live = await repo.findLiveConnectionForBot(externalAccountId);
+    if (live) {
+      connectionId = live.id;
+      generation = live.webhook_generation;
+      outcome = await pointWebhook(
+        bot,
+        telegramWebhookUrl(live.id, live.webhook_generation),
+        await deriveWebhookSecret(live.id, live.webhook_generation),
+        startedAt,
+        nowMs,
+      );
+    } else {
+      outcome = await removeWebhook(bot, startedAt, nowMs);
+      if (outcome === "verified") outcome = "done";
+    }
+  } finally {
+    await repo
+      .settleOperation({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        operationId,
+        connectionId,
+        generation,
+        outcome,
+      })
+      .catch(() => undefined);
+    serverLog.warn("channels.telegram.reconciled", { outcome });
+  }
+}
+
 // ── Connect ───────────────────────────────────────────────────────────────────
 
 export async function connectTelegramBot(
@@ -136,7 +276,9 @@ export async function connectTelegramBot(
   rawToken: string,
   expectedPrincipal: ExpectedPrincipal,
   api: TelegramApiFactory = defaultApi,
+  options: ProviderOperationOptions = {},
 ): Promise<ChannelConnectionSummary> {
+  const nowMs = options.nowMs ?? Date.now;
   // The connection is attributed to (and audited as) the member who pasted the
   // token: refuse before anything else if the session changed under the form.
   assertExpectedPrincipal(ctx, expectedPrincipal);
@@ -163,6 +305,10 @@ export async function connectTelegramBot(
   if (!identity.isBot) throw new ChannelError("not_a_bot");
   // The token's own prefix is the bot id; a mismatch means a forged/mixed token.
   if (token.split(":")[0] !== String(identity.id)) throw new ChannelError("invalid_token");
+  const externalAccountId = String(identity.id);
+
+  // Fail before any write when this deployment has no public webhook origin.
+  telegramWebhookUrl(crypto.randomUUID(), crypto.randomUUID());
 
   let ciphertext: string;
   try {
@@ -174,57 +320,99 @@ export async function connectTelegramBot(
     }
     throw error;
   }
-  const secret = generateWebhookSecret();
-  // This operation's identity: the connect lease it takes is the only thing
-  // that lets it finish or undo this connect later (migration 064 §2).
-  const operationId = crypto.randomUUID();
 
-  const row = await repo.connectAccount({
+  // The bot's operation lease, held until Telegram's answer is KNOWN.
+  const operationId = crypto.randomUUID();
+  await repo.beginOperation({
     organizationId: ctx.organizationId,
     actorUserId: ctx.userId,
-    externalAccountId: String(identity.id),
-    handle: identity.username,
-    displayName: identity.firstName.slice(0, 128) || null,
-    ciphertext,
-    keyVersion: CREDENTIAL_KEY_VERSION,
-    secretHash: await sha256Hex(secret),
+    externalAccountId,
+    kind: "connect",
     operationId,
   });
+  const startedAt = nowMs();
 
-  // The row now holds the NEW secret's digest, so Telegram must be pointed at
-  // it. If that fails the connection cannot receive anything: disconnect it
-  // (audited) rather than leave a row that silently drops every message —
-  // but only while this operation still holds the connect lease. A newer
-  // connect (after this one's lease expired) or a member's disconnect owns the
-  // row now, and an older operation's cleanup must not touch it.
+  // This connect's generation: part of the URL Telegram gets, and of the
+  // derived secret. Bound to the row id the secret is derived for.
+  const generation = crypto.randomUUID();
+  let row: repo.ChannelConnectionRow;
+  let secret: string;
   try {
-    await bot.setWebhook(telegramWebhookUrl(row.id), secret);
-  } catch (error) {
-    const aborted = await repo
-      .abortConnect(ctx.organizationId, ctx.userId, row.id, operationId)
-      .catch(() => false);
-    if (!aborted)
-      serverLog.warn("channels.telegram.connect_abort_skipped", { connectionId: row.id });
-    if (error instanceof ChannelError) throw error;
-    serverLog.warn("channels.telegram.set_webhook_failed", {
-      code: error instanceof TelegramApiError ? error.code : "unknown",
+    const live = await repo.findLiveConnectionForBot(externalAccountId);
+    const connectionId =
+      live && live.organization_id === ctx.organizationId ? live.id : crypto.randomUUID();
+    try {
+      secret = await deriveWebhookSecret(connectionId, generation);
+    } catch (error) {
+      if (error instanceof ChannelCredentialKeyError)
+        throw new ChannelError("credential_unavailable");
+      throw error;
+    }
+    row = await repo.connectAccount({
+      organizationId: ctx.organizationId,
+      actorUserId: ctx.userId,
+      externalAccountId,
+      handle: identity.username,
+      displayName: identity.firstName.slice(0, 128) || null,
+      ciphertext,
+      keyVersion: CREDENTIAL_KEY_VERSION,
+      secretHash: await sha256Hex(secret),
+      connectionId,
+      generation,
+      operationId,
     });
-    throw new ChannelError("webhook_failed");
+  } catch (error) {
+    // Nothing reached Telegram: give the lease back.
+    await repo
+      .settleOperation({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        operationId,
+        connectionId: null,
+        generation: null,
+        outcome: "done",
+      })
+      .catch(() => undefined);
+    throw error;
   }
 
-  let finished: repo.ChannelConnectionRow;
-  try {
-    finished = await repo.finishConnect(ctx.organizationId, row.id, operationId);
-  } catch (error) {
-    // Superseded while Telegram was answering: the newer operation (or the
-    // disconnect) decides what the bot points at. Report, never undo.
-    serverLog.warn("channels.telegram.connect_superseded", { connectionId: row.id });
-    if (error instanceof ChannelError) throw error;
+  const outcome = await pointWebhook(
+    bot,
+    telegramWebhookUrl(row.id, generation),
+    secret,
+    startedAt,
+    nowMs,
+  );
+  const settled = await repo.settleOperation({
+    organizationId: ctx.organizationId,
+    actorUserId: ctx.userId,
+    operationId,
+    connectionId: row.id,
+    generation,
+    outcome,
+  });
+
+  if (!settled.held) {
+    // Superseded while Telegram was answering (this operation's lease lapsed
+    // and another operation took the bot). If this request was applied it may
+    // have landed after that operation's: make Telegram match APSA again.
+    serverLog.warn("channels.telegram.connect_superseded", { connectionId: row.id, outcome });
+    if (outcome !== "refused") await reconcileBot(ctx, bot, externalAccountId, nowMs);
     throw new ChannelError("connect_superseded");
+  }
+  if (outcome === "unknown") {
+    // Maybe applied, maybe later: the bot stays in doubt and the connection is
+    // NOT reported connected.
+    serverLog.warn("channels.telegram.connect_unverified", { connectionId: row.id });
+    throw new ChannelError("webhook_unverified");
+  }
+  if (outcome === "refused" || !settled.current || !settled.connection) {
+    serverLog.warn("channels.telegram.set_webhook_failed", { connectionId: row.id });
+    throw new ChannelError(settled.current ? "webhook_failed" : "connect_superseded");
   }
 
   serverLog.info("channels.telegram.connected", { connectionId: row.id });
-  return summarize(finished, ctx.can("integrations.view_health"));
+  return summarize(settled.connection, ctx.can("integrations.view_health"));
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────
@@ -234,26 +422,74 @@ export async function disconnectChannel(
   connectionId: string,
   expectedPrincipal: ExpectedPrincipal,
   api: TelegramApiFactory = defaultApi,
+  options: ProviderOperationOptions = {},
 ): Promise<ChannelConnectionSummary> {
+  const nowMs = options.nowMs ?? Date.now;
   assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("integrations.disconnect");
   const live = await repo.findLiveCredential(connectionId, ctx.organizationId);
-  if (live) {
-    // Best effort: stop Telegram delivering. Without this the webhook still
-    // stops working — the cleared secret digest refuses every delivery.
-    try {
-      const token = await openCredential(live.credential_ciphertext);
-      await api(token).deleteWebhook();
-    } catch (error) {
-      serverLog.warn("channels.telegram.delete_webhook_failed", {
-        code:
-          error instanceof TelegramApiError || error instanceof ChannelError
-            ? error.code
-            : "unknown",
-      });
-    }
+  if (!live) {
+    const row = await repo.findConnection(connectionId, ctx.organizationId);
+    if (!row) throw new ChannelError("connection_not_found");
+    return summarize(row, ctx.can("integrations.view_health"));
   }
-  const row = await repo.disconnectAccount(ctx.organizationId, ctx.userId, connectionId);
+
+  // Read the token before the row forgets it; a token that cannot be opened
+  // still disconnects (every delivery is refused once the digest is gone).
+  let bot: TelegramBotApi | null = null;
+  try {
+    bot = api(await openCredential(live.credential_ciphertext));
+  } catch {
+    bot = null;
+  }
+
+  const operationId = crypto.randomUUID();
+  await repo.beginOperation({
+    organizationId: ctx.organizationId,
+    actorUserId: ctx.userId,
+    externalAccountId: live.external_account_id,
+    kind: "disconnect",
+    operationId,
+    connectionId,
+  });
+  const startedAt = nowMs();
+
+  // Database first: from here APSA refuses every delivery for this connection.
+  let row: repo.ChannelConnectionRow;
+  try {
+    row = await repo.disconnectAccount(ctx.organizationId, ctx.userId, connectionId, operationId);
+  } catch (error) {
+    await repo
+      .settleOperation({
+        organizationId: ctx.organizationId,
+        actorUserId: ctx.userId,
+        operationId,
+        connectionId: null,
+        generation: null,
+        outcome: "done",
+      })
+      .catch(() => undefined);
+    throw error;
+  }
+
+  // Then Telegram, still under the lease: a reconnect of this bot cannot start
+  // until this request's outcome is known (or its in-doubt window has passed).
+  const outcome = bot ? await removeWebhook(bot, startedAt, nowMs) : "refused";
+  if (outcome !== "verified") {
+    serverLog.warn("channels.telegram.delete_webhook_unconfirmed", { outcome });
+  }
+  const settled = await repo.settleOperation({
+    organizationId: ctx.organizationId,
+    actorUserId: ctx.userId,
+    operationId,
+    connectionId: null,
+    generation: null,
+    outcome: outcome === "unknown" ? "unknown" : "done",
+  });
+  if (!settled.held && bot && outcome !== "refused") {
+    // This deleteWebhook may have landed after a newer connect of the bot.
+    await reconcileBot(ctx, bot, live.external_account_id, nowMs);
+  }
   return summarize(row, ctx.can("integrations.view_health"));
 }
 

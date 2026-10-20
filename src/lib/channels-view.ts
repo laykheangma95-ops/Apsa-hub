@@ -21,6 +21,7 @@ export type ConnectErrorKind =
   | "webhook_failed"
   | "connect_in_progress"
   | "connect_superseded"
+  | "webhook_unverified"
   | "credential_unavailable"
   | "provider_unavailable"
   | "rate_limited"
@@ -34,6 +35,7 @@ const CONNECT_CODES: ReadonlySet<string> = new Set([
   "webhook_failed",
   "connect_in_progress",
   "connect_superseded",
+  "webhook_unverified",
   "credential_unavailable",
   "provider_unavailable",
 ]);

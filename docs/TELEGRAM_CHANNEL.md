@@ -6,7 +6,7 @@ migration `064_telegram_channel.sql`.
 ## What it does
 
 ```
-Customer ──message──▶ merchant's Telegram bot ──webhook──▶ POST /api/webhooks/telegram/<connection id>
+Customer ──message──▶ merchant's Telegram bot ──webhook──▶ POST /api/webhooks/telegram/<connection id>/<generation>
                                                              │ secret check (sha256, constant time)
                                                              │ replay LOOKUP (webhook_event_receipts)
                                                              ▼
@@ -25,15 +25,27 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
 
 - **Connect** (Settings → Messaging channels → Telegram, Owner only): paste the
   @BotFather token. APSA validates it (`getMe`), encrypts it with
-  `CHANNEL_CREDENTIAL_KEY` (AES-256-GCM), stores only the SHA-256 of a fresh
+  `CHANNEL_CREDENTIAL_KEY` (AES-256-GCM), stores only the SHA-256 of the
   webhook secret, and calls `setWebhook`. Audited (`integrations.connect`).
-  The whole connect → `setWebhook` → finish/cleanup runs under a per-bot
-  **connect lease** (60 s): an overlapping connect is refused
-  (`connect_in_progress`), and only the operation holding the lease may finish
-  it or undo it after a failed `setWebhook` — an older, superseded operation
-  can neither disconnect nor claim the newer connection
-  (`connect_superseded`). Connect and disconnect carry the initiating member +
+  Each connect has a fresh **webhook generation**: it is part of the URL
+  Telegram gets, and the secret is derived from connection id + generation
+  with a subkey of `CHANNEL_CREDENTIAL_KEY` (never stored). The connection is
+  reported **connected only after APSA has seen Telegram hold exactly that
+  generation's URL** (`getWebhookInfo`); until then it shows _Needs
+  attention_. Connect and disconnect carry the initiating member +
   organization and are refused if the session changed.
+- **One Telegram-side operation per bot** (migration 064 §2). Connect,
+  disconnect and repair each take the bot's operation lease
+  (`channel_bot_operations`, 120 s; Telegram writes only in its first 30 s,
+  each with a 10 s timeout). The lease is released only when Telegram's
+  answer is known — applied, or refused (4xx, never applied). With no answer
+  (timeout, network error, 5xx) the outcome is unknown: the lease stays **in
+  doubt for 5 minutes**, nothing else may touch the bot, and the connect is
+  reported `webhook_unverified` ("not confirmed"), never connected. An
+  overlapping operation is refused `connect_in_progress`. An operation that
+  learns it was superseded after its own request may have landed re-checks
+  Telegram under a fresh lease and points it back at what APSA stores (the
+  live connection's generation, or no webhook).
 - **One bot, one business.** A bot live in one organization is refused to any
   other (`account_in_use`). Reconnecting in the same organization rotates the
   token and secret in place.
@@ -59,8 +71,10 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
   receipt is written by `ingest_telegram_inbound` in the same transaction as
   the message. A crash before that commit leaves no receipt, so Telegram's
   retry is processed; a retry after it is acknowledged as a duplicate.
-- **Disconnect** (Owner only): `deleteWebhook`, credential and secret digest
-  cleared, audited. Past conversations stay.
+- **Disconnect** (Owner only), under the bot's lease: credential, secret digest
+  and generation cleared first (audited), then `deleteWebhook` — so a
+  reconnect cannot start while that request could still land. Past
+  conversations stay.
 
 ## Permissions (PERMISSIONS_MATRIX.md §25)
 
@@ -122,13 +136,14 @@ token anywhere shared): `https://api.telegram.org/bot<token>/getWebhookInfo`.
   ledger records the delivery (`delivered_refs`), but the duplicate in the
   customer's chat cannot be undone.
 - A reply stuck in `sending` (server died mid-send) is never auto-retried.
-- Connect lease edge: if an older `setWebhook` request lands at Telegram
-  _after_ a newer connect took over its expired lease, Telegram can hold the
-  older secret; deliveries then fail 401 until the merchant reconnects. The
-  lease (60 s) is six times the client timeout (10 s) to make this unlikely,
-  not impossible.
-- During a re-connect (rotation), deliveries signed with the previous secret
-  are refused 401 until Telegram has the new one; Telegram retries them.
+- Provider timing assumption: Telegram applies a request within 80 s of APSA
+  sending it, or never. Beyond that, a `setWebhook` landing late is still
+  _detected_ — a delivery carrying an older generation's valid secret is
+  stored and flags the connection `webhook_mismatch` — but a `deleteWebhook`
+  landing late after a newer verified connect silences the bot with nothing
+  arriving to reveal it until the merchant reconnects.
+- During a re-connect (rotation), deliveries for the previous generation are
+  verified against that generation's derived secret and stored, not refused.
 - No media download / sending photos; no read receipts (Bot API has none).
 - Manager `integrations.connect` (matrix ⚠️) is not granted.
 - Receipt pruning still has no scheduler (docs/OPERABILITY.md).
@@ -144,7 +159,7 @@ configures **nothing** for that; the design below is for separate review.
   credential handed to a third party and logged by it.
 - **Proposed:** a dedicated, minimal ingress origin (its own project or a
   path-scoped public route on the production origin) that is public by design
-  and serves _only_ `POST /api/webhooks/telegram/<uuid>`. Everything else on it
+  and serves _only_ `POST /api/webhooks/telegram/<uuid>/<uuid>`. Everything else on it
   answers 404. It keeps the existing secret-header check, rate limit, body
   bound and atomic receipt, and holds no session cookies.
 - Optional hardening to evaluate: Telegram's published source ranges as a

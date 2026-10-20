@@ -48,6 +48,34 @@ function publicRow(row: Record<string, unknown>): ChannelConnectionRow {
   return out as unknown as ChannelConnectionRow;
 }
 
+export type ChannelOperationKind = "connect" | "disconnect" | "repair";
+
+/**
+ * Takes the bot's operation lease (migration 064 §2) for `operationId`.
+ * Refused 'connect_in_progress' while another operation on this bot — or one
+ * whose provider outcome is still unknown — holds it.
+ */
+export async function beginOperation(input: {
+  organizationId: string;
+  actorUserId: string;
+  externalAccountId: string;
+  kind: ChannelOperationKind;
+  operationId: string;
+  connectionId?: string | null;
+}): Promise<void> {
+  const { error } = await db.rpc("begin_channel_operation", {
+    p_org: input.organizationId,
+    p_actor: input.actorUserId,
+    p_provider: "TELEGRAM",
+    p_external_id: input.externalAccountId,
+    p_kind: input.kind,
+    p_operation: input.operationId,
+    p_connection: input.connectionId ?? null,
+  });
+  if (error) throw channelDatabaseError(error);
+}
+
+/** Stores the new credential + digest + webhook generation under the operation's connect lease (not yet 'connected'). */
 export async function connectAccount(input: {
   organizationId: string;
   actorUserId: string;
@@ -57,7 +85,9 @@ export async function connectAccount(input: {
   ciphertext: string;
   keyVersion: number;
   secretHash: string;
-  /** This connect operation; only it may later finish or abort the connect lease. */
+  /** The id the secret was derived for: this organization's live row of the bot, or a fresh id. */
+  connectionId: string;
+  generation: string;
   operationId: string;
 }): Promise<ChannelConnectionRow> {
   const { data, error } = await db
@@ -71,6 +101,8 @@ export async function connectAccount(input: {
       p_ciphertext: input.ciphertext,
       p_key_version: input.keyVersion,
       p_secret_hash: input.secretHash,
+      p_connection: input.connectionId,
+      p_generation: input.generation,
       p_operation: input.operationId,
     })
     .single();
@@ -78,15 +110,53 @@ export async function connectAccount(input: {
   return publicRow(first(data));
 }
 
-/** setWebhook succeeded: release the connect lease. connect_superseded if this operation no longer holds it. */
-export async function finishConnect(
+export type ProviderOutcome = "verified" | "refused" | "unknown" | "done";
+
+/**
+ * Records an operation's provider outcome and releases its lease — or, for
+ * 'unknown', holds it in doubt. `held` false: the operation was superseded and
+ * changed nothing; `current` true: the row still carried `generation`.
+ */
+export async function settleOperation(input: {
+  organizationId: string;
+  actorUserId: string;
+  operationId: string;
+  connectionId: string | null;
+  generation: string | null;
+  outcome: ProviderOutcome;
+}): Promise<{ held: boolean; current: boolean; connection: ChannelConnectionRow | null }> {
+  const { data, error } = await db.rpc("settle_channel_operation", {
+    p_org: input.organizationId,
+    p_actor: input.actorUserId,
+    p_operation: input.operationId,
+    p_connection: input.connectionId,
+    p_generation: input.generation,
+    p_outcome: input.outcome,
+  });
+  if (error || !data) throw channelDatabaseError(error);
+  const result = data as {
+    held: boolean;
+    current: boolean;
+    connection: Record<string, unknown> | null;
+  };
+  return {
+    held: result.held === true,
+    current: result.current === true,
+    connection: result.connection ? publicRow(result.connection) : null,
+  };
+}
+
+/** Clears the connection (audited) under the operation's disconnect lease. */
+export async function disconnectAccount(
   organizationId: string,
+  actorUserId: string,
   connectionId: string,
   operationId: string,
 ): Promise<ChannelConnectionRow> {
   const { data, error } = await db
-    .rpc("finish_channel_connect", {
+    .rpc("disconnect_channel_account", {
       p_org: organizationId,
+      p_actor: actorUserId,
       p_connection: connectionId,
       p_operation: operationId,
     })
@@ -96,40 +166,46 @@ export async function finishConnect(
 }
 
 /**
- * setWebhook failed: disconnect (audited) — only if this operation still holds
- * the connect lease. Returns false, touching nothing, when a newer connect or a
- * disconnect has superseded it.
+ * The bot's live connection in ANY organization — its id, organization and
+ * current webhook generation only (never a credential). Used under the bot's
+ * operation lease to derive what Telegram should hold.
  */
-export async function abortConnect(
-  organizationId: string,
-  actorUserId: string,
-  connectionId: string,
-  operationId: string,
-): Promise<boolean> {
-  const { data, error } = await db.rpc("abort_channel_connect", {
-    p_org: organizationId,
-    p_actor: actorUserId,
-    p_connection: connectionId,
-    p_operation: operationId,
-  });
+export async function findLiveConnectionForBot(
+  externalAccountId: string,
+): Promise<{ id: string; organization_id: string; webhook_generation: string } | null> {
+  const { data, error } = await db
+    .from("channel_connections")
+    .select("id, organization_id, webhook_generation")
+    .eq("provider", "TELEGRAM")
+    .eq("external_account_id", externalAccountId)
+    .in("status", ["connected", "error"])
+    .maybeSingle();
   if (error) throw channelDatabaseError(error);
-  return data === true;
+  return data ?? null;
 }
 
-export async function disconnectAccount(
-  organizationId: string,
-  actorUserId: string,
+/** One of the organization's connections, live or not (public columns). */
+export async function findConnection(
   connectionId: string,
-): Promise<ChannelConnectionRow> {
+  organizationId: string,
+): Promise<ChannelConnectionRow | null> {
   const { data, error } = await db
-    .rpc("disconnect_channel_account", {
-      p_org: organizationId,
-      p_actor: actorUserId,
-      p_connection: connectionId,
-    })
-    .single();
-  if (error || !data) throw channelDatabaseError(error);
-  return publicRow(first(data));
+    .from("channel_connections")
+    .select(PUBLIC_COLUMNS)
+    .eq("id", connectionId)
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+  if (error) throw channelDatabaseError(error);
+  return data ? publicRow(data) : null;
+}
+
+/** A verified delivery for `generation` of a live connection: evidence of what Telegram holds (064 §2 rule 5). */
+export async function observeWebhook(connectionId: string, generation: string): Promise<void> {
+  const { error } = await db.rpc("observe_channel_webhook", {
+    p_connection: connectionId,
+    p_generation: generation,
+  });
+  if (error) throw channelDatabaseError(error);
 }
 
 /** The organization's live (not disconnected) connections, newest first. */
@@ -156,12 +232,16 @@ export async function findLiveCredential(
 ): Promise<{
   id: string;
   organization_id: string;
+  external_account_id: string;
   credential_ciphertext: string;
   webhook_secret_hash: string;
+  webhook_generation: string;
 } | null> {
   let query = db
     .from("channel_connections")
-    .select("id, organization_id, credential_ciphertext, webhook_secret_hash")
+    .select(
+      "id, organization_id, external_account_id, credential_ciphertext, webhook_secret_hash, webhook_generation",
+    )
     .eq("id", connectionId)
     .in("status", ["connected", "error"]);
   if (organizationId) query = query.eq("organization_id", organizationId);

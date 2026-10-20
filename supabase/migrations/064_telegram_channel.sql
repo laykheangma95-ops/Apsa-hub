@@ -4,8 +4,12 @@
 --          (1) channel_connections: one row per merchant bot, holding the bot
 --              token ONLY as application-encrypted ciphertext and the webhook
 --              secret ONLY as a SHA-256 digest.
---          (2) connect (with a per-bot connect lease: finish / abort) and
---              disconnect, each audited in the same transaction.
+--          (2) connect and disconnect, each audited in the same transaction,
+--              every Telegram-side change of a bot serialized by a per-bot
+--              operation lease that is held until the provider outcome is
+--              KNOWN (an unknown outcome holds it "in doubt" for 5 minutes),
+--              and a connection reported 'connected' only after Telegram was
+--              seen holding exactly that connect's webhook generation.
 --          (3) ingest_telegram_inbound: one atomic, idempotent write per
 --              inbound private-chat message — conversation, participant,
 --              Customer + exact Telegram identity on first contact, message,
@@ -16,9 +20,10 @@
 --              or misapplied.
 --          (5) integrations.* permission vocabulary (PERMISSIONS_MATRIX.md §25).
 -- Touches: public.channel_connection_status (NEW TYPE),
---          public.channel_connections (NEW),
---          public.connect_channel_account (NEW), public.finish_channel_connect (NEW),
---          public.abort_channel_connect (NEW), public.disconnect_channel_account (NEW),
+--          public.channel_connections (NEW), public.channel_bot_operations (NEW),
+--          public.begin_channel_operation (NEW), public.connect_channel_account (NEW),
+--          public.settle_channel_operation (NEW), public.disconnect_channel_account (NEW),
+--          public.observe_channel_webhook (NEW),
 --          public.webhook_event_receipts (rows only, via ingest_telegram_inbound),
 --          public.ingest_telegram_inbound (NEW),
 --          public.begin_outbound_message (NEW), public.complete_outbound_message (NEW),
@@ -48,8 +53,11 @@
 -- AES-256-GCM output produced by the app server with CHANNEL_CREDENTIAL_KEY,
 -- a server-only secret that is not stored in this database; a database dump
 -- alone cannot send as the merchant's bot. The webhook secret Telegram echoes
--- in X-Telegram-Bot-Api-Secret-Token is stored as its SHA-256 hex digest only.
--- Disconnecting clears the ciphertext.
+-- in X-Telegram-Bot-Api-Secret-Token is stored as its SHA-256 hex digest only;
+-- the secret itself is derived by the app server from the connection id and
+-- the connect's webhook generation with CHANNEL_CREDENTIAL_KEY, so the
+-- database alone can neither read nor forge it. Disconnecting clears the
+-- ciphertext.
 --
 -- ── ONE BOT, ONE ORGANIZATION ───────────────────────────────────────────────
 -- A Telegram bot has exactly one webhook URL. Two organizations holding the
@@ -82,11 +90,12 @@ CREATE TABLE public.channel_connections (
   connected_by           UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   connected_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   disconnected_at        TIMESTAMPTZ,
-  -- Connect lease (see §2): bumped on every connect; the operation that holds
-  -- the lease is the only one that may finish or abort it.
+  -- Counts every connect of this row (audit). webhook_generation identifies
+  -- the CURRENT connect: it is part of the webhook URL Telegram is given
+  -- (…/telegram/<id>/<generation>), so getWebhookInfo shows which connect
+  -- Telegram actually holds, and the secret is derived from it (§2).
   connect_generation     BIGINT NOT NULL DEFAULT 1 CHECK (connect_generation >= 1),
-  pending_connect_op     UUID,
-  pending_connect_until  TIMESTAMPTZ,
+  webhook_generation     UUID,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT channel_connections_org_id_unique UNIQUE (organization_id, id),
@@ -96,11 +105,8 @@ CREATE TABLE public.channel_connections (
     (status = 'disconnected' AND credential_ciphertext IS NULL AND credential_key_version IS NULL
       AND webhook_secret_hash IS NULL AND disconnected_at IS NOT NULL)
     OR (status <> 'disconnected' AND credential_ciphertext IS NOT NULL
-      AND credential_key_version IS NOT NULL AND webhook_secret_hash IS NOT NULL)
-  ),
-  CONSTRAINT channel_connections_lease_shape CHECK (
-    (pending_connect_op IS NULL) = (pending_connect_until IS NULL)
-    AND (status <> 'disconnected' OR pending_connect_op IS NULL)
+      AND credential_key_version IS NOT NULL AND webhook_secret_hash IS NOT NULL
+      AND webhook_generation IS NOT NULL)
   )
 );
 
@@ -123,25 +129,127 @@ REVOKE ALL ON TABLE public.channel_connections FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON TABLE public.channel_connections FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.channel_connections TO service_role;
 
+-- One Telegram-side operation per bot at a time (§2). Keyed by the bot, not
+-- by a connection row, so a disconnect and a later reconnect (a new row)
+-- serialize too. Holds no credential.
+CREATE TABLE public.channel_bot_operations (
+  provider            public.conversation_provider NOT NULL,
+  external_account_id TEXT NOT NULL CHECK (external_account_id ~ '^[0-9]{1,20}$'),
+  operation_id        UUID NOT NULL UNIQUE,
+  kind                TEXT NOT NULL CHECK (kind IN ('connect', 'disconnect', 'repair')),
+  organization_id     UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  connection_id       UUID,
+  in_doubt            BOOLEAN NOT NULL DEFAULT false,
+  expires_at          TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (provider, external_account_id)
+);
+
+COMMENT ON TABLE public.channel_bot_operations IS
+  'The in-flight (or in-doubt) Telegram-side operation per messaging bot (migration 064). Holds no credential. Server-only.';
+
+ALTER TABLE public.channel_bot_operations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.channel_bot_operations FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.channel_bot_operations FROM service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.channel_bot_operations TO service_role;
+
 -- ── 2. Connect / disconnect (audited in the same transaction) ───────────────
 --
--- Connecting is three steps that cannot share one transaction, because the
--- middle one is a Telegram call:
---   connect_channel_account  stores the new credential + secret digest and
---                            takes the CONNECT LEASE for p_operation;
---   (app server)             setWebhook(url, secret) at Telegram;
---   finish_channel_connect   releases the lease — only for the operation
---                            that holds it;
---   abort_channel_connect    after a failed setWebhook, disconnects (audited)
---                            — only for the operation that holds it.
--- While a lease is live (60 s, well past the app's 10 s Telegram timeout) any
--- other connect of the same bot is refused 'connect_in_progress', so two
--- overlapping connects can never interleave their setWebhook calls. A lease
--- that expires (its server died) may be taken over; the older operation then
--- holds nothing: it can neither finish (connect_superseded) nor disconnect the
--- newer connection. connect_generation counts every connect for audit and
--- tests.
+-- Telegram's setWebhook / deleteWebhook are last-writer-wins, carry no
+-- version, and an HTTP request whose answer APSA never saw may still be
+-- applied after it. No database check made AFTER Telegram answers can undo
+-- an older request that lands later, so the rules are about WHEN a request
+-- may be sent and WHAT is reported:
+--
+--   1. One operation per bot. begin_channel_operation takes the bot's
+--      lease (channel_bot_operations) for a connect, disconnect or repair;
+--      any other operation on that bot is refused 'connect_in_progress'
+--      while the lease is live. The lease outlives connection rows, so a
+--      disconnect and the reconnect after it serialize as well.
+--   2. Held until the outcome is known. The holder may START a Telegram
+--      write only in the first 30 s of its 120 s lease (the app enforces it;
+--      every call times out at 10 s). settle_channel_operation then:
+--        known (answered: applied, or refused — a 4xx is never applied)
+--          → releases the lease;
+--        unknown (timeout, network error, 5xx: maybe applied, maybe later)
+--          → keeps it IN DOUBT for 5 more minutes; nothing else touches
+--            the bot until then.
+--      A holder that dies simply lets the lease expire — at least 80 s
+--      after its last possible request.
+--   3. Seen, not assumed. Every connect has a fresh webhook_generation that
+--      is part of the URL Telegram gets. After setWebhook the app reads
+--      getWebhookInfo; only when Telegram's URL is exactly this
+--      generation's URL — proof that Telegram holds this connect's secret —
+--      is the connection settled 'connected'. Until then it is 'error'
+--      ('webhook_pending', or 'webhook_unverified' when unknown).
+--   4. Late answers repair, never clobber. An operation that learns it was
+--      superseded (its lease was taken over) after a request of its own was
+--      applied re-checks Telegram under a fresh 'repair' lease and points it
+--      back at the live connection's current generation (or removes it when
+--      no connection is live), then verifies.
+--   5. Detected if ever violated. A delivery that carries a valid secret for
+--      an OLDER generation of a live connection proves Telegram disagrees
+--      with APSA: observe_channel_webhook flags it 'webhook_mismatch'.
+--
+-- Residual assumption: Telegram applies a request within 80 s of APSA
+-- sending it, or never.
 
+CREATE FUNCTION public.begin_channel_operation(
+  p_org         UUID,
+  p_actor       UUID,
+  p_provider    public.conversation_provider,
+  p_external_id TEXT,
+  p_kind        TEXT,
+  p_operation   UUID,
+  p_connection  UUID DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_lease channel_bot_operations;
+BEGIN
+  IF p_provider <> 'TELEGRAM' THEN RAISE EXCEPTION 'provider_unsupported'; END IF;
+  IF p_operation IS NULL OR p_kind IS NULL OR p_kind NOT IN ('connect', 'disconnect', 'repair')
+     OR p_external_id IS NULL OR p_external_id !~ '^[0-9]{1,20}$'
+    THEN RAISE EXCEPTION 'invalid_reference'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
+    AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || p_provider::text || ':' || p_external_id, 0));
+
+  -- Refuse before Telegram is touched when another organization holds the bot.
+  IF p_kind = 'connect' AND EXISTS (SELECT 1 FROM channel_connections WHERE provider = p_provider
+      AND external_account_id = p_external_id AND status <> 'disconnected' AND organization_id <> p_org)
+    THEN RAISE EXCEPTION 'account_in_use'; END IF;
+  -- A disconnect names this organization's live connection of this bot.
+  IF p_kind = 'disconnect' AND NOT EXISTS (SELECT 1 FROM channel_connections WHERE id = p_connection
+      AND organization_id = p_org AND provider = p_provider AND external_account_id = p_external_id
+      AND status <> 'disconnected')
+    THEN RAISE EXCEPTION 'connection_not_found'; END IF;
+
+  SELECT * INTO v_lease FROM channel_bot_operations
+    WHERE provider = p_provider AND external_account_id = p_external_id FOR UPDATE;
+  IF FOUND AND v_lease.expires_at > clock_timestamp() AND v_lease.operation_id <> p_operation THEN
+    RAISE EXCEPTION 'connect_in_progress';
+  END IF;
+
+  INSERT INTO channel_bot_operations (provider, external_account_id, operation_id, kind,
+    organization_id, connection_id, in_doubt, expires_at)
+  VALUES (p_provider, p_external_id, p_operation, p_kind, p_org, p_connection, false,
+    clock_timestamp() + interval '120 seconds')
+  ON CONFLICT (provider, external_account_id) DO UPDATE SET
+    operation_id = EXCLUDED.operation_id, kind = EXCLUDED.kind,
+    organization_id = EXCLUDED.organization_id, connection_id = EXCLUDED.connection_id,
+    in_doubt = false, expires_at = EXCLUDED.expires_at;
+END;
+$$;
+
+-- Writes the new credential + secret digest + webhook generation under the
+-- caller's live 'connect' lease. The connection is NOT 'connected' yet.
+-- p_connection: the id the app derived the secret for — this organization's
+-- live row of the bot, or a fresh id for a new row; anything else means the
+-- caller's view is stale.
 CREATE FUNCTION public.connect_channel_account(
   p_org             UUID,
   p_actor           UUID,
@@ -152,6 +260,8 @@ CREATE FUNCTION public.connect_channel_account(
   p_ciphertext      TEXT,
   p_key_version     SMALLINT,
   p_secret_hash     TEXT,
+  p_connection      UUID,
+  p_generation      UUID,
   p_operation       UUID
 )
 RETURNS public.channel_connections
@@ -163,12 +273,17 @@ DECLARE
   v_row      channel_connections;
 BEGIN
   IF p_provider <> 'TELEGRAM' THEN RAISE EXCEPTION 'provider_unsupported'; END IF;
-  IF p_operation IS NULL THEN RAISE EXCEPTION 'invalid_reference'; END IF;
+  IF p_operation IS NULL OR p_connection IS NULL OR p_generation IS NULL
+    THEN RAISE EXCEPTION 'invalid_reference'; END IF;
   IF NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
     AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
 
-  -- Serialize every connect of this bot, in any organization.
   PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || p_provider::text || ':' || p_external_id, 0));
+
+  IF NOT EXISTS (SELECT 1 FROM channel_bot_operations WHERE provider = p_provider
+      AND external_account_id = p_external_id AND operation_id = p_operation AND kind = 'connect'
+      AND organization_id = p_org AND expires_at > clock_timestamp())
+    THEN RAISE EXCEPTION 'connect_superseded'; END IF;
 
   SELECT * INTO v_existing FROM channel_connections
     WHERE provider = p_provider AND external_account_id = p_external_id AND status <> 'disconnected'
@@ -177,38 +292,37 @@ BEGIN
   IF FOUND AND v_existing.organization_id <> p_org THEN
     RAISE EXCEPTION 'account_in_use';
   END IF;
-
-  IF FOUND AND v_existing.pending_connect_op IS NOT NULL
-     AND v_existing.pending_connect_op <> p_operation
-     AND v_existing.pending_connect_until > clock_timestamp() THEN
-    RAISE EXCEPTION 'connect_in_progress';
+  IF (FOUND AND v_existing.id <> p_connection)
+     OR (NOT FOUND AND EXISTS (SELECT 1 FROM channel_connections WHERE id = p_connection)) THEN
+    RAISE EXCEPTION 'connect_superseded';
   END IF;
 
   IF FOUND THEN
     UPDATE channel_connections SET
       account_handle = p_handle,
       account_display_name = p_display_name,
-      status = 'connected',
+      status = 'error',
       credential_ciphertext = p_ciphertext,
       credential_key_version = p_key_version,
       webhook_secret_hash = p_secret_hash,
-      last_error_code = NULL,
-      last_error_at = NULL,
+      webhook_generation = p_generation,
+      last_error_code = 'webhook_pending',
+      last_error_at = now(),
       connected_by = p_actor,
       connected_at = now(),
-      connect_generation = v_existing.connect_generation + 1,
-      pending_connect_op = p_operation,
-      pending_connect_until = clock_timestamp() + interval '60 seconds'
+      connect_generation = v_existing.connect_generation + 1
     WHERE id = v_existing.id
     RETURNING * INTO v_row;
   ELSE
-    INSERT INTO channel_connections (organization_id, provider, external_account_id, account_handle,
-      account_display_name, credential_ciphertext, credential_key_version, webhook_secret_hash, connected_by,
-      pending_connect_op, pending_connect_until)
-    VALUES (p_org, p_provider, p_external_id, p_handle, p_display_name, p_ciphertext, p_key_version,
-      p_secret_hash, p_actor, p_operation, clock_timestamp() + interval '60 seconds')
+    INSERT INTO channel_connections (id, organization_id, provider, external_account_id, account_handle,
+      account_display_name, status, credential_ciphertext, credential_key_version, webhook_secret_hash,
+      webhook_generation, last_error_code, last_error_at, connected_by)
+    VALUES (p_connection, p_org, p_provider, p_external_id, p_handle, p_display_name, 'error',
+      p_ciphertext, p_key_version, p_secret_hash, p_generation, 'webhook_pending', now(), p_actor)
     RETURNING * INTO v_row;
   END IF;
+
+  UPDATE channel_bot_operations SET connection_id = v_row.id WHERE operation_id = p_operation;
 
   -- Never the credential, never the secret digest.
   INSERT INTO audit_logs (organization_id, actor_user_id, action, resource_type, resource_id, before_json, after_json)
@@ -223,80 +337,107 @@ BEGIN
 END;
 $$;
 
--- setWebhook succeeded: release the lease. Only the operation holding it may.
-CREATE FUNCTION public.finish_channel_connect(
-  p_org        UUID,
-  p_connection UUID,
-  p_operation  UUID
+-- Records an operation's provider outcome and releases (or holds in doubt)
+-- its lease. p_outcome:
+--   'verified'  Telegram was SEEN holding p_generation's URL (connect/repair)
+--               — or holding no webhook (disconnect/repair-to-none);
+--   'refused'   Telegram answered "no" (or nothing was sent): not applied;
+--   'unknown'   no answer: maybe applied, maybe later — lease held in doubt;
+--   'done'      nothing to record on a row (a disconnect's known outcome).
+-- Row effects apply only while the caller still HOLDS the lease and the row
+-- still carries p_generation; a superseded operation changes nothing
+-- ('held' false tells the app to re-check Telegram, rule 4).
+CREATE FUNCTION public.settle_channel_operation(
+  p_org         UUID,
+  p_actor       UUID,
+  p_operation   UUID,
+  p_connection  UUID,
+  p_generation  UUID,
+  p_outcome     TEXT
 )
-RETURNS public.channel_connections
+RETURNS JSONB
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
 DECLARE
-  v_row channel_connections;
+  v_lease   channel_bot_operations;
+  v_row     channel_connections;
+  v_held    BOOLEAN;
+  v_current BOOLEAN := false;
 BEGIN
-  SELECT * INTO v_row FROM channel_connections
-    WHERE organization_id = p_org AND id = p_connection FOR UPDATE;
-  IF NOT FOUND OR v_row.status = 'disconnected'
-     OR v_row.pending_connect_op IS DISTINCT FROM p_operation THEN
-    RAISE EXCEPTION 'connect_superseded';
-  END IF;
-  UPDATE channel_connections SET pending_connect_op = NULL, pending_connect_until = NULL
-    WHERE id = p_connection RETURNING * INTO v_row;
-  RETURN v_row;
-END;
-$$;
-
--- setWebhook failed: the connection cannot receive — disconnect it, audited.
--- Only the operation holding the lease may; a superseded operation's cleanup
--- returns false and touches nothing.
-CREATE FUNCTION public.abort_channel_connect(
-  p_org        UUID,
-  p_actor      UUID,
-  p_connection UUID,
-  p_operation  UUID
-)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SET search_path = public
-AS $$
-DECLARE
-  v_before channel_connections;
-BEGIN
+  IF p_operation IS NULL OR p_outcome IS NULL
+     OR p_outcome NOT IN ('verified', 'refused', 'unknown', 'done')
+    THEN RAISE EXCEPTION 'invalid_reference'; END IF;
   IF NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
     AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
 
-  SELECT * INTO v_before FROM channel_connections
-    WHERE organization_id = p_org AND id = p_connection FOR UPDATE;
-  IF NOT FOUND OR v_before.status = 'disconnected'
-     OR v_before.pending_connect_op IS DISTINCT FROM p_operation THEN
-    RETURN false;
+  SELECT * INTO v_lease FROM channel_bot_operations
+    WHERE operation_id = p_operation AND organization_id = p_org;
+  v_held := FOUND;
+  IF v_held THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || v_lease.provider::text
+      || ':' || v_lease.external_account_id, 0));
+    SELECT * INTO v_lease FROM channel_bot_operations WHERE operation_id = p_operation FOR UPDATE;
+    v_held := FOUND;
   END IF;
 
-  UPDATE channel_connections SET
-    status = 'disconnected',
-    credential_ciphertext = NULL,
-    credential_key_version = NULL,
-    webhook_secret_hash = NULL,
-    pending_connect_op = NULL,
-    pending_connect_until = NULL,
-    disconnected_at = now()
-  WHERE id = p_connection;
+  IF v_held AND p_connection IS NOT NULL THEN
+    SELECT * INTO v_row FROM channel_connections
+      WHERE id = p_connection AND provider = v_lease.provider
+        AND external_account_id = v_lease.external_account_id
+        AND (organization_id = p_org OR v_lease.kind = 'repair')
+      FOR UPDATE;
+    v_current := FOUND AND v_row.status <> 'disconnected' AND v_row.webhook_generation = p_generation;
+  END IF;
 
-  INSERT INTO audit_logs (organization_id, actor_user_id, action, resource_type, resource_id, before_json, after_json)
-  VALUES (p_org, p_actor, 'integrations.disconnect', 'channel_connection', p_connection::text,
-    jsonb_build_object('status', v_before.status),
-    jsonb_build_object('status', 'disconnected', 'reason', 'connect_failed',
-      'generation', v_before.connect_generation));
-  RETURN true;
+  IF v_current THEN
+    IF p_outcome = 'verified' THEN
+      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL
+        WHERE id = p_connection RETURNING * INTO v_row;
+    ELSIF p_outcome = 'refused' AND v_lease.kind = 'connect' THEN
+      -- Telegram never took this connect's webhook: nothing can arrive. Disconnect, audited.
+      UPDATE channel_connections SET status = 'disconnected', credential_ciphertext = NULL,
+          credential_key_version = NULL, webhook_secret_hash = NULL, webhook_generation = NULL,
+          disconnected_at = now()
+        WHERE id = p_connection RETURNING * INTO v_row;
+      INSERT INTO audit_logs (organization_id, actor_user_id, action, resource_type, resource_id, before_json, after_json)
+      VALUES (p_org, p_actor, 'integrations.disconnect', 'channel_connection', p_connection::text,
+        jsonb_build_object('status', 'error'),
+        jsonb_build_object('status', 'disconnected', 'reason', 'connect_failed',
+          'generation', v_row.connect_generation));
+    ELSIF p_outcome IN ('refused', 'unknown') THEN
+      UPDATE channel_connections SET status = 'error',
+          last_error_code = CASE WHEN p_outcome = 'unknown' THEN 'webhook_unverified' ELSE 'webhook_failed' END,
+          last_error_at = now()
+        WHERE id = p_connection RETURNING * INTO v_row;
+    END IF;
+  END IF;
+
+  IF v_held THEN
+    IF p_outcome = 'unknown' THEN
+      UPDATE channel_bot_operations SET in_doubt = true,
+          expires_at = greatest(expires_at, clock_timestamp() + interval '5 minutes')
+        WHERE operation_id = p_operation;
+    ELSE
+      DELETE FROM channel_bot_operations WHERE operation_id = p_operation;
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object('held', v_held, 'current', v_current,
+    'connection', CASE WHEN v_row.id IS NULL THEN NULL
+      ELSE to_jsonb(v_row) - 'credential_ciphertext' - 'webhook_secret_hash' END);
 END;
 $$;
 
+-- Clears the connection (audited) under the caller's live 'disconnect' lease
+-- for exactly this connection. The app calls deleteWebhook only AFTER this,
+-- still holding the lease, and settles it with the provider's outcome — so a
+-- reconnect cannot start while that request could still land.
 CREATE FUNCTION public.disconnect_channel_account(
   p_org        UUID,
   p_actor      UUID,
-  p_connection UUID
+  p_connection UUID,
+  p_operation  UUID
 )
 RETURNS public.channel_connections
 LANGUAGE plpgsql
@@ -310,19 +451,26 @@ BEGIN
     AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
 
   SELECT * INTO v_before FROM channel_connections
-    WHERE organization_id = p_org AND id = p_connection FOR UPDATE;
+    WHERE organization_id = p_org AND id = p_connection;
   IF NOT FOUND THEN RAISE EXCEPTION 'connection_not_found'; END IF;
   IF v_before.status = 'disconnected' THEN RETURN v_before; END IF;
 
-  -- Clearing the lease means an in-flight connect can neither finish nor
-  -- abort this row: the member's disconnect wins.
+  PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || v_before.provider::text
+    || ':' || v_before.external_account_id, 0));
+  IF NOT EXISTS (SELECT 1 FROM channel_bot_operations WHERE operation_id = p_operation
+      AND kind = 'disconnect' AND organization_id = p_org AND connection_id = p_connection
+      AND expires_at > clock_timestamp())
+    THEN RAISE EXCEPTION 'connect_superseded'; END IF;
+
+  SELECT * INTO v_before FROM channel_connections WHERE id = p_connection FOR UPDATE;
+  IF v_before.status = 'disconnected' THEN RETURN v_before; END IF;
+
   UPDATE channel_connections SET
     status = 'disconnected',
     credential_ciphertext = NULL,
     credential_key_version = NULL,
     webhook_secret_hash = NULL,
-    pending_connect_op = NULL,
-    pending_connect_until = NULL,
+    webhook_generation = NULL,
     disconnected_at = now()
   WHERE id = p_connection
   RETURNING * INTO v_row;
@@ -334,6 +482,42 @@ BEGIN
       'external_account_id', v_row.external_account_id));
 
   RETURN v_row;
+END;
+$$;
+
+-- A delivery whose secret the webhook VERIFIED, for generation p_generation of
+-- a live connection, is evidence of what Telegram holds. With no operation
+-- in flight on the bot: the current generation confirms an unverified
+-- connection; an older generation means Telegram and APSA disagree.
+CREATE FUNCTION public.observe_channel_webhook(
+  p_connection UUID,
+  p_generation UUID
+)
+RETURNS public.channel_connection_status
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_row channel_connections;
+BEGIN
+  SELECT * INTO v_row FROM channel_connections
+    WHERE id = p_connection AND status <> 'disconnected' FOR UPDATE;
+  IF NOT FOUND OR p_generation IS NULL THEN RETURN NULL; END IF;
+  IF EXISTS (SELECT 1 FROM channel_bot_operations WHERE provider = v_row.provider
+      AND external_account_id = v_row.external_account_id AND expires_at > clock_timestamp())
+    THEN RETURN v_row.status; END IF;
+
+  IF v_row.webhook_generation = p_generation THEN
+    IF v_row.status = 'error' AND v_row.last_error_code IN ('webhook_unverified', 'webhook_mismatch') THEN
+      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL
+        WHERE id = p_connection RETURNING * INTO v_row;
+    END IF;
+  ELSIF v_row.status = 'connected' THEN
+    UPDATE channel_connections SET status = 'error', last_error_code = 'webhook_mismatch',
+        last_error_at = now()
+      WHERE id = p_connection RETURNING * INTO v_row;
+  END IF;
+  RETURN v_row.status;
 END;
 $$;
 
@@ -451,7 +635,10 @@ BEGIN
       AND status IN ('closed', 'waiting_customer');
 
   UPDATE channel_connections SET last_inbound_at = greatest(COALESCE(last_inbound_at, now()), now()),
-      status = CASE WHEN status = 'error' THEN 'connected'::channel_connection_status ELSE status END
+      status = CASE WHEN status = 'error' AND last_error_code IS DISTINCT FROM 'webhook_pending'
+          AND last_error_code IS DISTINCT FROM 'webhook_unverified'
+          AND last_error_code IS DISTINCT FROM 'webhook_mismatch'
+        THEN 'connected'::channel_connection_status ELSE status END
     WHERE id = v_connection.id;
 
   RETURN v_message;
@@ -674,20 +861,22 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION
-  public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT, UUID),
-  public.finish_channel_connect(UUID, UUID, UUID),
-  public.abort_channel_connect(UUID, UUID, UUID, UUID),
-  public.disconnect_channel_account(UUID, UUID, UUID),
+  public.begin_channel_operation(UUID, UUID, public.conversation_provider, TEXT, TEXT, UUID, UUID),
+  public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT, UUID, UUID, UUID),
+  public.settle_channel_operation(UUID, UUID, UUID, UUID, UUID, TEXT),
+  public.disconnect_channel_account(UUID, UUID, UUID, UUID),
+  public.observe_channel_webhook(UUID, UUID),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB, TEXT),
   public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),
   public.complete_outbound_message(UUID, UUID, UUID, UUID, BOOLEAN, TEXT, TEXT)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION
-  public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT, UUID),
-  public.finish_channel_connect(UUID, UUID, UUID),
-  public.abort_channel_connect(UUID, UUID, UUID, UUID),
-  public.disconnect_channel_account(UUID, UUID, UUID),
+  public.begin_channel_operation(UUID, UUID, public.conversation_provider, TEXT, TEXT, UUID, UUID),
+  public.connect_channel_account(UUID, UUID, public.conversation_provider, TEXT, TEXT, TEXT, TEXT, SMALLINT, TEXT, UUID, UUID, UUID),
+  public.settle_channel_operation(UUID, UUID, UUID, UUID, UUID, TEXT),
+  public.disconnect_channel_account(UUID, UUID, UUID, UUID),
+  public.observe_channel_webhook(UUID, UUID),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB, TEXT),
   public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),

@@ -11,7 +11,7 @@ import { parseTelegramUpdate, telegramUpdateId } from "@/server/channels/telegra
 import {
   decryptCredential,
   encryptCredential,
-  generateWebhookSecret,
+  deriveWebhookSecret,
   readCredentialKey,
   sha256Hex,
 } from "@/server/channels/credentials";
@@ -138,10 +138,18 @@ describe("credential protection", () => {
     );
   });
 
-  it("webhook secrets fit Telegram's alphabet and are unique; digests are hex", async () => {
-    const one = generateWebhookSecret();
+  it("webhook secrets are derived per connection AND generation, keyed, in Telegram's alphabet", async () => {
+    const connection = crypto.randomUUID();
+    const generation = crypto.randomUUID();
+    const one = await deriveWebhookSecret(connection, generation, KEY);
     expect(one).toMatch(/^[A-Za-z0-9_-]{40,256}$/);
-    expect(generateWebhookSecret()).not.toBe(one);
+    // Re-derivable (repair re-points Telegram without storing the secret)...
+    expect(await deriveWebhookSecret(connection.toUpperCase(), generation, KEY)).toBe(one);
+    // ...and bound to the generation, the connection and the key.
+    expect(await deriveWebhookSecret(connection, crypto.randomUUID(), KEY)).not.toBe(one);
+    expect(await deriveWebhookSecret(crypto.randomUUID(), generation, KEY)).not.toBe(one);
+    const otherKey = readCredentialKey(Buffer.alloc(32, 9).toString("base64"));
+    expect(await deriveWebhookSecret(connection, generation, otherKey)).not.toBe(one);
     expect(await sha256Hex("abc")).toBe(
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
@@ -204,21 +212,23 @@ describe("TelegramBotApi", () => {
 describe("webhook URL and route", () => {
   const id = "11111111-2222-4333-8444-555555555555";
 
-  it("uses the canonical https origin, or the explicit override", () => {
-    expect(telegramWebhookUrl(id, { VITE_APP_URL: "https://app.apsa.com/" })).toBe(
-      `https://app.apsa.com/api/webhooks/telegram/${id}`,
+  const gen = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+
+  it("uses the canonical https origin, or the explicit override, and carries the generation", () => {
+    expect(telegramWebhookUrl(id, gen, { VITE_APP_URL: "https://app.apsa.com/" })).toBe(
+      `https://app.apsa.com/api/webhooks/telegram/${id}/${gen}`,
     );
     expect(
-      telegramWebhookUrl(id, {
+      telegramWebhookUrl(id, gen, {
         VITE_APP_URL: "https://app.apsa.com",
         CHANNEL_WEBHOOK_BASE_URL: "https://staging.apsa.com",
       }),
-    ).toBe(`https://staging.apsa.com/api/webhooks/telegram/${id}`);
+    ).toBe(`https://staging.apsa.com/api/webhooks/telegram/${id}/${gen}`);
   });
 
   it("refuses an origin Telegram cannot reach", () => {
     for (const base of ["", "http://app.apsa.com", "https://localhost:3000", "https://10.0.0.1"]) {
-      expect(() => telegramWebhookUrl(id, { VITE_APP_URL: base })).toThrow(
+      expect(() => telegramWebhookUrl(id, gen, { VITE_APP_URL: base })).toThrow(
         "webhook_url_unavailable",
       );
     }

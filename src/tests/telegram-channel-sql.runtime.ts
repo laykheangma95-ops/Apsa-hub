@@ -13,9 +13,14 @@
  *     under concurrency), reuses it afterwards, is idempotent per message,
  *     refuses a conflicting replay, refuses a disconnected connection, and
  *     reopens a parked thread;
- *   - connect lease: an overlapping connect of the same bot is refused
- *     connect_in_progress; only the operation holding the lease may finish
- *     or abort it, so an older failed connect never disconnects a newer one;
+ *   - bot operation lease (064 §2): one Telegram-side operation per bot —
+ *     an overlapping connect OR disconnect is refused connect_in_progress;
+ *     a connection is 'connected' only when settled 'verified' for its own
+ *     webhook generation; a superseded operation can neither verify nor
+ *     disconnect the newer connect; an unknown outcome keeps the bot in
+ *     doubt (5 min) and the connection 'webhook_unverified'; a disconnect is
+ *     bound to its own lease and connection; observe_channel_webhook confirms
+ *     the current generation and flags an older one as a mismatch;
  *   - the webhook replay receipt commits WITH the message (a rolled-back
  *     ingest leaves no receipt, so a retry is processed);
  *   - begin/complete_outbound_message: exactly one caller is told to send,
@@ -85,12 +90,40 @@ async function errorOf(promise: Promise<unknown>): Promise<string> {
   return "no error";
 }
 
-function startConnect(
+function begin(
+  tenant: string,
+  actor: string,
+  kind: "connect" | "disconnect" | "repair",
+  bot: string,
+  operation: string,
+  connection: string | null = null,
+) {
+  return db.query("select begin_channel_operation($1,$2,'TELEGRAM',$3,$4,$5,$6)", [
+    tenant,
+    actor,
+    bot,
+    kind,
+    operation,
+    connection,
+  ]);
+}
+
+/** The connection id a connect derives its secret for: the tenant's live row of the bot, or a fresh id. */
+async function connectionIdFor(tenant: string, bot: string): Promise<string> {
+  const live = await db.query<{ id: string }>(
+    "select id from channel_connections where external_account_id=$1 and organization_id=$2 and status <> 'disconnected'",
+    [bot, tenant],
+  );
+  return live.rows[0]?.id ?? crypto.randomUUID();
+}
+
+async function startConnect(
   tenant: string,
   actor: string,
   bot = BOT,
   hash = HASH,
   operation: string = crypto.randomUUID(),
+  generation: string = crypto.randomUUID(),
 ) {
   return call("connect_channel_account", [
     tenant,
@@ -102,15 +135,60 @@ function startConnect(
     CIPHER,
     1,
     hash,
+    await connectionIdFor(tenant, bot),
+    generation,
     operation,
   ]);
 }
 
-/** A whole successful connect: take the lease, then finish it (setWebhook succeeded). */
-async function connect(tenant: string, actor: string, bot = BOT, hash = HASH) {
+function settle(
+  tenant: string,
+  actor: string,
+  operation: string,
+  connection: unknown,
+  generation: unknown,
+  outcome: "verified" | "refused" | "unknown" | "done",
+) {
+  return call("settle_channel_operation", [
+    tenant,
+    actor,
+    operation,
+    connection,
+    generation,
+    outcome,
+  ]) as Promise<{ held: boolean; current: boolean; connection: Row | null }>;
+}
+
+async function stored(id: unknown): Promise<Row> {
+  return (await db.query<Row>("select * from channel_connections where id=$1", [id])).rows[0]!;
+}
+
+/** A whole successful connect: lease → write → Telegram SEEN holding it → settle 'verified'. */
+async function connect(tenant: string, actor: string, bot = BOT, hash = HASH): Promise<Row> {
   const operation = crypto.randomUUID();
-  const row = await startConnect(tenant, actor, bot, hash, operation);
-  return call("finish_channel_connect", [tenant, row.id, operation]);
+  const generation = crypto.randomUUID();
+  await begin(tenant, actor, "connect", bot, operation);
+  const row = await startConnect(tenant, actor, bot, hash, operation, generation);
+  await settle(tenant, actor, operation, row.id, generation, "verified");
+  return stored(row.id);
+}
+
+/** A whole disconnect: lease → clear the row → (deleteWebhook answered) → settle 'done'. */
+async function disconnect(tenant: string, actor: string, id: unknown): Promise<Row> {
+  const operation = crypto.randomUUID();
+  const bot = (await stored(id)).external_account_id as string;
+  await begin(tenant, actor, "disconnect", bot, operation, id as string);
+  const row = await call("disconnect_channel_account", [tenant, actor, id, operation]);
+  await settle(tenant, actor, operation, null, null, "done");
+  return row;
+}
+
+/** Stand in for time passing: every live lease on `bot` lapses. */
+function expireLeases(bot: string) {
+  return db.query(
+    "update channel_bot_operations set expires_at = now() - interval '1 second' where external_account_id=$1",
+    [bot],
+  );
 }
 
 function inbound(
@@ -183,7 +261,7 @@ describe("connect / disconnect", () => {
 
   it("disconnect clears the credential, is audited, and frees the bot", async () => {
     const other = await connect(org, owner, "7000000002");
-    const gone = await call("disconnect_channel_account", [org, owner, other.id]);
+    const gone = await disconnect(org, owner, other.id);
     expect(gone).toMatchObject({
       status: "disconnected",
       credential_ciphertext: null,
@@ -196,7 +274,12 @@ describe("connect / disconnect", () => {
     expect(audit.rows).toHaveLength(1);
     // Another organization's id is never found.
     expect(
-      await errorOf(call("disconnect_channel_account", [orgB, ownerB, connectionId])),
+      await errorOf(
+        call("disconnect_channel_account", [orgB, ownerB, connectionId, crypto.randomUUID()]),
+      ),
+    ).toContain("connection_not_found");
+    expect(
+      await errorOf(begin(orgB, ownerB, "disconnect", BOT, crypto.randomUUID(), connectionId)),
     ).toContain("connection_not_found");
     // The freed bot can now be connected elsewhere.
     const taken = await connect(orgB, ownerB, "7000000002");
@@ -204,106 +287,94 @@ describe("connect / disconnect", () => {
   });
 });
 
-describe("connect lease", () => {
+describe("bot operation lease (064 §2)", () => {
   const LEASE_BOT = "7000000077";
 
-  async function live(id: unknown): Promise<Row> {
-    const r = await db.query<Row>(
-      "select status, webhook_secret_hash, pending_connect_op, connect_generation from channel_connections where id=$1",
-      [id],
-    );
-    return r.rows[0]!;
-  }
-
-  it("an overlapping connect of the same bot is refused while the first holds the lease", async () => {
+  it("an overlapping connect is refused while the first holds the bot; it is not 'connected' before Telegram is seen", async () => {
     const opA = crypto.randomUUID();
-    const a = await startConnect(org, owner, LEASE_BOT, "c".repeat(64), opA);
-    expect(await errorOf(startConnect(org, owner, LEASE_BOT, "d".repeat(64)))).toContain(
+    const genA = crypto.randomUUID();
+    await begin(org, owner, "connect", LEASE_BOT, opA);
+    const a = await startConnect(org, owner, LEASE_BOT, "c".repeat(64), opA, genA);
+    expect(a).toMatchObject({ status: "error", last_error_code: "webhook_pending" });
+    expect(await errorOf(begin(org, owner, "connect", LEASE_BOT, crypto.randomUUID()))).toContain(
       "connect_in_progress",
     );
-    // The refused overlap changed nothing.
-    expect(await live(a.id)).toMatchObject({
-      webhook_secret_hash: "c".repeat(64),
-      pending_connect_op: opA,
-    });
-    // Once A finishes, a new connect may rotate.
-    await call("finish_channel_connect", [org, a.id, opA]);
+    // A connect write without its own lease is refused too.
+    expect(
+      await errorOf(startConnect(org, owner, LEASE_BOT, "d".repeat(64), crypto.randomUUID())),
+    ).toContain("connect_superseded");
+    expect(await stored(a.id)).toMatchObject({ webhook_secret_hash: "c".repeat(64) });
+
+    const done = await settle(org, owner, opA, a.id, genA, "verified");
+    expect(done).toMatchObject({ held: true, current: true });
+    expect(done.connection).toMatchObject({ status: "connected", last_error_code: null });
+    expect(JSON.stringify(done.connection)).not.toContain(CIPHER);
+    expect(JSON.stringify(done.connection)).not.toContain("c".repeat(64));
+    // Released: the next connect rotates in place with a new generation.
     const b = await connect(org, owner, LEASE_BOT, "d".repeat(64));
     expect(b.id).toBe(a.id);
-    expect(b).toMatchObject({ webhook_secret_hash: "d".repeat(64), pending_connect_op: null });
+    expect(b.webhook_generation).not.toBe(genA);
     expect(Number(b.connect_generation)).toBe(Number(a.connect_generation) + 1);
   });
 
-  it("an older connect whose lease expired and was taken over can neither abort nor finish the newer one", async () => {
+  it("a superseded (expired) connect can neither verify nor disconnect the newer connect", async () => {
     const opOld = crypto.randomUUID();
-    const old = await startConnect(org, owner, LEASE_BOT, "e".repeat(64), opOld);
-    // The older operation's server stalls past its lease.
-    await db.query(
-      "update channel_connections set pending_connect_until = now() - interval '1 second' where id=$1",
-      [old.id],
-    );
+    const genOld = crypto.randomUUID();
+    await begin(org, owner, "connect", LEASE_BOT, opOld);
+    const old = await startConnect(org, owner, LEASE_BOT, "e".repeat(64), opOld, genOld);
+    await expireLeases(LEASE_BOT);
     const opNew = crypto.randomUUID();
-    await startConnect(org, owner, LEASE_BOT, "f".repeat(64), opNew);
+    const genNew = crypto.randomUUID();
+    await begin(org, owner, "connect", LEASE_BOT, opNew);
+    await startConnect(org, owner, LEASE_BOT, "f".repeat(64), opNew, genNew);
 
-    // The older setWebhook then fails: its cleanup must not disconnect the newer connect.
-    const aborted = await db.query<{ ok: boolean }>(
-      "select abort_channel_connect($1,$2,$3,$4) ok",
-      [org, owner, old.id, opOld],
-    );
-    expect(aborted.rows[0]!.ok).toBe(false);
-    expect(await live(old.id)).toMatchObject({
-      status: "connected",
+    for (const outcome of ["refused", "verified", "unknown"] as const) {
+      const late = await settle(org, owner, opOld, old.id, genOld, outcome);
+      expect(late).toMatchObject({ held: false, current: false });
+    }
+    expect(await stored(old.id)).toMatchObject({
+      status: "error",
+      last_error_code: "webhook_pending",
       webhook_secret_hash: "f".repeat(64),
-      pending_connect_op: opNew,
+      webhook_generation: genNew,
     });
-    // Nor may it claim success for the newer secret.
-    expect(await errorOf(call("finish_channel_connect", [org, old.id, opOld]))).toContain(
-      "connect_superseded",
-    );
-    // The newer operation still owns it.
-    const finished = await call("finish_channel_connect", [org, old.id, opNew]);
-    expect(finished).toMatchObject({ status: "connected", pending_connect_op: null });
-  });
-
-  it("the operation holding the lease aborts its own failed connect, audited", async () => {
-    const op = crypto.randomUUID();
-    const row = await startConnect(org, owner, "7000000078", "1".repeat(64), op);
-    // Negative controls: another org, another actor, another operation.
-    expect(
-      (
-        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
-          orgB,
-          ownerB,
-          row.id,
-          op,
-        ])
-      ).rows[0]!.ok,
-    ).toBe(false);
-    expect(
-      await errorOf(
-        db.query("select abort_channel_connect($1,$2,$3,$4)", [org, outsider, row.id, op]),
-      ),
-    ).toContain("permission_denied");
-    expect(
-      (
-        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
-          org,
-          owner,
-          row.id,
-          crypto.randomUUID(),
-        ])
-      ).rows[0]!.ok,
-    ).toBe(false);
-    expect((await live(row.id)).status).toBe("connected");
-
-    const ok = await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
+    // Even the holder cannot verify a generation the row no longer carries.
+    const wrongGen = await call("settle_channel_operation", [
       org,
       owner,
-      row.id,
-      op,
+      opNew,
+      old.id,
+      genOld,
+      "unknown",
     ]);
-    expect(ok.rows[0]!.ok).toBe(true);
-    expect(await live(row.id)).toMatchObject({ status: "disconnected", webhook_secret_hash: null });
+    expect(wrongGen).toMatchObject({ held: true, current: false });
+    await expireLeases(LEASE_BOT);
+    const opFinal = crypto.randomUUID();
+    await begin(org, owner, "connect", LEASE_BOT, opFinal);
+    await settle(org, owner, opFinal, null, null, "done");
+  });
+
+  it("the holder's refused connect disconnects its own row, audited; negative controls change nothing", async () => {
+    const bot = "7000000078";
+    const op = crypto.randomUUID();
+    const gen = crypto.randomUUID();
+    await begin(org, owner, "connect", bot, op);
+    const row = await startConnect(org, owner, bot, "1".repeat(64), op, gen);
+    expect(await settle(orgB, ownerB, op, row.id, gen, "refused")).toMatchObject({ held: false });
+    expect(await errorOf(settle(org, outsider, op, row.id, gen, "refused"))).toContain(
+      "permission_denied",
+    );
+    expect(await settle(org, owner, crypto.randomUUID(), row.id, gen, "refused")).toMatchObject({
+      held: false,
+    });
+    expect((await stored(row.id)).status).toBe("error");
+
+    const failed = await settle(org, owner, op, row.id, gen, "refused");
+    expect(failed).toMatchObject({ held: true, current: true });
+    expect(await stored(row.id)).toMatchObject({
+      status: "disconnected",
+      webhook_secret_hash: null,
+    });
     const audit = await db.query<{ after_json: Row }>(
       "select after_json from audit_logs where resource_id=$1 and action='integrations.disconnect'",
       [row.id],
@@ -311,32 +382,119 @@ describe("connect lease", () => {
     expect(audit.rows[0]!.after_json).toMatchObject({ reason: "connect_failed" });
   });
 
-  it("a member's disconnect during a pending connect wins: the connect can no longer finish", async () => {
+  it("an unknown outcome keeps the bot in doubt and the connection unverified", async () => {
+    const bot = "7000000081";
     const op = crypto.randomUUID();
-    const row = await startConnect(org, owner, "7000000079", "2".repeat(64), op);
-    await call("disconnect_channel_account", [org, owner, row.id]);
-    expect(await errorOf(call("finish_channel_connect", [org, row.id, op]))).toContain(
-      "connect_superseded",
+    const gen = crypto.randomUUID();
+    await begin(org, owner, "connect", bot, op);
+    const row = await startConnect(org, owner, bot, "4".repeat(64), op, gen);
+    await settle(org, owner, op, row.id, gen, "unknown");
+    expect(await stored(row.id)).toMatchObject({
+      status: "error",
+      last_error_code: "webhook_unverified",
+    });
+    const lease = await db.query<{ in_doubt: boolean; left: number }>(
+      "select in_doubt, extract(epoch from expires_at - now())::int as left from channel_bot_operations where operation_id=$1",
+      [op],
+    );
+    expect(lease.rows[0]!.in_doubt).toBe(true);
+    expect(lease.rows[0]!.left).toBeGreaterThan(240);
+    // Neither a reconnect nor a disconnect may touch the bot meanwhile.
+    expect(await errorOf(begin(org, owner, "connect", bot, crypto.randomUUID()))).toContain(
+      "connect_in_progress",
     );
     expect(
-      (
-        await db.query<{ ok: boolean }>("select abort_channel_connect($1,$2,$3,$4) ok", [
-          org,
-          owner,
-          row.id,
-          op,
-        ])
-      ).rows[0]!.ok,
-    ).toBe(false);
+      await errorOf(begin(org, owner, "disconnect", bot, crypto.randomUUID(), row.id as string)),
+    ).toContain("connect_in_progress");
+    // After the window, the next connect proceeds (and must verify for itself).
+    await expireLeases(bot);
+    const next = await connect(org, owner, bot, "5".repeat(64));
+    expect(next).toMatchObject({ id: row.id, status: "connected" });
   });
 
-  it("finish is tenant-bound", async () => {
+  it("a disconnect holds the bot until its deleteWebhook is settled; it is bound to its own connection", async () => {
+    const bot = "7000000082";
+    const row = await connect(org, owner, bot, "6".repeat(64));
     const op = crypto.randomUUID();
-    const row = await startConnect(org, owner, "7000000080", "3".repeat(64), op);
-    expect(await errorOf(call("finish_channel_connect", [orgB, row.id, op]))).toContain(
+    // Without its lease (or with a lease for another connection) nothing is cleared.
+    expect(await errorOf(call("disconnect_channel_account", [org, owner, row.id, op]))).toContain(
       "connect_superseded",
     );
-    await call("finish_channel_connect", [org, row.id, op]);
+    await begin(org, owner, "disconnect", bot, op, row.id as string);
+    const gone = await call("disconnect_channel_account", [org, owner, row.id, op]);
+    expect(gone).toMatchObject({ status: "disconnected", webhook_generation: null });
+    // deleteWebhook still in flight: a reconnect must wait.
+    expect(await errorOf(begin(org, owner, "connect", bot, crypto.randomUUID()))).toContain(
+      "connect_in_progress",
+    );
+    // Its answer never came: in doubt.
+    await settle(org, owner, op, null, null, "unknown");
+    expect(await errorOf(begin(org, owner, "connect", bot, crypto.randomUUID()))).toContain(
+      "connect_in_progress",
+    );
+    await expireLeases(bot);
+    const again = await connect(org, owner, bot, "7".repeat(64));
+    expect(again.id).not.toBe(row.id);
+    expect(again.status).toBe("connected");
+    // The old disconnect, answering late, cannot touch the new row.
+    expect(await settle(org, owner, op, null, null, "done")).toMatchObject({ held: false });
+    expect(await errorOf(call("disconnect_channel_account", [org, owner, again.id, op]))).toContain(
+      "connect_superseded",
+    );
+    expect((await stored(again.id)).status).toBe("connected");
+  });
+
+  it("observe_channel_webhook: the current generation confirms, an older one flags a mismatch", async () => {
+    const bot = "7000000083";
+    const op = crypto.randomUUID();
+    const gen = crypto.randomUUID();
+    await begin(org, owner, "connect", bot, op);
+    const row = await startConnect(org, owner, bot, "8".repeat(64), op, gen);
+    // While the operation is in flight, evidence changes nothing.
+    await db.query("select observe_channel_webhook($1,$2)", [row.id, gen]);
+    expect((await stored(row.id)).last_error_code).toBe("webhook_pending");
+    await settle(org, owner, op, row.id, gen, "unknown");
+    await expireLeases(bot);
+    // A delivery on the current generation proves Telegram holds it.
+    await db.query("select observe_channel_webhook($1,$2)", [row.id, gen]);
+    expect(await stored(row.id)).toMatchObject({ status: "connected", last_error_code: null });
+    // A verified delivery on an OLDER generation proves Telegram disagrees.
+    await db.query("select observe_channel_webhook($1,$2)", [row.id, crypto.randomUUID()]);
+    expect(await stored(row.id)).toMatchObject({
+      status: "error",
+      last_error_code: "webhook_mismatch",
+    });
+    // An ordinary inbound message does not clear it.
+    await call("ingest_telegram_inbound", [
+      row.id,
+      "640099",
+      "640099",
+      "Obs",
+      "obs",
+      "tg:880099",
+      "hi",
+      "text",
+      "2026-10-20T03:00:00Z",
+      null,
+      "880099",
+    ]);
+    expect((await stored(row.id)).last_error_code).toBe("webhook_mismatch");
+    await db.query("select observe_channel_webhook($1,$2)", [row.id, gen]);
+    expect((await stored(row.id)).status).toBe("connected");
+  });
+
+  it("settle is tenant-bound", async () => {
+    const bot = "7000000080";
+    const op = crypto.randomUUID();
+    const gen = crypto.randomUUID();
+    await begin(org, owner, "connect", bot, op);
+    const row = await startConnect(org, owner, bot, "3".repeat(64), op, gen);
+    expect(await settle(orgB, ownerB, op, row.id, gen, "verified")).toMatchObject({
+      held: false,
+    });
+    expect((await stored(row.id)).status).toBe("error");
+    await settle(org, owner, op, row.id, gen, "verified");
+    expect((await stored(row.id)).status).toBe("connected");
   });
 });
 
@@ -777,14 +935,16 @@ describe("browser roles", () => {
             db.query("select fail_stuck_outbound_messages($1,$1)", [crypto.randomUUID()]),
           ),
         ).toContain("permission denied");
-        expect(
-          await errorOf(db.query("select finish_channel_connect($1,$1,$1)", [crypto.randomUUID()])),
-        ).toContain("permission denied");
-        expect(
-          await errorOf(
-            db.query("select abort_channel_connect($1,$1,$1,$1)", [crypto.randomUUID()]),
-          ),
-        ).toContain("permission denied");
+        for (const statement of [
+          "select begin_channel_operation($1,$1,'TELEGRAM','1','connect',$1,null)",
+          "select settle_channel_operation($1,$1,$1,null,null,'done')",
+          "select disconnect_channel_account($1,$1,$1,$1)",
+          "select observe_channel_webhook($1,$1)",
+          "select * from channel_bot_operations",
+        ]) {
+          const params = statement.includes("$1") ? [crypto.randomUUID()] : [];
+          expect(await errorOf(db.query(statement, params))).toContain("permission denied");
+        }
       } finally {
         await db.exec("reset role");
       }

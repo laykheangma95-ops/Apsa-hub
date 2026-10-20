@@ -161,9 +161,17 @@ export function TelegramChannelRow({ userId, organizationId }: TelegramChannelRo
       });
       if (!sameScope(started, scopeRef.current)) return;
       notifySuccess(t("settings.channels.telegram.disconnected"));
-    } catch {
+    } catch (error) {
       if (!sameScope(started, scopeRef.current)) return;
-      notifyError(t("settings.channels.telegram.disconnectError"));
+      // Another change to this bot (or one whose outcome Telegram never
+      // confirmed) is still settling: say so rather than "try again".
+      notifyError(
+        t(
+          classifyConnectError(error) === "connect_in_progress"
+            ? "settings.channels.telegram.connectError.connect_in_progress"
+            : "settings.channels.telegram.disconnectError",
+        ),
+      );
     } finally {
       if (sameScope(started, scopeRef.current)) setDisconnecting(false);
     }
