@@ -1848,9 +1848,9 @@
     "list": {
       "title": "Products",
       "subtitle": "Your catalogue — names, variants and prices",
-      "searchPlaceholder": "Search the products below",
-      "searchScope": "Searches only the products loaded on this page, not the whole catalogue.",
-      "pageLimit": "This page shows the first {{count}} products. Pick a category to narrow it down.",
+      "searchPlaceholder": "Search all products",
+      "searchScope": "Searches your whole catalogue by name, SKU or barcode.",
+      "searching": "Searching…",
       "status": {
         "active": "Active",
         "archived": "Archived"
@@ -1875,11 +1875,44 @@
       },
       "noMatches": {
         "title": "Nothing matches that",
-        "body": "Only the products loaded on this page were searched. Clear the search or pick another category."
+        "body": "No product in this list has that name, SKU or barcode. Check the spelling, or clear the search.",
+        "clear": "Clear search"
+      },
+      "emptyCategory": {
+        "title": "Nothing in this category",
+        "body": "No product in this list is in this category yet."
       },
       "error": {
         "title": "Products didn't load",
         "body": "Check your connection and try again."
+      },
+      "loadMore": "Load more products",
+      "loadingMore": "Loading more products…",
+      "showing_one": "Showing {{count}} product",
+      "showing_other": "Showing {{count}} products",
+      "end": {
+        "title": "That's every product in this list",
+        "body_one": "{{count}} product shown.",
+        "body_other": "{{count}} products shown."
+      },
+      "endSearch": {
+        "title": "No more matches",
+        "body_one": "{{count}} matching product shown.",
+        "body_other": "{{count}} matching products shown."
+      },
+      "moreError": {
+        "title": "More products didn't load",
+        "body": "This list isn't complete yet. Check your connection and try again."
+      },
+      "refreshError": "This list couldn't refresh, so it may be out of date.",
+      "principalChanged": {
+        "title": "You switched account or business",
+        "body": "Another tab signed in as someone else or changed business. Reload to see the right products.",
+        "reload": "Reload"
+      },
+      "denied": {
+        "title": "You can't view products",
+        "body": "Ask the shop owner for permission to view products."
       }
     },
     "detail": {

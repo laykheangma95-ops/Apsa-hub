@@ -28,6 +28,8 @@
  *   I. No production mock/fallback path in the catalog data layer.
  *   J. No browser-boundary regression — no server-only import reachable from
  *      the new routes or components.
+ *   N. A Khmer product name wraps inside its row in either interface language
+ *      (geometry: catalog-khmer-name-fit.browser.ts).
  *
  * Run: bun test src/tests/product-catalog-ui.test.ts
  */
@@ -57,7 +59,6 @@ import {
   isCatalogId,
   parseMinorUnits,
   productLeadPrice,
-  searchLoadedProducts,
   variantFieldAccess,
   visibleVariantCost,
   type CatalogProduct,
@@ -810,7 +811,7 @@ describe("C. a product, variant or category id from another organization", () =>
       expect(code).not.toMatch(/organizationId\s*\?\?\s*["']unresolved["']/);
       expect(source).toContain("catalogKeys.categories(userId, organizationId");
     }
-    expect(read(LIST_ROUTE)).toContain("catalogKeys.products(userId, organizationId");
+    expect(read(LIST_ROUTE)).toContain("catalogKeys.productPagesFor(userId, organizationId");
     expect(read(DETAIL_ROUTE)).toContain("catalogKeys.product(userId, organizationId");
   });
 
@@ -1665,55 +1666,37 @@ function fakeProduct(over: Partial<CatalogProduct>): CatalogProduct {
 }
 
 describe("catalog list search is honest about its own scope", () => {
-  const loaded: CatalogProduct[] = [
-    fakeProduct({ id: "p1", nameKm: "កាហ្វេ", nameEn: "Coffee" }),
-    fakeProduct({ id: "p2", nameKm: "តែ", nameEn: "Tea" }),
-    fakeProduct({
-      id: "p3",
-      nameKm: "នំបុ័ង",
-      nameEn: null,
-      variants: [
-        {
-          id: "v3",
-          productId: "p3",
-          sku: "BRD-01",
-          barcode: "8850",
-          name: "Large",
-          price: { amount: 250, currency: "USD" },
-          cost: null,
-          weightGrams: null,
-          status: "ACTIVE",
-          createdAt: "2026-01-01T00:00:00Z",
-          updatedAt: "2026-01-01T00:00:00Z",
-        },
-      ],
-    }),
-  ];
-
-  it("matches Khmer and English names, SKU and barcode", () => {
-    expect(searchLoadedProducts(loaded, "កាហ្វេ").map((p) => p.id)).toEqual(["p1"]);
-    expect(searchLoadedProducts(loaded, "tea").map((p) => p.id)).toEqual(["p2"]);
-    expect(searchLoadedProducts(loaded, "brd-01").map((p) => p.id)).toEqual(["p3"]);
-    expect(searchLoadedProducts(loaded, "8850").map((p) => p.id)).toEqual(["p3"]);
-    expect(searchLoadedProducts(loaded, "large").map((p) => p.id)).toEqual(["p3"]);
+  /*
+   * The screen used to filter only the 200 products it had loaded and said so.
+   * It now asks the server across the whole catalogue (behaviour proven
+   * against SQL in products-catalog-mounted.runtime.ts); these pin that the
+   * screen no longer filters in the browser and no longer claims a page limit.
+   */
+  it("the list asks the server, and filters nothing in the browser", () => {
+    const code = read(LIST_ROUTE)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(code).toContain("listCatalogProductsPage(");
+    expect(code).toContain("useInfiniteQuery(");
+    expect(code).not.toContain("searchLoadedProducts");
+    expect(code).not.toContain("CATALOG_PAGE_LIMIT");
+    expect(code).not.toMatch(/products\.filter\(/);
+    expect(read(CATALOG_LIB)).not.toContain("export function searchLoadedProducts");
   });
 
-  it("returns the loaded page unchanged for an empty query — it never re-queries", () => {
-    expect(searchLoadedProducts(loaded, "   ").map((p) => p.id)).toEqual(["p1", "p2", "p3"]);
-  });
-
-  it("searches nothing beyond what was loaded", () => {
-    expect(searchLoadedProducts([], "កាហ្វេ")).toEqual([]);
-    expect(searchLoadedProducts(loaded, "nothing-here")).toEqual([]);
-  });
-
-  it("the screen says so, in both languages, and flags a full page", () => {
+  it("the screen says the whole catalogue is searched, in both languages, with no page ceiling", () => {
     const en = JSON.parse(read("src/locales/en.json"));
     const km = JSON.parse(read("src/locales/km.json"));
-    expect(en.catalog.list.searchScope).toMatch(/this page/i);
+    expect(en.catalog.list.searchScope).toMatch(/whole catalogue/i);
+    expect(en.catalog.list.searchScope).not.toMatch(/this page/i);
     expect(km.catalog.list.searchScope).toMatch(/[ក-៿]/);
+    expect(km.catalog.list.searchScope).toContain("ទាំងមូល");
+    expect(en.catalog.list.pageLimit).toBeUndefined();
+    expect(km.catalog.list.pageLimit).toBeUndefined();
     expect(read(LIST_ROUTE)).toContain("catalog.list.searchScope");
-    expect(read(LIST_ROUTE)).toContain("catalog.list.pageLimit");
+    expect(read(LIST_ROUTE)).not.toContain("catalog.list.pageLimit");
+    // Inventory still makes one bounded read, and still says so when full.
+    expect(read("src/routes/app.inventory.tsx")).toContain("inventoryList.catalogPageLimit");
     expect(CATALOG_PAGE_LIMIT).toBeGreaterThan(0);
   });
 
@@ -1958,5 +1941,47 @@ describe("Product detail does not reserve dead space for a nav it never renders"
   it('wraps its screen with bottom="none", matching Orders/Deliveries detail convention', () => {
     const detail = read(DETAIL_ROUTE);
     expect(detail).toMatch(/<ScreenBleed surface="raised" bottom="none">/);
+  });
+});
+
+/*
+ * N. A Khmer product name wraps inside its row in either interface language.
+ *
+ * In the English UI a long Khmer name kept `.chip-text`'s nowrap and painted
+ * across the price and out of the row (Chromium, Kantumruy Pro loaded: x=513
+ * in a row ending at 303 at 320px, the same at 360/390/430). The geometry is
+ * measured in catalog-khmer-name-fit.browser.ts against the built stylesheet,
+ * with this markup; these checks pin the markup and the rule it relies on, so
+ * neither can drift from the browser fixture silently.
+ */
+describe("N. a Khmer product name wraps inside its row in either interface language", () => {
+  const css = read("src/styles.css");
+  const rule = /\.text-label\[lang="km"\]\s*>\s*\.chip-text\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+
+  it("the stylesheet wraps Khmer label content by its own language, not the interface's", () => {
+    expect(rule).toMatch(/white-space:\s*normal/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).toMatch(/overflow:\s*visible/);
+    expect(rule).toMatch(/text-overflow:\s*clip/);
+    // Khmer-mode label line height, so wrapped lines keep their stacked marks.
+    expect(rule).toMatch(/line-height:\s*19px/);
+  });
+
+  it("ProductRow marks the name as Khmer content in the label the rule targets", () => {
+    expect(read(LIST_ROUTE)).toContain(
+      '<span className="text-label min-w-0 flex-1 text-text-primary" lang="km">\n          <span className="chip-text">{product.nameKm}</span>',
+    );
+  });
+
+  it("InventoryListRow marks the name the same way", () => {
+    expect(read("src/routes/app.inventory.tsx")).toContain(
+      '<span className="text-label min-w-0 text-text-primary" lang="km">\n          <span className="chip-text">{row.productNameKm}</span>',
+    );
+  });
+
+  it("the price keeps its own width beside the name", () => {
+    expect(read(LIST_ROUTE)).toContain(
+      '<span className="text-financial tnum shrink-0 text-text-primary">',
+    );
   });
 });

@@ -781,6 +781,25 @@ select:focus-visible {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/*
+ * The same for Khmer CONTENT in a label, whatever the interface language. A
+ * row that shows a Khmer name declares it (`lang="km"` on the label), and the
+ * English interface kept `.chip-text`'s nowrap for it: on an inline span
+ * `overflow: hidden` clips nothing, so a long Khmer product name painted as
+ * one line straight across the price and out of the row (measured in Chromium
+ * with Kantumruy Pro loaded: right edge 513px in a row ending at 303px at
+ * 320px wide, the same at 360/390/430). Wrapping follows the text's own
+ * language, as above, with the Khmer-mode label line height (19px) so wrapped
+ * lines keep room for stacked vowels and subscripts. In the Khmer interface
+ * these are the values it already had.
+ */
+.text-label[lang="km"] > .chip-text {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 19px;
+}
 
 .font-khmer {
   font-family: "Kantumruy Pro", "Plus Jakarta Sans", system-ui, sans-serif;

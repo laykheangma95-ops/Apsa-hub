@@ -25,10 +25,12 @@ import type { AuthorizationContext } from "@/server/auth/authorization";
 import { auditLog } from "@/server/auth/audit";
 import { formatApsaBarcode, APSA_SERIAL_LENGTH } from "@/lib/barcode/apsa-code";
 import { isCode128Encodable } from "@/lib/barcode/code128";
+import { normalizeCatalogSearch, type CatalogListCursor } from "@/lib/catalog-search";
 import { getBusinessCurrency } from "@/server/org/get-business-currency";
 import { CREATE_BINDING_CHANGED_MESSAGE, type ProductCreateBinding } from "@/lib/business-currency";
 import * as repo from "./repository";
 import type {
+  ProductStatusDb,
   ProductRow,
   ProductVariantRow,
   ProductCategoryRow,
@@ -187,6 +189,15 @@ function mapCategory(row: ProductCategoryRow): ProductCategoryDetail {
 
 // ── Service functions ─────────────────────────────────────────────────────────
 
+/**
+ * The whole catalogue under one status in ONE read — kept for the POS grid,
+ * the manual order picker and the Conversation Smart Action resolver
+ * (src/lib/api/index.ts getProducts/getPosProducts), which still hold the
+ * full ACTIVE list in memory. The Products screen pages with listProductsPage
+ * below instead. With no `limit` this read is bounded only by PostgREST's
+ * max_rows; that limitation belongs to those callers and is reported, not
+ * changed, here.
+ */
 export async function getProductCatalog(
   ctx: AuthorizationContext,
   opts: ListProductsOptions = {},
@@ -195,10 +206,19 @@ export async function getProductCatalog(
 
   const canViewCost = ctx.can("products.view_cost");
   const products = await repo.listProducts(ctx.organizationId, opts);
+  return withActiveVariants(ctx.organizationId, products, canViewCost);
+}
+
+/** Each product with its ACTIVE variants, oldest first, in one batched read. */
+async function withActiveVariants(
+  organizationId: string,
+  products: ProductRow[],
+  canViewCost: boolean,
+): Promise<ProductDetail[]> {
   if (products.length === 0) return [];
 
   const productIds = products.map((p) => p.id);
-  const allVariants = await repo.listVariantsByOrg(ctx.organizationId, productIds);
+  const allVariants = await repo.listVariantsByOrg(organizationId, productIds);
 
   const variantsByProduct = new Map<string, ProductVariantRow[]>();
   for (const v of allVariants) {
@@ -208,6 +228,92 @@ export async function getProductCatalog(
   }
 
   return products.map((p) => mapProduct(p, variantsByProduct.get(p.id) ?? [], canViewCost));
+}
+
+/** The Products screen's page size, and the most one page request may ask for. */
+export const CATALOG_LIST_PAGE_SIZE = 50;
+export const CATALOG_LIST_PAGE_MAX = 100;
+
+/** The question a catalogue page answers, after the server normalized it. */
+export interface ProductListQuery {
+  status: ProductStatusDb;
+  categoryId: string | null;
+  /** Normalized (src/lib/catalog-search.ts); "" when nothing was searched. */
+  search: string;
+}
+
+/**
+ * One page of the Products screen.
+ *
+ * `nextCursor` is null only when the server looked past this page and found no
+ * further product — that, and nothing else, is what "end of list" means.
+ *
+ * `servedAs` is the principal the server resolved for THIS request. The browser
+ * checks it against the principal its cache entry belongs to and refuses a
+ * page answered for someone else (a sign-in in another tab between two page
+ * requests). It authorizes nothing: the server derived it from the session
+ * cookie and the active membership, and it echoes back only identifiers the
+ * browser already holds.
+ *
+ * `query` is the question the server answered — status, category and search
+ * exactly as it applied them. The browser files a page only under the question
+ * it asked, so a late answer to an earlier search can never be shown as the
+ * answer to the current one.
+ */
+export interface ProductListPage {
+  products: ProductDetail[];
+  nextCursor: CatalogListCursor | null;
+  servedAs: { userId: string; organizationId: string };
+  query: ProductListQuery;
+}
+
+/**
+ * The Products screen's paged read: newest first, `limit` at a time,
+ * continuing strictly after `before`, under one status, optionally one
+ * category, optionally a search across the WHOLE catalogue (names, and active
+ * variants' names, SKUs and barcodes — see src/lib/catalog-search.ts).
+ *
+ * Completeness is measured, never inferred from a short page: the read asks
+ * for one row more than it returns, and only a read that finds no such row
+ * reports the end. A category id that is not the caller's simply matches
+ * nothing — every read is scoped to ctx.organizationId first.
+ */
+export async function listProductsPage(
+  ctx: AuthorizationContext,
+  opts: {
+    status?: ProductStatusDb | undefined;
+    categoryId?: string | null | undefined;
+    search?: string | undefined;
+    before?: CatalogListCursor | undefined;
+    limit?: number | undefined;
+  } = {},
+): Promise<ProductListPage> {
+  ctx.require("products.read");
+
+  const canViewCost = ctx.can("products.view_cost");
+  const limit = Math.min(Math.max(opts.limit ?? CATALOG_LIST_PAGE_SIZE, 1), CATALOG_LIST_PAGE_MAX);
+  const query: ProductListQuery = {
+    status: opts.status ?? "ACTIVE",
+    categoryId: opts.categoryId ?? null,
+    search: normalizeCatalogSearch(opts.search ?? ""),
+  };
+
+  const rows = await repo.listProductsPage(ctx.organizationId, {
+    status: query.status,
+    category_id: query.categoryId ?? undefined,
+    search: query.search,
+    before: opts.before,
+    limit: limit + 1,
+  });
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+
+  return {
+    products: await withActiveVariants(ctx.organizationId, page, canViewCost),
+    nextCursor: rows.length > limit && last ? { createdAt: last.created_at, id: last.id } : null,
+    servedAs: { userId: ctx.userId, organizationId: ctx.organizationId },
+    query,
+  };
 }
 
 /**

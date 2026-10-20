@@ -135,9 +135,12 @@ function sqlTransport() {
     let columns = "*";
     let single = false;
     let max: number | undefined;
+    let counted = false;
     const chain = {
-      select(cols = "*") {
+      select(cols = "*", options?: { count?: "exact" }) {
         columns = cols;
+        // Prefer: count=exact — the whole filtered set (listVariantsByOrg asks).
+        counted = options?.count === "exact";
         return chain;
       },
       eq(key: string, value: unknown) {
@@ -171,7 +174,8 @@ function sqlTransport() {
       },
       async execute() {
         let sql = `select ${columns} from ${table}`;
-        if (where.length) sql += ` where ${where.join(" and ")}`;
+        const filtered = where.length ? ` where ${where.join(" and ")}` : "";
+        sql += filtered;
         if (ordering.length) sql += ` order by ${ordering.join(",")}`;
         if (max !== undefined) sql += ` limit ${max}`;
         try {
@@ -181,7 +185,17 @@ function sqlTransport() {
               ? { data: rows[0], error: null }
               : { data: null, error: { code: "PGRST116" } };
           }
-          return { data: rows, error: null };
+          const count = counted
+            ? Number(
+                (
+                  await f.db.query<{ n: number }>(
+                    `select count(*)::int as n from ${table}${filtered}`,
+                    values,
+                  )
+                ).rows[0]!.n,
+              )
+            : null;
+          return { data: rows, error: null, count };
         } catch (error) {
           return { data: null, error };
         }
