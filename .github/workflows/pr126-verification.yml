@@ -1,0 +1,274 @@
+name: PR 126 verification (manual)
+
+# Verification only, for PR #126 at one fixed commit. Runs nothing on push or
+# pull_request; it is started by hand (workflow_dispatch).
+#
+# Everything is disposable and local to the runner: native PostgreSQL 16 on
+# loopback with a per-run password, a pinned PostgREST binary, and Chromium.
+# No secrets, no deployment environment, no hosted database, read-only token.
+# See .github/verification/pr126/README.md.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr126-verification
+  cancel-in-progress: false
+
+env:
+  TARGET_SHA: f42c4ff2d5e4ae80479f6712daf677fb367698e9
+  EXPECTED_MAIN: 47c8627e48bf179d0309d84fc06e3ba3d18f3f21
+  # As .github/workflows/ci.yml on main.
+  BUN_VERSION: "1.4.2"
+  VERIFY: ${{ github.workspace }}/verify/.github/verification/pr126
+  EVIDENCE: ${{ github.workspace }}/evidence
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  gate-caps:
+    name: PostgREST gate (caps 40, 150, 1000)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: verify
+          persist-credentials: false
+      - name: Check out PR #126 at the target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the target before any test
+        run: bash "$VERIFY/verify-target.sh" target "$EVIDENCE"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Disposable PostgreSQL 16 and pinned PostgREST
+        id: runner
+        run: bash "$VERIFY/setup-runner.sh" "$EVIDENCE"
+      - name: Install the target's dependencies
+        working-directory: target
+        run: bun install --frozen-lockfile
+      - name: Run the committed gate
+        working-directory: target
+        run: |
+          echo "bun --version: $(bun --version)" >>"$EVIDENCE/provenance.txt"
+          cmd=(bun run scripts/run-catalog-postgrest-gate.ts --caps 40,150,1000 --log-dir "$EVIDENCE/logs")
+          echo "(cd target && ${cmd[*]})" >>"$EVIDENCE/commands.txt"
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$EVIDENCE/gate.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" >"$EVIDENCE/exit-code"
+          exit "$rc"
+      - name: Probe embedded-permission truncation
+        if: ${{ !cancelled() && steps.runner.outcome == 'success' }}
+        run: |
+          cmd=(bun run "$VERIFY/embed-probe.ts" "$GITHUB_WORKSPACE/target" "$EVIDENCE/embed-probe.json")
+          echo "${cmd[*]}" >>"$EVIDENCE/commands.txt"
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$EVIDENCE/embed-probe.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" >"$EVIDENCE/embed-exit-code"
+          exit "$rc"
+      - name: Scrub the run's database password from evidence
+        if: always()
+        run: |
+          if [[ -n "${APSA_VERIFY_PG_PASSWORD:-}" && -d "$EVIDENCE" ]]; then
+            { grep -rlF "$APSA_VERIFY_PG_PASSWORD" "$EVIDENCE" || true; } | xargs -r sed -i "s/$APSA_VERIFY_PG_PASSWORD/***/g"
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr126-gate-caps
+          path: evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+  gate-negative-controls:
+    name: PostgREST gate (8 negative controls, separate checkout)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: verify
+          persist-credentials: false
+      - name: Check out PR #126 at the target SHA (a copy the controls may mutate)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          path: negctl
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the target before any test
+        run: bash "$VERIFY/verify-target.sh" negctl "$EVIDENCE"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Disposable PostgreSQL 16 and pinned PostgREST
+        run: bash "$VERIFY/setup-runner.sh" "$EVIDENCE"
+      - name: Install the target's dependencies
+        working-directory: negctl
+        run: bun install --frozen-lockfile
+      - name: Run the committed gate with all negative controls
+        working-directory: negctl
+        run: |
+          echo "bun --version: $(bun --version)" >>"$EVIDENCE/provenance.txt"
+          cmd=(bun run scripts/run-catalog-postgrest-gate.ts --caps 40 --negative-controls --log-dir "$EVIDENCE/logs")
+          echo "(cd negctl && ${cmd[*]})" >>"$EVIDENCE/commands.txt"
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$EVIDENCE/gate.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" >"$EVIDENCE/exit-code"
+          exit "$rc"
+      - name: Record whether every mutation was restored
+        if: always()
+        run: git -C negctl status --porcelain >"$EVIDENCE/worktree-status.txt"
+      - name: Scrub the run's database password from evidence
+        if: always()
+        run: |
+          if [[ -n "${APSA_VERIFY_PG_PASSWORD:-}" && -d "$EVIDENCE" ]]; then
+            { grep -rlF "$APSA_VERIFY_PG_PASSWORD" "$EVIDENCE" || true; } | xargs -r sed -i "s/$APSA_VERIFY_PG_PASSWORD/***/g"
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr126-gate-negative-controls
+          path: evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+  mobile:
+    name: Mobile harness (production build, km/en × 320–430)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: verify
+          persist-credentials: false
+      - name: Check out PR #126 at the target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the target before any test
+        run: bash "$VERIFY/verify-target.sh" target "$EVIDENCE"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Disposable PostgreSQL 16 and pinned PostgREST
+        run: bash "$VERIFY/setup-runner.sh" "$EVIDENCE"
+      - name: Install the target's dependencies
+        working-directory: target
+        run: bun install --frozen-lockfile
+      - name: Install browser tooling (locked playwright-core, its Chromium)
+        working-directory: ${{ env.VERIFY }}/tooling
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          ./node_modules/.bin/playwright-core install --with-deps chromium
+          chromium="$(node -e "import('playwright-core').then((p) => console.log(p.chromium.executablePath()))")"
+          echo "APSA_CHROMIUM=$chromium" >>"$GITHUB_ENV"
+          {
+            echo "bun --version: $(bun --version)"
+            echo "node --version: $(node --version)"
+            echo "playwright-core: $(node -p "require('./node_modules/playwright-core/package.json').version")"
+            echo "chromium.executable: $chromium"
+            echo "chromium.version: $("$chromium" --version 2>/dev/null || echo unknown)"
+            echo "system Khmer fonts (fc-list :lang=km):"
+            fc-list :lang=km family | sort -u | sed 's/^/  /'
+          } >>"$EVIDENCE/provenance.txt"
+      - name: Run the committed mobile harness
+        working-directory: target
+        env:
+          APSA_PLAYWRIGHT_CORE: ${{ env.VERIFY }}/tooling/font-observer.mjs
+          APSA_FONT_LOG: ${{ github.workspace }}/evidence/fonts.jsonl
+        run: |
+          cmd=(bun run scripts/products-mobile-harness.ts --out "$EVIDENCE/evidence")
+          echo "(cd target && APSA_PLAYWRIGHT_CORE=$APSA_PLAYWRIGHT_CORE APSA_FONT_LOG=$APSA_FONT_LOG APSA_CHROMIUM=$APSA_CHROMIUM ${cmd[*]})" >>"$EVIDENCE/commands.txt"
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$EVIDENCE/harness.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" >"$EVIDENCE/exit-code"
+          exit "$rc"
+      - name: Scrub the run's database password from evidence
+        if: always()
+        run: |
+          if [[ -n "${APSA_VERIFY_PG_PASSWORD:-}" && -d "$EVIDENCE" ]]; then
+            { grep -rlF "$APSA_VERIFY_PG_PASSWORD" "$EVIDENCE" || true; } | xargs -r sed -i "s/$APSA_VERIFY_PG_PASSWORD/***/g"
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr126-mobile
+          path: evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+  summary:
+    name: Result summary
+    needs: [gate-caps, gate-negative-controls, mobile]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: verify
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pr126-gate-caps
+          path: artifacts/gate-caps
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pr126-gate-negative-controls
+          path: artifacts/gate-negative-controls
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pr126-mobile
+          path: artifacts/mobile
+      - name: Summarize (PASS only on verified content, not on exit alone)
+        run: |
+          mkdir -p summary
+          set +e
+          bun run "$VERIFY/summarize.ts" artifacts summary
+          rc=$?
+          cat summary/summary.md >>"$GITHUB_STEP_SUMMARY" 2>/dev/null
+          {
+            echo "needs.gate-caps=${{ needs.gate-caps.result }}"
+            echo "needs.gate-negative-controls=${{ needs.gate-negative-controls.result }}"
+            echo "needs.mobile=${{ needs.mobile.result }}"
+            echo "summarize.exit=$rc"
+          } >summary/job-results.txt
+          exit "$rc"
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr126-summary
+          path: summary
+          retention-days: 30
+          if-no-files-found: warn
