@@ -1,7 +1,9 @@
-name: PR 126 verification (manual)
+name: PR 126 verification
 
-# Verification only, for PR #126 at one fixed commit. Runs nothing on push or
-# pull_request; it is started by hand (workflow_dispatch).
+# Verification only, for PR #126 at one fixed commit. Started by hand
+# (workflow_dispatch) or by pull_request events on PR #133 only: the `scope`
+# job skips every other pull request, and every job needs it. Never
+# pull_request_target.
 #
 # Everything is disposable and local to the runner: native PostgreSQL 16 on
 # loopback with a per-run password, a pinned PostgREST binary, and Chromium.
@@ -10,6 +12,8 @@ name: PR 126 verification (manual)
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -27,16 +31,44 @@ env:
   VERIFY: ${{ github.workspace }}/verify/.github/verification/pr126
   EVIDENCE: ${{ github.workspace }}/evidence
   GH_TOKEN: ${{ github.token }}
+  # The verification scripts' commit: #133's head on a pull_request event (not
+  # the merge ref), the dispatched ref's commit otherwise.
+  TOOLING_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  scope:
+    name: Scope (PR #133 or manual dispatch only)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.number == 133 &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'claude/verify-pr126-ci-evidence' &&
+       github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record the trigger
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          echo "event=$GITHUB_EVENT_NAME pr=${PR_NUMBER:-none} head=${PR_HEAD_REPO:-}:${PR_HEAD_REF:-}" \
+               "base=${PR_BASE_REF:-}@${PR_BASE_SHA:-} tooling=$TOOLING_SHA workflow_sha=$GITHUB_SHA"
+
   gate-caps:
     name: PostgREST gate (caps 40, 150, 1000)
+    needs: scope
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out the verification tooling
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TOOLING_SHA }}
           path: verify
           persist-credentials: false
       - name: Check out PR #126 at the target SHA
@@ -95,12 +127,14 @@ jobs:
 
   gate-negative-controls:
     name: PostgREST gate (8 negative controls, separate checkout)
+    needs: scope
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: Check out the verification tooling
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TOOLING_SHA }}
           path: verify
           persist-credentials: false
       - name: Check out PR #126 at the target SHA (a copy the controls may mutate)
@@ -151,12 +185,14 @@ jobs:
 
   mobile:
     name: Mobile harness (production build, km/en × 320–430)
+    needs: scope
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out the verification tooling
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TOOLING_SHA }}
           path: verify
           persist-credentials: false
       - name: Check out PR #126 at the target SHA
@@ -222,14 +258,16 @@ jobs:
 
   summary:
     name: Result summary
-    needs: [gate-caps, gate-negative-controls, mobile]
-    if: always()
+    needs: [scope, gate-caps, gate-negative-controls, mobile]
+    # Even when a gate job fails, but never when scope skipped this event.
+    if: ${{ !cancelled() && needs.scope.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out the verification tooling
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TOOLING_SHA }}
           path: verify
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2

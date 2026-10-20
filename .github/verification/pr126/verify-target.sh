@@ -26,6 +26,12 @@ note "target.merge_base_with_expected_main=$(git -C "$checkout" merge-base "$EXP
 note "main.expected=$EXPECTED_MAIN"
 note "main.now=$(git -C "$checkout" rev-parse origin/main 2>/dev/null || echo unknown)"
 note "pr126.head_now=$(gh api "repos/$GITHUB_REPOSITORY/pulls/126" --jq .head.sha 2>/dev/null || echo unknown)"
+tooling="$(git -C "$(dirname "$0")" rev-parse HEAD)"
+note "tooling.expected=$TOOLING_SHA"
+note "tooling.checked_out=$tooling"
+if [[ "$tooling" != "$TOOLING_SHA" ]]; then note "FAIL: verification scripts are not from $TOOLING_SHA"; exit 1; fi
+note "workflow.event=$GITHUB_EVENT_NAME"
+# On pull_request this is the merge ref's commit the workflow file was read from.
 note "workflow.sha=$GITHUB_SHA"
 note "workflow.ref=$GITHUB_REF"
 note "workflow.run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"

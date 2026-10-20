@@ -6,8 +6,13 @@ PostgREST gate and mobile harness, unchanged, at one fixed commit:
 - target: `f42c4ff2d5e4ae80479f6712daf677fb367698e9` (checked out by SHA and
   verified before any test; `47c8627e48bf179d0309d84fc06e3ba3d18f3f21` must be
   its ancestor)
-- trigger: `workflow_dispatch` only; token `contents: read`,
-  `pull-requests: read`; no secrets, no environment, no hosted database
+- trigger: `workflow_dispatch`, or `pull_request` on PR #133 only (same-repo
+  branch `claude/verify-pr126-ci-evidence` into `main`; the `scope` job skips
+  every other pull request); never `pull_request_target`; token
+  `contents: read`, `pull-requests: read`; no secrets, no environment, no
+  hosted database
+- scripts: checked out at #133's head commit (not the merge ref) and verified;
+  the application checkout is the target SHA above. Both are recorded.
 
 ## Jobs
 
@@ -67,4 +72,4 @@ membership read's embedded permission keys at each cap.
 
 GitHub only offers `workflow_dispatch` for workflows whose file is on the
 default branch. Until this file is on `main`, the workflow cannot be
-dispatched from this branch. See the PR description.
+dispatched from this branch; it runs instead on each push to PR #133.
