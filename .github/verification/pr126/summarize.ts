@@ -71,7 +71,10 @@ function suiteResult(log: string) {
       .find((l) => /^\((pass|fail|skip)\)/.test(l) && l.includes(fragment));
     return { fragment, kind, result: line ? /^\((\w+)\)/.exec(line)![1]! : "absent" };
   });
-  return { pass: count("pass"), fail: count("fail"), skip: count("skip"), cases };
+  // bun always prints the pass and fail counts but a skip count only when
+  // something was skipped; an absent pass/fail line still reads as NaN (FAIL).
+  const skip = count("skip");
+  return { pass: count("pass"), fail: count("fail"), skip: Number.isNaN(skip) ? 0 : skip, cases };
 }
 
 // ── PostgREST gate: caps ─────────────────────────────────────────────────────
