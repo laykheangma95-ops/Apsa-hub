@@ -151,7 +151,39 @@ describe("061 static shape", () => {
     expect(sql).toContain("has_schema_privilege(d.defaclrole, 'public', 'CREATE')");
     expect(sql).toContain("has_schema_privilege(b.roleid, 'public', 'CREATE')");
     expect(sql).not.toMatch(/d\.defaclrole\s*<>\s*postgres_oid/);
-    expect(sql).not.toMatch(/supabase_admin/);
+  });
+
+  it("names supabase_admin only inside the staging exception, which is exact and marker-gated", () => {
+    const raw = read(FILE);
+    const start = raw.indexOf("-- 6a-x. STAGING EXCEPTION");
+    const end = raw.indexOf("-- 6a. every role that can create");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const block = strip(raw.slice(start, end));
+    // outside the block (comments aside) no role is special-cased by name
+    expect(strip(raw.slice(0, start) + raw.slice(end))).not.toMatch(/supabase_admin/);
+    // gated by a postgres-owned marker with an exact comment, and a superuser
+    expect(block).toContain("n.nspname = 'apsa_environment'");
+    expect(block).toContain("n.nspowner = postgres_oid");
+    expect(block).toContain(
+      "obj_description(n.oid, 'pg_namespace') = 'APSA STAGING: 061 managed supabase_admin default ACL exception v1'",
+    );
+    expect(block).toContain("rolname = 'supabase_admin' AND rolsuper");
+    // public tables/sequences only, never a global row
+    expect(block).toContain("d.defaclnamespace = 'public'::regnamespace");
+    expect(block).toContain("d.defaclobjtype IN ('r','S')");
+    expect(block).not.toMatch(/defaclnamespace\s*=\s*0/);
+    // whole-row set equality, both directions, exact grantees, no grant option
+    expect(block.match(/\bEXCEPT\b/g)?.length).toBe(2);
+    expect(block.match(/'postgres', 'anon', 'authenticated', 'service_role'/g)?.length).toBe(2);
+    expect(block).toContain("managed_oid, p.privilege, false");
+    // the creator check itself is unchanged apart from skipping those row oids
+    const creator = strip(raw.slice(end));
+    expect(creator).toContain("has_schema_privilege(d.defaclrole, 'public', 'CREATE')");
+    expect(creator).toContain("AND d.oid <> ALL (coalesce(exempt, ARRAY[]::oid[]))");
+    expect(creator).toContain(
+      "RAISE EXCEPTION '061: a role that can create relations in public has default privileges",
+    );
   });
 
   it("checks EFFECTIVE authority of every browser-reachable role, not literal ACL grantees", () => {

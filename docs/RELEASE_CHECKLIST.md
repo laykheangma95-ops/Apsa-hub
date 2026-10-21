@@ -361,3 +361,76 @@ while every other workflow keeps working, until 062 is applied.
 
 Never roll 062 back by re-granting a retired or internal function. A database
 that applied an earlier draft of 062 must be rebuilt, not patched.
+
+---
+
+## 8b. Migration 061 staging exception (Supabase-managed defaults)
+
+**Staging only. Production stays at `060` and never gets the marker below.**
+
+The staging read-only 061 preflight (reviewed file, SHA-256
+`2392d5a6…bbc53c`) returned `99.01 FAIL / BLOCKED BY PRIVILEGES` for one
+reason only: Supabase's managed defaults — `supabase_admin`, schema `public`,
+tables and sequences, ALL to `postgres, anon, authenticated, service_role`
+(Supabase `init-scripts/00000000000000-initial-schema.sql`). `postgres` cannot
+change another role's defaults (`permission denied to change default
+privileges`), cannot `SET ROLE supabase_admin`, and a superuser's CREATE on
+`public` cannot be revoked; only Supabase can remove them.
+
+**What the exception allows** (`061` header, "STAGING EXCEPTION"; step 6a-x):
+step 6a skips a `pg_default_acl` row only if schema `apsa_environment` exists,
+is owned by `postgres` and carries exactly the comment
+`APSA STAGING: 061 managed supabase_admin default ACL exception v1`, the row
+belongs to `supabase_admin` (a superuser), is for `public` (never global),
+tables or sequences, and its complete ACL equals exactly the managed set
+(those four grantees, every privilege, granted by `supabase_admin`, no grant
+option). Anything else — PUBLIC, another grantee, a missing privilege, a grant
+option, a global row, another creator — aborts as before. Steps 1–5 and 6b,
+existing objects (step 3 refuses any relation in `public` not owned by
+`postgres`) and role reachability are unchanged. Without the marker, 061 is
+exactly the reviewed migration. Proof:
+`src/tests/migration-061-staging-exception-native.runtime.ts` (native
+PostgreSQL, Supabase role split, positive and mutation cases).
+
+**Expected preflight with the exception.** The reviewed preflight is not
+changed and models the original 061, so on staging it still reports
+`BLOCKED BY PRIVILEGES`. Proceed only if every `FAIL` row is `08.00` or an
+`08.02` row of the form `supabase_admin public tables: anon|authenticated
+<DELETE|INSERT|MAINTAIN|REFERENCES|SELECT|TRIGGER|TRUNCATE|UPDATE>` or
+`supabase_admin public sequences: anon|authenticated <SELECT|UPDATE|USAGE>`
+(22 rows on PostgreSQL 17), there is no `UNKNOWN`, and row `12.01` for
+`supabase_admin schema public tables` lists exactly `postgres`, `anon`,
+`authenticated`, `service_role`. Any other FAIL/UNKNOWN: stop.
+
+**Order (each a separately approved step):** preflight as above → the owner
+creates the marker on the confirmed staging project only
+(`CREATE SCHEMA apsa_environment AUTHORIZATION postgres;` then
+`COMMENT ON SCHEMA apsa_environment IS 'APSA STAGING: 061 managed supabase_admin default ACL exception v1';`)
+→ `supabase db push` dry run lists only `061` → apply; 061 prints
+`NOTICE: 061: STAGING EXCEPTION on: 2 …` → `DROP SCHEMA apsa_environment;`
+(the marker is read only by 061; dropping it means a re-run would abort).
+
+**Residual risk while the managed defaults exist.** A table or sequence that
+`supabase_admin` creates in `public` later (platform actions such as an
+extension installed into `public`) gets ALL for `anon` and `authenticated`,
+with RLS off, and is reachable through the Data API. APSA never creates
+objects as `supabase_admin`. Staging holds only `QA-STAGING` data. Detect it
+before every staging verification (read-only; any row is a stop):
+
+```sql
+select c.oid::regclass, c.relkind, c.relowner::regrole
+  from pg_class c
+ where c.relnamespace = 'public'::regnamespace
+   and c.relkind in ('r','p','v','m','f','S')
+   and c.relowner <> 'postgres'::regrole;
+```
+
+`postgres` cannot revoke on an object `supabase_admin` owns, so a hit is
+resolved by Supabase or by resetting staging.
+
+**Reset / reconcile.** Staging is DISPOSABLE (`docs/STAGING_BOOTSTRAP.md`
+§11). A rebuilt project starts with the same managed defaults: repeat
+preflight → marker → 061 → drop marker. If Supabase removes the defaults, the
+preflight passes and 061 needs no marker. Production: no marker, ever; its
+061 waits for Supabase to remove the defaults there (or a separate, reviewed
+decision), preceded by its own read-only preflight.
