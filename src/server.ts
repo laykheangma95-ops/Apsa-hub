@@ -3,7 +3,10 @@ import "./lib/error-capture";
 import { consumeCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { healthResponse, isHealthRequest } from "./lib/health";
-import { isTelegramWebhookRequest } from "./server/channels/telegram/paths";
+import {
+  isChannelReconcileRequest,
+  isTelegramWebhookRequest,
+} from "./server/channels/telegram/paths";
 import { missingServerEnv } from "./server/observability/env-check";
 import { reportServerError } from "./server/observability/errors";
 import { serverLog } from "./server/observability/logger";
@@ -80,6 +83,11 @@ export default {
         if (isTelegramWebhookRequest(request)) {
           const { handleTelegramWebhook } = await import("./server/channels/telegram/webhook");
           return await handleTelegramWebhook(request);
+        }
+        // The scheduler's channel reconciliation: CRON_SECRET is its only credential.
+        if (isChannelReconcileRequest(request)) {
+          const { handleReconcileRequest } = await import("./server/channels/reconcile");
+          return await handleReconcileRequest(request);
         }
         const handler = await getServerEntry();
         const response = await handler.fetch(request, env, ctx);

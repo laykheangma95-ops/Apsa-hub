@@ -17,6 +17,7 @@
  *     lease; an in-doubt lease refuses every concurrent operation;
  *   - a superseded connect's settle racing a newer connect that took over
  *     its expired lease never disconnects or verifies the newer connect;
+ *   - concurrent reconciliation runs (064 §2a) never claim the same row;
  *   - identical reply submissions racing: exactly one is told to send;
  *   - a superseded attempt's late success racing the current attempt's
  *     completion: the reply ends 'sent' with both deliveries recorded,
@@ -340,6 +341,29 @@ describe("migration 064 on native PostgreSQL", () => {
       const r = late[0]!["r"] as { held: boolean };
       // A refused old attempt that still held the bot disconnected only ITS row.
       if (r.held && round % 2 === 0) expect(newId).not.toBe(oldId);
+    }
+  });
+
+  it("concurrent reconciliation runs never claim the same connection (SKIP LOCKED)", async () => {
+    for (let i = 0; i < 6; i++)
+      await connect(`70000067${String(i).padStart(2, "0")}`, "b".repeat(64));
+    for (let round = 0; round < 5; round++) {
+      await sql`update channel_connections set next_reconcile_at = now() - interval '1 second' where status <> 'disconnected'`;
+      const due = (
+        await sql`select count(*)::int n from channel_connections where status <> 'disconnected'`
+      )[0] as { n: number };
+      const claims = await Promise.all(
+        Array.from({ length: 4 }, () => svc("select id from claim_channel_reconcile_batch(3)")),
+      );
+      const ids = claims.flat().map((r) => String(r["id"]));
+      // Disjoint: no row went to two runs.
+      expect(new Set(ids).size).toBe(ids.length);
+      // Nothing due was skipped for good: everything claimed or still due.
+      const stillDue = (
+        await sql`select count(*)::int n from channel_connections
+        where status <> 'disconnected' and next_reconcile_at <= now()`
+      )[0] as { n: number };
+      expect(ids.length + stillDue.n).toBe(due.n);
     }
   });
 

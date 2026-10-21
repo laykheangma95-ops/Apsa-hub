@@ -32,6 +32,9 @@ const conversations = await import("@/server/conversations/service");
 const { handleTelegramWebhook } = await import("@/server/channels/telegram/webhook");
 const { TelegramBotApi } = await import("@/server/channels/telegram/api");
 const { decryptCredential, sha256Hex } = await import("@/server/channels/credentials");
+const { reconcileChannels, handleReconcileRequest, RECONCILE_ALERT_AFTER } =
+  await import("@/server/channels/reconcile");
+const { setLogSink } = await import("@/server/observability/logger");
 
 const org = fixture.org;
 const orgB = fixture.orgB;
@@ -82,6 +85,8 @@ let nextMessageId = 500;
 /** The next call of this method loses its answer: the client sees a network failure; Telegram applies it only when land() runs. */
 let loseAnswerOf: string | null = null;
 const lateLandings: (() => void)[] = [];
+/** The next N getWebhookInfo calls fail as a Telegram outage would (502). */
+let getWebhookInfoFailures = 0;
 function land() {
   for (const apply of lateLandings.splice(0)) apply();
 }
@@ -102,6 +107,13 @@ async function fakeFetch(url: string, init: RequestInit): Promise<Response> {
   calls.push({ method, body });
   const hold = holds.findIndex((h) => h.method === method);
   if (hold >= 0) await holds.splice(hold, 1)[0]!.release;
+  if (method === "getWebhookInfo" && getWebhookInfoFailures > 0) {
+    getWebhookInfoFailures -= 1;
+    return Response.json(
+      { ok: false, error_code: 502, description: "Bad Gateway" },
+      { status: 502 },
+    );
+  }
   if (loseAnswerOf === method) {
     loseAnswerOf = null;
     lateLandings.push(() => applyAtTelegram(method, body));
@@ -987,3 +999,213 @@ describe("stale webhook generation (064 §2 rule 5)", () => {
     await expectAgreement(connectionId);
   });
 });
+
+describe("reconciliation, independent of customer traffic (064 §2a)", () => {
+  beforeEach(() => void setPrimaryRateLimitStore(new MemoryRateLimitStore()));
+
+  /** Make the live connection due now, as the schedule eventually would. */
+  function makeDue() {
+    return db.query(
+      "update channel_connections set next_reconcile_at = now() where status <> 'disconnected'",
+    );
+  }
+  async function row() {
+    return (
+      await db.query<{
+        id: string;
+        status: string;
+        last_error_code: string | null;
+        reconcile_failures: number;
+        mismatch_since: string | null;
+        last_verified_at: string | null;
+        due_in_s: number;
+      }>(
+        `select id, status, last_error_code, reconcile_failures, mismatch_since, last_verified_at,
+           extract(epoch from next_reconcile_at - now())::int as due_in_s
+         from channel_connections where status <> 'disconnected'`,
+      )
+    ).rows[0]!;
+  }
+  const run = () => reconcileChannels({ api });
+
+  it("setWebhook acknowledged but getWebhookInfo failing is NEVER 'connected'; reconciliation then sees it", async () => {
+    calls.length = 0;
+    getWebhookInfoFailures = 1;
+    await expect(connectAs(ctx(owner, org), TOKEN)).rejects.toThrow("webhook_unverified");
+    const pending = await row();
+    expect(pending).toMatchObject({ status: "error", last_error_code: "webhook_unverified" });
+    // The outcome is KNOWN (Telegram answered OK): the bot is not held in doubt...
+    expect(await leases()).toBe(0);
+    // ...and it is checked again at once.
+    expect(pending.due_in_s).toBeLessThanOrEqual(0);
+    const report = await run();
+    expect(report).toMatchObject({ checked: 1, healthy: 1, repaired: 0, failed: 0 });
+    await expectAgreement(pending.id);
+    connectionId = pending.id;
+  });
+
+  it("a setWebhook applied AFTER lease expiry and a newer connect, with no messages: detected and repaired", async () => {
+    calls.length = 0;
+    loseAnswerOf = "setWebhook";
+    await expect(connectAs(ctx(owner, org), TOKEN)).rejects.toThrow("webhook_unverified");
+    await expireBotLeases();
+    const newer = await connectAs(ctx(owner, org), TOKEN);
+    await expectAgreement(newer.id);
+    // The old request lands at Telegram long after: Telegram now holds the OLD generation.
+    land();
+    const db1 = await row();
+    expect(telegram!.url).not.toContain(`/${newer.id}/${await liveGeneration()}`);
+    expect(db1.status).toBe("connected"); // APSA cannot know yet — nothing arrived
+    await makeDue();
+    const report = await run();
+    expect(report).toMatchObject({ checked: 1, repaired: 1 });
+    await expectAgreement(newer.id);
+  });
+
+  it("a deleteWebhook applied AFTER lease expiry and a newer connect: silence, then detected and repaired", async () => {
+    calls.length = 0;
+    const id = (await liveRow()).id;
+    loseAnswerOf = "deleteWebhook";
+    await disconnectAs(ctx(owner, org), id);
+    await expireBotLeases();
+    const newer = await connectAs(ctx(owner, org), TOKEN);
+    await expectAgreement(newer.id);
+    land(); // the old delete lands: Telegram has NO webhook — the bot is silent
+    expect(telegram).toBeNull();
+    // Silence: Telegram has nowhere to deliver, so no delivery can reveal it.
+    expect((await row()).status).toBe("connected");
+    await makeDue();
+    const report = await run();
+    expect(report).toMatchObject({ checked: 1, repaired: 1 });
+    await expectAgreement(newer.id);
+    connectionId = newer.id;
+  });
+
+  it("with no reconciler running, a connection ages to 'not confirmed' after 60 minutes at read time", async () => {
+    await db.query(
+      "update channel_connections set last_verified_at = now() - interval '61 minutes', next_reconcile_at = now() + interval '1 hour' where status <> 'disconnected'",
+    );
+    const [listed] = await service.listChannelConnections(ctx(owner, org));
+    expect(listed).toMatchObject({
+      status: "error",
+      health: { lastErrorCode: "webhook_unverified" },
+    });
+    // Negative control: a fresh observation reads 'connected'.
+    await makeDue();
+    await run();
+    const [fresh] = await service.listChannelConnections(ctx(owner, org));
+    expect(fresh?.status).toBe("connected");
+  });
+
+  it("repeated failed observations back off, expose 'not confirmed', and alert the operator", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((_level, line) => lines.push(line));
+    try {
+      getWebhookInfoFailures = 100;
+      const dues: number[] = [];
+      for (let i = 1; i <= RECONCILE_ALERT_AFTER; i++) {
+        await makeDue();
+        const report = await run();
+        expect(report).toMatchObject({ checked: 1, failed: 1 });
+        const r = await row();
+        expect(r.reconcile_failures).toBe(i);
+        dues.push(r.due_in_s);
+        // Verified recently: still connected — one failed check is not a mismatch.
+        expect(r.status).toBe("connected");
+        expect(report.alerts).toBe(i >= RECONCILE_ALERT_AFTER ? 1 : 0);
+      }
+      // Backoff: ~1, ~2, ~4 minutes.
+      expect(dues[0]!).toBeGreaterThan(50);
+      expect(dues[1]!).toBeGreaterThan(dues[0]!);
+      expect(dues[2]!).toBeGreaterThan(dues[1]!);
+      expect(lines.some((l) => l.includes('"event":"channels.telegram.reconcile_alert"'))).toBe(
+        true,
+      );
+      expect(lines.join("\n")).not.toContain(TOKEN);
+      // Unobserved for over 60 minutes: the row itself says not confirmed.
+      await db.query(
+        "update channel_connections set last_verified_at = now() - interval '61 minutes' where status <> 'disconnected'",
+      );
+      await makeDue();
+      await run();
+      expect(await row()).toMatchObject({ status: "error", last_error_code: "webhook_unverified" });
+    } finally {
+      restore();
+      getWebhookInfoFailures = 0;
+    }
+    // Telegram reachable again: healthy, counters cleared.
+    await makeDue();
+    await run();
+    expect(await row()).toMatchObject({ status: "connected", reconcile_failures: 0 });
+  });
+
+  it("a missing webhook that cannot be repaired is shown as missing, with since-when", async () => {
+    telegram = null; // the webhook is gone...
+    nextFailure = { method: "setWebhook", status: 400, description: "Bad Request" }; // ...and repair is refused
+    await makeDue();
+    const report = await run();
+    expect(report).toMatchObject({ checked: 1, failed: 1 });
+    const r = await row();
+    expect(r).toMatchObject({ status: "error", last_error_code: "webhook_missing" });
+    expect(r.mismatch_since).not.toBeNull();
+    const [listed] = await service.listChannelConnections(ctx(owner, org));
+    expect(listed?.status).toBe("error");
+    expect(listed?.health?.mismatchSince).not.toBeNull();
+    // The next run repairs it.
+    await makeDue();
+    expect(await run()).toMatchObject({ repaired: 1 });
+    await expectAgreement(r.id);
+    expect((await row()).mismatch_since).toBeNull();
+  });
+
+  it("never writes to Telegram while a member's operation holds the bot", async () => {
+    calls.length = 0;
+    telegram = null;
+    const slow = deferred();
+    holds.push({ method: "setWebhook", release: slow.promise });
+    const member = connectAs(ctx(owner, org), TOKEN);
+    await untilCalled("setWebhook");
+    await makeDue();
+    const report = await run();
+    expect(report.busy + report.healthy + report.failed).toBe(1);
+    expect(calls.filter((c) => c.method === "setWebhook")).toHaveLength(1); // only the member's
+    slow.resolve();
+    const done = await member;
+    await expectAgreement(done.id);
+  });
+
+  it("the scheduler entry: off without CRON_SECRET, generic 401 for a wrong one, counts only when right", async () => {
+    const url = "https://apsa.test/api/internal/channels/reconcile";
+    const off = await handleReconcileRequest(new Request(url), { env: {}, api });
+    expect(off.status).toBe(503);
+    const env = { CRON_SECRET: "s3cret-for-tests-only" };
+    for (const auth of [undefined, "Bearer wrong", "s3cret-for-tests-only"]) {
+      const res = await handleReconcileRequest(
+        new Request(url, auth ? { headers: { authorization: auth } } : {}),
+        { env, api },
+      );
+      expect(res.status).toBe(401);
+    }
+    expect(
+      (await handleReconcileRequest(new Request(url, { method: "PUT" }), { env, api })).status,
+    ).toBe(405);
+    await makeDue();
+    const ok = await handleReconcileRequest(
+      new Request(url, { headers: { authorization: "Bearer s3cret-for-tests-only" } }),
+      { env, api },
+    );
+    expect(ok.status).toBe(200);
+    const body = await ok.json();
+    expect(Object.keys(body).sort()).toEqual(
+      ["alerts", "busy", "checked", "failed", "healthy", "ok", "repaired"].sort(),
+    );
+  });
+});
+
+async function liveGeneration(): Promise<string> {
+  return (
+    await db.query<{ webhook_generation: string }>(
+      "select webhook_generation from channel_connections where status <> 'disconnected'",
+    )
+  ).rows[0]!.webhook_generation;
+}

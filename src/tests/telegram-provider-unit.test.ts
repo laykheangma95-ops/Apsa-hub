@@ -16,7 +16,7 @@ import {
   sha256Hex,
 } from "@/server/channels/credentials";
 import { TelegramApiError, TelegramBotApi } from "@/server/channels/telegram/api";
-import { telegramWebhookUrl } from "@/server/channels/service";
+import { pointWebhook, telegramWebhookUrl } from "@/server/channels/service";
 import { isTelegramWebhookRequest } from "@/server/channels/telegram/paths";
 import { classifyReplyError, replyMayHaveBeenSent } from "@/lib/conversation/reply-errors";
 import en from "@/locales/en.json";
@@ -206,6 +206,81 @@ describe("TelegramBotApi", () => {
     expect(await api.sendMessage("555", "<b>hi</b>")).toEqual({ messageId: 9 });
     expect(body).toMatchObject({ chat_id: "555", text: "<b>hi</b>" });
     expect(body["parse_mode"]).toBeUndefined();
+  });
+});
+
+describe("setWebhook outcome classification (064 §2)", () => {
+  const URL_OK = "https://app.apsa.com/api/webhooks/telegram/a/b";
+  type Reply = "ok" | "network" | "502" | "400" | { url: string };
+  function botWith(set: Reply, info: Reply) {
+    const fetchImpl = async (url: string) => {
+      const reply = url.endsWith("/setWebhook") ? set : info;
+      if (reply === "network") throw new TypeError("connection lost");
+      if (reply === "502" || reply === "400") {
+        const status = Number(reply);
+        return Response.json({ ok: false, error_code: status, description: "x" }, { status });
+      }
+      if (reply === "ok") return Response.json({ ok: true, result: true });
+      return Response.json({ ok: true, result: { url: reply.url } });
+    };
+    return new TelegramBotApi(
+      "7123456789:AAH-test_token_value_0123456789abcdefXYZ",
+      fetchImpl as never,
+    );
+  }
+  const outcome = (set: Reply, info: Reply) =>
+    pointWebhook(botWith(set, info), URL_OK, "secret", Date.now(), Date.now);
+
+  it("verified ONLY when getWebhookInfo shows exactly the URL", async () => {
+    expect(await outcome("ok", { url: URL_OK })).toBe("verified");
+    // A lost setWebhook answer whose request did apply is still SEEN.
+    expect(await outcome("network", { url: URL_OK })).toBe("verified");
+  });
+
+  it("acknowledged — never verified — when setWebhook answered OK but getWebhookInfo failed", async () => {
+    expect(await outcome("ok", "502")).toBe("acknowledged");
+    expect(await outcome("ok", "network")).toBe("acknowledged");
+  });
+
+  it("unknown when Telegram never answered, or shows another URL", async () => {
+    expect(await outcome("network", "502")).toBe("unknown");
+    expect(await outcome("502", "network")).toBe("unknown");
+    expect(await outcome("ok", { url: "https://elsewhere.example/hook" })).toBe("unknown");
+    expect(await outcome("ok", { url: "" })).toBe("unknown");
+  });
+
+  it("refused when Telegram said no, and when the write window has passed (nothing sent)", async () => {
+    expect(await outcome("400", { url: URL_OK })).toBe("refused");
+    let calls = 0;
+    const bot = new TelegramBotApi(
+      "7123456789:AAH-test_token_value_0123456789abcdefXYZ",
+      (async () => {
+        calls += 1;
+        return Response.json({ ok: true, result: true });
+      }) as never,
+    );
+    expect(await pointWebhook(bot, URL_OK, "s", 0, () => 60_000)).toBe("refused");
+    expect(calls).toBe(0);
+  });
+
+  it("every connection state the server explains has copy in Khmer and English", () => {
+    const states = [
+      "webhook_pending",
+      "webhook_unverified",
+      "webhook_missing",
+      "webhook_mismatch",
+      "webhook_failed",
+    ];
+    for (const copy of [en, km] as const) {
+      const table = (
+        copy as never as {
+          settings: { channels: { telegram: { webhookState: Record<string, string> } } };
+        }
+      ).settings.channels.telegram.webhookState;
+      for (const state of states) expect(table[state]?.length ?? 0).toBeGreaterThan(10);
+      // "Not confirmed" never claims delivery is working.
+      expect(table["webhook_unverified"]).not.toMatch(/working|arriving normally/i);
+    }
   });
 });
 

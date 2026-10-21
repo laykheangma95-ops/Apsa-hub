@@ -498,6 +498,147 @@ describe("bot operation lease (064 §2)", () => {
   });
 });
 
+describe("reconciliation state (064 §2a)", () => {
+  const RBOT = "7000000090";
+
+  async function record(id: unknown, generation: unknown, result: string) {
+    return call("record_channel_reconcile", [id, generation, result]) as Promise<Row>;
+  }
+  async function dueIn(id: unknown): Promise<number> {
+    return (
+      await db.query<{ s: number }>(
+        "select extract(epoch from next_reconcile_at - now())::int s from channel_connections where id=$1",
+        [id],
+      )
+    ).rows[0]!.s;
+  }
+
+  it("'acknowledged' is known but not seen: lease released, not connected, due at once", async () => {
+    const op = crypto.randomUUID();
+    const gen = crypto.randomUUID();
+    await begin(org, owner, "connect", RBOT, op);
+    const row = await startConnect(org, owner, RBOT, "9".repeat(64), op, gen);
+    const settled = await settle(org, owner, op, row.id, gen, "acknowledged");
+    expect(settled).toMatchObject({ held: true, current: true });
+    expect(await stored(row.id)).toMatchObject({
+      status: "error",
+      last_error_code: "webhook_unverified",
+      last_verified_at: null,
+    });
+    expect(await dueIn(row.id)).toBeLessThanOrEqual(0);
+    const leases = await db.query("select 1 from channel_bot_operations where operation_id=$1", [
+      op,
+    ]);
+    expect(leases.rows).toHaveLength(0);
+    // 'verified' stamps the observation and schedules the next check.
+    await connect(org, owner, RBOT, "9".repeat(64));
+    const verified = await stored(row.id);
+    expect(verified.status).toBe("connected");
+    expect(verified.last_verified_at).not.toBeNull();
+    expect(await dueIn(row.id)).toBeGreaterThan(14 * 60);
+  });
+
+  it("a NULL actor (the server's reconciler) may take and settle only a 'repair' lease", async () => {
+    for (const kind of ["connect", "disconnect"] as const) {
+      expect(
+        await errorOf(begin(org, null as unknown as string, kind, RBOT, crypto.randomUUID())),
+      ).toContain("permission_denied");
+    }
+    const op = crypto.randomUUID();
+    await begin(org, null as unknown as string, "repair", RBOT, op);
+    await settle(org, null as unknown as string, op, null, null, "done");
+    // Negative control: a member's lease cannot be settled by a NULL actor.
+    const memberOp = crypto.randomUUID();
+    await begin(org, owner, "connect", RBOT, memberOp);
+    expect(
+      await errorOf(settle(org, null as unknown as string, memberOp, null, null, "done")),
+    ).toContain("permission_denied");
+    await settle(org, owner, memberOp, null, null, "done");
+  });
+
+  it("claim hands each due live row to one run and pushes it 2 minutes out", async () => {
+    const live = await db.query<{ id: string }>(
+      "update channel_connections set next_reconcile_at = now() - interval '1 second' where status <> 'disconnected' returning id",
+    );
+    const first = await db.query<{ id: string; credential_ciphertext: string }>(
+      "select * from claim_channel_reconcile_batch(100)",
+    );
+    expect(first.rows.map((r) => r.id).sort()).toEqual(live.rows.map((r) => r.id).sort());
+    expect(first.rows[0]!.credential_ciphertext).toBe(CIPHER); // server-side: it must read the token
+    const second = await db.query("select * from claim_channel_reconcile_batch(100)");
+    expect(second.rows).toHaveLength(0);
+    for (const r of first.rows) {
+      const due = await dueIn(r.id);
+      expect(due).toBeGreaterThan(100);
+      expect(due).toBeLessThanOrEqual(120);
+    }
+    expect(await errorOf(db.query("select * from claim_channel_reconcile_batch(0)"))).toContain(
+      "invalid_reference",
+    );
+  });
+
+  it("record: failures back off and expose state; healthy clears; a stale generation is not recorded", async () => {
+    const row = await stored(
+      (
+        await db.query<{ id: string }>(
+          "select id from channel_connections where external_account_id=$1 and status <> 'disconnected'",
+          [RBOT],
+        )
+      ).rows[0]!.id,
+    );
+    const gen = row.webhook_generation;
+    expect(await record(row.id, crypto.randomUUID(), "healthy")).toEqual({ recorded: false });
+
+    const one = await record(row.id, gen, "unobservable");
+    expect(one).toMatchObject({ recorded: true, status: "connected", reconcile_failures: 1 });
+    expect(await dueIn(row.id)).toBeGreaterThan(50);
+    const two = await record(row.id, gen, "unobservable");
+    expect(two.reconcile_failures).toBe(2);
+    expect(await dueIn(row.id)).toBeGreaterThan(110);
+
+    const missing = await record(row.id, gen, "missing");
+    expect(missing).toMatchObject({ status: "error", last_error_code: "webhook_missing" });
+    expect(missing.mismatch_since).not.toBeNull();
+    const since = missing.mismatch_since;
+    expect((await record(row.id, gen, "mismatch")).mismatch_since).toBe(since);
+
+    // Backoff caps at 60 minutes.
+    for (let i = 0; i < 6; i++) await record(row.id, gen, "unobservable");
+    expect(await dueIn(row.id)).toBeLessThanOrEqual(3600);
+    expect(await dueIn(row.id)).toBeGreaterThan(3500);
+
+    const healthy = await record(row.id, gen, "repaired");
+    expect(healthy).toMatchObject({
+      status: "connected",
+      last_error_code: null,
+      reconcile_failures: 0,
+      mismatch_since: null,
+    });
+
+    // Unobserved for over an hour: the row says not confirmed.
+    await db.query(
+      "update channel_connections set last_verified_at = now() - interval '61 minutes' where id=$1",
+      [row.id],
+    );
+    expect(await record(row.id, gen, "unobservable")).toMatchObject({
+      status: "error",
+      last_error_code: "webhook_unverified",
+    });
+
+    // Busy: retried in a minute, nothing else changes; a live lease freezes status.
+    const before = await stored(row.id);
+    expect(await record(row.id, gen, "busy")).toMatchObject({
+      reconcile_failures: before.reconcile_failures,
+    });
+    expect(await dueIn(row.id)).toBeLessThanOrEqual(60);
+    const op = crypto.randomUUID();
+    await begin(org, owner, "repair", RBOT, op);
+    expect((await record(row.id, gen, "healthy")).status).toBe("error");
+    await settle(org, owner, op, null, null, "done");
+    expect((await record(row.id, gen, "healthy")).status).toBe("connected");
+  });
+});
+
 describe("ingest_telegram_inbound", () => {
   let connectionId: string;
 
@@ -940,6 +1081,8 @@ describe("browser roles", () => {
           "select settle_channel_operation($1,$1,$1,null,null,'done')",
           "select disconnect_channel_account($1,$1,$1,$1)",
           "select observe_channel_webhook($1,$1)",
+          "select * from claim_channel_reconcile_batch(1)",
+          "select record_channel_reconcile($1,$1,'healthy')",
           "select * from channel_bot_operations",
         ]) {
           const params = statement.includes("$1") ? [crypto.randomUUID()] : [];

@@ -1868,6 +1868,14 @@
           "disconnected": "Disconnected"
         },
         "lastInbound": "Last customer message",
+        "lastVerified": "Last confirmed with Telegram",
+        "webhookState": {
+          "webhook_pending": "Connecting — waiting for Telegram to confirm.",
+          "webhook_unverified": "Telegram hasn't confirmed this connection recently, so APSA can't promise new messages are arriving. APSA keeps checking automatically.",
+          "webhook_missing": "Telegram isn't sending this bot's messages to APSA right now. APSA is repairing it automatically; messages sent meanwhile should arrive once it's repaired (Telegram keeps them for up to 24 hours).",
+          "webhook_mismatch": "Telegram is using an older connection of this bot. APSA is repairing it automatically.",
+          "webhook_failed": "Telegram refused this connection. Reconnect the bot."
+        },
         "never": "None yet",
         "step1": "In Telegram, open @BotFather and send /newbot.",
         "step2": "Choose your shop's bot name and username.",
@@ -1890,7 +1898,7 @@
           "webhook_failed": "Telegram didn't accept the connection. Try again in a moment.",
           "connect_in_progress": "Another change to this bot is still finishing. Wait a few minutes, then check its status.",
           "connect_superseded": "Another connect or disconnect replaced this one. Check the channel's current status.",
-          "webhook_unverified": "Telegram didn't confirm the connection, so it isn't active yet. Wait a few minutes, then check its status before trying again.",
+          "webhook_unverified": "Telegram hasn't confirmed the connection yet, so APSA can't show it as connected. APSA keeps checking automatically — check its status in a few minutes before trying again.",
           "credential_unavailable": "APSA can't store this connection securely right now. Contact support.",
           "provider_unavailable": "Telegram didn't respond. Try again in a moment.",
           "rate_limited": "Too many attempts. Wait a while and try again.",

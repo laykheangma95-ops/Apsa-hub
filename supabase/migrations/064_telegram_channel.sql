@@ -8,8 +8,11 @@
 --              every Telegram-side change of a bot serialized by a per-bot
 --              operation lease that is held until the provider outcome is
 --              KNOWN (an unknown outcome holds it "in doubt" for 5 minutes),
---              and a connection reported 'connected' only after Telegram was
---              seen holding exactly that connect's webhook generation.
+--              a connection reported 'connected' only after Telegram was
+--              SEEN holding exactly that connect's webhook generation, and a
+--              periodic reconciliation (claim / record) that re-checks every
+--              live connection with or without customer traffic and repairs a
+--              missing or wrong webhook under the same guard.
 --          (3) ingest_telegram_inbound: one atomic, idempotent write per
 --              inbound private-chat message — conversation, participant,
 --              Customer + exact Telegram identity on first contact, message,
@@ -24,6 +27,7 @@
 --          public.begin_channel_operation (NEW), public.connect_channel_account (NEW),
 --          public.settle_channel_operation (NEW), public.disconnect_channel_account (NEW),
 --          public.observe_channel_webhook (NEW),
+--          public.claim_channel_reconcile_batch (NEW), public.record_channel_reconcile (NEW),
 --          public.webhook_event_receipts (rows only, via ingest_telegram_inbound),
 --          public.ingest_telegram_inbound (NEW),
 --          public.begin_outbound_message (NEW), public.complete_outbound_message (NEW),
@@ -96,6 +100,15 @@ CREATE TABLE public.channel_connections (
   -- Telegram actually holds, and the secret is derived from it (§2).
   connect_generation     BIGINT NOT NULL DEFAULT 1 CHECK (connect_generation >= 1),
   webhook_generation     UUID,
+  -- Reconciliation (§2a): when Telegram was last SEEN holding the current
+  -- generation, when the next check is due, how many checks in a row failed
+  -- and why, and since when Telegram has been seen holding the wrong (or no)
+  -- webhook.
+  last_verified_at       TIMESTAMPTZ,
+  next_reconcile_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reconcile_failures     INTEGER NOT NULL DEFAULT 0 CHECK (reconcile_failures >= 0),
+  reconcile_error        TEXT CHECK (reconcile_error IS NULL OR reconcile_error ~ '^[a-z0-9_]{1,64}$'),
+  mismatch_since         TIMESTAMPTZ,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT channel_connections_org_id_unique UNIQUE (organization_id, id),
@@ -114,6 +127,8 @@ CREATE UNIQUE INDEX channel_connections_live_account
   ON public.channel_connections (provider, external_account_id)
   WHERE status <> 'disconnected';
 CREATE INDEX channel_connections_org ON public.channel_connections (organization_id, provider);
+CREATE INDEX channel_connections_reconcile_due ON public.channel_connections (next_reconcile_at)
+  WHERE status <> 'disconnected';
 
 CREATE TRIGGER channel_connections_set_updated_at
   BEFORE UPDATE ON public.channel_connections
@@ -179,8 +194,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.channel_bot_operations TO s
 --      is part of the URL Telegram gets. After setWebhook the app reads
 --      getWebhookInfo; only when Telegram's URL is exactly this
 --      generation's URL — proof that Telegram holds this connect's secret —
---      is the connection settled 'connected'. Until then it is 'error'
---      ('webhook_pending', or 'webhook_unverified' when unknown).
+--      is the connection settled 'connected'. Three outcomes stay distinct:
+--        verified      seen holding this URL                → 'connected';
+--        acknowledged  Telegram answered OK, URL not seen   → lease released
+--                      (the outcome is known) but 'webhook_unverified',
+--                      checked again at once by reconciliation;
+--        unknown       no answer                            → in doubt.
 --   4. Late answers repair, never clobber. An operation that learns it was
 --      superseded (its lease was taken over) after a request of its own was
 --      applied re-checks Telegram under a fresh 'repair' lease and points it
@@ -190,8 +209,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.channel_bot_operations TO s
 --      an OLDER generation of a live connection proves Telegram disagrees
 --      with APSA: observe_channel_webhook flags it 'webhook_mismatch'.
 --
--- Residual assumption: Telegram applies a request within 80 s of APSA
--- sending it, or never.
+-- No Telegram guarantee bounds how late a request APSA sent can still be
+-- applied. Rules 1–2 make overlap unlikely; they do not prevent it. What is
+-- guaranteed is DETECTION AND REPAIR, by reconciliation (§2a), whether or not
+-- any customer message arrives.
 
 CREATE FUNCTION public.begin_channel_operation(
   p_org         UUID,
@@ -213,8 +234,10 @@ BEGIN
   IF p_operation IS NULL OR p_kind IS NULL OR p_kind NOT IN ('connect', 'disconnect', 'repair')
      OR p_external_id IS NULL OR p_external_id !~ '^[0-9]{1,20}$'
     THEN RAISE EXCEPTION 'invalid_reference'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
-    AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
+  -- A NULL actor is the server's own reconciliation (§2a): repair only.
+  IF (p_actor IS NULL AND p_kind <> 'repair')
+     OR (p_actor IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
+       AND user_id = p_actor AND status = 'active')) THEN RAISE EXCEPTION 'permission_denied'; END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || p_provider::text || ':' || p_external_id, 0));
 
@@ -366,14 +389,15 @@ DECLARE
   v_current BOOLEAN := false;
 BEGIN
   IF p_operation IS NULL OR p_outcome IS NULL
-     OR p_outcome NOT IN ('verified', 'refused', 'unknown', 'done')
+     OR p_outcome NOT IN ('verified', 'acknowledged', 'refused', 'unknown', 'done')
     THEN RAISE EXCEPTION 'invalid_reference'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
+  IF p_actor IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships WHERE organization_id = p_org
     AND user_id = p_actor AND status = 'active') THEN RAISE EXCEPTION 'permission_denied'; END IF;
 
   SELECT * INTO v_lease FROM channel_bot_operations
     WHERE operation_id = p_operation AND organization_id = p_org;
   v_held := FOUND;
+  IF v_held AND p_actor IS NULL AND v_lease.kind <> 'repair' THEN RAISE EXCEPTION 'permission_denied'; END IF;
   IF v_held THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('channel_connection:' || v_lease.provider::text
       || ':' || v_lease.external_account_id, 0));
@@ -392,7 +416,15 @@ BEGIN
 
   IF v_current THEN
     IF p_outcome = 'verified' THEN
-      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL
+      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL,
+          last_verified_at = now(), reconcile_failures = 0, reconcile_error = NULL,
+          mismatch_since = NULL, next_reconcile_at = now() + interval '15 minutes'
+        WHERE id = p_connection RETURNING * INTO v_row;
+    ELSIF p_outcome = 'acknowledged' THEN
+      -- Telegram said it applied the request but APSA could not SEE it: not
+      -- connected; reconciliation checks again at once.
+      UPDATE channel_connections SET status = 'error', last_error_code = 'webhook_unverified',
+          last_error_at = now(), next_reconcile_at = now()
         WHERE id = p_connection RETURNING * INTO v_row;
     ELSIF p_outcome = 'refused' AND v_lease.kind = 'connect' THEN
       -- Telegram never took this connect's webhook: nothing can arrive. Disconnect, audited.
@@ -408,7 +440,10 @@ BEGIN
     ELSIF p_outcome IN ('refused', 'unknown') THEN
       UPDATE channel_connections SET status = 'error',
           last_error_code = CASE WHEN p_outcome = 'unknown' THEN 'webhook_unverified' ELSE 'webhook_failed' END,
-          last_error_at = now()
+          last_error_at = now(),
+          -- An unknown outcome is re-checked as soon as its in-doubt window ends.
+          next_reconcile_at = CASE WHEN p_outcome = 'unknown'
+            THEN clock_timestamp() + interval '5 minutes' ELSE now() + interval '1 minute' END
         WHERE id = p_connection RETURNING * INTO v_row;
     END IF;
   END IF;
@@ -508,16 +543,149 @@ BEGIN
     THEN RETURN v_row.status; END IF;
 
   IF v_row.webhook_generation = p_generation THEN
-    IF v_row.status = 'error' AND v_row.last_error_code IN ('webhook_unverified', 'webhook_mismatch') THEN
-      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL
+    IF v_row.status = 'error'
+       AND v_row.last_error_code IN ('webhook_unverified', 'webhook_mismatch', 'webhook_missing') THEN
+      UPDATE channel_connections SET status = 'connected', last_error_code = NULL, last_error_at = NULL,
+          last_verified_at = now(), reconcile_failures = 0, reconcile_error = NULL, mismatch_since = NULL
+        WHERE id = p_connection RETURNING * INTO v_row;
+    ELSIF v_row.status = 'connected' THEN
+      UPDATE channel_connections SET last_verified_at = now()
         WHERE id = p_connection RETURNING * INTO v_row;
     END IF;
   ELSIF v_row.status = 'connected' THEN
     UPDATE channel_connections SET status = 'error', last_error_code = 'webhook_mismatch',
-        last_error_at = now()
+        last_error_at = now(), mismatch_since = COALESCE(mismatch_since, now()),
+        next_reconcile_at = now()
       WHERE id = p_connection RETURNING * INTO v_row;
   END IF;
   RETURN v_row.status;
+END;
+$$;
+
+-- ── 2a. Reconciliation ──────────────────────────────────────────────────────
+-- A Telegram request APSA sent can be applied arbitrarily late (a timed-out
+-- deleteWebhook after a newer connect silences the bot; nothing arrives to
+-- reveal it). Reconciliation finds that without customer traffic:
+--
+--   worker   any number of runs of /api/internal/channels/reconcile (a
+--            scheduler, CRON_SECRET-authorized) — no single owner needed.
+--   claim    claim_channel_reconcile_batch takes up to p_limit DUE live
+--            connections with FOR UPDATE SKIP LOCKED and pushes their next
+--            check 2 minutes out: concurrent runs never take the same row,
+--            and a run that dies hands its rows back after 2 minutes.
+--   check    getWebhookInfo (read-only, no lease). Right URL → healthy.
+--            Missing / wrong → repair under the bot's 'repair' operation
+--            lease (§2), then SEE it again. Bot busy → retry in 1 minute.
+--   record   record_channel_reconcile: healthy → verified now, next check in
+--            15 minutes; failed → failures + 1, retry after
+--            min(60, 2^(failures-1)) minutes; a missing / wrong webhook is
+--            'error' (webhook_missing / webhook_mismatch, since
+--            mismatch_since) until repaired; no successful observation for
+--            60 minutes → 'webhook_unverified'.
+--
+-- Both apply only to the generation the run observed: a member's connect or
+-- disconnect in between is never overwritten.
+
+CREATE FUNCTION public.claim_channel_reconcile_batch(
+  p_limit INTEGER
+)
+RETURNS TABLE (
+  id                    UUID,
+  organization_id       UUID,
+  external_account_id   TEXT,
+  webhook_generation    UUID,
+  credential_ciphertext TEXT,
+  reconcile_failures    INTEGER
+)
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+#variable_conflict use_column
+BEGIN
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN RAISE EXCEPTION 'invalid_reference'; END IF;
+  RETURN QUERY
+  WITH due AS (
+    SELECT c.id FROM channel_connections c
+     WHERE c.status <> 'disconnected' AND c.next_reconcile_at <= now()
+     ORDER BY c.next_reconcile_at
+     LIMIT p_limit
+     FOR UPDATE SKIP LOCKED
+  )
+  UPDATE channel_connections c SET next_reconcile_at = now() + interval '2 minutes'
+    FROM due WHERE c.id = due.id
+  RETURNING c.id, c.organization_id, c.external_account_id, c.webhook_generation,
+    c.credential_ciphertext, c.reconcile_failures;
+END;
+$$;
+
+-- p_result: 'healthy' | 'repaired' (Telegram SEEN holding p_generation) |
+-- 'missing' | 'mismatch' (seen holding no / another webhook, not repaired) |
+-- 'unobservable' (getWebhookInfo failed) | 'busy' (another operation holds
+-- the bot). Returns the row's state after recording (never a credential).
+CREATE FUNCTION public.record_channel_reconcile(
+  p_connection UUID,
+  p_generation UUID,
+  p_result     TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_row     channel_connections;
+  v_busy    BOOLEAN;
+  v_backoff INTERVAL;
+BEGIN
+  IF p_result IS NULL OR p_result NOT IN ('healthy', 'repaired', 'missing', 'mismatch',
+      'unobservable', 'busy') THEN RAISE EXCEPTION 'invalid_reference'; END IF;
+
+  SELECT * INTO v_row FROM channel_connections
+    WHERE id = p_connection AND status <> 'disconnected' FOR UPDATE;
+  IF NOT FOUND OR v_row.webhook_generation IS DISTINCT FROM p_generation THEN
+    -- Disconnected or reconnected since the run observed it: not this run's to record.
+    RETURN jsonb_build_object('recorded', false);
+  END IF;
+  v_busy := EXISTS (SELECT 1 FROM channel_bot_operations WHERE provider = v_row.provider
+    AND external_account_id = v_row.external_account_id AND expires_at > clock_timestamp());
+
+  IF p_result IN ('healthy', 'repaired') THEN
+    UPDATE channel_connections SET last_verified_at = now(), reconcile_failures = 0,
+        reconcile_error = NULL, mismatch_since = NULL, next_reconcile_at = now() + interval '15 minutes',
+        status = CASE WHEN v_busy THEN status ELSE 'connected'::channel_connection_status END,
+        last_error_code = CASE WHEN v_busy THEN last_error_code ELSE NULL END,
+        last_error_at = CASE WHEN v_busy THEN last_error_at ELSE NULL END
+      WHERE id = p_connection RETURNING * INTO v_row;
+  ELSIF p_result = 'busy' THEN
+    UPDATE channel_connections SET next_reconcile_at = now() + interval '1 minute'
+      WHERE id = p_connection RETURNING * INTO v_row;
+  ELSE
+    v_backoff := least(interval '60 minutes',
+      interval '1 minute' * power(2, least(v_row.reconcile_failures, 6)));
+    UPDATE channel_connections SET
+        reconcile_failures = reconcile_failures + 1,
+        reconcile_error = 'webhook_' || p_result,
+        next_reconcile_at = now() + v_backoff,
+        mismatch_since = CASE WHEN p_result IN ('missing', 'mismatch')
+          THEN COALESCE(mismatch_since, now()) ELSE mismatch_since END,
+        status = CASE
+          WHEN v_busy THEN status
+          WHEN p_result IN ('missing', 'mismatch') THEN 'error'::channel_connection_status
+          WHEN last_verified_at IS NULL OR last_verified_at < now() - interval '60 minutes'
+            THEN 'error'::channel_connection_status
+          ELSE status END,
+        last_error_code = CASE
+          WHEN v_busy THEN last_error_code
+          WHEN p_result IN ('missing', 'mismatch') THEN 'webhook_' || p_result
+          WHEN last_verified_at IS NULL OR last_verified_at < now() - interval '60 minutes'
+            THEN 'webhook_unverified'
+          ELSE last_error_code END,
+        last_error_at = CASE WHEN v_busy THEN last_error_at ELSE now() END
+      WHERE id = p_connection RETURNING * INTO v_row;
+  END IF;
+
+  RETURN jsonb_build_object('recorded', true, 'status', v_row.status,
+    'last_error_code', v_row.last_error_code, 'reconcile_failures', v_row.reconcile_failures,
+    'mismatch_since', v_row.mismatch_since, 'next_reconcile_at', v_row.next_reconcile_at);
 END;
 $$;
 
@@ -638,6 +806,7 @@ BEGIN
       status = CASE WHEN status = 'error' AND last_error_code IS DISTINCT FROM 'webhook_pending'
           AND last_error_code IS DISTINCT FROM 'webhook_unverified'
           AND last_error_code IS DISTINCT FROM 'webhook_mismatch'
+          AND last_error_code IS DISTINCT FROM 'webhook_missing'
         THEN 'connected'::channel_connection_status ELSE status END
     WHERE id = v_connection.id;
 
@@ -866,6 +1035,8 @@ REVOKE ALL ON FUNCTION
   public.settle_channel_operation(UUID, UUID, UUID, UUID, UUID, TEXT),
   public.disconnect_channel_account(UUID, UUID, UUID, UUID),
   public.observe_channel_webhook(UUID, UUID),
+  public.claim_channel_reconcile_batch(INTEGER),
+  public.record_channel_reconcile(UUID, UUID, TEXT),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB, TEXT),
   public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),
@@ -877,6 +1048,8 @@ GRANT EXECUTE ON FUNCTION
   public.settle_channel_operation(UUID, UUID, UUID, UUID, UUID, TEXT),
   public.disconnect_channel_account(UUID, UUID, UUID, UUID),
   public.observe_channel_webhook(UUID, UUID),
+  public.claim_channel_reconcile_batch(INTEGER),
+  public.record_channel_reconcile(UUID, UUID, TEXT),
   public.ingest_telegram_inbound(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, public.message_content_type, TIMESTAMPTZ, JSONB, TEXT),
   public.fail_stuck_outbound_messages(UUID, UUID),
   public.begin_outbound_message(UUID, UUID, UUID, UUID, TEXT),

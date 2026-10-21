@@ -51,24 +51,46 @@ export interface ChannelConnectionSummary {
     lastOutboundAt: string | null;
     lastErrorCode: string | null;
     lastErrorAt: string | null;
+    /** When Telegram was last SEEN holding this connection's webhook. */
+    lastVerifiedAt: string | null;
+    /** Since when Telegram has been seen holding no / the wrong webhook. */
+    mismatchSince: string | null;
   };
 }
 
-function summarize(row: repo.ChannelConnectionRow, withHealth: boolean): ChannelConnectionSummary {
+/*
+ * 'connected' means Telegram was SEEN holding this connection's webhook
+ * within this window (migration 064 §2a). Older than that — the reconciler
+ * is not running, or cannot reach Telegram — it is shown as not confirmed,
+ * decided here at read time so a stopped reconciler is visible too.
+ */
+export const VERIFICATION_FRESH_MS = 60 * 60 * 1000;
+
+function summarize(
+  row: repo.ChannelConnectionRow,
+  withHealth: boolean,
+  nowMs: number = Date.now(),
+): ChannelConnectionSummary {
+  const stale =
+    row.status === "connected" &&
+    (!row.last_verified_at ||
+      nowMs - new Date(row.last_verified_at).getTime() > VERIFICATION_FRESH_MS);
   const summary: ChannelConnectionSummary = {
     id: row.id,
     provider: row.provider,
     handle: row.account_handle,
     displayName: row.account_display_name,
-    status: row.status,
+    status: stale ? "error" : row.status,
     connectedAt: row.connected_at,
   };
   if (withHealth) {
     summary.health = {
       lastInboundAt: row.last_inbound_at,
       lastOutboundAt: row.last_outbound_at,
-      lastErrorCode: row.last_error_code,
+      lastErrorCode: stale ? "webhook_unverified" : row.last_error_code,
       lastErrorAt: row.last_error_at,
+      lastVerifiedAt: row.last_verified_at,
+      mismatchSince: row.mismatch_since,
     };
   }
   return summary;
@@ -104,7 +126,7 @@ export function telegramWebhookUrl(
   return `${origin.origin}${TELEGRAM_WEBHOOK_PATH_PREFIX}${connectionId}/${generation}`;
 }
 
-async function openCredential(ciphertext: string): Promise<string> {
+export async function openCredential(ciphertext: string): Promise<string> {
   try {
     return await decryptCredential(ciphertext);
   } catch (error) {
@@ -158,12 +180,15 @@ function outcomeOf(error: unknown): Outcome {
 }
 
 /**
- * setWebhook, then SEE it. 'verified' when Telegram shows exactly `url` (this
- * generation, so this generation's secret) — or, if getWebhookInfo cannot be
- * read, when setWebhook itself answered OK (Telegram confirming it applied
- * THIS request). Any other URL seen, or no answer at all, is 'unknown'.
+ * setWebhook, then SEE it. Three outcomes are never merged:
+ *   'verified'      getWebhookInfo shows exactly `url` (this generation, so
+ *                   this generation's secret);
+ *   'acknowledged'  setWebhook answered OK but getWebhookInfo could not be
+ *                   read — applied, NOT seen: never reported connected;
+ *   'unknown'       no answer to setWebhook, or another URL seen.
+ * (Exported for tests.)
  */
-async function pointWebhook(
+export async function pointWebhook(
   bot: TelegramBotApi,
   url: string,
   secret: string,
@@ -181,11 +206,11 @@ async function pointWebhook(
   try {
     return (await bot.getWebhookInfo()).url === url ? "verified" : "unknown";
   } catch {
-    return sent;
+    return sent === "verified" ? "acknowledged" : "unknown";
   }
 }
 
-/** deleteWebhook, then SEE no webhook. */
+/** deleteWebhook, then SEE no webhook — with the same three outcomes. */
 async function removeWebhook(
   bot: TelegramBotApi,
   startedAt: number,
@@ -202,7 +227,7 @@ async function removeWebhook(
   try {
     return (await bot.getWebhookInfo()).url === "" ? "verified" : "unknown";
   } catch {
-    return sent;
+    return sent === "verified" ? "acknowledged" : "unknown";
   }
 }
 
@@ -213,17 +238,23 @@ async function removeWebhook(
  * generation, or no webhook at all. Skipped (not needed) while any other
  * operation holds the bot: that operation verifies Telegram itself.
  */
-async function reconcileBot(
-  ctx: AuthorizationContext,
+/** Who a repair runs as: a member (their late operation) or the server's reconciler (actor null). */
+export interface RepairPrincipal {
+  organizationId: string;
+  actorUserId: string | null;
+}
+
+export async function reconcileBot(
+  principal: RepairPrincipal,
   bot: TelegramBotApi,
   externalAccountId: string,
   nowMs: () => number,
-): Promise<void> {
+): Promise<Outcome | "busy"> {
   const operationId = crypto.randomUUID();
   try {
     await repo.beginOperation({
-      organizationId: ctx.organizationId,
-      actorUserId: ctx.userId,
+      organizationId: principal.organizationId,
+      actorUserId: principal.actorUserId,
       externalAccountId,
       kind: "repair",
       operationId,
@@ -232,7 +263,7 @@ async function reconcileBot(
     serverLog.info("channels.telegram.reconcile_deferred", {
       code: error instanceof ChannelError ? error.code : "unknown",
     });
-    return;
+    return "busy";
   }
   const startedAt = nowMs();
   let connectionId: string | null = null;
@@ -252,13 +283,13 @@ async function reconcileBot(
       );
     } else {
       outcome = await removeWebhook(bot, startedAt, nowMs);
-      if (outcome === "verified") outcome = "done";
+      if (outcome === "verified" || outcome === "acknowledged") outcome = "done";
     }
   } finally {
     await repo
       .settleOperation({
-        organizationId: ctx.organizationId,
-        actorUserId: ctx.userId,
+        organizationId: principal.organizationId,
+        actorUserId: principal.actorUserId,
         operationId,
         connectionId,
         generation,
@@ -267,6 +298,7 @@ async function reconcileBot(
       .catch(() => undefined);
     serverLog.warn("channels.telegram.reconciled", { outcome });
   }
+  return outcome;
 }
 
 // ── Connect ───────────────────────────────────────────────────────────────────
@@ -397,13 +429,21 @@ export async function connectTelegramBot(
     // and another operation took the bot). If this request was applied it may
     // have landed after that operation's: make Telegram match APSA again.
     serverLog.warn("channels.telegram.connect_superseded", { connectionId: row.id, outcome });
-    if (outcome !== "refused") await reconcileBot(ctx, bot, externalAccountId, nowMs);
+    if (outcome !== "refused") {
+      await reconcileBot(
+        { organizationId: ctx.organizationId, actorUserId: ctx.userId },
+        bot,
+        externalAccountId,
+        nowMs,
+      );
+    }
     throw new ChannelError("connect_superseded");
   }
-  if (outcome === "unknown") {
-    // Maybe applied, maybe later: the bot stays in doubt and the connection is
-    // NOT reported connected.
-    serverLog.warn("channels.telegram.connect_unverified", { connectionId: row.id });
+  if (outcome === "unknown" || outcome === "acknowledged") {
+    // unknown: maybe applied, maybe later — the bot stays in doubt.
+    // acknowledged: applied, but not SEEN — reconciliation checks at once.
+    // Either way the connection is NOT reported connected.
+    serverLog.warn("channels.telegram.connect_unverified", { connectionId: row.id, outcome });
     throw new ChannelError("webhook_unverified");
   }
   if (outcome === "refused" || !settled.current || !settled.connection) {
@@ -488,7 +528,12 @@ export async function disconnectChannel(
   });
   if (!settled.held && bot && outcome !== "refused") {
     // This deleteWebhook may have landed after a newer connect of the bot.
-    await reconcileBot(ctx, bot, live.external_account_id, nowMs);
+    await reconcileBot(
+      { organizationId: ctx.organizationId, actorUserId: ctx.userId },
+      bot,
+      live.external_account_id,
+      nowMs,
+    );
   }
   return summarize(row, ctx.can("integrations.view_health"));
 }

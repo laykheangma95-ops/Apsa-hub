@@ -21,7 +21,7 @@ export type ChannelConnectionStatus = "connected" | "error" | "disconnected";
 
 /** Public columns only — never the credential or the secret digest. */
 const PUBLIC_COLUMNS =
-  "id, organization_id, provider, external_account_id, account_handle, account_display_name, status, last_inbound_at, last_outbound_at, last_error_code, last_error_at, connected_at";
+  "id, organization_id, provider, external_account_id, account_handle, account_display_name, status, last_inbound_at, last_outbound_at, last_error_code, last_error_at, connected_at, last_verified_at, mismatch_since";
 
 export interface ChannelConnectionRow {
   id: string;
@@ -36,6 +36,10 @@ export interface ChannelConnectionRow {
   last_error_code: string | null;
   last_error_at: string | null;
   connected_at: string;
+  /** When Telegram was last SEEN holding this connection's current webhook generation. */
+  last_verified_at: string | null;
+  /** Since when Telegram has been seen holding no / another webhook (unrepaired). */
+  mismatch_since: string | null;
 }
 
 function first<T>(data: unknown): T {
@@ -57,7 +61,8 @@ export type ChannelOperationKind = "connect" | "disconnect" | "repair";
  */
 export async function beginOperation(input: {
   organizationId: string;
-  actorUserId: string;
+  /** null only for the server's own reconciliation ('repair'). */
+  actorUserId: string | null;
   externalAccountId: string;
   kind: ChannelOperationKind;
   operationId: string;
@@ -110,7 +115,14 @@ export async function connectAccount(input: {
   return publicRow(first(data));
 }
 
-export type ProviderOutcome = "verified" | "refused" | "unknown" | "done";
+/**
+ * verified      Telegram SEEN holding the expected URL (or none, for a removal);
+ * acknowledged  Telegram answered OK but the result could not be read back;
+ * refused       Telegram answered "no" (never applied), or nothing was sent;
+ * unknown       no answer — maybe applied, maybe later;
+ * done          nothing to record on a row.
+ */
+export type ProviderOutcome = "verified" | "acknowledged" | "refused" | "unknown" | "done";
 
 /**
  * Records an operation's provider outcome and releases its lease — or, for
@@ -119,7 +131,7 @@ export type ProviderOutcome = "verified" | "refused" | "unknown" | "done";
  */
 export async function settleOperation(input: {
   organizationId: string;
-  actorUserId: string;
+  actorUserId: string | null;
   operationId: string;
   connectionId: string | null;
   generation: string | null;
@@ -197,6 +209,46 @@ export async function findConnection(
     .maybeSingle();
   if (error) throw channelDatabaseError(error);
   return data ? publicRow(data) : null;
+}
+
+export interface ReconcileCandidate {
+  id: string;
+  organization_id: string;
+  external_account_id: string;
+  webhook_generation: string;
+  credential_ciphertext: string;
+  reconcile_failures: number;
+}
+
+/** Claims up to `limit` due live connections for one reconciliation run (064 §2a; SKIP LOCKED). */
+export async function claimReconcileBatch(limit: number): Promise<ReconcileCandidate[]> {
+  const { data, error } = await db.rpc("claim_channel_reconcile_batch", { p_limit: limit });
+  if (error) throw channelDatabaseError(error);
+  return (data ?? []) as ReconcileCandidate[];
+}
+
+export type ReconcileResult =
+  "healthy" | "repaired" | "missing" | "mismatch" | "unobservable" | "busy";
+
+/** Records one reconciliation check for the generation the run observed. */
+export async function recordReconcile(
+  connectionId: string,
+  generation: string,
+  result: ReconcileResult,
+): Promise<{
+  recorded: boolean;
+  status?: ChannelConnectionStatus;
+  last_error_code?: string | null;
+  reconcile_failures?: number;
+  mismatch_since?: string | null;
+}> {
+  const { data, error } = await db.rpc("record_channel_reconcile", {
+    p_connection: connectionId,
+    p_generation: generation,
+    p_result: result,
+  });
+  if (error || !data) throw channelDatabaseError(error);
+  return data;
 }
 
 /** A verified delivery for `generation` of a live connection: evidence of what Telegram holds (064 §2 rule 5). */

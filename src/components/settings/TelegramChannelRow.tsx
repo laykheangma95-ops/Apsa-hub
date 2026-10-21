@@ -30,6 +30,15 @@ import {
 } from "@/lib/channels-view";
 import { sameScope, type OperationScope } from "@/lib/conversation/reply-session";
 
+/** Connection states the server explains with their own copy. */
+const WEBHOOK_STATES: ReadonlySet<string> = new Set([
+  "webhook_pending",
+  "webhook_unverified",
+  "webhook_missing",
+  "webhook_mismatch",
+  "webhook_failed",
+]);
+
 interface TelegramChannelRowProps {
   userId: string;
   organizationId: string;
@@ -241,6 +250,16 @@ export function TelegramChannelRow({ userId, organizationId }: TelegramChannelRo
               />
               {telegram.health ? (
                 <SectionRow
+                  label={t("settings.channels.telegram.lastVerified")}
+                  value={
+                    telegram.health.lastVerifiedAt
+                      ? fullTimestamp(telegram.health.lastVerifiedAt)
+                      : t("settings.channels.telegram.never")
+                  }
+                />
+              ) : null}
+              {telegram.health ? (
+                <SectionRow
                   label={t("settings.channels.telegram.lastInbound")}
                   value={
                     telegram.health.lastInboundAt
@@ -250,6 +269,19 @@ export function TelegramChannelRow({ userId, organizationId }: TelegramChannelRo
                 />
               ) : null}
             </SectionRows>
+
+            {/*
+             * Not 'connected' = Telegram was not SEEN holding this bot's
+             * webhook recently (migration 064 §2a). Say what that means and
+             * that APSA keeps checking — never imply delivery is working.
+             */}
+            {telegram.status !== "connected" &&
+            telegram.health?.lastErrorCode &&
+            WEBHOOK_STATES.has(telegram.health.lastErrorCode) ? (
+              <p className="text-body-sm text-text-secondary" role="status">
+                {t(`settings.channels.telegram.webhookState.${telegram.health.lastErrorCode}`)}
+              </p>
+            ) : null}
 
             {canDisconnect ? (
               confirmDisconnect ? (

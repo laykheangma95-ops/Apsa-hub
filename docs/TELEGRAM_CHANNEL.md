@@ -31,9 +31,17 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
   Telegram gets, and the secret is derived from connection id + generation
   with a subkey of `CHANNEL_CREDENTIAL_KEY` (never stored). The connection is
   reported **connected only after APSA has seen Telegram hold exactly that
-  generation's URL** (`getWebhookInfo`); until then it shows _Needs
-  attention_. Connect and disconnect carry the initiating member +
-  organization and are refused if the session changed.
+  generation's URL** (`getWebhookInfo`). Three outcomes are never merged:
+  _verified_ (URL seen) → connected; _acknowledged_ (`setWebhook` answered OK
+  but `getWebhookInfo` failed) → not confirmed, re-checked at once by
+  reconciliation; _unknown_ (no answer) → not confirmed, bot held in doubt.
+  Connect and disconnect carry the initiating member + organization and are
+  refused if the session changed.
+- **What "Connected" means.** Telegram was _seen_ holding this bot's webhook
+  within the last 60 minutes (Settings shows "Last confirmed with Telegram").
+  Older than that — reconciliation stopped or Telegram unreachable — the
+  connection reads "not confirmed", decided at read time. It never means
+  Telegram promised delivery.
 - **One Telegram-side operation per bot** (migration 064 §2). Connect,
   disconnect and repair each take the bot's operation lease
   (`channel_bot_operations`, 120 s; Telegram writes only in its first 30 s,
@@ -45,7 +53,9 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
   overlapping operation is refused `connect_in_progress`. An operation that
   learns it was superseded after its own request may have landed re-checks
   Telegram under a fresh lease and points it back at what APSA stores (the
-  live connection's generation, or no webhook).
+  live connection's generation, or no webhook). This makes overlap unlikely;
+  it cannot prevent a request Telegram applies arbitrarily late — Telegram
+  offers no such guarantee. That is what reconciliation is for.
 - **One bot, one business.** A bot live in one organization is refused to any
   other (`account_in_use`). Reconnecting in the same organization rotates the
   token and secret in place.
@@ -91,6 +101,7 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
 | `CHANNEL_CREDENTIAL_KEY`   | server only | Yes — `openssl rand -base64 32`. Changing it makes stored tokens unreadable (merchants must reconnect).                                                                   |
 | `VITE_APP_URL`             | server      | Must be a public **https** origin (Telegram only delivers to https).                                                                                                      |
 | `CHANNEL_WEBHOOK_BASE_URL` | server      | Optional public https origin for the webhook URL. It must be an origin that is public **by design**; never point it at, or create it by, weakening deployment protection. |
+| `CRON_SECRET`              | server only | Needed for reconciliation: the scheduler's bearer secret for `/api/internal/channels/reconcile`. Unset = reconciliation off.                                              |
 
 ## Test-deployment checklist
 
@@ -120,11 +131,46 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
 Verify Telegram's view at any time (from a trusted machine, never paste the
 token anywhere shared): `https://api.telegram.org/bot<token>/getWebhookInfo`.
 
+## Reconciliation (operator)
+
+A request APSA sent may still be applied by Telegram arbitrarily late — e.g.
+a timed-out `deleteWebhook` after a newer connect, which silences the bot with
+no customer message arriving to reveal it. Every live connection is therefore
+re-checked on a schedule, independent of traffic (migration 064 §2a,
+`src/server/channels/reconcile.ts`).
+
+| Aspect         | Definition                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Entry          | `GET` or `POST /api/internal/channels/reconcile`, `Authorization: Bearer $CRON_SECRET`. No `CRON_SECRET` → 503 (off). Wrong credential → generic 401. Answers counts only.                                                                                                                                                                                                           |
+| Schedule       | Every **5 minutes** (Vercel Cron or any HTTPS scheduler). **Not configured by this PR**: an operator step.                                                                                                                                                                                                                                                                           |
+| Ownership      | None needed. `claim_channel_reconcile_batch` gives each due row to one run (`FOR UPDATE SKIP LOCKED`) and pushes it 2 minutes out. Overlapping runs never share a row; a run that dies hands its rows back after 2 minutes; a restart simply resumes with what is due. Telegram writes only under the bot's `repair` operation lease, never alongside a member's connect/disconnect. |
+| Per connection | One `getWebhookInfo`. Right URL → healthy, next check in **15 min**. Missing / wrong → repair (`setWebhook` + `getWebhookInfo`) under the lease. Bot busy → retry in 1 min. Failure → retry after 1, 2, 4 … **60 min** (capped).                                                                                                                                                     |
+| Rate limits    | ≤ 25 connections per run, no new connection after 45 s, ≤ 3 Telegram calls per connection per run.                                                                                                                                                                                                                                                                                   |
+| Merchant view  | Missing / wrong webhook → _Needs attention_ with an explanation and since-when; not seen for 60 min → _not confirmed_.                                                                                                                                                                                                                                                               |
+| Operator alert | From the 3rd consecutive failed check, each run logs `channels.telegram.reconcile_alert` (error level; connection id, failure count, kind, since-when — never a token or secret). Alert on it in the log pipeline. Every run logs `channels.telegram.reconcile_run` with counts.                                                                                                     |
+
+**Guarantee.** With the entry invoked at least every 5 minutes and Telegram
+reachable, a missing or wrong webhook on a live connection — whatever late
+request caused it — is detected and repaired within about **20 minutes**
+(15-minute check + 5-minute schedule), plus any operation then in flight on
+that bot. Telegram's Bot API documentation states that updates are kept on
+Telegram's side until received, for at most 24 hours, so messages sent during
+such a gap should be delivered once the webhook is restored. This is
+detection and repair — **not prevention** of late provider writes.
+
+**Not covered.** If no scheduler runs, nothing is repaired automatically (the
+connection still ages to "not confirmed" after 60 minutes). If Telegram stays
+unreachable, the connection reads "not confirmed" and alerts continue, but
+nothing can be repaired. A disconnected bot holds no credential, so a late
+`setWebhook` for it cannot be removed (its deliveries are refused 401).
+
 ## Operations
 
 - Logs: `channels.telegram.*` and `webhook.*` events. Payloads are never logged.
-- Health: Settings shows last customer message; `channel_connections` holds
-  `last_inbound_at`, `last_outbound_at`, `last_error_code`.
+- Health: Settings shows last customer message and last confirmation by
+  Telegram; `channel_connections` holds `last_inbound_at`, `last_outbound_at`,
+  `last_error_code`, `last_verified_at`, `reconcile_failures`,
+  `reconcile_error`, `mismatch_since`.
 - A Telegram retry after an APSA failure or crash is processed (the receipt
   commits only with the message); duplicates are acknowledged and dropped.
 
@@ -136,12 +182,10 @@ token anywhere shared): `https://api.telegram.org/bot<token>/getWebhookInfo`.
   ledger records the delivery (`delivered_refs`), but the duplicate in the
   customer's chat cannot be undone.
 - A reply stuck in `sending` (server died mid-send) is never auto-retried.
-- Provider timing assumption: Telegram applies a request within 80 s of APSA
-  sending it, or never. Beyond that, a `setWebhook` landing late is still
-  _detected_ — a delivery carrying an older generation's valid secret is
-  stored and flags the connection `webhook_mismatch` — but a `deleteWebhook`
-  landing late after a newer verified connect silences the bot with nothing
-  arriving to reveal it until the merchant reconnects.
+- Late provider writes are detected and repaired, not prevented. Between the
+  write landing and the next reconciliation check (≤ ~20 minutes when the
+  schedule runs) the bot can be silent or pointed at an older generation.
+  Repair relies on the scheduler being configured (see Reconciliation).
 - During a re-connect (rotation), deliveries for the previous generation are
   verified against that generation's derived secret and stored, not refused.
 - No media download / sending photos; no read receipts (Bot API has none).

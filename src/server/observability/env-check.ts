@@ -31,6 +31,9 @@ export const OPTIONAL_SERVER_ENV = [
   // Public https origin Telegram delivers webhooks to, when VITE_APP_URL is
   // not reachable by Telegram (e.g. behind deployment protection).
   "CHANNEL_WEBHOOK_BASE_URL",
+  // Bearer secret of the scheduler that runs Telegram webhook reconciliation
+  // (/api/internal/channels/reconcile). Without it reconciliation is off.
+  "CRON_SECRET",
 ] as const;
 
 export function missingServerEnv(
