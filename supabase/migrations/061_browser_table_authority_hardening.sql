@@ -107,6 +107,33 @@
 --      sequences to anon/authenticated, 061 aborts there by design — the live
 --      preflight must establish this before 061 is scheduled.
 --
+-- STAGING EXCEPTION (step 6a only; docs/RELEASE_CHECKLIST.md §8b)
+--   The staging preflight (2026-10-21) found exactly Supabase's managed
+--   defaults: supabase_admin, schema public, tables and sequences, ALL to
+--   postgres, anon, authenticated and service_role (supabase/postgres
+--   init-scripts/00000000000000-initial-schema.sql). postgres cannot change
+--   another role's defaults and a superuser's CREATE cannot be revoked, so
+--   only Supabase can remove them. Step 6a skips a pg_default_acl row ONLY when
+--   ALL of these hold; otherwise it aborts exactly as before:
+--     * schema apsa_environment exists, is owned by postgres and carries the
+--       comment 'APSA STAGING: 061 managed supabase_admin default ACL
+--       exception v1' — created by the operator on staging only, never on
+--       production (without it 061 behaves as originally reviewed);
+--     * the row's role is supabase_admin and supabase_admin is a superuser;
+--     * the row is for schema public (never global) and for tables or
+--       sequences;
+--     * the row's complete ACL equals, as a set of (grantee, grantor,
+--       privilege, grantable), ALL privileges the server knows for that kind
+--       to exactly postgres, anon, authenticated and service_role, granted by
+--       supabase_admin, without grant option. Any extra or missing grantee or
+--       privilege, PUBLIC, another browser-reachable role or a grant option
+--       voids the exception for that row.
+--   Unchanged: steps 1–5, 6b, every other creator and grantee, every existing
+--   object (step 3 still refuses any relation in public not owned by
+--   postgres), role reachability. RISK while it is on: a table or sequence
+--   that supabase_admin creates in public later is browser-readable (and RLS
+--   is off on it) until revoked; the exception is announced by a NOTICE.
+--
 -- POSTGRESQL VERSIONS
 --   Only REVOKE ALL is used — never a privilege keyword in DDL. On PostgreSQL
 --   15 (no MAINTAIN) and 17+ (MAINTAIN) alike, ALL means every table privilege
@@ -277,6 +304,9 @@ DECLARE
     || CASE WHEN current_setting('server_version_num')::int >= 170000
             THEN ARRAY['MAINTAIN'] ELSE ARRAY[]::text[] END;
   offenders text;
+  managed_oid oid;
+  exception_on boolean;
+  exempt oid[];
 BEGIN
   -- 3. creator boundary: postgres runs this and owns every relation in public
   IF current_user <> 'postgres' THEN
@@ -372,6 +402,43 @@ BEGIN
     RAISE EXCEPTION '061: service_role lost authority it held before 061 (it held it through PUBLIC, a column grant, or a browser role — grant it to service_role explicitly first): %', offenders;
   END IF;
 
+  -- 6a-x. STAGING EXCEPTION (see header). On only when the staging marker
+  --       schema exists, is owned by postgres and carries the exact comment,
+  --       and only for whole pg_default_acl rows that are byte-for-byte
+  --       Supabase's managed supabase_admin public defaults.
+  managed_oid := (SELECT oid FROM pg_roles WHERE rolname = 'supabase_admin' AND rolsuper);
+  exception_on := managed_oid IS NOT NULL AND EXISTS (
+    SELECT 1 FROM pg_namespace n
+    WHERE n.nspname = 'apsa_environment'
+      AND n.nspowner = postgres_oid
+      AND obj_description(n.oid, 'pg_namespace') = 'APSA STAGING: 061 managed supabase_admin default ACL exception v1');
+  SELECT array_agg(d.oid) INTO exempt
+  FROM pg_default_acl d
+  WHERE exception_on
+    AND d.defaclrole = managed_oid
+    AND d.defaclnamespace = 'public'::regnamespace
+    AND d.defaclobjtype IN ('r','S')
+    AND NOT EXISTS (
+      (SELECT a.grantee, a.grantor, a.privilege_type, a.is_grantable FROM aclexplode(d.defaclacl) a)
+      EXCEPT
+      (SELECT g.oid, managed_oid, p.privilege, false
+         FROM pg_roles g
+         CROSS JOIN unnest(CASE d.defaclobjtype WHEN 'r' THEN table_privs
+                                ELSE ARRAY['USAGE','SELECT','UPDATE'] END) AS p(privilege)
+        WHERE g.rolname IN ('postgres', 'anon', 'authenticated', 'service_role')))
+    AND NOT EXISTS (
+      (SELECT g.oid, managed_oid, p.privilege, false
+         FROM pg_roles g
+         CROSS JOIN unnest(CASE d.defaclobjtype WHEN 'r' THEN table_privs
+                                ELSE ARRAY['USAGE','SELECT','UPDATE'] END) AS p(privilege)
+        WHERE g.rolname IN ('postgres', 'anon', 'authenticated', 'service_role'))
+      EXCEPT
+      (SELECT a.grantee, a.grantor, a.privilege_type, a.is_grantable FROM aclexplode(d.defaclacl) a));
+  IF exception_on THEN
+    RAISE NOTICE '061: STAGING EXCEPTION on: % managed supabase_admin public default row(s) exempted from 6a (future objects supabase_admin creates in public stay browser-readable until Supabase removes these defaults)',
+      coalesce(cardinality(exempt), 0);
+  END IF;
+
   -- 6a. every role that can create the next relation in public (effective
   --     CREATE: direct, PUBLIC, ownership, superuser, inherited membership)
   --     gives future tables/sequences nothing a browser role can reach —
@@ -389,6 +456,7 @@ BEGIN
       AND (d.defaclnamespace = 0 OR d.defaclnamespace = 'public'::regnamespace)
       AND has_schema_privilege(d.defaclrole, 'public', 'CREATE')
       AND (a.grantee = 0 OR a.grantee IN (SELECT roleid FROM apsa_061_browser_roles))
+      AND d.oid <> ALL (coalesce(exempt, ARRAY[]::oid[]))
     ORDER BY x
     LIMIT 40
   ) shown;
