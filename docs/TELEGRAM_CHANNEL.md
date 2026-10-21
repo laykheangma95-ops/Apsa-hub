@@ -38,10 +38,21 @@ Customer ──message──▶ merchant's Telegram bot ──webhook──▶ P
   Connect and disconnect carry the initiating member + organization and are
   refused if the session changed.
 - **What "Connected" means.** Telegram was _seen_ holding this bot's webhook
-  within the last 60 minutes (Settings shows "Last confirmed with Telegram").
-  Older than that — reconciliation stopped or Telegram unreachable — the
-  connection reads "not confirmed", decided at read time. It never means
-  Telegram promised delivery.
+  **URL** within the last 60 minutes (Settings shows "Last confirmed with
+  Telegram"). Older than that — reconciliation stopped or Telegram
+  unreachable — the connection reads "not confirmed", decided at read time. It
+  never means Telegram promised delivery.
+- **What is and is not observed.** `getWebhookInfo` returns the webhook URL
+  only; the Bot API never returns or confirms the secret token Telegram
+  holds. "Verified" therefore means _the URL_ matched. Secret consistency is
+  not observed from Telegram: it follows from APSA's invariant — the secret is
+  derived from (connection id, generation, `CHANNEL_CREDENTIAL_KEY`), so one
+  generation URL always carries one secret while the key is unchanged — and
+  every repair first checks that the derived secret still matches the stored
+  digest. After a key change it sends nothing and marks the connection
+  `webhook_key_changed` (reconnect the bot), instead of re-sending the same
+  URL with a new secret that `getWebhookInfo` would call verified while every
+  delivery is refused.
 - **One Telegram-side operation per bot** (migration 064 §2). Connect,
   disconnect and repair each take the bot's operation lease
   (`channel_bot_operations`, 120 s; Telegram writes only in its first 30 s,
@@ -139,24 +150,44 @@ no customer message arriving to reveal it. Every live connection is therefore
 re-checked on a schedule, independent of traffic (migration 064 §2a,
 `src/server/channels/reconcile.ts`).
 
-| Aspect         | Definition                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Entry          | `GET` or `POST /api/internal/channels/reconcile`, `Authorization: Bearer $CRON_SECRET`. No `CRON_SECRET` → 503 (off). Wrong credential → generic 401. Answers counts only.                                                                                                                                                                                                           |
-| Schedule       | Every **5 minutes** (Vercel Cron or any HTTPS scheduler). **Not configured by this PR**: an operator step.                                                                                                                                                                                                                                                                           |
-| Ownership      | None needed. `claim_channel_reconcile_batch` gives each due row to one run (`FOR UPDATE SKIP LOCKED`) and pushes it 2 minutes out. Overlapping runs never share a row; a run that dies hands its rows back after 2 minutes; a restart simply resumes with what is due. Telegram writes only under the bot's `repair` operation lease, never alongside a member's connect/disconnect. |
-| Per connection | One `getWebhookInfo`. Right URL → healthy, next check in **15 min**. Missing / wrong → repair (`setWebhook` + `getWebhookInfo`) under the lease. Bot busy → retry in 1 min. Failure → retry after 1, 2, 4 … **60 min** (capped).                                                                                                                                                     |
-| Rate limits    | ≤ 25 connections per run, no new connection after 45 s, ≤ 3 Telegram calls per connection per run.                                                                                                                                                                                                                                                                                   |
-| Merchant view  | Missing / wrong webhook → _Needs attention_ with an explanation and since-when; not seen for 60 min → _not confirmed_.                                                                                                                                                                                                                                                               |
-| Operator alert | From the 3rd consecutive failed check, each run logs `channels.telegram.reconcile_alert` (error level; connection id, failure count, kind, since-when — never a token or secret). Alert on it in the log pipeline. Every run logs `channels.telegram.reconcile_run` with counts.                                                                                                     |
+| Aspect         | Definition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entry          | `GET` or `POST /api/internal/channels/reconcile`, `Authorization: Bearer $CRON_SECRET`. No `CRON_SECRET` → 503 (off). Wrong credential → generic 401. Answers counts only.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Schedule       | Every **5 minutes** (Vercel Cron or any HTTPS scheduler). **Not configured by this PR**: an operator step.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Ownership      | None needed. `claim_channel_reconcile_batch` gives each due row to one run (`FOR UPDATE SKIP LOCKED`) with a **unique claim id** valid for 2 minutes. Overlapping runs never share a row; a run that dies hands its rows back when its claim lapses; a restart simply resumes with what is due. **Fence:** `record_channel_reconcile` records only under the claim that still owns the row — a slow run whose claim lapsed or was replaced records no health, failure, backoff or mismatch. Telegram writes only under the bot's `repair` operation lease, never alongside a member's connect/disconnect. |
+| Per connection | One `getWebhookInfo`. Right URL → healthy, next check in **15 min**. Missing / wrong → repair (`setWebhook` + `getWebhookInfo`) under the lease. Bot busy → retry in 1 min. Failure → retry after 1, 2, 4 … **60 min** (capped).                                                                                                                                                                                                                                                                                                                                                                          |
+| Rate limits    | ≤ 25 connections per run, no new connection after 45 s, ≤ 3 Telegram calls per connection per run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Merchant view  | Missing / wrong webhook → _Needs attention_ with an explanation and since-when; not seen for 60 min → _not confirmed_.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Operator alert | From the 3rd consecutive failed check, each run logs `channels.telegram.reconcile_alert` (error level; connection id, failure count, kind, since-when — never a token or secret). Alert on it in the log pipeline. Every run logs `channels.telegram.reconcile_run` with counts.                                                                                                                                                                                                                                                                                                                          |
 
-**Guarantee.** With the entry invoked at least every 5 minutes and Telegram
-reachable, a missing or wrong webhook on a live connection — whatever late
-request caused it — is detected and repaired within about **20 minutes**
-(15-minute check + 5-minute schedule), plus any operation then in flight on
-that bot. Telegram's Bot API documentation states that updates are kept on
-Telegram's side until received, for at most 24 hours, so messages sent during
-such a gap should be delivered once the webhook is restored. This is
-detection and repair — **not prevention** of late provider writes.
+**Timing: a conditional target, not a bound.** About **20 minutes**
+(15-minute check interval + 5-minute schedule) is the target for an
+_eligible_ connection — not backing off, bot not held by another operation —
+when the scheduler runs, the next run has capacity for it, and Telegram's
+calls succeed. There is **no fixed worst-case bound**:
+
+- **Backlog.** A run checks at most 25 connections (fewer when Telegram is
+  slow and the 45 s run budget ends). 250 connections due at once need 10 runs
+  — the last is first checked about 45 minutes later — and with 250 live
+  connections each is re-checked only about every 50 minutes, not 15
+  (`backlogRuns`, `steadyStateCheckIntervalMs`; tested against the SQL).
+- **Backoff.** After _k_ consecutive failures the next check is 1, 2, 4 … up
+  to 60 minutes away. When an outage ends, the first check that can succeed
+  may be up to 60 minutes + one schedule interval (≈ 65 minutes) later — and
+  then still subject to backlog (`reconcileBackoffMs`; tested against the
+  SQL).
+- **Outages.** While Telegram or the database is unreachable nothing is
+  repaired at all.
+- **Contention.** A bot held by another operation is retried every minute for
+  as long as that lasts (an in-doubt lease lasts 5 minutes).
+- **Stopped scheduling.** Nothing runs; connections only age to "not
+  confirmed" after 60 minutes.
+
+Late provider writes are **detected and repaired when the above allow — not
+prevented**. Telegram's Bot API documentation states that updates are kept
+on Telegram's side until received, for at most 24 hours, so messages sent
+during a gap shorter than that should be delivered once the webhook is
+restored; a longer gap can lose them.
 
 **Not covered.** If no scheduler runs, nothing is repaired automatically (the
 connection still ages to "not confirmed" after 60 minutes). If Telegram stays
@@ -183,9 +214,13 @@ nothing can be repaired. A disconnected bot holds no credential, so a late
   customer's chat cannot be undone.
 - A reply stuck in `sending` (server died mid-send) is never auto-retried.
 - Late provider writes are detected and repaired, not prevented. Between the
-  write landing and the next reconciliation check (≤ ~20 minutes when the
-  schedule runs) the bot can be silent or pointed at an older generation.
-  Repair relies on the scheduler being configured (see Reconciliation).
+  write landing and the next successful reconciliation check the bot can be
+  silent or pointed at an older generation — about 20 minutes as a target,
+  with no fixed worst case (see Reconciliation → Timing). Repair relies on
+  the scheduler being configured.
+- The secret Telegram holds is never observed (the Bot API does not return
+  it); consistency rests on APSA's derivation invariant and the digest check
+  before every repair.
 - During a re-connect (rotation), deliveries for the previous generation are
   verified against that generation's derived secret and stored, not refused.
 - No media download / sending photos; no read receipts (Bot API has none).

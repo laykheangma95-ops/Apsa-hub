@@ -120,9 +120,12 @@ export async function connectAccount(input: {
  * acknowledged  Telegram answered OK but the result could not be read back;
  * refused       Telegram answered "no" (never applied), or nothing was sent;
  * unknown       no answer — maybe applied, maybe later;
- * done          nothing to record on a row.
+ * done          nothing to record on a row;
+ * stale_key     the current key no longer derives the stored secret — nothing
+ *               was sent (a repair would have created a URL/secret mismatch).
  */
-export type ProviderOutcome = "verified" | "acknowledged" | "refused" | "unknown" | "done";
+export type ProviderOutcome =
+  "verified" | "acknowledged" | "refused" | "unknown" | "done" | "stale_key";
 
 /**
  * Records an operation's provider outcome and releases its lease — or, for
@@ -182,12 +185,15 @@ export async function disconnectAccount(
  * current webhook generation only (never a credential). Used under the bot's
  * operation lease to derive what Telegram should hold.
  */
-export async function findLiveConnectionForBot(
-  externalAccountId: string,
-): Promise<{ id: string; organization_id: string; webhook_generation: string } | null> {
+export async function findLiveConnectionForBot(externalAccountId: string): Promise<{
+  id: string;
+  organization_id: string;
+  webhook_generation: string;
+  webhook_secret_hash: string;
+} | null> {
   const { data, error } = await db
     .from("channel_connections")
-    .select("id, organization_id, webhook_generation")
+    .select("id, organization_id, webhook_generation, webhook_secret_hash")
     .eq("provider", "TELEGRAM")
     .eq("external_account_id", externalAccountId)
     .in("status", ["connected", "error"])
@@ -217,7 +223,10 @@ export interface ReconcileCandidate {
   external_account_id: string;
   webhook_generation: string;
   credential_ciphertext: string;
+  webhook_secret_hash: string;
   reconcile_failures: number;
+  /** This run's claim on the row: the fence record_channel_reconcile checks. */
+  reconcile_claim: string;
 }
 
 /** Claims up to `limit` due live connections for one reconciliation run (064 §2a; SKIP LOCKED). */
@@ -228,15 +237,21 @@ export async function claimReconcileBatch(limit: number): Promise<ReconcileCandi
 }
 
 export type ReconcileResult =
-  "healthy" | "repaired" | "missing" | "mismatch" | "unobservable" | "busy";
+  "healthy" | "repaired" | "missing" | "mismatch" | "unobservable" | "busy" | "stale_key";
 
-/** Records one reconciliation check for the generation the run observed. */
+/**
+ * Records one reconciliation check for the generation the run observed —
+ * only while `claim` still owns the row (fence: a lapsed or replaced claim
+ * records nothing and gets `recorded: false, reason: "claim"`).
+ */
 export async function recordReconcile(
   connectionId: string,
   generation: string,
+  claim: string,
   result: ReconcileResult,
 ): Promise<{
   recorded: boolean;
+  reason?: "generation" | "claim";
   status?: ChannelConnectionStatus;
   last_error_code?: string | null;
   reconcile_failures?: number;
@@ -245,6 +260,7 @@ export async function recordReconcile(
   const { data, error } = await db.rpc("record_channel_reconcile", {
     p_connection: connectionId,
     p_generation: generation,
+    p_claim: claim,
     p_result: result,
   });
   if (error || !data) throw channelDatabaseError(error);

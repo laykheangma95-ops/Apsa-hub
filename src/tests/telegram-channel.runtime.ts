@@ -87,6 +87,8 @@ let loseAnswerOf: string | null = null;
 const lateLandings: (() => void)[] = [];
 /** The next N getWebhookInfo calls fail as a Telegram outage would (502). */
 let getWebhookInfoFailures = 0;
+/** Runs once, before the next getWebhookInfo is answered (to interleave a second worker). */
+let beforeNextGetWebhookInfo: (() => Promise<void>) | null = null;
 function land() {
   for (const apply of lateLandings.splice(0)) apply();
 }
@@ -107,6 +109,11 @@ async function fakeFetch(url: string, init: RequestInit): Promise<Response> {
   calls.push({ method, body });
   const hold = holds.findIndex((h) => h.method === method);
   if (hold >= 0) await holds.splice(hold, 1)[0]!.release;
+  if (method === "getWebhookInfo" && beforeNextGetWebhookInfo) {
+    const hook = beforeNextGetWebhookInfo;
+    beforeNextGetWebhookInfo = null;
+    await hook();
+  }
   if (method === "getWebhookInfo" && getWebhookInfoFailures > 0) {
     getWebhookInfoFailures -= 1;
     return Response.json(
@@ -1209,3 +1216,95 @@ async function liveGeneration(): Promise<string> {
     )
   ).rows[0]!.webhook_generation;
 }
+
+describe("reconciliation fence and secret invariant (064 §2a)", () => {
+  beforeEach(() => void setPrimaryRateLimitStore(new MemoryRateLimitStore()));
+
+  async function live() {
+    return (
+      await db.query<{
+        id: string;
+        status: string;
+        last_error_code: string | null;
+        reconcile_failures: number;
+        reconcile_claim: string | null;
+      }>(
+        "select id, status, last_error_code, reconcile_failures, reconcile_claim from channel_connections where status <> 'disconnected'",
+      )
+    ).rows[0]!;
+  }
+
+  it("a worker whose claim lapsed mid-check records nothing; the newer worker's result stands", async () => {
+    const lines: string[] = [];
+    const restore = setLogSink((_level, line) => lines.push(line));
+    try {
+      await db.query(
+        "update channel_connections set next_reconcile_at = now() where status <> 'disconnected'",
+      );
+      beforeNextGetWebhookInfo = async () => {
+        // The old run stalls past its claim; a new run claims and finishes.
+        await db.query(
+          "update channel_connections set reconcile_claimed_until = now() - interval '1 second', next_reconcile_at = now() - interval '1 second' where status <> 'disconnected'",
+        );
+        const newer = await reconcileChannels({ api });
+        expect(newer).toMatchObject({ checked: 1, healthy: 1 });
+        // ...and the old run's own observation will now fail.
+        getWebhookInfoFailures = 1;
+      };
+      const older = await reconcileChannels({ api });
+      expect(older).toMatchObject({ checked: 1, failed: 1 });
+      // The failure was NOT recorded: no failure count, no backoff, still connected.
+      expect(await live()).toMatchObject({
+        status: "connected",
+        reconcile_failures: 0,
+        reconcile_claim: null,
+      });
+      expect(
+        lines.some((l) => l.includes('"event":"channels.telegram.reconcile_claim_lost"')),
+      ).toBe(true);
+    } finally {
+      restore();
+      getWebhookInfoFailures = 0;
+      beforeNextGetWebhookInfo = null;
+    }
+  });
+
+  it("a key change never yields a same-URL / different-secret webhook: the repair sends nothing", async () => {
+    const original = process.env["CHANNEL_CREDENTIAL_KEY"];
+    const row = await live();
+    const before = { ...telegram! };
+    try {
+      process.env["CHANNEL_CREDENTIAL_KEY"] = Buffer.alloc(32, 8).toString("base64"); // rotated
+      telegram = null; // a late deleteWebhook landed
+      calls.length = 0;
+      const outcome = await service.reconcileBot(
+        { organizationId: org, actorUserId: owner },
+        api(TOKEN),
+        String(BOT_ID),
+        Date.now,
+      );
+      expect(outcome).toBe("stale_key");
+      // Nothing was sent: Telegram never got this URL with a new-key secret.
+      expect(calls.filter((c) => c.method === "setWebhook")).toHaveLength(0);
+      expect(telegram).toBeNull();
+      expect(await live()).toMatchObject({
+        status: "error",
+        last_error_code: "webhook_key_changed",
+      });
+      const [listed] = await service.listChannelConnections(ctx(owner, org));
+      expect(listed?.health?.lastErrorCode).toBe("webhook_key_changed");
+    } finally {
+      process.env["CHANNEL_CREDENTIAL_KEY"] = original;
+    }
+    // Same key again: the repair re-sends the SAME url and the SAME secret.
+    const repaired = await service.reconcileBot(
+      { organizationId: org, actorUserId: owner },
+      api(TOKEN),
+      String(BOT_ID),
+      Date.now,
+    );
+    expect(repaired).toBe("verified");
+    expect(telegram).toEqual(before);
+    await expectAgreement(row.id);
+  });
+});

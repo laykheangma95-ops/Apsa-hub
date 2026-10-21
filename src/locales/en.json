@@ -1874,7 +1874,8 @@
           "webhook_unverified": "Telegram hasn't confirmed this connection recently, so APSA can't promise new messages are arriving. APSA keeps checking automatically.",
           "webhook_missing": "Telegram isn't sending this bot's messages to APSA right now. APSA is repairing it automatically; messages sent meanwhile should arrive once it's repaired (Telegram keeps them for up to 24 hours).",
           "webhook_mismatch": "Telegram is using an older connection of this bot. APSA is repairing it automatically.",
-          "webhook_failed": "Telegram refused this connection. Reconnect the bot."
+          "webhook_failed": "Telegram refused this connection. Reconnect the bot.",
+          "webhook_key_changed": "APSA's security key changed since this bot was connected, so APSA can't safely re-point Telegram. Reconnect the bot to restore messages."
         },
         "never": "None yet",
         "step1": "In Telegram, open @BotFather and send /newbot.",

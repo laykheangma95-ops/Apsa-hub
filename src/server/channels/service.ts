@@ -181,8 +181,9 @@ function outcomeOf(error: unknown): Outcome {
 
 /**
  * setWebhook, then SEE it. Three outcomes are never merged:
- *   'verified'      getWebhookInfo shows exactly `url` (this generation, so
- *                   this generation's secret);
+ *   'verified'      getWebhookInfo shows exactly `url` (this generation's
+ *                   URL — the API never returns the secret; its match
+ *                   follows from the derivation invariant, not observation);
  *   'acknowledged'  setWebhook answered OK but getWebhookInfo could not be
  *                   read — applied, NOT seen: never reported connected;
  *   'unknown'       no answer to setWebhook, or another URL seen.
@@ -274,13 +275,24 @@ export async function reconcileBot(
     if (live) {
       connectionId = live.id;
       generation = live.webhook_generation;
-      outcome = await pointWebhook(
-        bot,
-        telegramWebhookUrl(live.id, live.webhook_generation),
-        await deriveWebhookSecret(live.id, live.webhook_generation),
-        startedAt,
-        nowMs,
-      );
+      const secret = await deriveWebhookSecret(live.id, live.webhook_generation);
+      // getWebhookInfo shows the URL, never the secret, so a repair that sent
+      // this generation's URL with a DIFFERENT secret would be "verified"
+      // while every delivery is refused. The secret is derived from
+      // (connection, generation, CHANNEL_CREDENTIAL_KEY); if the key changed
+      // since connect it no longer matches the stored digest — send nothing.
+      if ((await sha256Hex(secret)) !== live.webhook_secret_hash) {
+        serverLog.error("channels.telegram.webhook_key_changed", { connectionId: live.id });
+        outcome = "stale_key";
+      } else {
+        outcome = await pointWebhook(
+          bot,
+          telegramWebhookUrl(live.id, live.webhook_generation),
+          secret,
+          startedAt,
+          nowMs,
+        );
+      }
     } else {
       outcome = await removeWebhook(bot, startedAt, nowMs);
       if (outcome === "verified" || outcome === "acknowledged") outcome = "done";

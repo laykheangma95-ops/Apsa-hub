@@ -17,7 +17,8 @@
  *     lease; an in-doubt lease refuses every concurrent operation;
  *   - a superseded connect's settle racing a newer connect that took over
  *     its expired lease never disconnects or verifies the newer connect;
- *   - concurrent reconciliation runs (064 §2a) never claim the same row;
+ *   - concurrent reconciliation runs (064 §2a) never claim the same row, and
+ *     a run whose claim lapsed never records — old-first, new-first, racing;
  *   - identical reply submissions racing: exactly one is told to send;
  *   - a superseded attempt's late success racing the current attempt's
  *     completion: the reply ends 'sent' with both deliveries recorded,
@@ -364,6 +365,69 @@ describe("migration 064 on native PostgreSQL", () => {
         where status <> 'disconnected' and next_reconcile_at <= now()`
       )[0] as { n: number };
       expect(ids.length + stillDue.n).toBe(due.n);
+    }
+  });
+
+  it("reconciliation fence: an old worker whose claim lapsed never records, in either completion order", async () => {
+    const bot = "7000006800";
+    const id = await connect(bot, "c".repeat(64));
+    const gen = String(
+      ((await sql`select webhook_generation from channel_connections where id = ${id}`)[0] as Row)[
+        "webhook_generation"
+      ],
+    );
+    async function claimRow(): Promise<string> {
+      await sql`update channel_connections set next_reconcile_at = now() - interval '1 second' where id = ${id}`;
+      const rows = await svc("select id, reconcile_claim from claim_channel_reconcile_batch(100)");
+      return String(rows.find((r) => String(r["id"]) === id)!["reconcile_claim"]);
+    }
+    async function lapse() {
+      await sql`update channel_connections set reconcile_claimed_until = now() - interval '1 second' where id = ${id}`;
+    }
+    const record = (claim: string, result: string) =>
+      svc("select record_channel_reconcile($1,$2,$3,$4) as r", [id, gen, claim, result]).then(
+        (rows) => rows[0]!["r"] as { recorded: boolean; reason?: string },
+      );
+    async function state() {
+      return (
+        await sql`select status, last_error_code, reconcile_failures, mismatch_since
+        from channel_connections where id = ${id}`
+      )[0] as Row;
+    }
+
+    // Order 1: old worker completes FIRST (after its claim lapsed), then the new one.
+    const old1 = await claimRow();
+    await lapse();
+    const new1 = await claimRow();
+    const before1 = await state();
+    expect(await record(old1, "missing")).toEqual({ recorded: false, reason: "claim" });
+    expect(await state()).toEqual(before1);
+    expect((await record(new1, "healthy")).recorded).toBe(true);
+    expect(await state()).toMatchObject({ status: "connected", reconcile_failures: 0 });
+
+    // Order 2: new worker completes FIRST, then the old one.
+    const old2 = await claimRow();
+    await lapse();
+    const new2 = await claimRow();
+    expect((await record(new2, "healthy")).recorded).toBe(true);
+    const before2 = await state();
+    expect(await record(old2, "unobservable")).toEqual({ recorded: false, reason: "claim" });
+    expect(await state()).toEqual(before2);
+
+    // Both at once, on separate sessions: only the owning claim records.
+    for (let round = 0; round < 10; round++) {
+      const old = await claimRow();
+      await lapse();
+      const fresh = await claimRow();
+      const [a, b] = await Promise.all([record(old, "mismatch"), record(fresh, "healthy")]);
+      expect(a).toEqual({ recorded: false, reason: "claim" });
+      expect(b.recorded).toBe(true);
+      expect(await state()).toMatchObject({
+        status: "connected",
+        last_error_code: null,
+        reconcile_failures: 0,
+        mismatch_since: null,
+      });
     }
   });
 

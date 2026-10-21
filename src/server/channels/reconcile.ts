@@ -13,16 +13,27 @@
  *              503: reconciliation is off, never open. Intended cadence:
  *              every 5 minutes (RECONCILE_RUN_INTERVAL_MS documents it).
  *   ownership  none needed: claim_channel_reconcile_batch hands each due row
- *              to exactly one run (FOR UPDATE SKIP LOCKED) and pushes its next
- *              check 2 minutes out, so overlapping or restarted runs never
- *              work the same row, and a run that dies returns its rows after
- *              2 minutes. Any Telegram write happens only under the bot's
- *              'repair' operation lease (§2) — never alongside a member's
- *              connect or disconnect.
+ *              to exactly one run (FOR UPDATE SKIP LOCKED) with a unique claim
+ *              id valid for RECONCILE_CLAIM_MS, so overlapping or restarted
+ *              runs never work the same row, and a run that dies returns its
+ *              rows when the claim lapses. FENCE: a result is recorded only
+ *              under the claim that still owns the row — a slow run whose
+ *              claim lapsed or was replaced records no health, failure,
+ *              backoff or mismatch. Any Telegram write happens only under the
+ *              bot's 'repair' operation lease (§2) — never alongside a
+ *              member's connect or disconnect.
  *   per row    one getWebhookInfo (read-only). Right URL → healthy (next in
  *              15 min). Missing / wrong → repair: setWebhook + getWebhookInfo
  *              under the lease. Bot busy → retry in 1 minute. Failure → retry
- *              after 1, 2, 4 … 60 minutes.
+ *              after 1, 2, 4 … 60 minutes (reconcileBackoffMs).
+ *   secret     getWebhookInfo returns the URL only — Telegram never shows
+ *              the secret it holds, so APSA cannot observe it. Consistency
+ *              follows from APSA's invariant: the secret is derived from
+ *              (connection id, generation, CHANNEL_CREDENTIAL_KEY), and a
+ *              repair first checks the derived secret against the stored
+ *              digest; after a key change it sends nothing ('stale_key',
+ *              merchant must reconnect) instead of a same-URL/new-secret
+ *              webhook that getWebhookInfo would call "verified".
  *   limits     ≤ RECONCILE_BATCH_LIMIT rows per run, no new row after
  *              RECONCILE_RUN_BUDGET_MS; ≤ 3 Telegram calls per row per run.
  *   visible    missing / wrong webhook → 'Needs attention' with
@@ -32,10 +43,28 @@
  *              logs channels.telegram.reconcile_alert (error level, ids and
  *              counts only) for the operator's log alerting.
  *
- * Guarantee (with the worker scheduled every 5 minutes and Telegram
- * reachable): a missing or wrong webhook on a live connection — whatever late
- * request caused it — is detected and repaired within ~20 minutes, plus any
- * operation then in flight on the bot. Not prevented: detected and repaired.
+ * Timing is a CONDITIONAL TARGET, not a bound. ~20 minutes (15-minute check
+ * interval + 5-minute schedule) holds only for an ELIGIBLE connection (not
+ * backing off, bot not busy) when the scheduler runs, has capacity for it in
+ * the next run, and Telegram's calls succeed. There is NO fixed worst case:
+ *   - backlog: a run checks at most RECONCILE_BATCH_LIMIT rows (fewer when
+ *     Telegram is slow and the run budget ends), so N due connections need
+ *     backlogRuns(N) runs — 250 due connections take 10 runs ≈ 50 minutes,
+ *     and with more live connections than one run per check interval can
+ *     cover, every connection's effective interval grows
+ *     (steadyStateCheckIntervalMs);
+ *   - backoff: after k consecutive failures the next check is
+ *     reconcileBackoffMs(k − 1) away (up to 60 minutes), so after an outage
+ *     ends the first successful check can be up to 60 minutes + one run later
+ *     — then still subject to backlog;
+ *   - outages: while Telegram (or the database) is unreachable nothing is
+ *     repaired at all;
+ *   - contention: a bot held by another operation is retried each minute, for
+ *     as long as that lasts (an in-doubt lease lasts 5 minutes);
+ *   - stopped scheduling: nothing runs; connections only age to "not
+ *     confirmed" after 60 minutes (computed at read time).
+ * Late writes are not prevented: they are detected and repaired when the
+ * above allow.
  */
 import { serverLog } from "@/server/observability/logger";
 import { timingSafeEqual, webhookRejection } from "@/server/webhooks/security";
@@ -52,12 +81,23 @@ import { CHANNEL_RECONCILE_PATH, isChannelReconcileRequest } from "./telegram/pa
 
 export const RECONCILE_PATH = CHANNEL_RECONCILE_PATH;
 export { isChannelReconcileRequest as isReconcileRequest };
-/** The schedule this design assumes (configured outside the app). */
-export const RECONCILE_RUN_INTERVAL_MS = 5 * 60 * 1000;
-export const RECONCILE_BATCH_LIMIT = 25;
-export const RECONCILE_RUN_BUDGET_MS = 45_000;
-/** Consecutive failed checks from which every run raises an operator alert. */
-export const RECONCILE_ALERT_AFTER = 3;
+export {
+  RECONCILE_RUN_INTERVAL_MS,
+  RECONCILE_BATCH_LIMIT,
+  RECONCILE_RUN_BUDGET_MS,
+  RECONCILE_ALERT_AFTER,
+  RECONCILE_CHECK_INTERVAL_MS,
+  RECONCILE_CLAIM_MS,
+  RECONCILE_BACKOFF_CAP_MS,
+  reconcileBackoffMs,
+  backlogRuns,
+  steadyStateCheckIntervalMs,
+} from "./reconcile-timing";
+import {
+  RECONCILE_ALERT_AFTER,
+  RECONCILE_BATCH_LIMIT,
+  RECONCILE_RUN_BUDGET_MS,
+} from "./reconcile-timing";
 
 export interface ReconcileRunOptions {
   api?: TelegramApiFactory;
@@ -106,7 +146,15 @@ export async function reconcileChannels(
 
     let recorded: Awaited<ReturnType<typeof repo.recordReconcile>> | null = null;
     try {
-      recorded = await repo.recordReconcile(row.id, row.webhook_generation, result);
+      recorded = await repo.recordReconcile(
+        row.id,
+        row.webhook_generation,
+        row.reconcile_claim,
+        result,
+      );
+      if (!recorded.recorded && recorded.reason === "claim") {
+        serverLog.warn("channels.telegram.reconcile_claim_lost", { connectionId: row.id });
+      }
     } catch (error) {
       serverLog.error("channels.telegram.reconcile_record_failed", {
         connectionId: row.id,
@@ -168,6 +216,7 @@ async function checkOne(
   ).catch(() => "unknown" as const);
   if (outcome === "verified") return "repaired";
   if (outcome === "busy") return "busy";
+  if (outcome === "stale_key") return "stale_key";
   return seenState;
 }
 

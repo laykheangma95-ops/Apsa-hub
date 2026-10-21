@@ -35,6 +35,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { PGlite } from "@electric-sql/pglite";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import {
+  RECONCILE_BATCH_LIMIT,
+  RECONCILE_CHECK_INTERVAL_MS,
+  RECONCILE_CLAIM_MS,
+  RECONCILE_RUN_INTERVAL_MS,
+  backlogRuns,
+  reconcileBackoffMs,
+  steadyStateCheckIntervalMs,
+} from "../server/channels/reconcile-timing";
 
 let fixture: Awaited<ReturnType<typeof financialFixture>>;
 let db: PGlite;
@@ -501,8 +510,24 @@ describe("bot operation lease (064 §2)", () => {
 describe("reconciliation state (064 §2a)", () => {
   const RBOT = "7000000090";
 
+  /** Claim the row as a run would, then record under that claim. */
+  async function claim(id: unknown): Promise<string> {
+    return (
+      await db.query<{ c: string }>(
+        `update channel_connections set reconcile_claim = gen_random_uuid(),
+           reconcile_claimed_until = now() + interval '2 minutes' where id = $1
+         returning reconcile_claim c`,
+        [id],
+      )
+    ).rows[0]!.c;
+  }
   async function record(id: unknown, generation: unknown, result: string) {
-    return call("record_channel_reconcile", [id, generation, result]) as Promise<Row>;
+    return call("record_channel_reconcile", [
+      id,
+      generation,
+      await claim(id),
+      result,
+    ]) as Promise<Row>;
   }
   async function dueIn(id: unknown): Promise<number> {
     return (
@@ -587,7 +612,10 @@ describe("reconciliation state (064 §2a)", () => {
       ).rows[0]!.id,
     );
     const gen = row.webhook_generation;
-    expect(await record(row.id, crypto.randomUUID(), "healthy")).toEqual({ recorded: false });
+    expect(await record(row.id, crypto.randomUUID(), "healthy")).toEqual({
+      recorded: false,
+      reason: "generation",
+    });
 
     const one = await record(row.id, gen, "unobservable");
     expect(one).toMatchObject({ recorded: true, status: "connected", reconcile_failures: 1 });
@@ -636,6 +664,156 @@ describe("reconciliation state (064 §2a)", () => {
     expect((await record(row.id, gen, "healthy")).status).toBe("error");
     await settle(org, owner, op, null, null, "done");
     expect((await record(row.id, gen, "healthy")).status).toBe("connected");
+  });
+});
+
+describe("reconciliation fence and timing (064 §2a)", () => {
+  const FBOT = "7000000091";
+  let id: string;
+  let gen: string;
+
+  beforeAll(async () => {
+    const row = await connect(org, owner, FBOT, "a".repeat(64));
+    id = row.id as string;
+    gen = row.webhook_generation as string;
+  });
+
+  async function claimBatchFor(target: string): Promise<string> {
+    await db.query(
+      "update channel_connections set next_reconcile_at = now() - interval '1 second' where id=$1",
+      [target],
+    );
+    const rows = await db.query<{ id: string; reconcile_claim: string }>(
+      "select id, reconcile_claim from claim_channel_reconcile_batch(100)",
+    );
+    return rows.rows.find((r) => r.id === target)!.reconcile_claim;
+  }
+  function recordAs(claimId: string | null, result: string) {
+    return call("record_channel_reconcile", [id, gen, claimId, result]);
+  }
+  async function snapshot() {
+    return (
+      await db.query<Row>(
+        "select status, last_error_code, reconcile_failures, mismatch_since, last_verified_at, next_reconcile_at, reconcile_claim from channel_connections where id=$1",
+        [id],
+      )
+    ).rows[0]!;
+  }
+
+  it("each claim is unique and expires after the claim window", async () => {
+    const c1 = await claimBatchFor(id);
+    const left = await db.query<{ s: number }>(
+      "select extract(epoch from reconcile_claimed_until - now())::int s from channel_connections where id=$1",
+      [id],
+    );
+    expect(left.rows[0]!.s * 1000).toBeLessThanOrEqual(RECONCILE_CLAIM_MS);
+    expect(left.rows[0]!.s * 1000).toBeGreaterThan(RECONCILE_CLAIM_MS - 5000);
+    await db.query(
+      "update channel_connections set reconcile_claimed_until = now() - interval '1 second' where id=$1",
+      [id],
+    );
+    const c2 = await claimBatchFor(id);
+    expect(c2).not.toBe(c1);
+    await recordAs(c2, "healthy");
+  });
+
+  for (const result of ["healthy", "unobservable", "missing", "busy", "stale_key"]) {
+    it(`a lapsed or replaced claim records nothing ('${result}')`, async () => {
+      const old = await claimBatchFor(id);
+      // The old run stalls past its claim; a new run claims the row.
+      await db.query(
+        "update channel_connections set reconcile_claimed_until = now() - interval '1 second' where id=$1",
+        [id],
+      );
+      const before = await snapshot();
+      expect(await recordAs(old, result)).toEqual({ recorded: false, reason: "claim" });
+      const fresh = await claimBatchFor(id);
+      expect(await recordAs(old, result)).toEqual({ recorded: false, reason: "claim" });
+      expect(await recordAs(null, result)).toEqual({ recorded: false, reason: "claim" });
+      const after = await snapshot();
+      for (const k of [
+        "status",
+        "last_error_code",
+        "reconcile_failures",
+        "mismatch_since",
+        "last_verified_at",
+      ]) {
+        expect(after[k]).toEqual(before[k]);
+      }
+      // The owning claim records, once.
+      expect((await recordAs(fresh, "healthy")).recorded).toBe(true);
+      expect(await recordAs(fresh, "healthy")).toEqual({ recorded: false, reason: "claim" });
+    });
+  }
+
+  it("stale_key: the connection says the key changed and must be reconnected", async () => {
+    const c = await claimBatchFor(id);
+    expect(await recordAs(c, "stale_key")).toMatchObject({
+      recorded: true,
+      status: "error",
+      last_error_code: "webhook_key_changed",
+    });
+    await recordAs(await claimBatchFor(id), "healthy");
+  });
+
+  it("backlog: 250 due connections need backlogRuns(250) = 10 full runs (≈50 min), not ~20 min", async () => {
+    // 250 more live connections, all due at once.
+    await db.query(
+      `insert into channel_connections (organization_id, provider, external_account_id, status,
+         credential_ciphertext, credential_key_version, webhook_secret_hash, webhook_generation,
+         next_reconcile_at)
+       select $1, 'TELEGRAM', (8100000000 + g)::text, 'connected', $2, 1, repeat('b', 64),
+         gen_random_uuid(), now() - interval '1 second'
+       from generate_series(1, 250) g`,
+      [org, CIPHER],
+    );
+    await db.query(
+      "update channel_connections set next_reconcile_at = now() + interval '1 day' where external_account_id not like '81%'",
+    );
+    let runs = 0;
+    let claimed = 0;
+    for (;;) {
+      const batch = await db.query(
+        `select id from claim_channel_reconcile_batch(${RECONCILE_BATCH_LIMIT})`,
+      );
+      if (batch.rows.length === 0) break;
+      expect(batch.rows.length).toBeLessThanOrEqual(RECONCILE_BATCH_LIMIT);
+      runs += 1;
+      claimed += batch.rows.length;
+    }
+    expect(claimed).toBe(250);
+    expect(runs).toBe(backlogRuns(250));
+    expect(runs).toBe(10);
+    // The last connection is first checked after (runs − 1) further runs.
+    expect((runs - 1) * RECONCILE_RUN_INTERVAL_MS).toBe(45 * 60 * 1000);
+    // And 250 live connections cannot all be re-checked every 15 minutes.
+    expect(steadyStateCheckIntervalMs(250)).toBe(50 * 60 * 1000);
+    expect(steadyStateCheckIntervalMs(250)).toBeGreaterThan(RECONCILE_CHECK_INTERVAL_MS);
+    expect(steadyStateCheckIntervalMs(75)).toBe(RECONCILE_CHECK_INTERVAL_MS);
+    await db.query("delete from channel_connections where external_account_id like '81%'");
+  });
+
+  it("outage: the SQL backoff equals reconcileBackoffMs — 1, 2, 4 … 60 min — so recovery can lag an outage by up to 60 min + a run", async () => {
+    await db.query("update channel_connections set reconcile_failures = 0 where id=$1", [id]);
+    const observed: number[] = [];
+    for (let k = 0; k < 9; k++) {
+      await recordAs(await claimBatchFor(id), "unobservable");
+      const d = await db.query<{ s: number }>(
+        "select extract(epoch from next_reconcile_at - now())::int s from channel_connections where id=$1",
+        [id],
+      );
+      observed.push(d.rows[0]!.s);
+    }
+    const expected = Array.from({ length: 9 }, (_, k) => reconcileBackoffMs(k) / 1000);
+    expect(expected).toEqual([60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
+    observed.forEach((s, k) => {
+      expect(s).toBeLessThanOrEqual(expected[k]!);
+      expect(s).toBeGreaterThan(expected[k]! - 5);
+    });
+    // Telegram comes back right after the 9th failure: the first check that
+    // can succeed is up to the capped backoff plus one schedule interval away.
+    expect(reconcileBackoffMs(9) + RECONCILE_RUN_INTERVAL_MS).toBe(65 * 60 * 1000);
+    await recordAs(await claimBatchFor(id), "healthy");
   });
 });
 
@@ -1082,7 +1260,7 @@ describe("browser roles", () => {
           "select disconnect_channel_account($1,$1,$1,$1)",
           "select observe_channel_webhook($1,$1)",
           "select * from claim_channel_reconcile_batch(1)",
-          "select record_channel_reconcile($1,$1,'healthy')",
+          "select record_channel_reconcile($1,$1,$1,'healthy')",
           "select * from channel_bot_operations",
         ]) {
           const params = statement.includes("$1") ? [crypto.randomUUID()] : [];
