@@ -14,12 +14,15 @@
  * in one transaction and checks the outcome. Every abort must leave the
  * catalog byte-identical.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { SQL } from "bun";
 import { readFileSync, readdirSync } from "node:fs";
 
 const ADMIN_URL = process.env["APSA_TEST_PG_URL"];
 if (!ADMIN_URL) throw new Error("APSA_TEST_PG_URL is required for migration-061-staging-exception");
+
+// Each case copies a database and applies 061; several do so more than once.
+setDefaultTimeout(60_000);
 
 const MIG_061 = "061_browser_table_authority_hardening.sql";
 const MARKER_COMMENT = "APSA STAGING: 061 managed supabase_admin default ACL exception v1";
@@ -177,7 +180,7 @@ afterAll(async () => {
   }
   for (const role of extraRoles) await admin?.unsafe(`DROP ROLE IF EXISTS ${role}`);
   await admin?.close();
-});
+}, 120_000);
 
 describe("061 staging exception — native PostgreSQL, Supabase role split", () => {
   it("runs on a real server", () => {
@@ -323,5 +326,104 @@ describe("061 staging exception — native PostgreSQL, Supabase role split", () 
         `${MARKER} GRANT CREATE ON SCHEMA public TO authenticated;`,
         /061: browser-reachable roles can create/,
       ));
+  });
+
+  describe("read-only ACL check (scripts/sql/staging-061-exception-acl-check.sql) agrees with 6a-x", () => {
+    const CHECK = readFileSync("scripts/sql/staging-061-exception-acl-check.sql", "utf8");
+    const report = CHECK.slice(
+      CHECK.indexOf("WITH params AS"),
+      CHECK.lastIndexOf(";\n\nROLLBACK;"),
+    );
+    type Row = { check_id: string; status: string; subject: string; observed: string };
+
+    /** The check's rows on a copy of the template after `mutation`, in a READ ONLY transaction. */
+    async function aclCheck(mutation: string): Promise<Row[]> {
+      const name = `apsa_061x_${tag}_${databases.length}`;
+      databases.push(name);
+      await admin.unsafe(`CREATE DATABASE ${name} TEMPLATE ${template}`);
+      const db = new SQL({ url: urlFor(name), max: 1 });
+      try {
+        if (mutation.trim()) await db.unsafe(mutation);
+        const [before] = await db.unsafe(SNAPSHOT);
+        await db.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        const rows = (await db.unsafe(report)) as Row[];
+        await db.unsafe("ROLLBACK");
+        const [after] = await db.unsafe(SNAPSHOT);
+        expect(after).toEqual(before);
+        return rows;
+      } finally {
+        await db.close();
+      }
+    }
+    const result = (rows: Row[]) => rows.find((r) => r.check_id === "99.01")!.subject;
+
+    it("Supabase's managed defaults: EXACT MATCH, every entry shown with grantor and grant option", async () => {
+      const rows = await aclCheck("");
+      expect(result(rows)).toBe("EXACT MATCH: 2 managed rows");
+      const tables = rows.find((r) => r.subject === "supabase_admin public tables")!;
+      const sequences = rows.find((r) => r.subject === "supabase_admin public sequences")!;
+      expect(tables.status).toBe("EXACT");
+      expect(sequences.status).toBe("EXACT");
+      const privs = Number.parseInt(serverVersion, 10) >= 17 ? 8 : 7;
+      expect(tables.observed).toStartWith(`${4 * privs} entries: `);
+      expect(sequences.observed).toStartWith("12 entries: ");
+      expect(tables.observed).toContain("anon:TRUNCATE:by supabase_admin:no grant option");
+      expect(sequences.observed).toContain("authenticated:USAGE:by supabase_admin:no grant option");
+      expect(rows.some((r) => r.check_id.startsWith("11."))).toBe(false);
+    });
+
+    // Each mutation of the managed rows: the check says STOP and names the
+    // difference, and 061 with the marker refuses the same database state.
+    const cases: Array<[string, string, RegExp]> = [
+      [
+        "PUBLIC on the tables row",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;",
+        /extra entry in supabase_admin public tables.*PUBLIC:SELECT/,
+      ],
+      [
+        "an extra non-browser grantee",
+        `ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT SELECT ON TABLES TO ${ROLE_Y};`,
+        new RegExp(`extra entry in supabase_admin public tables.*${ROLE_Y}:SELECT`),
+      ],
+      [
+        "a missing privilege",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public REVOKE TRUNCATE ON TABLES FROM anon;",
+        /missing entry in supabase_admin public tables.*anon:TRUNCATE/,
+      ],
+      [
+        "a grant option",
+        `ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public
+           GRANT USAGE ON SEQUENCES TO authenticated WITH GRANT OPTION;`,
+        /extra entry in supabase_admin public sequences.*authenticated:USAGE:by supabase_admin:WITH GRANT OPTION/,
+      ],
+      [
+        "a global supabase_admin row",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin GRANT SELECT ON TABLES TO anon;",
+        /supabase_admin global tables/,
+      ],
+      [
+        "browser grants already removed (no exception needed)",
+        `ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;
+         ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated;`,
+        /missing entry in supabase_admin public tables.*anon:/,
+      ],
+    ];
+    for (const [label, mutation, difference] of cases) {
+      it(`${label}: STOP with the difference named`, async () => {
+        const rows = await aclCheck(mutation);
+        expect(result(rows)).toStartWith("STOP");
+        expect(rows.map((r) => `${r.subject} ${r.observed}`).join("\n")).toMatch(difference);
+      });
+    }
+    it("agreement: the check's EXACT MATCH coincides with 061 using the exception", async () => {
+      for (const [, mutation] of cases.slice(0, 5)) {
+        const { error, db } = await run061(`${MARKER} ${mutation}`);
+        expect(error).toMatch(/061: a role that can create relations in public/);
+        await db.close();
+      }
+      const exact = await run061(MARKER);
+      expect(exact.error).toBeNull();
+      await exact.db.close();
+    });
   });
 });

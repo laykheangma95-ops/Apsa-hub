@@ -367,15 +367,17 @@ that applied an earlier draft of 062 must be rebuilt, not patched.
 ## 8b. Migration 061 staging exception (Supabase-managed defaults)
 
 **Staging only. Production stays at `060` and never gets the marker below.**
+Decision record: `CORRECTIONS.md` CORRECTION-006.
 
 The staging read-only 061 preflight (reviewed file, SHA-256
-`2392d5a6…bbc53c`) returned `99.01 FAIL / BLOCKED BY PRIVILEGES` for one
-reason only: Supabase's managed defaults — `supabase_admin`, schema `public`,
-tables and sequences, ALL to `postgres, anon, authenticated, service_role`
-(Supabase `init-scripts/00000000000000-initial-schema.sql`). `postgres` cannot
-change another role's defaults (`permission denied to change default
-privileges`), cannot `SET ROLE supabase_admin`, and a superuser's CREATE on
-`public` cannot be revoked; only Supabase can remove them.
+`2392d5a610b235b670bb608e85a1457a787bf167f61c07314e1a66f778bbc53c`) is
+blocked for one reason only: Supabase's managed defaults — `supabase_admin`,
+schema `public`, tables and sequences, ALL to `postgres, anon, authenticated,
+service_role` (Supabase `init-scripts/00000000000000-initial-schema.sql`).
+`postgres` cannot change another role's defaults (`permission denied to
+change default privileges`), cannot `SET ROLE supabase_admin`, and a
+superuser's CREATE on `public` cannot be revoked; only Supabase can remove
+them.
 
 **What the exception allows** (`061` header, "STAGING EXCEPTION"; step 6a-x):
 step 6a skips a `pg_default_acl` row only if schema `apsa_environment` exists,
@@ -392,30 +394,98 @@ exactly the reviewed migration. Proof:
 `src/tests/migration-061-staging-exception-native.runtime.ts` (native
 PostgreSQL, Supabase role split, positive and mutation cases).
 
-**Expected preflight with the exception.** The reviewed preflight is not
-changed and models the original 061, so on staging it still reports
-`BLOCKED BY PRIVILEGES`. Proceed only if every `FAIL` row is `08.00` or an
-`08.02` row of the form `supabase_admin public tables: anon|authenticated
-<DELETE|INSERT|MAINTAIN|REFERENCES|SELECT|TRIGGER|TRUNCATE|UPDATE>` or
-`supabase_admin public sequences: anon|authenticated <SELECT|UPDATE|USAGE>`
-(22 rows on PostgreSQL 17), there is no `UNKNOWN`, and row `12.01` for
-`supabase_admin schema public tables` lists exactly `postgres`, `anon`,
-`authenticated`, `service_role`. Any other FAIL/UNKNOWN: stop.
+Every step below is separately approved and run by the owner on the
+confirmed staging project only. Stop at the first deviation; never edit a
+check to make it fit.
 
-**Order (each a separately approved step):** preflight as above → the owner
-creates the marker on the confirmed staging project only
-(`CREATE SCHEMA apsa_environment AUTHORIZATION postgres;` then
-`COMMENT ON SCHEMA apsa_environment IS 'APSA STAGING: 061 managed supabase_admin default ACL exception v1';`)
-→ `supabase db push` dry run lists only `061` → apply; 061 prints
-`NOTICE: 061: STAGING EXCEPTION on: 2 …` → `DROP SCHEMA apsa_environment;`
-(the marker is read only by 061; dropping it means a re-run would abort).
+### Step 1 — reviewed preflight: the expected blocked result
 
-**Residual risk while the managed defaults exist.** A table or sequence that
-`supabase_admin` creates in `public` later (platform actions such as an
-extension installed into `public`) gets ALL for `anon` and `authenticated`,
-with RLS off, and is reachable through the Data API. APSA never creates
-objects as `supabase_admin`. Staging holds only `QA-STAGING` data. Detect it
-before every staging verification (read-only; any row is a stop):
+The preflight is **not changed** and models the original 061, so on staging
+its verdict is, and must be, `99.01 FAIL / PRIVILEGE / BLOCKED BY
+PRIVILEGES`. This is never a PASS and must never be recorded as one; it is
+the one aggregate FAIL this procedure accepts. Continue only if **all** hold:
+
+- The run is valid (exit 0, row `99.01` present), `00.06` reports
+  PostgreSQL 17 or later, and the `99.01` observed text reads
+  `classes: script=false ledger_unavailable=false inconsistent=false
+  already_recorded=false prerequisite=false privilege=true unknown=false |
+  FAIL=23 UNKNOWN=0 …`.
+- **Exactly 23 diagnostic FAIL rows** (every FAIL row other than `99.01`):
+  - one `08.00`;
+  - sixteen `08.02` table rows —
+    `supabase_admin public tables: anon <P>` and
+    `supabase_admin public tables: authenticated <P>` for each
+    `P` in `DELETE, INSERT, MAINTAIN, REFERENCES, SELECT, TRIGGER, TRUNCATE,
+    UPDATE`;
+  - six `08.02` sequence rows —
+    `supabase_admin public sequences: anon <P>` and
+    `supabase_admin public sequences: authenticated <P>` for each `P` in
+    `SELECT, UPDATE, USAGE`.
+- **Zero UNKNOWN** rows.
+
+Any other diagnostic FAIL (another section, another `08.02` subject, a
+`global` scope, `PUBLIC`, another role), a different count, or any UNKNOWN:
+**stop**.
+
+### Step 2 — complete ACL check: grantor and grant option
+
+The preflight lists these defaults by grantee and privilege only. Run the
+read-only `scripts/sql/staging-061-exception-acl-check.sql` the same way
+(`psql -X -v ON_ERROR_STOP=1 --csv -f <file> -o <output.csv>`). It prints
+every entry of each `supabase_admin` table/sequence default row in 6a's scope
+(global or `public`) as `grantee:privilege:by grantor:grant option`, and
+evaluates the **same predicate as 061 step 6a-x** (the native proof asserts
+that the two agree, mutation by mutation). Continue only if:
+
+- `99.01` is `EXACT MATCH: 2 managed rows` (rows in scope = 2, one exact
+  `public tables`, one exact `public sequences`, read_only = on);
+- the two `10.01` rows are `EXACT`, with 32 table entries (four grantees ×
+  eight privileges on PostgreSQL 17) and 12 sequence entries (four × three),
+  each `by supabase_admin:no grant option`;
+- there is no `11.01` (extra entry) or `11.02` (missing entry) row.
+
+Anything else: **stop**.
+
+### Step 3 — apply only 061 while 062–064 are pending
+
+`supabase db push` applies every migration the ledger has not recorded; from
+the repository root it would push `061`–`064` together. Push from a subset
+instead (tested with Supabase CLI 2.121.0 against a CLI-built ledger ending at
+`060`):
+
+1. From a checkout of the reviewed commit:
+   `bun run scripts/prepare-migration-subset.ts --through=061 --out=<new dir>`.
+   It copies `supabase/migrations/001…061` byte-for-byte into
+   `<new dir>/supabase/migrations`, prints each file's SHA-256, and lists the
+   excluded `062`–`064`. It refuses an existing directory.
+2. From `<new dir>`: `supabase db push --db-url "<staging url>" --dry-run`.
+   **Stop unless it lists exactly `061_browser_table_authority_hardening.sql`.**
+3. Create the marker (staging only):
+   `CREATE SCHEMA apsa_environment AUTHORIZATION postgres;` then
+   `COMMENT ON SCHEMA apsa_environment IS 'APSA STAGING: 061 managed supabase_admin default ACL exception v1';`
+4. Repeat the dry run from `<new dir>`; it must still list exactly `061`.
+5. From `<new dir>`: `supabase db push --db-url "<staging url>"`. Without the
+   marker this aborts at 6a and records nothing (tested).
+6. Verify: the ledger's highest version is `061` (59 rows); step 2's check
+   still reports `EXACT MATCH` (061 does not touch the managed rows); `anon`
+   has no privilege on `public.customers`. The CLI does not display server
+   NOTICEs, so do not wait for 061's `STAGING EXCEPTION` notice.
+7. Drop the marker: `DROP SCHEMA apsa_environment;`. This removes only the
+   marker. **It does not remove Supabase's managed defaults**; the residual
+   risk below remains until Supabase removes them.
+
+`062`–`064` are pushed later, from the full repository, as their own approved
+steps (a dry run then lists exactly `062`–`064`; `062` precedes its
+application release, §8a).
+
+### Residual risk while the managed defaults exist
+
+A table or sequence that `supabase_admin` creates in `public` later (platform
+actions such as an extension installed into `public`) gets ALL for `anon` and
+`authenticated`, with RLS off, and is reachable through the Data API. APSA
+never creates objects as `supabase_admin`. Staging holds only `QA-STAGING`
+data. Detect it before every staging verification (read-only; any row is a
+stop):
 
 ```sql
 select c.oid::regclass, c.relkind, c.relowner::regrole
@@ -428,9 +498,11 @@ select c.oid::regclass, c.relkind, c.relowner::regrole
 `postgres` cannot revoke on an object `supabase_admin` owns, so a hit is
 resolved by Supabase or by resetting staging.
 
-**Reset / reconcile.** Staging is DISPOSABLE (`docs/STAGING_BOOTSTRAP.md`
-§11). A rebuilt project starts with the same managed defaults: repeat
-preflight → marker → 061 → drop marker. If Supabase removes the defaults, the
-preflight passes and 061 needs no marker. Production: no marker, ever; its
-061 waits for Supabase to remove the defaults there (or a separate, reviewed
-decision), preceded by its own read-only preflight.
+### Reset / reconcile
+
+Staging is DISPOSABLE (`docs/STAGING_BOOTSTRAP.md` §11). A rebuilt project
+starts with the same managed defaults: repeat steps 1–3. If Supabase removes
+the defaults, the preflight's section 08 passes and 061 needs no marker.
+Production: no marker, ever; its 061 waits for Supabase to remove the
+defaults there (or a separate, reviewed decision), preceded by its own
+read-only preflight.
