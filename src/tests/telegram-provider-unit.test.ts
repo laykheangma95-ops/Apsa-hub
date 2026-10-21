@@ -284,6 +284,24 @@ describe("setWebhook outcome classification (064 §2)", () => {
   });
 });
 
+describe("undecryptable stored credential (APSA key fault)", () => {
+  it("a reply that failed for it is its own kind, with support-first guidance in both languages", () => {
+    expect(classifyReplyError("credential_unavailable")).toBe("credential_unavailable");
+    expect(classifyReplyError(new Error("credential_unavailable"))).toBe("credential_unavailable");
+    for (const copy of [en, km] as never as {
+      conversation: { replyError: Record<string, string> };
+    }[]) {
+      const text = copy.conversation.replyError["credential_unavailable"]!;
+      expect(text.length).toBeGreaterThan(20);
+      expect(text).not.toMatch(/Tap Send to try again/);
+    }
+    expect(
+      (en as never as { conversation: { replyError: Record<string, string> } }).conversation
+        .replyError["credential_unavailable"],
+    ).toContain("contact APSA support");
+  });
+});
+
 describe("webhook URL and route", () => {
   const id = "11111111-2222-4333-8444-555555555555";
 

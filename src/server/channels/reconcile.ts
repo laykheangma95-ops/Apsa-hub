@@ -42,6 +42,15 @@
  *              worker is visible); from the 3rd consecutive failure every run
  *              logs channels.telegram.reconcile_alert (error level, ids and
  *              counts only) for the operator's log alerting.
+ *   key fault  a stored token that cannot be decrypted with the configured
+ *              CHANNEL_CREDENTIAL_KEY is 'credential_unreadable' — an APSA
+ *              configuration fault, never reported as a Telegram observation
+ *              failure. Nothing is sent to Telegram and nothing stored
+ *              changes; the merchant is told to contact support (checking
+ *              again cannot fix it) and the operator is alerted on the FIRST
+ *              occurrence to restore the key the token was encrypted with
+ *              (the row then recovers on its next check) — or, if that key
+ *              is irrecoverably lost, to have the merchant reconnect.
  *
  * Timing is a CONDITIONAL TARGET, not a bound. ~20 minutes (15-minute check
  * interval + 5-minute schedule) holds only for an ELIGIBLE connection (not
@@ -162,13 +171,22 @@ export async function reconcileChannels(
       });
     }
     const failures = recorded?.reconcile_failures ?? 0;
-    if (recorded?.recorded && failures >= RECONCILE_ALERT_AFTER) {
+    // A key fault cannot heal by retrying: alert at once. Others from the
+    // RECONCILE_ALERT_AFTER-th consecutive failure.
+    const keyFault = result === "credential_unreadable";
+    if (recorded?.recorded && (keyFault || failures >= RECONCILE_ALERT_AFTER)) {
       report.alerts += 1;
       serverLog.error("channels.telegram.reconcile_alert", {
         connectionId: row.id,
         failures,
         error: result,
         mismatchSince: recorded.mismatch_since ?? null,
+        ...(keyFault
+          ? {
+              action:
+                "restore the CHANNEL_CREDENTIAL_KEY this credential was encrypted with; only if that key is irrecoverably lost, ask the merchant to reconnect the bot",
+            }
+          : {}),
       });
     }
   }
@@ -184,10 +202,16 @@ async function checkOne(
   let bot: TelegramBotApi;
   let expected: string;
   try {
+    // A token that cannot be decrypted is APSA's key configuration, not
+    // Telegram: never touch Telegram with it, never change what is stored.
     bot = api(await openCredential(row.credential_ciphertext));
+  } catch {
+    return "credential_unreadable";
+  }
+  try {
     expected = telegramWebhookUrl(row.id, row.webhook_generation);
   } catch {
-    return "unobservable"; // key missing / ciphertext unreadable / no public origin
+    return "unobservable"; // no public webhook origin configured
   }
 
   let seen: string;

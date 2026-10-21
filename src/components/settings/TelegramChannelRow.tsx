@@ -38,6 +38,7 @@ const WEBHOOK_STATES: ReadonlySet<string> = new Set([
   "webhook_mismatch",
   "webhook_failed",
   "webhook_key_changed",
+  "credential_unreadable",
 ]);
 
 interface TelegramChannelRowProps {

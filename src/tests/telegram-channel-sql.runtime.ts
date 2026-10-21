@@ -746,6 +746,37 @@ describe("reconciliation fence and timing (064 §2a)", () => {
     });
   }
 
+  it("credential_unreadable: shown at once (even if verified moments ago); generation and digest untouched", async () => {
+    await db.query("update channel_connections set last_verified_at = now() where id=$1", [id]);
+    const before = await snapshot();
+    const keyBefore = (
+      await db.query<Row>(
+        "select webhook_generation, webhook_secret_hash, credential_ciphertext from channel_connections where id=$1",
+        [id],
+      )
+    ).rows[0]!;
+    const r = await recordAs(await claimBatchFor(id), "credential_unreadable");
+    expect(r).toMatchObject({
+      recorded: true,
+      status: "error",
+      last_error_code: "credential_unreadable",
+      reconcile_failures: Number(before.reconcile_failures) + 1,
+    });
+    expect(
+      (
+        await db.query<Row>(
+          "select webhook_generation, webhook_secret_hash, credential_ciphertext from channel_connections where id=$1",
+          [id],
+        )
+      ).rows[0],
+    ).toEqual(keyBefore);
+    // Restored key: the next healthy check clears it.
+    expect(await recordAs(await claimBatchFor(id), "healthy")).toMatchObject({
+      status: "connected",
+      last_error_code: null,
+    });
+  });
+
   it("stale_key: the connection says the key changed and must be reconnected", async () => {
     const c = await claimBatchFor(id);
     expect(await recordAs(c, "stale_key")).toMatchObject({

@@ -1308,3 +1308,160 @@ describe("reconciliation fence and secret invariant (064 §2a)", () => {
     await expectAgreement(row.id);
   });
 });
+
+describe("stored credential unreadable: key A connected, key B configured (064 §2a)", () => {
+  beforeEach(() => void setPrimaryRateLimitStore(new MemoryRateLimitStore()));
+  const KEY_B = Buffer.alloc(32, 0xb2).toString("base64");
+  let keyA: string;
+
+  async function stored() {
+    return (
+      await db.query<{
+        id: string;
+        status: string;
+        last_error_code: string | null;
+        reconcile_error: string | null;
+        reconcile_failures: number;
+        webhook_generation: string;
+        webhook_secret_hash: string;
+        credential_ciphertext: string;
+        next_in_s: number;
+      }>(
+        `select id, status, last_error_code, reconcile_error, reconcile_failures, webhook_generation,
+           webhook_secret_hash, credential_ciphertext,
+           extract(epoch from next_reconcile_at - now())::int as next_in_s
+         from channel_connections where status <> 'disconnected'`,
+      )
+    ).rows[0]!;
+  }
+  const makeDue = () =>
+    db.query(
+      "update channel_connections set next_reconcile_at = now() where status <> 'disconnected'",
+    );
+
+  it("is classified as an APSA key fault at once — no Telegram write, nothing stored replaced, operator alerted", async () => {
+    keyA = process.env["CHANNEL_CREDENTIAL_KEY"]!;
+    const before = await stored();
+    expect(before.status).toBe("connected");
+    const telegramBefore = { ...telegram! };
+    const lines: string[] = [];
+    const restore = setLogSink((_level, line) => lines.push(line));
+    try {
+      process.env["CHANNEL_CREDENTIAL_KEY"] = KEY_B;
+      calls.length = 0;
+      await makeDue();
+      const report = await reconcileChannels({ api });
+      // First occurrence: failed AND alerted (a key fault cannot heal by retrying).
+      expect(report).toMatchObject({ checked: 1, failed: 1, alerts: 1 });
+      expect(calls).toHaveLength(0); // no Telegram call with an undecryptable credential
+      expect(telegram).toEqual(telegramBefore);
+      const after = await stored();
+      // Shown immediately — not "connected" until the 60-minute staleness, not "Telegram".
+      expect(after).toMatchObject({
+        status: "error",
+        last_error_code: "credential_unreadable",
+        reconcile_error: "webhook_credential_unreadable",
+        reconcile_failures: 1,
+      });
+      // Fail-safe: generation, digest and ciphertext untouched.
+      expect(after.webhook_generation).toBe(before.webhook_generation);
+      expect(after.webhook_secret_hash).toBe(before.webhook_secret_hash);
+      expect(after.credential_ciphertext).toBe(before.credential_ciphertext);
+
+      const alert = lines
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((e) => e["event"] === "channels.telegram.reconcile_alert");
+      expect(alert).toMatchObject({ error: "credential_unreadable", connectionId: after.id });
+      expect(String(alert!["action"])).toContain("restore the CHANNEL_CREDENTIAL_KEY");
+      const all = lines.join("\n");
+      for (const secret of [TOKEN, keyA, KEY_B, telegramBefore.secret]) {
+        expect(all).not.toContain(secret);
+      }
+
+      // The merchant view: an APSA problem, contact support — not "keeps checking".
+      const [listed] = await service.listChannelConnections(ctx(owner, org));
+      expect(listed).toMatchObject({
+        status: "error",
+        health: { lastErrorCode: "credential_unreadable" },
+      });
+      const enLocale = (await import("@/locales/en.json")).default as never as {
+        settings: { channels: { telegram: { webhookState: Record<string, string> } } };
+      };
+      const kmLocale = (await import("@/locales/km.json")).default as never as typeof enLocale;
+      const en = enLocale.settings.channels.telegram.webhookState["credential_unreadable"]!;
+      const km = kmLocale.settings.channels.telegram.webhookState["credential_unreadable"]!;
+      expect(en).toContain("contact APSA support");
+      expect(en).not.toMatch(/keeps checking|checks again automatically/i);
+      expect(km).toContain("ផ្នែកជំនួយ APSA");
+      expect(km).not.toContain("បន្តពិនិត្យដោយស្វ័យប្រវត្តិ");
+
+      // An inbound delivery (still verifiable by its digest) does not paper over it.
+      const inbound = await handleTelegramWebhook(
+        delivery(after.id, customerText("message during key fault", 95_001), { id: 95_001 }),
+        { clientIp: null },
+      );
+      expect(inbound.status).toBe(200);
+      expect((await stored()).status).toBe("error");
+
+      // A reply cannot be sent either, and says why — support, not "try again".
+      const conversationId = (await conversations.listConversations(ctx(owner, org)))
+        .conversations[0]!.id;
+      const reply = await service.sendConversationReply(
+        ctx(owner, org),
+        {
+          conversationId,
+          clientMessageId: crypto.randomUUID(),
+          body: "during key fault",
+          expectedPrincipal: { userId: owner, organizationId: org },
+        },
+        api,
+      );
+      expect(reply.deliveryError).toBe("credential_unavailable");
+      expect(sent().filter((c) => c.body["text"] === "during key fault")).toHaveLength(0);
+
+      // Repeated checks keep backing off and alerting, still without Telegram calls.
+      await makeDue();
+      expect(await reconcileChannels({ api })).toMatchObject({ failed: 1, alerts: 1 });
+      expect(calls).toHaveLength(0);
+      expect((await stored()).next_in_s).toBeGreaterThan(110);
+    } finally {
+      restore();
+      process.env["CHANNEL_CREDENTIAL_KEY"] = keyA;
+    }
+  });
+
+  it("recovers on the next check once key A is restored — nothing else needed", async () => {
+    process.env["CHANNEL_CREDENTIAL_KEY"] = keyA;
+    await makeDue();
+    expect(await reconcileChannels({ api })).toMatchObject({ checked: 1, healthy: 1, alerts: 0 });
+    expect(await stored()).toMatchObject({
+      status: "connected",
+      last_error_code: null,
+      reconcile_failures: 0,
+    });
+    await expectAgreement((await stored()).id);
+  });
+
+  it("if key A is irrecoverably lost, a reconnect under the new key restores the connection", async () => {
+    const before = await stored();
+    try {
+      process.env["CHANNEL_CREDENTIAL_KEY"] = KEY_B; // key A is gone for good
+      await makeDue();
+      await reconcileChannels({ api });
+      expect((await stored()).last_error_code).toBe("credential_unreadable");
+      // The merchant reconnects (pastes the token again) — as support advised.
+      const reconnected = await connectAs(ctx(owner, org), TOKEN);
+      expect(reconnected).toMatchObject({ id: before.id, status: "connected" });
+      const after = await stored();
+      expect(after.credential_ciphertext).not.toBe(before.credential_ciphertext); // now under key B
+      expect(after.webhook_generation).not.toBe(before.webhook_generation);
+      expect(after).toMatchObject({ last_error_code: null, reconcile_failures: 0 });
+      await makeDue();
+      expect(await reconcileChannels({ api })).toMatchObject({ healthy: 1 });
+      await expectAgreement(after.id);
+    } finally {
+      // Leave the shared fixture on key B consistently: every live credential is under it now.
+      process.env["CHANNEL_CREDENTIAL_KEY"] = KEY_B;
+    }
+  });
+});

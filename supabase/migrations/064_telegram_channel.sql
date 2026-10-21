@@ -663,7 +663,11 @@ $$;
 -- 'missing' | 'mismatch' (seen holding no / another webhook, not repaired) |
 -- 'unobservable' (getWebhookInfo failed) | 'busy' (another operation holds
 -- the bot) | 'stale_key' (the current key no longer derives the stored secret;
--- nothing sent). Returns the row's state after recording (never a credential).
+-- nothing sent) | 'credential_unreadable' (the stored token cannot be
+-- decrypted with the configured CHANNEL_CREDENTIAL_KEY — an APSA
+-- configuration fault, not a Telegram one: shown at once, never confused with
+-- a temporary observation failure; nothing sent, nothing stored changes).
+-- Returns the row's state after recording (never a credential).
 CREATE FUNCTION public.record_channel_reconcile(
   p_connection UUID,
   p_generation UUID,
@@ -680,7 +684,8 @@ DECLARE
   v_backoff INTERVAL;
 BEGIN
   IF p_result IS NULL OR p_result NOT IN ('healthy', 'repaired', 'missing', 'mismatch',
-      'unobservable', 'busy', 'stale_key') THEN RAISE EXCEPTION 'invalid_reference'; END IF;
+      'unobservable', 'busy', 'stale_key', 'credential_unreadable')
+    THEN RAISE EXCEPTION 'invalid_reference'; END IF;
 
   SELECT * INTO v_row FROM channel_connections
     WHERE id = p_connection AND status <> 'disconnected' FOR UPDATE;
@@ -722,13 +727,15 @@ BEGIN
           THEN COALESCE(mismatch_since, now()) ELSE mismatch_since END,
         status = CASE
           WHEN v_busy THEN status
-          WHEN p_result IN ('missing', 'mismatch', 'stale_key') THEN 'error'::channel_connection_status
+          WHEN p_result IN ('missing', 'mismatch', 'stale_key', 'credential_unreadable')
+            THEN 'error'::channel_connection_status
           WHEN last_verified_at IS NULL OR last_verified_at < now() - interval '60 minutes'
             THEN 'error'::channel_connection_status
           ELSE status END,
         last_error_code = CASE
           WHEN v_busy THEN last_error_code
           WHEN p_result = 'stale_key' THEN 'webhook_key_changed'
+          WHEN p_result = 'credential_unreadable' THEN 'credential_unreadable'
           WHEN p_result IN ('missing', 'mismatch') THEN 'webhook_' || p_result
           WHEN last_verified_at IS NULL OR last_verified_at < now() - interval '60 minutes'
             THEN 'webhook_unverified'
@@ -861,6 +868,8 @@ BEGIN
           AND last_error_code IS DISTINCT FROM 'webhook_unverified'
           AND last_error_code IS DISTINCT FROM 'webhook_mismatch'
           AND last_error_code IS DISTINCT FROM 'webhook_missing'
+          AND last_error_code IS DISTINCT FROM 'webhook_key_changed'
+          AND last_error_code IS DISTINCT FROM 'credential_unreadable'
         THEN 'connected'::channel_connection_status ELSE status END
     WHERE id = v_connection.id;
 

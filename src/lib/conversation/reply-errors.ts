@@ -17,6 +17,8 @@ export type ReplyErrorKind =
   | "channel_unavailable"
   | "rate_limited"
   | "principal_changed"
+  /** APSA cannot decrypt this bot's stored token (its key configuration): not delivered; support, not retry. */
+  | "credential_unavailable"
   /** A timeout, a lost connection or a 'send_stuck' sweep: delivery is UNKNOWN, not failed. */
   | "unconfirmed"
   /** The provider (or APSA, before sending) definitely did not deliver it. */
@@ -29,6 +31,7 @@ const KNOWN: ReadonlySet<string> = new Set([
   "chat_not_found",
   "channel_unavailable",
   "rate_limited",
+  "credential_unavailable",
 ]);
 
 /*

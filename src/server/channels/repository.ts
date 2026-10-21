@@ -237,7 +237,14 @@ export async function claimReconcileBatch(limit: number): Promise<ReconcileCandi
 }
 
 export type ReconcileResult =
-  "healthy" | "repaired" | "missing" | "mismatch" | "unobservable" | "busy" | "stale_key";
+  | "healthy"
+  | "repaired"
+  | "missing"
+  | "mismatch"
+  | "unobservable"
+  | "busy"
+  | "stale_key"
+  | "credential_unreadable";
 
 /**
  * Records one reconciliation check for the generation the run observed —
