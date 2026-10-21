@@ -935,8 +935,10 @@ describe("production boundary", () => {
       // 061 (browser table authority hardening) is an unrelated security fix;
       // 062 (financial replay identity, refund idempotency and audit atomicity)
       // belongs to the PR #121 security repair, not this UI phase;
-      // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
-      return Number.isFinite(prefix) && prefix > 63;
+      // 063 (order cancellation custody guard) belongs to Orders cancellation safety;
+      // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
+      // to the Telegram provider phase.
+      return Number.isFinite(prefix) && prefix > 64;
     });
     expect(beyond047).toEqual([]);
   });

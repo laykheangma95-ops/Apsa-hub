@@ -74,6 +74,7 @@ import type {
   PaymentRecord,
   StaffRole,
   HomeSummary,
+  Message,
   MetricRange,
   Money,
   Order,
@@ -243,6 +244,38 @@ export async function assignRealConversation(
   const { assignConversationFn } = await import("@/api/conversations");
   const updated = await assignConversationFn({ data: { conversationId: id, assignedUserId } });
   return updated as unknown as Conversation;
+}
+
+/**
+ * The provider channels a production conversation can be answered through
+ * today. Every other channel keeps the composer's "providerPending" state.
+ * Presentation only — the server refuses a reply into a conversation with no
+ * live connection (channel_unavailable) whatever this says.
+ */
+export const REPLYABLE_CHANNELS: ReadonlySet<Conversation["channel"]> = new Set(["telegram"]);
+
+export interface RealReplyResult {
+  message: Message;
+  /** Set when the provider refused; the message is then 'failed' and the SAME clientMessageId may be retried. */
+  deliveryError?: string;
+}
+
+/**
+ * Send a staff reply through the conversation's provider. `clientMessageId`
+ * identifies this submission: a retry (network loss, a failed delivery) MUST
+ * reuse it, and the server then never sends the same reply twice.
+ */
+export async function sendRealConversationReply(input: {
+  conversationId: string;
+  clientMessageId: string;
+  body: string;
+  expectedPrincipal: InitiatingPrincipal;
+}): Promise<RealReplyResult> {
+  if (!isProductionId(input.conversationId) || !isProductionId(input.clientMessageId))
+    throw new Error("invalid_reference");
+  const { sendConversationReplyFn } = await import("@/api/channels");
+  const result = await sendConversationReplyFn({ data: input });
+  return result as unknown as RealReplyResult;
 }
 
 export async function getOlderConversationMessages(id: string, beforeId: string) {

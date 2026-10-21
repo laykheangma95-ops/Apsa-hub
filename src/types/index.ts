@@ -485,6 +485,12 @@ export interface Message {
   body: string;
   at: string;
   state?: DeliveryState;
+  /** Production path only: what the provider delivered (a photo with no caption has an empty body). */
+  messageType?: "text" | "image" | "video" | "audio" | "file" | "system";
+  /** Production path only: 'apsa:<client uuid>' on a staff reply — its retry key. */
+  providerMessageId?: string | null;
+  /** Production path only: why a failed reply failed (a provider error code). */
+  sendError?: string;
 }
 
 export type ConversationStatus =

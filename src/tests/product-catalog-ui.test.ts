@@ -1922,7 +1922,9 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 062 (financial replay identity, refund idempotency and audit atomicity)
     // belongs to the PR #121 security repair;
     // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
-    expect(migrations.at(-1)).toBe("063_order_cancellation_custody_guard.sql");
+    // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
+    // to the Telegram provider phase.
+    expect(migrations.at(-1)).toBe("064_telegram_channel.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

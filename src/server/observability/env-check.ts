@@ -25,6 +25,15 @@ export const OPTIONAL_SERVER_ENV = [
   "RATE_LIMIT_KEY_SECRET",
   // The one forwarding header the deployment's proxy guarantees for client IPs.
   "RATE_LIMIT_CLIENT_IP_HEADER",
+  // AES-256-GCM key for messaging-channel credentials (Telegram bot tokens).
+  // Without it, connecting a channel and replying fail closed.
+  "CHANNEL_CREDENTIAL_KEY",
+  // Public https origin Telegram delivers webhooks to, when VITE_APP_URL is
+  // not reachable by Telegram (e.g. behind deployment protection).
+  "CHANNEL_WEBHOOK_BASE_URL",
+  // Bearer secret of the scheduler that runs Telegram webhook reconciliation
+  // (/api/internal/channels/reconcile). Without it reconciliation is off.
+  "CRON_SECRET",
 ] as const;
 
 export function missingServerEnv(

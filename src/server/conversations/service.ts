@@ -27,6 +27,8 @@
 import { ConversationError } from "./errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
 import * as repo from "./repository";
+import { failStuckOutboundMessages } from "@/server/channels/repository";
+import { serverLog } from "@/server/observability/logger";
 import type {
   ConversationProvider,
   ConversationRow,
@@ -83,6 +85,8 @@ export interface ConversationMessageSummary {
   messageType: MessageRow["message_type"];
   senderType: MessageRow["sender_type"];
   providerMessageId: string | null;
+  /** Failed outbound replies only: the stored provider error code (e.g. provider_unavailable, send_stuck). */
+  sendError?: string;
 }
 
 export interface ConversationDetailResult extends ConversationSummary {
@@ -96,7 +100,7 @@ export interface ConversationListPage {
   nextCursor: string | null;
 }
 
-function toMessageSummary(row: MessageRow): ConversationMessageSummary {
+export function toMessageSummary(row: MessageRow): ConversationMessageSummary {
   const summary: ConversationMessageSummary = {
     id: row.id,
     direction: row.direction,
@@ -107,6 +111,8 @@ function toMessageSummary(row: MessageRow): ConversationMessageSummary {
     providerMessageId: row.provider_message_id,
   };
   if (row.state) summary.state = row.state;
+  const sendError = row.metadata?.["send_error"];
+  if (row.state === "failed" && typeof sendError === "string") summary.sendError = sendError;
   return summary;
 }
 
@@ -245,6 +251,14 @@ export async function getConversationDetail(
   ctx.require("messages.read");
 
   const conversation = await requireOwnedConversation(ctx, conversationId);
+
+  // A reply whose sender died mid-send would otherwise show "sending" forever.
+  // Best effort: the thread still opens if this fails.
+  if (conversation.provider === "TELEGRAM") {
+    await failStuckOutboundMessages(ctx.organizationId, conversationId).catch(() =>
+      serverLog.warn("conversations.fail_stuck_outbound_failed", {}),
+    );
+  }
 
   const [messages, summary] = await Promise.all([
     repo.listMessagesBefore(ctx.organizationId, conversationId, null, DETAIL_MESSAGE_WINDOW),

@@ -91,7 +91,19 @@ export const RATE_LIMITS = {
   paymentMutateMember: rule("payments.mutate.member", 60, 60),
   paymentReversalMember: rule("payments.reversal.member", 20, 60),
 
-  // ── Webhooks (future providers) ───────────────────────────────────────────
+  // ── Messaging replies and channel connections ─────────────────────────────
+  //
+  // A reply is one human tap in the composer: 60/min per member is far above
+  // any real conversation, and keeps a stuck client from hammering the
+  // provider (Telegram allows ~30 messages/s per bot). An idempotent retry of
+  // a reply that was already sent never reaches the provider again (migration
+  // 064 begin_outbound_message), but still counts here.
+  messageReplyMember: rule("messages.reply.member", 60, 60),
+  messageReplyOrganization: rule("messages.reply.organization", 600, 60),
+  /** Connecting a bot validates its token against the provider: 10/hour per member. */
+  integrationConnectMember: rule("integrations.connect.member", 10, 60 * 60),
+
+  // ── Webhooks ──────────────────────────────────────────────────────────────
   /**
    * Per provider per client IP, before any signature work. SECONDARY only:
    * signature verification and replay protection are the primary controls,
@@ -144,6 +156,8 @@ export const BACKEND_FAILURE_POLICY = {
   paymentMutation: "memory_fallback",
   financialReversal: "fail_closed",
   webhook: "memory_fallback",
+  messageReply: "memory_fallback",
+  integrationConnect: "memory_fallback",
   perfTelemetry: "memory_fallback",
 } as const satisfies Record<string, BackendFailurePolicy>;
 

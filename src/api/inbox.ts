@@ -14,4 +14,6 @@ export {
   updateRealConversationStatus,
   assignRealConversation,
   getOlderConversationMessages,
+  sendRealConversationReply,
+  REPLYABLE_CHANNELS,
 } from "@/lib/api";

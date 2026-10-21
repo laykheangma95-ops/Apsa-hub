@@ -827,6 +827,24 @@
       "attachmentBody": "Sending photos is not in the app yet.",
       "paymentBody": "Record or check payment on {{code}}.",
       "deliveryBody": "Arrange or track delivery for {{code}}."
+    },
+    "replyError": {
+      "blocked_by_user": "Not delivered: this customer has blocked your bot. Tap Send to try again.",
+      "chat_not_found": "Not delivered: Telegram can't find this chat anymore.",
+      "channel_unavailable": "This channel is no longer connected. Reconnect it in Settings to reply.",
+      "rate_limited": "You're sending too fast. Wait a moment, then tap Send again.",
+      "principal_changed": "You switched account or business. Reload the page, then send again.",
+      "credential_unavailable": "Not delivered: APSA can't use this bot's saved connection right now (a configuration problem on APSA's side). Please contact APSA support — only reconnect the bot if support asks you to.",
+      "unconfirmed": "Delivery not confirmed — it may already have reached the customer. Check Telegram before you tap Retry.",
+      "not_delivered": "Not delivered. Tap Send to try again.",
+      "generic": "We couldn't confirm this reply. Tap Send to try again."
+    },
+    "retrySend": "Retry",
+    "media": {
+      "image": "Photo",
+      "video": "Video",
+      "audio": "Voice message",
+      "file": "File"
     }
   },
   "createOrder": {
@@ -1786,7 +1804,8 @@
       "business": "Business",
       "personal": "Personal",
       "securityAccess": "Security & Access",
-      "security": "Security"
+      "security": "Security",
+      "channels": "Messaging channels"
     },
     "business": {
       "rowLabel": "Business Profile",
@@ -1831,6 +1850,64 @@
       "signOutConfirmAction": "Sign out",
       "signingOut": "Signing out…",
       "signOutError": "Could not sign you out. Check your connection and try again."
+    },
+    "channels": {
+      "telegram": {
+        "label": "Telegram",
+        "sheetDescription": "Customers message your Telegram bot; you read and reply in the APSA Inbox.",
+        "notConnected": "Not connected",
+        "connectedAs": "Connected · {{handle}}",
+        "unavailable": "Status unavailable",
+        "errorTitle": "Couldn't load your Telegram connection",
+        "errorBody": "Check your connection and try again.",
+        "bot": "Bot",
+        "handle": "Username",
+        "status": "Status",
+        "statusValue": {
+          "connected": "Connected",
+          "error": "Needs attention",
+          "disconnected": "Disconnected"
+        },
+        "lastInbound": "Last customer message",
+        "lastVerified": "Last confirmed with Telegram",
+        "webhookState": {
+          "webhook_pending": "Connecting — waiting for Telegram to confirm.",
+          "webhook_unverified": "Telegram hasn't confirmed this connection recently, so APSA can't promise new messages are arriving. APSA keeps checking automatically.",
+          "webhook_missing": "Telegram isn't sending this bot's messages to APSA right now. APSA is repairing it automatically; messages sent meanwhile should arrive once it's repaired (Telegram keeps them for up to 24 hours).",
+          "webhook_mismatch": "Telegram is using an older connection of this bot. APSA is repairing it automatically.",
+          "webhook_failed": "Telegram refused this connection. Reconnect the bot.",
+          "webhook_key_changed": "APSA's security configuration changed since this bot was connected, so APSA can't safely update Telegram. Please contact APSA support. Only reconnect the bot if support asks you to.",
+          "credential_unreadable": "APSA can't use this bot's saved connection because of a configuration problem on APSA's side — not Telegram. New messages and replies may not work, and checking again won't fix it. Please contact APSA support. Only reconnect the bot if support asks you to."
+        },
+        "never": "None yet",
+        "step1": "In Telegram, open @BotFather and send /newbot.",
+        "step2": "Choose your shop's bot name and username.",
+        "step3": "Copy the token BotFather gives you and paste it below.",
+        "tokenLabel": "Bot token",
+        "connect": "Connect Telegram",
+        "connecting": "Connecting…",
+        "connected": "Telegram is connected. New messages will appear in your Inbox.",
+        "ownerOnly": "Only the business owner can connect a channel.",
+        "disconnect": "Disconnect Telegram",
+        "disconnectConfirmBody": "New Telegram messages will stop arriving in APSA and you won't be able to reply from here. Your past conversations stay.",
+        "disconnectAction": "Disconnect",
+        "disconnected": "Telegram is disconnected.",
+        "disconnectError": "Telegram could not be disconnected. Try again.",
+        "connectError": {
+          "invalid_token": "That doesn't look like a valid bot token. Copy it again from @BotFather.",
+          "not_a_bot": "This token doesn't belong to a bot. Create a bot with @BotFather.",
+          "account_in_use": "This bot is already connected to another APSA business.",
+          "webhook_url_unavailable": "APSA isn't set up to receive Telegram messages on this site yet. Contact support.",
+          "webhook_failed": "Telegram didn't accept the connection. Try again in a moment.",
+          "connect_in_progress": "Another change to this bot is still finishing. Wait a few minutes, then check its status.",
+          "connect_superseded": "Another connect or disconnect replaced this one. Check the channel's current status.",
+          "webhook_unverified": "Telegram hasn't confirmed the connection yet, so APSA can't show it as connected. APSA keeps checking automatically — check its status in a few minutes before trying again.",
+          "credential_unavailable": "APSA can't store this connection securely right now. Contact support.",
+          "provider_unavailable": "Telegram didn't respond. Try again in a moment.",
+          "rate_limited": "Too many attempts. Wait a while and try again.",
+          "generic": "The bot could not be connected. Try again."
+        }
+      }
     }
   },
   "capability": {
