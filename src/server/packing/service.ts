@@ -48,6 +48,13 @@ import * as deliveriesRepo from "@/server/deliveries/repository";
 import { classifyScan } from "@/lib/barcode/scan-router";
 import { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "@/lib/barcode/normalize";
 import { PACK_ORDER_PACKED_REASON_CODE, isPackedDeliveryStatus } from "@/lib/pack";
+import { isReservedOperationalReason } from "@/lib/operational-reasons";
+import {
+  isValidStaffReason,
+  normalizePackDetails,
+  type PackDetailsInput,
+  type UndoPackingResult,
+} from "@/lib/order-work-queue";
 import type {
   MarkPackedResult,
   OrderPackStateResult,
@@ -224,7 +231,22 @@ export async function getOrderPackState(
     if (parcel && parcel.status !== "void") parcelCode = parcel.parcel_code;
   }
 
-  return { packed, parcelCode };
+  // Details describe the parcel as it is packed NOW; a record from before an
+  // undo (or from a Mark Packed that did not complete) is never shown.
+  const record = packed
+    ? await parcelsRepo.findLatestPackRecord(ctx.organizationId, orderId)
+    : null;
+  const packDetails = record
+    ? {
+        packageCount: record.package_count,
+        weightGrams: record.weight_grams,
+        storageLocation: record.storage_location,
+        recordedAt: record.recorded_at,
+      }
+    : null;
+  const handedOff = order.fulfillment_status === "fulfilled" || delivery?.status === "in_transit";
+
+  return { packed, parcelCode, packDetails, handedOff };
 }
 
 /**
@@ -376,10 +398,18 @@ export async function markOrderPacked(
   packedLines: readonly PackedLineInput[],
   /** Refuse-only (assertExpectedPrincipal): who started this Mark Packed. */
   expectedPrincipal: ExpectedPrincipal,
+  /**
+   * Parcel details and the optional shelf / bin (migration 065). Recorded
+   * after every check passes and before the packed marker; they describe the
+   * parcel only — never payment, hand-off, delivery or completion.
+   */
+  detailsInput: PackDetailsInput = { packageCount: 1, weightGrams: null, storageLocation: null },
 ): Promise<MarkPackedResult> {
   assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.read");
   ctx.require("delivery.handoff");
+  const details = normalizePackDetails(detailsInput);
+  if (!details) return { kind: "invalid_details" };
 
   const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
   if (!order || !isPackEligible(order.lifecycle_status, order.fulfillment_status)) {
@@ -394,6 +424,18 @@ export async function markOrderPacked(
 
   const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
   const alreadyPacked = await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null);
+
+  if (!alreadyPacked) {
+    const recorded = await parcelsRepo.recordParcelPackDetails(
+      ctx.organizationId,
+      orderId,
+      ctx.userId,
+      details,
+    );
+    if (recorded.status === "invalid_details") return { kind: "invalid_details" };
+    if (recorded.status === "no_parcel") return { kind: "no_parcel" };
+    if (recorded.status !== "success") return { kind: "invalid_order" };
+  }
 
   if (delivery) {
     const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
@@ -572,4 +614,63 @@ function isPackingComplete(
   }
   if (submitted.size !== items.length) return false;
   return items.every((item) => submitted.get(item.id) === item.quantity);
+}
+
+/**
+ * Undo packing — for a Mark Packed done by mistake (wrong items, wrong parcel).
+ *
+ * Only while the parcel is still in the shop: undo_order_packing_v1 refuses
+ * once a delivery is in transit or delivered (courier custody) and decides that
+ * under the order lock. A reason is required; the clearing history row carries
+ * it and an audit_logs row is written in the same transaction. A 'ready'
+ * delivery is cancelled with the undo (exactly as a reopen does), so the
+ * parcel cannot be handed off until it is packed again. Payment, stock and the
+ * order's lifecycle are never touched.
+ *
+ * Same grants as Mark Packed (orders.read + delivery.handoff): whoever may pack
+ * may correct a packing. Refused first when started as another member or
+ * organization (CORRECTION-004).
+ */
+export async function undoOrderPacking(
+  ctx: AuthorizationContext,
+  orderId: string,
+  reason: string,
+  /** Refuse-only (assertExpectedPrincipal): who started this undo. */
+  expectedPrincipal: ExpectedPrincipal,
+): Promise<UndoPackingResult> {
+  assertExpectedPrincipal(ctx, expectedPrincipal);
+  ctx.require("orders.read");
+  ctx.require("delivery.handoff");
+  if (!isValidStaffReason(reason) || isReservedOperationalReason(reason)) {
+    return { kind: "reason_required" };
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    const result = await ordersRepo.undoOrderPacking(
+      ctx.organizationId,
+      orderId,
+      ctx.userId,
+      reason.trim(),
+    );
+    switch (result.status) {
+      case "success":
+        return {
+          kind: "undone",
+          cancelledDeliveryId:
+            (result as { cancelled_delivery_id?: string | null }).cancelled_delivery_id ?? null,
+        };
+      case "handed_off":
+        return { kind: "handed_off" };
+      case "not_packed":
+        return { kind: "not_packed" };
+      case "reason_required":
+        return { kind: "reason_required" };
+      case "retry":
+        if (attempt < 3) continue;
+        return { kind: "retry" };
+      default:
+        // not_found, order_terminal, stale, actor_required
+        return { kind: "invalid_order" };
+    }
+  }
 }

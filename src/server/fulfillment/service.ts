@@ -61,7 +61,7 @@ function money(amount: number, currency: string): Money {
  * should always, being a LEFT JOIN on orders), we fall back to the order total,
  * i.e. assume nothing settled — the safe direction for COD.
  */
-function outstandingMinor(
+export function outstandingMinor(
   totals: repo.OrderPaymentTotalsRow | undefined,
   orderTotalMinor: number,
 ): number {

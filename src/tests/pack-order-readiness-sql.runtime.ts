@@ -690,16 +690,20 @@ describe("one timestamp strategy: every fulfillment-history writer stamps after 
     ).rows;
     const names = writers.map((w) => w.name).sort();
     // Every function in the database that writes order or delivery history.
-    expect(names).toEqual([
-      "create_delivery_v1",
-      "ready_packed_delivery_v1",
-      "record_order_packed_v1",
-      "reopen_order_fulfillment_v1",
-      "sync_order_payment_state",
-      "transition_delivery_status_v1",
-      "transition_order_before_payment_authority_v1",
-      "transition_order_status_v1",
-    ]);
+    expect(names).toEqual(
+      [
+        "create_delivery_v1",
+        "ready_packed_delivery_v1",
+        "record_order_packed_v1",
+        "reopen_order_fulfillment_v1",
+        "sync_order_payment_state",
+        "transition_delivery_status_v1",
+        "transition_order_before_payment_authority_v1",
+        "transition_order_status_v1",
+        // 065: Undo packing — same lock discipline and helper-stamped rows.
+        "undo_order_packing_v1",
+      ].sort(),
+    );
     for (const { name, src } of writers) {
       if (name === "sync_order_payment_state") {
         // Payment/refund axes only — not fulfillment history.

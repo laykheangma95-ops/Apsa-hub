@@ -45,6 +45,7 @@ import { Route as AppInventoryVariantIdRouteImport } from './routes/app.inventor
 import { Route as AppInventoryCountRouteImport } from './routes/app.inventory.count'
 import { Route as AppInventoryReceiveRouteImport } from './routes/app.inventory.receive'
 import { Route as AppOrdersIdRouteImport } from './routes/app.orders.$id'
+import { Route as AppOrdersWorkRouteImport } from './routes/app.orders.work'
 import { Route as AppPackOrderIdRouteImport } from './routes/app.pack.$orderId'
 import { Route as AppParcelsCodeRouteImport } from './routes/app.parcels.$code'
 import { Route as AppPaymentsIdRouteImport } from './routes/app.payments.$id'
@@ -232,6 +233,11 @@ const AppOrdersIdRoute = AppOrdersIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppOrdersRoute,
 } as any)
+const AppOrdersWorkRoute = AppOrdersWorkRouteImport.update({
+  id: '/work',
+  path: '/work',
+  getParentRoute: () => AppOrdersRoute,
+} as any)
 const AppPackOrderIdRoute = AppPackOrderIdRouteImport.update({
   id: '/$orderId',
   path: '/$orderId',
@@ -299,6 +305,7 @@ export interface FileRoutesByFullPath {
   '/app/inventory/count': typeof AppInventoryCountRoute
   '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/orders/work': typeof AppOrdersWorkRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
@@ -342,6 +349,7 @@ export interface FileRoutesByTo {
   '/app/inventory/count': typeof AppInventoryCountRoute
   '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/orders/work': typeof AppOrdersWorkRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
@@ -387,6 +395,7 @@ export interface FileRoutesById {
   '/app/inventory/count': typeof AppInventoryCountRoute
   '/app/inventory/receive': typeof AppInventoryReceiveRoute
   '/app/orders/$id': typeof AppOrdersIdRoute
+  '/app/orders/work': typeof AppOrdersWorkRoute
   '/app/pack/$orderId': typeof AppPackOrderIdRoute
   '/app/parcels/$code': typeof AppParcelsCodeRoute
   '/app/payments/$id': typeof AppPaymentsIdRoute
@@ -433,6 +442,7 @@ export interface FileRouteTypes {
     | '/app/inventory/count'
     | '/app/inventory/receive'
     | '/app/orders/$id'
+    | '/app/orders/work'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
     | '/app/payments/$id'
@@ -476,6 +486,7 @@ export interface FileRouteTypes {
     | '/app/inventory/count'
     | '/app/inventory/receive'
     | '/app/orders/$id'
+    | '/app/orders/work'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
     | '/app/payments/$id'
@@ -520,6 +531,7 @@ export interface FileRouteTypes {
     | '/app/inventory/count'
     | '/app/inventory/receive'
     | '/app/orders/$id'
+    | '/app/orders/work'
     | '/app/pack/$orderId'
     | '/app/parcels/$code'
     | '/app/payments/$id'
@@ -799,6 +811,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrdersIdRouteImport
       parentRoute: typeof AppOrdersRoute
     }
+    '/app/orders/work': {
+      id: '/app/orders/work'
+      path: '/work'
+      fullPath: '/app/orders/work'
+      preLoaderRoute: typeof AppOrdersWorkRouteImport
+      parentRoute: typeof AppOrdersRoute
+    }
     '/app/pack/$orderId': {
       id: '/app/pack/$orderId'
       path: '/$orderId'
@@ -886,10 +905,12 @@ const AppInventoryRouteWithChildren = AppInventoryRoute._addFileChildren(
 
 interface AppOrdersRouteChildren {
   AppOrdersIdRoute: typeof AppOrdersIdRoute
+  AppOrdersWorkRoute: typeof AppOrdersWorkRoute
 }
 
 const AppOrdersRouteChildren: AppOrdersRouteChildren = {
   AppOrdersIdRoute: AppOrdersIdRoute,
+  AppOrdersWorkRoute: AppOrdersWorkRoute,
 }
 
 const AppOrdersRouteWithChildren = AppOrdersRoute._addFileChildren(

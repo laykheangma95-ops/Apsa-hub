@@ -20,6 +20,7 @@ import {
   ScreenBleed,
   Spinner,
   StickyActionBar,
+  QuantityStepper,
 } from "@/design-system";
 import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
@@ -51,6 +52,11 @@ import {
   type ServerProductScanResult,
 } from "@/lib/pack";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
+import {
+  PACKAGE_COUNT_MAX,
+  STORAGE_LOCATION_MAX,
+  normalizePackDetails,
+} from "@/lib/order-work-queue";
 
 export const Route = createFileRoute("/app/pack/$orderId")({
   head: () => ({
@@ -251,6 +257,17 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [search, setSearch] = useState("");
+  // Parcel details saved with Mark Packed. They describe the parcel and its
+  // shelf / bin only — the server never derives payment, hand-off or delivery
+  // from them.
+  const [packageCount, setPackageCount] = useState(1);
+  const [weightText, setWeightText] = useState("");
+  const [shelfText, setShelfText] = useState("");
+  const details = normalizePackDetails({
+    packageCount,
+    weightGrams: weightText.trim() === "" ? null : Number(weightText),
+    storageLocation: shelfText,
+  });
   const feedbackIdRef = useRef(0);
   const scanInputRef = useRef<HTMLInputElement>(null);
 
@@ -390,8 +407,14 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
       const current = sessionRef.current;
       if (!current) return { kind: "incomplete" };
       const { markOrderPackedFn } = await import("@/api/packing");
+      if (!details) return { kind: "invalid_details" };
       return markOrderPackedFn({
-        data: { orderId, packedLines: buildPackedLines(current), expectedPrincipal: startedAs },
+        data: {
+          orderId,
+          packedLines: buildPackedLines(current),
+          expectedPrincipal: startedAs,
+          details,
+        },
       });
     },
     onSuccess: async (result) => {
@@ -424,7 +447,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
     },
   });
 
-  const ready = packSession !== null && canMarkPacked(packSession);
+  const ready = packSession !== null && canMarkPacked(packSession) && details !== null;
   const remaining = progress?.remaining ?? 0;
 
   return (
@@ -496,6 +519,59 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                 </div>
               ) : null}
             </section>
+
+            {/* Parcel details — saved with Mark Packed, once every item is in. */}
+            {progress.isComplete && !alreadyPacked ? (
+              <section className="rounded-2xl border border-border-default bg-surface-primary p-4">
+                <h2 className="text-label mb-1 text-text-primary">
+                  {t("packSession.details.title")}
+                </h2>
+                <p className="text-caption mb-3 text-text-muted">{t("packSession.details.hint")}</p>
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span id="pack-package-count" className="text-body-sm text-text-secondary">
+                      {t("packSession.details.packageCount")}
+                    </span>
+                    <div role="group" aria-labelledby="pack-package-count">
+                      <QuantityStepper
+                        value={packageCount}
+                        onChange={setPackageCount}
+                        min={1}
+                        max={PACKAGE_COUNT_MAX}
+                      />
+                    </div>
+                  </div>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-body-sm text-text-secondary">
+                      {t("packSession.details.weight")}
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={weightText}
+                      onChange={(e) => setWeightText(e.target.value.replace(/[^0-9]/g, ""))}
+                      maxLength={6}
+                      className="h-12 rounded-xl border border-border-default bg-surface-primary px-4 text-body text-text-primary focus:border-brand-primary focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-body-sm text-text-secondary">
+                      {t("packSession.details.shelf")}
+                    </span>
+                    <input
+                      type="text"
+                      value={shelfText}
+                      onChange={(e) => setShelfText(e.target.value)}
+                      maxLength={STORAGE_LOCATION_MAX}
+                      placeholder={t("packSession.details.shelfPlaceholder")}
+                      autoComplete="off"
+                      className="h-12 rounded-xl border border-border-default bg-surface-primary px-4 text-body text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
+                    />
+                  </label>
+                </div>
+              </section>
+            ) : null}
 
             {/* Scan: camera (primary on phones), hardware scanner, or typed code */}
             {!progress.isComplete && !alreadyPacked ? (
@@ -667,6 +743,8 @@ function markPackedErrorKey(result: MarkPackedResult): string {
   switch (result.kind) {
     case "incomplete":
       return "packSession.markPacked.incomplete";
+    case "invalid_details":
+      return "packSession.markPacked.invalidDetails";
     default:
       return "packSession.markPacked.failed";
   }

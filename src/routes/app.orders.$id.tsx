@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, PackageCheck, Printer, Truck } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -80,6 +80,8 @@ import { packingKeys } from "@/lib/packing-query";
 import { evictShippingLabels } from "@/lib/fulfillment-query";
 import { RetryDeliveryReadyBoundary } from "@/components/fulfillment/RetryDeliveryReadyAction";
 import { ParcelRecoveryBoundary } from "@/components/fulfillment/ParcelRecoveryAction";
+import { PackedParcelBoundary } from "@/components/fulfillment/PackedParcelPanel";
+import { isOrderWorkQueue } from "@/lib/order-work-queue";
 import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliveries";
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
@@ -254,6 +256,10 @@ const orderActionScopeOf = ({ orderId, startedAs }: OrderActionStart) =>
 
 function RealOrderDetailScreen({ id }: { id: string }) {
   const navigate = useNavigate();
+  // The work queue this order was opened from, if any (validated, never trusted).
+  const fromQueue = useRouterState({
+    select: (state) => (state.location.search as { queue?: unknown } | undefined)?.queue,
+  });
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const errorCopy = useOrderErrorCopy();
@@ -774,7 +780,15 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   }, [lifecycleError]);
 
   // Back to the list the merchant came from, filter included.
-  const back = () => navigate({ to: "/app/orders", search: (prev) => prev });
+  // Navigation only — leaving changes nothing. An order opened from a work
+  // queue returns to that queue; otherwise to the list with its filter.
+  const back = () =>
+    isOrderWorkQueue(fromQueue)
+      ? navigate({ to: "/app/orders/work", search: { queue: fromQueue } })
+      : navigate({
+          to: "/app/orders",
+          search: ({ queue: _queue, ...prev }: { queue?: unknown; [key: string]: unknown }) => prev,
+        });
 
   if (query.isLoading) {
     return (
@@ -1396,14 +1410,28 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                   case "packed":
                     // Status carried by icon + label, never colour alone.
                     return (
-                      <p
-                        key={action.key}
-                        role="status"
-                        className="text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-status-success-soft text-status-success-text"
-                      >
-                        <PackageCheck className="size-4" aria-hidden />
-                        {t("order.packed")}
-                      </p>
+                      <div key={action.key} className="flex flex-col gap-2">
+                        <p
+                          role="status"
+                          className="text-label flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-status-success-soft text-status-success-text"
+                        >
+                          <PackageCheck className="size-4" aria-hidden />
+                          {t("order.packed")}
+                        </p>
+                        {/* Saved parcel details + Undo packing (never after hand-off). */}
+                        <PackedParcelBoundary
+                          userId={userId}
+                          organizationId={routeOrganizationId}
+                          orderId={id}
+                          details={packState?.packDetails ?? null}
+                          canUndo={
+                            identityOk &&
+                            capabilities.can("delivery.handoff") &&
+                            packState?.handedOff === false
+                          }
+                          deliveryReady={activeDelivery?.status === "ready"}
+                        />
+                      </div>
                     );
                   case "arrange_delivery":
                     return (
@@ -1507,6 +1535,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
         open={cancelOpen}
         onOpenChange={setCancelOpen}
         pending={cancelMutation.isPending}
+        paymentRecorded={order.paymentStatus === "paid" || order.paymentStatus === "pending"}
         onConfirm={(reason) =>
           cancelMutation.mutate({ orderId: order.id, reason, startedAs: principal })
         }

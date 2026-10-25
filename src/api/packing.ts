@@ -109,13 +109,64 @@ export const markOrderPackedFn = createServerFn({ method: "POST" })
           .max(500),
         // Refuse-only: the principal this Mark Packed was started as.
         expectedPrincipal: expectedPrincipalSchema,
+        // Parcel details + optional shelf / bin. Range-checked again by the
+        // service and by the database; they never change any status.
+        details: z
+          .object({
+            packageCount: z.number().int().min(1).max(50),
+            weightGrams: z.number().int().min(1).max(100000).nullable(),
+            storageLocation: z.string().max(40).nullable(),
+          })
+          .strict()
+          .optional(),
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markOrderPacked } = await import("@/server/packing/service");
-    return markOrderPacked(authCtx, data.orderId, data.packedLines, data.expectedPrincipal);
+    return markOrderPacked(
+      authCtx,
+      data.orderId,
+      data.packedLines,
+      data.expectedPrincipal,
+      data.details,
+    );
+  });
+
+// ── undoOrderPackingFn ───────────────────────────────────────────────────────
+
+export const undoOrderPackingFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        reason: z.string().max(500),
+        // Refuse-only: the principal this undo was started as.
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .strict()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { undoOrderPacking } = await import("@/server/packing/service");
+    return undoOrderPacking(authCtx, data.orderId, data.reason, data.expectedPrincipal);
+  });
+
+// ── listOrderWorkQueueFn ─────────────────────────────────────────────────────
+
+export const listOrderWorkQueueFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({ queue: z.enum(["payment_due", "not_prepared", "awaiting_handoff"]) })
+      .strict()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listOrderWorkQueue } = await import("@/server/orders/work-queue");
+    return listOrderWorkQueue(authCtx, data.queue);
   });
 
 // ── getOrderPackStateFn ──────────────────────────────────────────────────────
