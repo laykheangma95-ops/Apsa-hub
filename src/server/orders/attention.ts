@@ -1,11 +1,11 @@
 /**
  * Orders attention views — the per-row facts behind "Payment due", "Needs
- * preparation" and "Packed · Waiting for pickup" (src/lib/order-list-filters.ts).
+ * preparation", "Packed · Needs delivery" and "Packed · Waiting for pickup"
+ * (src/lib/order-list-filters.ts).
  *
  * Read-only. Nothing here writes an order, a payment, a delivery or stock, and
- * no status is derived that the domain does not already hold: each fact below
- * is a stored row, or the database's own packed rule (order_currently_packed_v1,
- * migration 054) called through the Delivery repository.
+ * no status is derived here: each fact below is a stored row. Which view an
+ * order is in (packed or not) is decided by the database, not here.
  *
  * Every read is scoped to the organization the server resolved for the caller
  * AND to the ids of one page of that organization's own orders, so nothing
@@ -14,8 +14,6 @@
  *   customer name   customers.read   (otherwise "a customer is linked")
  *   received so far payments.read
  *   delivery facts  delivery.read
- * The packed-review flag needs only orders.read: Order detail shows the same
- * packed state to the same member (getOrderPackState).
  *
  * There is no staff assignment in the data model (no column, no table), so
  * `assignedStaff` is always null and the screen says so rather than inventing
@@ -24,7 +22,6 @@
  * Never import this file from browser-bundled code.
  */
 import type { AuthorizationContext } from "@/server/auth/authorization";
-import * as deliveriesRepo from "@/server/deliveries/repository";
 import {
   DELIVERY_STATUSES,
   isTerminalDeliveryStatus,
@@ -56,12 +53,6 @@ export interface OrderAttentionDetail {
   received: Money | null;
   /** null when the member may not read deliveries. */
   delivery: OrderAttentionDelivery | null;
-  /**
-   * Listed under Needs preparation (fulfillment unfulfilled), yet the packed
-   * rule says the order IS packed — packed, then its delivery failed or was
-   * cancelled. Shown for review, never as "needs packing".
-   */
-  packedReview: boolean;
   /** Not tracked by APSA yet — always null. */
   assignedStaff: null;
 }
@@ -93,11 +84,7 @@ export async function buildOrderAttention(
     canPayments && filter === "awaiting_payment"
       ? repo.listPaymentTotalsForOrders(organizationId, orderIds)
       : [],
-    // Read whenever the packed review needs it, even for a member who may not
-    // see delivery facts; only the boolean leaves this function then.
-    canDeliveries || filter === "to_pack"
-      ? repo.listDeliveriesForOrders(organizationId, orderIds)
-      : [],
+    canDeliveries ? repo.listDeliveriesForOrders(organizationId, orderIds) : [],
   ]);
 
   const nameById = new Map(customers.map((row) => [row.id, row.display_name]));
@@ -129,21 +116,6 @@ export async function buildOrderAttention(
     }
   }
 
-  // The packed rule, once per listed order that has ever had a delivery: an
-  // order with none cannot be packed while unfulfilled (Mark Packed without a
-  // delivery moves it to processing; only a reopen moves it back, and a reopen
-  // clears packed).
-  const packed = new Set<string>();
-  if (filter === "to_pack") {
-    const candidates = rows.filter((row) => latestByOrder.has(row.id)).map((row) => row.id);
-    const answers = await Promise.all(
-      candidates.map((id) => deliveriesRepo.isOrderCurrentlyPacked(organizationId, id)),
-    );
-    candidates.forEach((id, index) => {
-      if (answers[index]) packed.add(id);
-    });
-  }
-
   const result: Record<string, OrderAttentionDetail> = {};
   for (const row of rows) {
     const name = row.customer_id ? nameById.get(row.customer_id) : undefined;
@@ -168,7 +140,6 @@ export async function buildOrderAttention(
             cod: shown ? (shown.cod_amount_minor ?? 0) > 0 : false,
           }
         : null,
-      packedReview: packed.has(row.id),
       assignedStaff: null,
     };
   }

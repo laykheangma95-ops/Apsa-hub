@@ -1355,6 +1355,7 @@
       "all": "All",
       "awaiting_payment": "Payment due",
       "to_pack": "Needs preparation",
+      "packed_needs_delivery": "Packed · Needs delivery",
       "waiting_pickup": "Packed · Waiting for pickup",
       "draft": "Drafts",
       "processing": "Processing",
@@ -1393,7 +1394,7 @@
       "staffNotTracked": "Assigned staff: not tracked yet",
       "received": "Received {{received}} of {{total}}",
       "cod": "Cash on delivery — the courier collects",
-      "packedReview": "Already packed. The last delivery did not go out — review before packing again.",
+      "packedDeliveryUnknown": "Packed, not with a courier yet. Open the order to see its delivery.",
       "next": "Next: {{action}}",
       "nextTeammate": "Next step needs a teammate with access",
       "countLabel": "{{label}}: {{count}} orders"

@@ -1,5 +1,5 @@
 /**
- * The Orders screen's nine filters — vocabulary, meaning and labels.
+ * The Orders screen's ten filters — vocabulary, meaning and labels.
  *
  * The SQL behind each filter is proven against the real repository and every
  * migration in src/tests/orders-pagination-mounted.runtime.ts (case FA); this
@@ -49,12 +49,13 @@ function lookup(dict: unknown, key: string): unknown {
   }, dict);
 }
 
-describe("the nine filters", () => {
-  it("are exactly these nine: All, then the three attention views, then progress", () => {
+describe("the ten filters", () => {
+  it("are exactly these ten: All, then the four attention views, then progress", () => {
     expect([...ORDER_LIST_FILTERS]).toEqual([
       "all",
       "awaiting_payment",
       "to_pack",
+      "packed_needs_delivery",
       "waiting_pickup",
       "draft",
       "processing",
@@ -63,7 +64,12 @@ describe("the nine filters", () => {
       "cancelled",
     ]);
     expect(DEFAULT_ORDER_LIST_FILTER).toBe("all");
-    expect([...ORDER_ATTENTION_FILTERS]).toEqual(["awaiting_payment", "to_pack", "waiting_pickup"]);
+    expect([...ORDER_ATTENTION_FILTERS]).toEqual([
+      "awaiting_payment",
+      "to_pack",
+      "packed_needs_delivery",
+      "waiting_pickup",
+    ]);
   });
 
   it("match exactly the combinations written out by hand", () => {
@@ -72,7 +78,10 @@ describe("the nine filters", () => {
       all: 64,
       awaiting_payment: 36,
       draft: 12,
-      to_pack: 4,
+      // Confirmed, unfulfilled or processing, not packed, nothing ready or out.
+      to_pack: 8,
+      // Needs the packed rule: no combination of the three columns alone is packed.
+      packed_needs_delivery: 0,
       // A delivery fact: no combination of the three columns alone is waiting.
       waiting_pickup: 0,
       processing: 4,
@@ -82,7 +91,13 @@ describe("the nine filters", () => {
     });
 
     expect(matching("to_pack").every((a) => a.lifecycle === "confirmed")).toBe(true);
-    expect(matching("to_pack").every((a) => a.fulfillment === "unfulfilled")).toBe(true);
+    // Not packed, unfulfilled OR processing: a delivery arranged before packing
+    // moves fulfillment to processing, and that order still needs packing.
+    expect(
+      matching("to_pack").every(
+        (a) => a.fulfillment === "unfulfilled" || a.fulfillment === "processing",
+      ),
+    ).toBe(true);
     expect(matching("processing").every((a) => a.fulfillment === "processing")).toBe(true);
     expect(matching("fulfilled").every((a) => a.lifecycle === "confirmed")).toBe(true);
     expect(matching("fulfilled").every((a) => a.fulfillment === "fulfilled")).toBe(true);
@@ -95,13 +110,43 @@ describe("the nine filters", () => {
     ).toBe(true);
   });
 
-  it("the six progress filters place every possible order in exactly one", () => {
+  it("the five progress filters plus 'confirmed, unfulfilled' place every possible order in exactly one", () => {
     expect([...ORDER_PROGRESS_FILTERS].sort()).toEqual(
-      ["cancelled", "completed", "draft", "fulfilled", "processing", "to_pack"].sort(),
+      ["cancelled", "completed", "draft", "fulfilled", "processing"].sort(),
     );
     for (const axes of EVERY) {
-      const hits = ORDER_PROGRESS_FILTERS.filter((f) => orderMatchesListFilter(f, axes));
-      expect({ axes, hits: hits.length }).toEqual({ axes, hits: 1 });
+      const hits = ORDER_PROGRESS_FILTERS.filter((f) => orderMatchesListFilter(f, axes)).length;
+      const confirmedUnfulfilled =
+        axes.lifecycle === "confirmed" && axes.fulfillment === "unfulfilled";
+      expect({ axes, hits: hits + (confirmedUnfulfilled ? 1 : 0) }).toEqual({ axes, hits: 1 });
+    }
+  });
+
+  it("Needs preparation and Packed · Needs delivery split the orders still in the shop by the packed rule alone", () => {
+    for (const base of EVERY) {
+      for (const readyDelivery of [false, true]) {
+        for (const deliveryOut of [false, true]) {
+          const inShop =
+            base.lifecycle === "confirmed" &&
+            (base.fulfillment === "unfulfilled" || base.fulfillment === "processing") &&
+            !readyDelivery &&
+            !deliveryOut;
+          const unpacked = { ...base, readyDelivery, deliveryOut, packed: false };
+          const packed = { ...unpacked, packed: true };
+          // Whatever fulfillment says — a delivery arranged first (processing)
+          // or a retired one (back to unfulfilled) — packed decides.
+          expect(orderMatchesListFilter("to_pack", unpacked)).toBe(inShop);
+          expect(orderMatchesListFilter("packed_needs_delivery", unpacked)).toBe(false);
+          expect(orderMatchesListFilter("to_pack", packed)).toBe(false);
+          expect(orderMatchesListFilter("packed_needs_delivery", packed)).toBe(inShop);
+          // Never two of the three packing-and-pickup views at once.
+          for (const axes of [unpacked, packed]) {
+            const views = ["to_pack", "packed_needs_delivery", "waiting_pickup"] as const;
+            const hits = views.filter((v) => orderMatchesListFilter(v, axes)).length;
+            expect(hits).toBeLessThanOrEqual(1);
+          }
+        }
+      }
     }
   });
 
@@ -154,21 +199,19 @@ describe("the nine filters", () => {
     ).toBe(false);
   });
 
-  it("To pack plus Processing is the Ready-to-Pack queue, nothing more and nothing less", () => {
+  it("Needs preparation never leaves the Ready-to-Pack queue", () => {
     // src/server/orders/state-machine.ts isReadyToPackEligible: confirmed + unfulfilled|processing.
     for (const axes of EVERY) {
       const queue =
         axes.lifecycle === "confirmed" &&
         (axes.fulfillment === "unfulfilled" || axes.fulfillment === "processing");
-      expect(
-        orderMatchesListFilter("to_pack", axes) || orderMatchesListFilter("processing", axes),
-      ).toBe(queue);
+      if (orderMatchesListFilter("to_pack", axes)) expect(queue).toBe(true);
     }
   });
 });
 
 describe("filter names from outside", () => {
-  it("accepts only the nine names; everything else is All", () => {
+  it("accepts only the ten names; everything else is All", () => {
     for (const filter of ORDER_LIST_FILTERS) {
       expect(isOrderListFilter(filter)).toBe(true);
       expect(parseOrderListFilter(filter)).toBe(filter);
@@ -199,8 +242,8 @@ describe("labels", () => {
       expect(typeof label).toBe("string");
       expect((label as string).trim().length).toBeGreaterThan(0);
     }
-    expect(new Set(enLabels).size).toBe(9);
-    expect(new Set(kmLabels).size).toBe(9);
+    expect(new Set(enLabels).size).toBe(10);
+    expect(new Set(kmLabels).size).toBe(10);
     for (const label of kmLabels) expect(label as string).toMatch(/[ក-៿]/);
     for (const label of kmLabels) expect(label as string).not.toMatch(/[A-Za-z]/);
   });
@@ -224,6 +267,7 @@ describe("labels", () => {
   it("the attention views carry the names merchants asked for", () => {
     expect(lookup(en, "orderList.filters.awaiting_payment")).toBe("Payment due");
     expect(lookup(en, "orderList.filters.to_pack")).toBe("Needs preparation");
+    expect(lookup(en, "orderList.filters.packed_needs_delivery")).toBe("Packed · Needs delivery");
     expect(lookup(en, "orderList.filters.waiting_pickup")).toBe("Packed · Waiting for pickup");
   });
 

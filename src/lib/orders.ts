@@ -324,6 +324,7 @@ export interface RealOrderPage {
 export interface RealOrderAttentionCounts {
   paymentDue: number;
   needsPreparation: number;
+  packedNeedsDelivery: number;
   /** null: this member may not read deliveries, so the view is not offered. */
   waitingPickup: number | null;
 }
@@ -395,6 +396,7 @@ export function acceptOrderAttentionCounts(
   return {
     paymentDue: counts.paymentDue,
     needsPreparation: counts.needsPreparation,
+    packedNeedsDelivery: counts.packedNeedsDelivery,
     waitingPickup: counts.waitingPickup,
   };
 }

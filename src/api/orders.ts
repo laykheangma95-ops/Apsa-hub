@@ -361,7 +361,7 @@ const CURSOR_TIMESTAMP_RE =
  * caller's OWN list — the repository filters on the server-resolved
  * organization before it applies one.
  *
- * `filter` is one of the nine names in src/lib/order-list-filters.ts and
+ * `filter` is one of the ten names in src/lib/order-list-filters.ts and
  * nothing else; the server turns it into SQL. Omitted → all orders.
  */
 export const listOrdersPageFn = createServerFn()

@@ -1336,6 +1336,7 @@ export async function listOrdersPage(
 export interface OrderAttentionCounts {
   paymentDue: number;
   needsPreparation: number;
+  packedNeedsDelivery: number;
   waitingPickup: number | null;
   servedAs: { userId: string; organizationId: string };
 }
@@ -1345,9 +1346,10 @@ export async function getOrderAttentionCounts(
 ): Promise<OrderAttentionCounts> {
   ctx.require("orders.read");
   const organizationId = ctx.organizationId;
-  const [paymentDue, needsPreparation, waitingPickup] = await Promise.all([
+  const [paymentDue, needsPreparation, packedNeedsDelivery, waitingPickup] = await Promise.all([
     repo.countOrdersByListFilter(organizationId, "awaiting_payment"),
     repo.countOrdersByListFilter(organizationId, "to_pack"),
+    repo.countOrdersByListFilter(organizationId, "packed_needs_delivery"),
     ctx.can("delivery.read")
       ? repo.countOrdersByListFilter(organizationId, "waiting_pickup")
       : Promise.resolve(null),
@@ -1355,6 +1357,7 @@ export async function getOrderAttentionCounts(
   return {
     paymentDue,
     needsPreparation,
+    packedNeedsDelivery,
     waitingPickup,
     servedAs: { userId: ctx.userId, organizationId },
   };

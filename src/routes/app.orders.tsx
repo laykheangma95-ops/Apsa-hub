@@ -38,7 +38,7 @@ import {
   type OrderAttentionFilter,
   type OrderListFilter,
 } from "@/lib/order-list-filters";
-import { attentionNextStep, waitingDuration } from "@/lib/order-attention";
+import { attentionNextStep, packedDeliveryReasonKey, waitingDuration } from "@/lib/order-attention";
 import type { UiPermissionKey } from "@/lib/capabilities";
 import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
@@ -161,7 +161,7 @@ function OrderRow({
 /**
  * Why an order is on an attention view, in the facts the server returned and
  * this member may see: how long it has waited, money received so far, COD,
- * an already-packed review, staff (not tracked — said plainly) and the next
+ * why a packed order is not out yet, staff (not tracked — said plainly) and the next
  * step. Text on every line, so nothing relies on colour.
  */
 function AttentionFacts({
@@ -183,7 +183,7 @@ function AttentionFacts({
   const readySince = attention.delivery?.readySince ?? null;
   const since = view === "waiting_pickup" ? readySince : order.createdAt;
   const waited = since ? waitingDuration(since, now) : null;
-  const next = attentionNextStep(view, order, attention.packedReview, can);
+  const next = attentionNextStep(view, order, attention.delivery, can);
   const received = attention.received;
 
   return (
@@ -212,10 +212,15 @@ function AttentionFacts({
         <span>{t("orderList.attention.cod")}</span>
       ) : null}
 
-      {attention.packedReview ? (
+      {view === "packed_needs_delivery" ? (
         <span className="flex items-start gap-1 text-status-warning-text">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          <span className="min-w-0">{t("orderList.attention.packedReview")}</span>
+          <span className="min-w-0">
+            {t(
+              packedDeliveryReasonKey(attention.delivery) ??
+                "orderList.attention.packedDeliveryUnknown",
+            )}
+          </span>
         </span>
       ) : null}
 
@@ -240,6 +245,7 @@ function attentionCount(
   if (!counts) return null;
   if (option === "awaiting_payment") return counts.paymentDue;
   if (option === "to_pack") return counts.needsPreparation;
+  if (option === "packed_needs_delivery") return counts.packedNeedsDelivery;
   if (option === "waiting_pickup") return counts.waitingPickup;
   return null;
 }

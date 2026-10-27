@@ -10,7 +10,7 @@ import { describe, expect, it } from "bun:test";
 import en from "@/locales/en.json";
 import km from "@/locales/km.json";
 import type { UiPermissionKey } from "@/lib/capabilities";
-import { attentionNextStep, waitingDuration } from "@/lib/order-attention";
+import { attentionNextStep, packedDeliveryReasonKey, waitingDuration } from "@/lib/order-attention";
 import {
   acceptOrderAttentionCounts,
   acceptOrderListPage,
@@ -41,39 +41,67 @@ describe("next-step hint", () => {
       attentionNextStep(
         "awaiting_payment",
         { lifecycleStatus: "draft", paymentStatus: "unpaid" },
-        false,
+        null,
         ALL,
       ),
     ).toEqual({ kind: "action", actionKey: "order.next.action.confirm_order" });
-    expect(attentionNextStep("awaiting_payment", confirmed("pending"), false, ALL)).toEqual({
+    expect(attentionNextStep("awaiting_payment", confirmed("pending"), null, ALL)).toEqual({
       kind: "action",
       actionKey: "order.next.action.review_payment",
     });
     for (const status of ["unpaid", "failed"] as const) {
-      expect(attentionNextStep("awaiting_payment", confirmed(status), false, ALL)).toEqual({
+      expect(attentionNextStep("awaiting_payment", confirmed(status), null, ALL)).toEqual({
         kind: "action",
         actionKey: "order.next.action.record_payment",
       });
     }
     // COD collection is recorded with payments.mark_cod alone.
     expect(
-      attentionNextStep("awaiting_payment", confirmed("unpaid"), false, only("payments.mark_cod")),
+      attentionNextStep("awaiting_payment", confirmed("unpaid"), null, only("payments.mark_cod")),
     ).toEqual({ kind: "action", actionKey: "order.next.action.record_payment" });
   });
 
-  it("Needs preparation: Pack order, or Arrange delivery when the packed rule says it is packed", () => {
-    expect(attentionNextStep("to_pack", confirmed("unpaid"), false, ALL)).toEqual({
+  it("Needs preparation: Pack order", () => {
+    expect(attentionNextStep("to_pack", confirmed("unpaid"), null, ALL)).toEqual({
       kind: "action",
       actionKey: "order.next.action.pack_order",
     });
-    expect(attentionNextStep("to_pack", confirmed("unpaid"), true, ALL)).toEqual({
-      kind: "action",
-      actionKey: "order.next.action.arrange_delivery",
+  });
+
+  it("Packed · Needs delivery: Arrange delivery, except a delivery never readied; nothing guessed without delivery.read", () => {
+    for (const status of [null, "failed", "cancelled"]) {
+      expect(
+        attentionNextStep("packed_needs_delivery", confirmed("paid"), { status }, ALL),
+      ).toEqual({ kind: "action", actionKey: "order.next.action.arrange_delivery" });
+    }
+    for (const status of ["pending", "preparing"]) {
+      // Next Action's own answer: "Retry delivery ready" on Order detail.
+      expect(
+        attentionNextStep("packed_needs_delivery", confirmed("paid"), { status }, ALL),
+      ).toEqual({ kind: "none" });
+      expect(packedDeliveryReasonKey({ status })).toBe("order.next.reason.deliveryNotReady");
+    }
+    expect(packedDeliveryReasonKey({ status: null })).toBe("order.next.reason.packedNoDelivery");
+    expect(packedDeliveryReasonKey({ status: "failed" })).toBe("order.next.reason.deliveryFailed");
+    expect(packedDeliveryReasonKey({ status: "cancelled" })).toBe(
+      "order.next.reason.deliveryCancelled",
+    );
+    expect(attentionNextStep("packed_needs_delivery", confirmed("paid"), null, ALL)).toEqual({
+      kind: "none",
     });
+    expect(packedDeliveryReasonKey(null)).toBeNull();
+    expect(
+      attentionNextStep(
+        "packed_needs_delivery",
+        confirmed("paid"),
+        { status: "failed" },
+        only("orders.read"),
+      ),
+    ).toEqual({ kind: "teammate" });
   });
 
   it("Waiting for pickup: Hand to courier", () => {
-    expect(attentionNextStep("waiting_pickup", confirmed("unpaid"), false, ALL)).toEqual({
+    expect(attentionNextStep("waiting_pickup", confirmed("unpaid"), null, ALL)).toEqual({
       kind: "action",
       actionKey: "order.next.action.courier_handoff",
     });
@@ -81,16 +109,16 @@ describe("next-step hint", () => {
 
   it("without the grant the step needs, the hint names a teammate, never the action", () => {
     const viewer = only("orders.read");
-    expect(attentionNextStep("awaiting_payment", confirmed("unpaid"), false, viewer)).toEqual({
+    expect(attentionNextStep("awaiting_payment", confirmed("unpaid"), null, viewer)).toEqual({
       kind: "teammate",
     });
-    expect(attentionNextStep("awaiting_payment", confirmed("pending"), false, viewer)).toEqual({
+    expect(attentionNextStep("awaiting_payment", confirmed("pending"), null, viewer)).toEqual({
       kind: "teammate",
     });
-    expect(attentionNextStep("to_pack", confirmed("unpaid"), false, viewer)).toEqual({
+    expect(attentionNextStep("to_pack", confirmed("unpaid"), null, viewer)).toEqual({
       kind: "teammate",
     });
-    expect(attentionNextStep("waiting_pickup", confirmed("unpaid"), false, viewer)).toEqual({
+    expect(attentionNextStep("waiting_pickup", confirmed("unpaid"), null, viewer)).toEqual({
       kind: "teammate",
     });
   });
@@ -127,7 +155,7 @@ describe("waiting time", () => {
 
 describe("stale and foreign answers", () => {
   const me = { userId: "u-1", organizationId: "org-a" };
-  const counts = { paymentDue: 3, needsPreparation: 2, waitingPickup: 1 };
+  const counts = { paymentDue: 3, needsPreparation: 2, packedNeedsDelivery: 4, waitingPickup: 1 };
 
   it("counts answered for this principal are accepted", () => {
     expect(acceptOrderAttentionCounts({ ...counts, servedAs: me }, me)).toEqual(counts);
@@ -177,7 +205,7 @@ describe("strings", () => {
       "orderList.attention.staffNotTracked",
       "orderList.attention.received",
       "orderList.attention.cod",
-      "orderList.attention.packedReview",
+      "orderList.attention.packedDeliveryUnknown",
       "orderList.attention.next",
       "orderList.attention.nextTeammate",
       "orderList.attention.countLabel",

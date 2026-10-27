@@ -245,7 +245,7 @@ mock.module("@/server/auth/membership", () => ({
 
 const api = await import("@/api/orders");
 const { getHomeOrderSummary } = await import("@/server/home/repository");
-type Filter = "awaiting_payment" | "to_pack" | "waiting_pickup" | "all";
+type Filter = "awaiting_payment" | "to_pack" | "packed_needs_delivery" | "waiting_pickup" | "all";
 
 async function page(filter: Filter, before?: { createdAt: string; id: string }, limit?: number) {
   return api.listOrdersPageFn({
@@ -424,99 +424,225 @@ describe("Packed · Waiting for pickup, and COD overlap", () => {
   });
 });
 
-describe("Needs preparation and the packed rule", () => {
+/** A parcel row (identity only — migration 050); packing never reads it. */
+async function parcel(org: string, orderId: string, status: "created" | "void"): Promise<void> {
+  await raw(
+    `insert into parcels(organization_id,order_id,parcel_code,status,created_by)
+     values($1,$2,$3,$4,$5)`,
+    [org, orderId, `APSA-PARCEL-${crypto.randomUUID()}`, status, OWNER],
+  );
+}
+
+/** Pack Order's marker on the order's own history (record_order_packed_v1's shape). */
+async function packedOnOrder(org: string, orderId: string, at: string): Promise<void> {
+  await orderHistory(org, orderId, "unfulfilled", "processing", at, "pack_order_packed");
+}
+
+/** Pack Order's marker on a delivery's history (transition_delivery_status_v1 → ready). */
+async function packedOnDelivery(org: string, deliveryId: string, at: string): Promise<void> {
+  await raw(
+    `insert into delivery_status_history(organization_id,delivery_id,from_status,to_status,
+       changed_by,reason,created_at) values($1,$2,'preparing','ready',$3,'pack_order_packed',$4)`,
+    [org, deliveryId, OWNER, at],
+  );
+}
+
+/** A retired delivery attempt drives the order back to unfulfilled at the SAME instant (054). */
+async function retired(
+  org: string,
+  orderId: string,
+  status: "failed" | "cancelled",
+  at: string,
+  reason: string | null = null,
+): Promise<string> {
+  const id = await delivery(org, orderId, status, { at, reason });
+  await orderHistory(org, orderId, "processing", "unfulfilled", at, reason ?? "delivery retired");
+  return id;
+}
+
+describe("Needs preparation vs Packed · Needs delivery — the database's packed rule", () => {
   let org: string;
   const ids: Record<string, string> = {};
   beforeAll(async () => {
     org = await newOrg();
-    ids.fresh = await order(org, "confirmed", "unpaid", "unfulfilled");
-    ids.draft = await order(org, "draft", "unpaid", "unfulfilled");
-    ids.cancelled = await order(org, "cancelled", "unpaid", "cancelled");
-    ids.packedNoDelivery = await order(org, "confirmed", "paid", "processing");
-    await orderHistory(
-      org,
-      ids.packedNoDelivery,
-      "unfulfilled",
-      "processing",
-      "2026-10-01T09:00:00+00",
-      "pack_order_packed",
-    );
+    // 1. Confirmed, unpacked, no delivery.
+    ids.unpackedNoDelivery = await order(org, "confirmed", "unpaid", "unfulfilled");
+    await parcel(org, ids.unpackedNoDelivery, "created");
 
-    // Packed, then its delivery failed: back to unfulfilled, but still packed
-    // (migration 054 — a retired delivery attempt does not clear packed).
+    // 2. Confirmed, unpacked, delivery arranged FIRST (pending → order processing).
+    ids.unpackedArranged = await order(org, "confirmed", "paid", "processing");
+    await delivery(org, ids.unpackedArranged, "pending", { at: "2026-10-01T08:00:00+00" });
+    ids.unpackedPreparing = await order(org, "confirmed", "paid", "processing");
+    await delivery(org, ids.unpackedPreparing, "preparing", { at: "2026-10-01T08:00:00+00" });
+
+    // 3. Packed with its delivery ready: Waiting for pickup only.
+    ids.packedReady = await order(org, "confirmed", "unpaid", "processing");
+    const ready = await delivery(org, ids.packedReady, "ready", { at: "2026-10-01T09:00:00+00" });
+    await packedOnDelivery(org, ready, "2026-10-01T09:00:00+00");
+
+    // 4a. Packed (no delivery), then a delivery failed → unfulfilled, still packed.
     ids.packedThenFailed = await order(org, "confirmed", "paid", "unfulfilled");
-    await orderHistory(
+    await packedOnOrder(org, ids.packedThenFailed, "2026-10-01T09:00:00+00");
+    await retired(org, ids.packedThenFailed, "failed", "2026-10-01T11:00:00+00");
+    // 4b. Packed, then the delivery was cancelled (not by a reopen) → still packed.
+    ids.packedThenCancelled = await order(org, "confirmed", "paid", "unfulfilled");
+    await packedOnOrder(org, ids.packedThenCancelled, "2026-10-01T09:00:00+00");
+    await retired(org, ids.packedThenCancelled, "cancelled", "2026-10-01T11:30:00+00");
+    // 4c. Packed, no delivery ever arranged (processing).
+    ids.packedNoDelivery = await order(org, "confirmed", "paid", "processing");
+    await packedOnOrder(org, ids.packedNoDelivery, "2026-10-01T09:00:00+00");
+    // 4d. Packed, but its delivery is pending and was never readied.
+    ids.packedPending = await order(org, "confirmed", "paid", "processing");
+    await packedOnOrder(org, ids.packedPending, "2026-10-01T09:00:00+00");
+    await delivery(org, ids.packedPending, "pending", { at: "2026-10-01T10:00:00+00" });
+
+    // Packed, then REOPENED (its ready delivery cancelled BY the reopen): packing again.
+    ids.reopened = await order(org, "confirmed", "paid", "unfulfilled");
+    await packedOnOrder(org, ids.reopened, "2026-10-01T09:00:00+00");
+    await retired(
       org,
-      ids.packedThenFailed,
-      "unfulfilled",
-      "processing",
-      "2026-10-01T09:00:00+00",
-      "pack_order_packed",
-    );
-    await delivery(org, ids.packedThenFailed, "failed", { at: "2026-10-01T11:00:00+00" });
-    await orderHistory(
-      org,
-      ids.packedThenFailed,
-      "processing",
-      "unfulfilled",
-      "2026-10-01T11:00:00+00",
-      null,
+      ids.reopened,
+      "cancelled",
+      "2026-10-01T12:00:00+00",
+      "system:order_fulfillment_reopened",
     );
 
-    // Packed, then REOPENED (its ready delivery cancelled by the reopen): not packed.
-    ids.reopened = await order(org, "confirmed", "paid", "unfulfilled");
-    await orderHistory(
-      org,
-      ids.reopened,
-      "unfulfilled",
-      "processing",
-      "2026-10-01T09:00:00+00",
-      "pack_order_packed",
-    );
-    await delivery(org, ids.reopened, "cancelled", {
-      at: "2026-10-01T12:00:00+00",
-      reason: "system:order_fulfillment_reopened",
-    });
-    await orderHistory(
-      org,
-      ids.reopened,
-      "processing",
-      "unfulfilled",
-      "2026-10-01T12:00:00+00",
-      "reopen",
-    );
+    // 5. Multiple parcels and deliveries: a voided parcel and its replacement,
+    //    a failed then a cancelled attempt, then a new pending one — packed
+    //    once, before all of them: packed, nothing ready or out.
+    ids.manyAttempts = await order(org, "confirmed", "paid", "processing");
+    await parcel(org, ids.manyAttempts, "void");
+    await parcel(org, ids.manyAttempts, "created");
+    await packedOnOrder(org, ids.manyAttempts, "2026-10-01T07:00:00+00");
+    await retired(org, ids.manyAttempts, "failed", "2026-10-01T08:00:00+00");
+    await retired(org, ids.manyAttempts, "cancelled", "2026-10-01T09:00:00+00");
+    await delivery(org, ids.manyAttempts, "pending", { at: "2026-10-01T10:00:00+00" });
+    // ...and the same history, never packed: still packing work.
+    ids.manyAttemptsUnpacked = await order(org, "confirmed", "paid", "processing");
+    await parcel(org, ids.manyAttemptsUnpacked, "void");
+    await parcel(org, ids.manyAttemptsUnpacked, "created");
+    await delivery(org, ids.manyAttemptsUnpacked, "failed", { at: "2026-10-01T08:00:00+00" });
+    await delivery(org, ids.manyAttemptsUnpacked, "pending", { at: "2026-10-01T10:00:00+00" });
+
+    // Out of the shop or out of the sale: in neither packing view.
+    ids.inTransit = await order(org, "confirmed", "unpaid", "processing");
+    await delivery(org, ids.inTransit, "in_transit");
+    ids.delivered = await order(org, "confirmed", "unpaid", "fulfilled");
+    await delivery(org, ids.delivered, "delivered");
+    ids.cancelled = await order(org, "cancelled", "unpaid", "cancelled");
+    ids.cancelledPacked = await order(org, "cancelled", "paid", "cancelled");
+    await packedOnOrder(org, ids.cancelledPacked, "2026-10-01T09:00:00+00");
+    ids.draft = await order(org, "draft", "unpaid", "unfulfilled");
+    ids.completed = await order(org, "completed", "paid", "fulfilled");
     signInAs(OWNER, org);
   });
 
-  it("NA. confirmed, unfulfilled orders are listed; drafts, cancelled and packed-without-delivery are not", async () => {
+  it("NA. Needs preparation is exactly the orders not packed — with or without a delivery arranged first", async () => {
     const listed = new Set(await walk("to_pack"));
-    expect(listed).toEqual(new Set([ids.fresh, ids.packedThenFailed, ids.reopened]));
-    expect((await counts()).needsPreparation).toBe(3);
+    expect(listed).toEqual(
+      new Set([
+        ids.unpackedNoDelivery,
+        ids.unpackedArranged,
+        ids.unpackedPreparing,
+        ids.reopened,
+        ids.manyAttemptsUnpacked,
+      ]),
+    );
+    expect((await counts()).needsPreparation).toBe(listed.size);
   });
 
-  it("NB. packed-then-failed is shown for review, never as 'needs packing'; reopened and fresh are not", async () => {
-    const result = await page("to_pack");
-    expect(result.attention[ids.packedThenFailed!]!.packedReview).toBe(true);
-    expect(result.attention[ids.reopened!]!.packedReview).toBe(false);
-    expect(result.attention[ids.fresh!]!.packedReview).toBe(false);
+  it("NB. a packed order whose delivery failed, was cancelled, was never arranged or never readied is delivery recovery, not packing work", async () => {
+    const recovery = new Set(await walk("packed_needs_delivery"));
+    expect(recovery).toEqual(
+      new Set([
+        ids.packedThenFailed,
+        ids.packedThenCancelled,
+        ids.packedNoDelivery,
+        ids.packedPending,
+        ids.manyAttempts,
+      ]),
+    );
+    expect((await counts()).packedNeedsDelivery).toBe(recovery.size);
   });
 
-  it("NC. the packed rule is asked only for listed orders that ever had a delivery", async () => {
-    const before = transport.reads.filter((r) => r === "rpc:order_currently_packed_v1").length;
-    await page("to_pack");
-    const after = transport.reads.filter((r) => r === "rpc:order_currently_packed_v1").length;
-    expect(after - before).toBe(2); // packedThenFailed, reopened — not the fresh order
+  it("NC. packed with a ready delivery is Waiting for pickup only; custody, cancellation and closed sales are in no packing view", async () => {
+    const toPack = await walk("to_pack");
+    const recovery = await walk("packed_needs_delivery");
+    expect(await walk("waiting_pickup")).toEqual([ids.packedReady!]);
+    for (const key of [
+      "packedReady",
+      "inTransit",
+      "delivered",
+      "cancelled",
+      "cancelledPacked",
+      "draft",
+      "completed",
+    ]) {
+      expect({ key, toPack: toPack.includes(ids[key]!) }).toEqual({ key, toPack: false });
+      expect({ key, recovery: recovery.includes(ids[key]!) }).toEqual({ key, recovery: false });
+    }
   });
 
-  it("ND. a member without delivery.read still gets the packed review (Order detail shows it too), but no delivery facts", async () => {
+  it("ND. the views agree with the packed rule itself, order by order", async () => {
+    const toPack = new Set(await walk("to_pack"));
+    const recovery = new Set(await walk("packed_needs_delivery"));
+    for (const id of [...toPack, ...recovery]) {
+      const packed = (
+        await f.db.query<{ p: boolean }>("select public.order_currently_packed_v1($1,$2) as p", [
+          org,
+          id,
+        ])
+      ).rows[0]!.p;
+      expect({ id, packed }).toEqual({ id, packed: recovery.has(id) });
+      expect(toPack.has(id) && recovery.has(id)).toBe(false);
+    }
+  });
+
+  it("NE. rows explain the recovery from the delivery the member may read; no per-row packed calls", async () => {
+    const before = transport.reads.filter((r) => r.startsWith("rpc:")).length;
+    const result = await page("packed_needs_delivery");
+    expect(transport.reads.filter((r) => r.startsWith("rpc:")).length).toBe(before);
+    expect(result.attention[ids.packedThenFailed!]!.delivery?.status).toBe("failed");
+    expect(result.attention[ids.packedThenCancelled!]!.delivery?.status).toBe("cancelled");
+    expect(result.attention[ids.packedNoDelivery!]!.delivery?.status).toBeNull();
+    expect(result.attention[ids.packedPending!]!.delivery?.status).toBe("pending");
+    // The active attempt is described, not the older retired ones.
+    expect(result.attention[ids.manyAttempts!]!.delivery?.status).toBe("pending");
+  });
+
+  it("NF. orders.read alone sees both packing views and counts, without delivery facts", async () => {
     signInAs(VIEWER, org);
     try {
-      const result = await page("to_pack");
-      expect(result.attention[ids.packedThenFailed!]!.packedReview).toBe(true);
-      expect(result.attention[ids.packedThenFailed!]!.delivery).toBeNull();
+      const c = await counts();
+      expect([c.needsPreparation, c.packedNeedsDelivery]).toEqual([5, 5]);
+      const recovery = await page("packed_needs_delivery");
+      expect(recovery.orders).toHaveLength(5);
+      expect(Object.values(recovery.attention).every((a) => a.delivery === null)).toBe(true);
+      signInAs(OUTSIDER, org);
+      for (const filter of ["to_pack", "packed_needs_delivery"] as const) {
+        await expect(page(filter)).rejects.toThrow(/orders\.read/);
+      }
     } finally {
       signInAs(OWNER, org);
     }
+  });
+
+  it("NG. another tenant's history can neither pack nor unpack an order, and its queue is its own", async () => {
+    const other = await newOrg();
+    const theirs = await order(other, "confirmed", "paid", "unfulfilled");
+    // A Pack Order marker written under THIS organization's id against the other
+    // tenant's order (corrupt data) must not count for either tenant.
+    await packedOnOrder(org, theirs, "2026-10-01T09:00:00+00");
+    signInAs(OWNER, other);
+    try {
+      expect(await walk("to_pack")).toEqual([theirs]);
+      expect(await walk("packed_needs_delivery")).toEqual([]);
+      expect(await counts()).toMatchObject({ needsPreparation: 1, packedNeedsDelivery: 0 });
+    } finally {
+      signInAs(OWNER, org);
+    }
+    expect(await walk("to_pack")).not.toContain(theirs);
+    expect((await counts()).needsPreparation).toBe(5);
   });
 });
 
@@ -563,7 +689,12 @@ describe("Permissions", () => {
   it("RD. without orders.read every view and every count is refused", async () => {
     signInAs(OUTSIDER, org);
     await expect(counts()).rejects.toThrow(/orders\.read/);
-    for (const filter of ["awaiting_payment", "to_pack", "waiting_pickup"] as const) {
+    for (const filter of [
+      "awaiting_payment",
+      "to_pack",
+      "packed_needs_delivery",
+      "waiting_pickup",
+    ] as const) {
       await expect(page(filter)).rejects.toThrow(/orders\.read/);
     }
   });
@@ -634,15 +765,33 @@ describe("Pagination and count consistency over large lists", () => {
       await delivery(org, id, "ready");
     }
     for (let i = 0; i < 40; i++) await order(org, "completed", "paid", "fulfilled");
+    // 73 packed orders whose delivery failed (paid): unfulfilled, but delivery
+    // recovery — a fulfillment_status predicate would have called them packing work.
+    for (let i = 0; i < 73; i++) {
+      const id = await order(org, "confirmed", "paid", "unfulfilled");
+      await packedOnOrder(org, id, "2026-10-01T09:00:00+00");
+      await retired(org, id, "failed", "2026-10-01T11:00:00+00");
+    }
+    // 27 unpacked orders with a delivery arranged first (paid, processing).
+    for (let i = 0; i < 27; i++) {
+      const id = await order(org, "confirmed", "paid", "processing");
+      await delivery(org, id, "pending");
+    }
     signInAs(OWNER, org);
   });
 
   it("CA. every view, walked page by page, holds exactly its count — no row twice, none missing", async () => {
     const c = await counts();
-    expect(c).toMatchObject({ paymentDue: 130 + 31, needsPreparation: 130, waitingPickup: 61 });
+    expect(c).toMatchObject({
+      paymentDue: 130 + 31,
+      needsPreparation: 130 + 27,
+      packedNeedsDelivery: 73,
+      waitingPickup: 61,
+    });
     for (const [filter, expected, limit] of [
       ["awaiting_payment", c.paymentDue, 50],
       ["to_pack", c.needsPreparation, 50],
+      ["packed_needs_delivery", c.packedNeedsDelivery, 20],
       ["waiting_pickup", c.waitingPickup, 25],
     ] as const) {
       const ids = await walk(filter, limit);

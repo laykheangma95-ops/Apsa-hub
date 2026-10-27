@@ -42,7 +42,11 @@ import type {
   OrderListCursor,
   OrderStatusAxis,
 } from "./types";
-import { PAYMENT_DUE_STATUSES, type OrderListFilter } from "@/lib/order-list-filters";
+import {
+  PAYMENT_DUE_STATUSES,
+  PREPARATION_QUEUE_STATES,
+  type OrderListFilter,
+} from "@/lib/order-list-filters";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db = supabaseAdmin as any;
@@ -330,7 +334,7 @@ export async function listOrders(
 ): Promise<OrderRow[]> {
   const filtered = () => {
     let query = db
-      .from("orders")
+      .from(orderListSource(opts.list_filter))
       .select(orderListSelect(opts.list_filter))
       .eq("organization_id", organizationId);
     if (opts.customer_id) query = query.eq("customer_id", opts.customer_id);
@@ -377,7 +381,7 @@ export async function countOrdersByListFilter(
 ): Promise<number> {
   const query = applyOrderListFilter(
     db
-      .from("orders")
+      .from(orderListSource(filter))
       .select(filter === "waiting_pickup" ? `id, ${READY_DELIVERY_JOIN}` : "id", {
         count: "exact",
         head: true,
@@ -406,13 +410,26 @@ function orderListSelect(filter: OrderListFilter | undefined): string {
 }
 
 /**
+ * Where a filter's rows come from. The two packing views read
+ * order_preparation_queue_v1 (migration 065): the orders still in the shop,
+ * each with the database's packed rule (order_currently_packed_v1) already
+ * applied as preparation_state. Its rows are whole orders rows, so the cursor,
+ * the order and the mapping are the list's own. Every other filter reads orders.
+ */
+function orderListSource(filter: OrderListFilter | undefined): string {
+  return filter === "to_pack" || filter === "packed_needs_delivery"
+    ? "order_preparation_queue_v1"
+    : "orders";
+}
+
+/**
  * One Orders-screen filter as SQL. The meaning of each filter, and why, is in
  * src/lib/order-list-filters.ts; orderMatchesListFilter there is the
  * specification this is tested against over every combination of the three
  * status columns.
  *
  * Every value below is a constant of this file: a filter crosses the network
- * only as one of the nine names, validated by the server function, and the
+ * only as one of the ten names, validated by the server function, and the
  * one `.or()` group is a fixed string. The predicate is ANDed with the
  * organization and with the cursor's bounds, so it can only narrow the
  * caller's own list.
@@ -429,7 +446,11 @@ function applyOrderListFilter(query: any, filter: OrderListFilter, organizationI
     case "draft":
       return query.eq("lifecycle_status", "draft").neq("fulfillment_status", "cancelled");
     case "to_pack":
-      return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "unfulfilled");
+    case "packed_needs_delivery":
+      // Read from order_preparation_queue_v1 (orderListSource): packing still
+      // required, or packed but no delivery ready or out — the packed rule
+      // decides, never fulfillment_status.
+      return query.eq("preparation_state", PREPARATION_QUEUE_STATES[filter]);
     case "waiting_pickup":
       // Needs READY_DELIVERY_JOIN in the select (orderListSelect, countOrdersByListFilter).
       // The delivery is held to the same organization as the order.
@@ -448,7 +469,7 @@ function applyOrderListFilter(query: any, filter: OrderListFilter, organizationI
     case "cancelled":
       return query.or("lifecycle_status.eq.cancelled,fulfillment_status.eq.cancelled");
     default: {
-      // A name outside the nine is a programming error, never "everything".
+      // A name outside the ten is a programming error, never "everything".
       const unknown: never = filter;
       throw new Error(`listOrders: unknown list filter ${String(unknown)}`);
     }

@@ -162,10 +162,20 @@ async function dbOrder(org: string, filter: OrderListFilter = "all"): Promise<st
     lifecycle_status: OrderListFilterAxes["lifecycle"];
     payment_status: OrderListFilterAxes["payment"];
     fulfillment_status: OrderListFilterAxes["fulfillment"];
+    packed: boolean;
+    ready_delivery: boolean;
+    delivery_out: boolean;
   }>(
-    `select order_number, lifecycle_status, payment_status, fulfillment_status
-       from orders where organization_id=$1
-     order by created_at desc, id desc`,
+    // The packed rule and the delivery facts the attention views read, straight
+    // from the database's own definitions (order_currently_packed_v1, 054).
+    `select o.order_number, o.lifecycle_status, o.payment_status, o.fulfillment_status,
+            public.order_currently_packed_v1(o.organization_id, o.id) as packed,
+            exists (select 1 from deliveries d where d.organization_id = o.organization_id
+                      and d.order_id = o.id and d.status = 'ready') as ready_delivery,
+            exists (select 1 from deliveries d where d.organization_id = o.organization_id
+                      and d.order_id = o.id and d.status in ('in_transit','delivered')) as delivery_out
+       from orders o where o.organization_id=$1
+     order by o.created_at desc, o.id desc`,
     [org],
   );
   return result.rows
@@ -174,6 +184,9 @@ async function dbOrder(org: string, filter: OrderListFilter = "all"): Promise<st
         lifecycle: row.lifecycle_status,
         payment: row.payment_status,
         fulfillment: row.fulfillment_status,
+        packed: row.packed,
+        readyDelivery: row.ready_delivery,
+        deliveryOut: row.delivery_out,
       }),
     )
     .map((row) => row.order_number);
@@ -1111,6 +1124,7 @@ const CHIP: Record<OrderListFilter, string> = {
   all: "All",
   awaiting_payment: "Payment due",
   to_pack: "Needs preparation",
+  packed_needs_delivery: "Packed · Needs delivery",
   waiting_pickup: "Packed · Waiting for pickup",
   draft: "Drafts",
   processing: "Processing",
@@ -1237,7 +1251,10 @@ describe("Orders filters — each filter is exactly its server-side predicate", 
       all: 64,
       awaiting_payment: 36, // 3 live lifecycles × {unpaid, pending, failed} × 4 fulfillments
       draft: 12, // 4 payments × 3 non-cancelled fulfillments
-      to_pack: 4,
+      // Confirmed, unfulfilled or processing, never packed (no Pack Order marker
+      // and no delivery here): 2 fulfillments × 4 payments.
+      to_pack: 8,
+      packed_needs_delivery: 0, // nothing here is packed (order-attention-lists covers it)
       waiting_pickup: 0, // no deliveries in this organization (order-attention-lists covers them)
       processing: 4,
       fulfilled: 4,
@@ -1245,9 +1262,12 @@ describe("Orders filters — each filter is exactly its server-side predicate", 
       cancelled: 28, // 16 cancelled sales + 12 cancelled fulfillments of live ones
     });
 
-    // The six progress filters partition the list: every order exactly once.
-    const progress = ["draft", "to_pack", "processing", "fulfilled", "completed", "cancelled"];
-    const placed = progress.flatMap((f) => served[f]!);
+    // The five progress filters, plus confirmed-and-unfulfilled, partition the
+    // list: every order exactly once. With no packing marker and no delivery,
+    // Needs preparation is exactly confirmed ∧ (unfulfilled ∨ processing).
+    const progress = ["draft", "processing", "fulfilled", "completed", "cancelled"];
+    const confirmedUnfulfilled = served.to_pack!.filter((c) => !served.processing!.includes(c));
+    const placed = [...progress.flatMap((f) => served[f]!), ...confirmedUnfulfilled];
     expectNoDuplicates(placed);
     expect([...placed].sort()).toEqual([...served.all!].sort());
 
@@ -1385,7 +1405,8 @@ describe("Orders filters — paging a filtered list", () => {
     const firstPage = shown();
 
     // Meanwhile: new orders to pack, new drafts, and one older order still to
-    // load starts packing (it leaves this filter).
+    // load is packed (Mark Packed's record: fulfillment to processing with the
+    // Pack Order marker — record_order_packed_v1), so it leaves this filter.
     await seedOrders(
       org,
       7,
@@ -1398,6 +1419,14 @@ describe("Orders filters — paging a filtered list", () => {
       `update orders set fulfillment_status='processing'
         where organization_id=$1 and order_number='CPACK-0110'`,
       [org],
+    );
+    await f.db.query(
+      `insert into order_status_history(organization_id,order_id,axis,from_status,to_status,
+         changed_by,reason,changed_at)
+       select organization_id, id, 'fulfillment', 'unfulfilled', 'processing', $2,
+         'pack_order_packed', clock_timestamp()
+       from orders where organization_id=$1 and order_number='CPACK-0110'`,
+      [org, U1],
     );
 
     await loadEverything();
