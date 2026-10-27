@@ -1,5 +1,5 @@
 /**
- * The Orders screen's eight filters — vocabulary and meaning.
+ * The Orders screen's nine filters — vocabulary and meaning.
  *
  * Safe to bundle for the browser, and imported by the server: the browser
  * names a filter, the server decides what it means. The browser never filters
@@ -7,13 +7,14 @@
  * SQL is tested against (src/tests/orders-filters-mounted.runtime.ts), not a
  * client-side filter.
  *
- * ── WHY THESE EIGHT ─────────────────────────────────────────────────────────
+ * ── WHY THESE NINE ──────────────────────────────────────────────────────────
  *
  * An order carries three independent axes (src/server/orders/state-machine.ts):
  * lifecycle (draft / confirmed / completed / cancelled), payment (unpaid /
  * pending / paid / failed) and fulfillment (unfulfilled / processing /
- * fulfilled / cancelled). Every filter here is a predicate over those columns
- * of the orders table and nothing else.
+ * fulfilled / cancelled). Every filter but one is a predicate over those
+ * columns of the orders table and nothing else; `waiting_pickup` also reads
+ * the order's deliveries (below).
  *
  * Six filters walk one order's progress (lifecycle × fulfillment) and are a
  * PARTITION: every order matches exactly one of them —
@@ -32,15 +33,48 @@
  * only once it is fulfilled, so a completed order with a cancelled fulfillment
  * should not exist; the clause keeps the partition exact even if one does.)
  *
- * One filter is on a DIFFERENT axis and overlaps the others on purpose:
+ * Two filters are on DIFFERENT axes and overlap the others on purpose — with
+ * `to_pack` they are the three attention views ("Payment due", "Needs
+ * preparation", "Packed · Waiting for pickup"), the ones whose counts the
+ * screen shows:
  *
- *   awaiting_payment   lifecycle not cancelled, payment unpaid or pending
+ *   awaiting_payment   lifecycle not cancelled, payment unpaid, pending or
+ *                      failed (PAYMENT_DUE_STATUSES). `pending` holds a partial
+ *                      payment as well as one awaiting confirmation (migration
+ *                      040: anything received short of the total is pending);
+ *                      `failed` means every attempt failed and nothing was
+ *                      received, so the money is still due.
+ *   waiting_pickup     lifecycle confirmed, fulfillment neither fulfilled nor
+ *                      cancelled, and a delivery of the order is `ready`.
+ *                      Migration 054 lets no path ready a delivery unless the
+ *                      order is currently packed, and a reopen cancels a ready
+ *                      delivery; Courier Handoff (ready → in_transit) is what
+ *                      takes it out. So `ready` is exactly "packed, in the shop,
+ *                      waiting for the courier". A packed order with no ready
+ *                      delivery (none arranged, or the last one failed) is NOT
+ *                      waiting for pickup: its next step is Arrange delivery.
  *
  * A cash-on-delivery sale is confirmed, unpaid and being packed at once. Forcing
  * payment into the progress partition would hide that order from "To pack" — the
- * packer's list — or from "Awaiting payment". The predicate is exactly the one
- * Home counts as "Orders awaiting payment" (src/server/home/repository.ts), so
- * the two never disagree.
+ * packer's list — or from "Awaiting payment"; a packed COD order waiting for the
+ * courier is in both Payment due and Waiting for pickup. The payment predicate
+ * is exactly the one Home counts as "Orders awaiting payment"
+ * (src/server/home/repository.ts, through PAYMENT_DUE_STATUSES), so the two
+ * never disagree.
+ *
+ * ── `to_pack` AND THE PACKED RULE ───────────────────────────────────────────
+ *
+ * "Packed" is not a column: it is order_currently_packed_v1 (migration 054), a
+ * comparison of history rows. A column filter cannot apply it to a whole list,
+ * so `to_pack` stays the column predicate above. Two cases therefore differ
+ * from the packed rule, and the server handles the one it can:
+ *   - packed, then its delivery failed or was cancelled: fulfillment is back to
+ *     unfulfilled, so the order is listed here. The server checks every listed
+ *     order that has a delivery against the packed rule and marks it for review
+ *     (src/server/orders/attention.ts) instead of calling it unpacked.
+ *   - delivery arranged BEFORE packing: fulfillment is processing, so the order
+ *     is under Processing, not here. Listing it needs the packed rule as a set
+ *     predicate in SQL — a migration, not done here.
  *
  * ── WHAT IS NOT A FILTER, AND WHY ───────────────────────────────────────────
  *
@@ -58,8 +92,9 @@
 export const ORDER_LIST_FILTERS = [
   "all",
   "awaiting_payment",
-  "draft",
   "to_pack",
+  "waiting_pickup",
+  "draft",
   "processing",
   "fulfilled",
   "completed",
@@ -69,6 +104,20 @@ export const ORDER_LIST_FILTERS = [
 export type OrderListFilter = (typeof ORDER_LIST_FILTERS)[number];
 
 export const DEFAULT_ORDER_LIST_FILTER: OrderListFilter = "all";
+
+/** The attention views, in the order the screen shows them; each carries a count. */
+export const ORDER_ATTENTION_FILTERS = ["awaiting_payment", "to_pack", "waiting_pickup"] as const;
+
+export type OrderAttentionFilter = (typeof ORDER_ATTENTION_FILTERS)[number];
+
+export function isOrderAttentionFilter(value: unknown): value is OrderAttentionFilter {
+  return (
+    typeof value === "string" && (ORDER_ATTENTION_FILTERS as readonly string[]).includes(value)
+  );
+}
+
+/** Payment statuses under which money is still due. Shared with Home's count. */
+export const PAYMENT_DUE_STATUSES = ["unpaid", "pending", "failed"] as const;
 
 /** The progress filters — the six that partition every order. */
 export const ORDER_PROGRESS_FILTERS: readonly OrderListFilter[] = [
@@ -99,6 +148,8 @@ export interface OrderListFilterAxes {
   lifecycle: "draft" | "confirmed" | "completed" | "cancelled";
   payment: "unpaid" | "pending" | "paid" | "failed";
   fulfillment: "unfulfilled" | "processing" | "fulfilled" | "cancelled";
+  /** Some delivery of the order is `ready` (only `waiting_pickup` reads it). Absent → none. */
+  readyDelivery?: boolean;
 }
 
 /**
@@ -108,17 +159,26 @@ export interface OrderListFilterAxes {
  */
 export function orderMatchesListFilter(
   filter: OrderListFilter,
-  { lifecycle, payment, fulfillment }: OrderListFilterAxes,
+  { lifecycle, payment, fulfillment, readyDelivery = false }: OrderListFilterAxes,
 ): boolean {
   switch (filter) {
     case "all":
       return true;
     case "awaiting_payment":
-      return lifecycle !== "cancelled" && (payment === "unpaid" || payment === "pending");
+      return (
+        lifecycle !== "cancelled" && (PAYMENT_DUE_STATUSES as readonly string[]).includes(payment)
+      );
     case "draft":
       return lifecycle === "draft" && fulfillment !== "cancelled";
     case "to_pack":
       return lifecycle === "confirmed" && fulfillment === "unfulfilled";
+    case "waiting_pickup":
+      return (
+        lifecycle === "confirmed" &&
+        fulfillment !== "fulfilled" &&
+        fulfillment !== "cancelled" &&
+        readyDelivery
+      );
     case "processing":
       return lifecycle === "confirmed" && fulfillment === "processing";
     case "fulfilled":

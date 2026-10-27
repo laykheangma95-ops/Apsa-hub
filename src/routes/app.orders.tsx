@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Check, Plus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -19,21 +19,27 @@ import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { useCapabilities } from "@/hooks/use-capabilities";
-import { listRealOrdersPage } from "@/lib/api";
+import { getRealOrderAttentionCounts, listRealOrdersPage } from "@/lib/api";
 import {
   classifyOrderError,
   isOrderListPrincipalChanged,
   presentOrderSource,
+  type OrderAttentionDetail,
   type OrderListCursor,
+  type RealOrderAttentionCounts,
 } from "@/lib/orders";
 import { HOME_QUERY_PREFIX } from "@/lib/home-query";
 import {
   DEFAULT_ORDER_LIST_FILTER,
   ORDER_LIST_FILTERS,
+  isOrderAttentionFilter,
   orderListFilterLabelKey,
   parseOrderListFilter,
+  type OrderAttentionFilter,
   type OrderListFilter,
 } from "@/lib/order-list-filters";
+import { attentionNextStep, waitingDuration } from "@/lib/order-attention";
+import type { UiPermissionKey } from "@/lib/capabilities";
 import { ordersKeys } from "@/lib/orders-query";
 import { customerKeys } from "@/lib/customers-query";
 import { shortTime } from "@/lib/format";
@@ -72,8 +78,22 @@ export const Route = createFileRoute("/app/orders")({
  * The total sits on the first line beside the code, where the eye already is,
  * rather than in a right-hand column that competes with the status chips.
  */
-function OrderRow({ order }: { order: Order }) {
+function OrderRow({
+  order,
+  view,
+  attention,
+  can,
+  now,
+}: {
+  order: Order;
+  /** Set on the three attention views; the row then says why it is listed. */
+  view: OrderAttentionFilter | null;
+  attention: OrderAttentionDetail | undefined;
+  can: (key: UiPermissionKey) => boolean;
+  now: number;
+}) {
   const { t } = useTranslation();
+  const customerName = attention?.customer.kind === "named" ? attention.customer.name : null;
 
   return (
     <Link
@@ -111,7 +131,8 @@ function OrderRow({ order }: { order: Order }) {
           return null;
         })()}
         <span className="text-caption min-w-0 flex-1 truncate text-text-muted">
-          {order.customerId ? t("orderList.hasCustomer") : t("orderList.noCustomer")}
+          {customerName ??
+            (order.customerId ? t("orderList.hasCustomer") : t("orderList.noCustomer"))}
         </span>
         <span className="text-caption tnum shrink-0 text-text-muted">
           {shortTime(order.createdAt)}
@@ -129,8 +150,98 @@ function OrderRow({ order }: { order: Order }) {
         <StatusChip status={order.paymentStatus} />
         <StatusChip status={order.fulfillmentStatus} />
       </div>
+
+      {view && attention ? (
+        <AttentionFacts order={order} view={view} attention={attention} can={can} now={now} />
+      ) : null}
     </Link>
   );
+}
+
+/**
+ * Why an order is on an attention view, in the facts the server returned and
+ * this member may see: how long it has waited, money received so far, COD,
+ * an already-packed review, staff (not tracked — said plainly) and the next
+ * step. Text on every line, so nothing relies on colour.
+ */
+function AttentionFacts({
+  order,
+  view,
+  attention,
+  can,
+  now,
+}: {
+  order: Order;
+  view: OrderAttentionFilter;
+  attention: OrderAttentionDetail;
+  can: (key: UiPermissionKey) => boolean;
+  now: number;
+}) {
+  const { t } = useTranslation();
+  // Waiting for pickup counts from when the parcel became ready; the other two
+  // from when the order was created (the moment the work could start).
+  const readySince = attention.delivery?.readySince ?? null;
+  const since = view === "waiting_pickup" ? readySince : order.createdAt;
+  const waited = since ? waitingDuration(since, now) : null;
+  const next = attentionNextStep(view, order, attention.packedReview, can);
+  const received = attention.received;
+
+  return (
+    <div className="text-caption flex flex-col gap-0.5 text-text-secondary">
+      {waited ? (
+        <span className="tnum">
+          {t(
+            `orderList.attention.${view === "waiting_pickup" ? "readyWaited" : "waited"}.${waited.unit}`,
+            { count: waited.count },
+          )}
+        </span>
+      ) : view === "waiting_pickup" && attention.delivery ? (
+        <span>{t("orderList.attention.readyTimeUnknown")}</span>
+      ) : null}
+
+      {view === "awaiting_payment" && received && received.amount > 0 ? (
+        <span className="tnum">
+          {t("orderList.attention.received", {
+            received: formatMoney(received),
+            total: formatMoney(order.total),
+          })}
+        </span>
+      ) : null}
+
+      {attention.delivery?.cod && order.paymentStatus !== "paid" ? (
+        <span>{t("orderList.attention.cod")}</span>
+      ) : null}
+
+      {attention.packedReview ? (
+        <span className="flex items-start gap-1 text-status-warning-text">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0">{t("orderList.attention.packedReview")}</span>
+        </span>
+      ) : null}
+
+      <span className="text-text-muted">{t("orderList.attention.staffNotTracked")}</span>
+
+      {next.kind === "action" ? (
+        <span className="text-label text-text-primary">
+          {t("orderList.attention.next", { action: t(next.actionKey) })}
+        </span>
+      ) : next.kind === "teammate" ? (
+        <span className="text-text-primary">{t("orderList.attention.nextTeammate")}</span>
+      ) : null}
+    </div>
+  );
+}
+
+/** The count a chip shows: only the attention views carry one, once it has been read. */
+function attentionCount(
+  counts: RealOrderAttentionCounts | null,
+  option: OrderListFilter,
+): number | null {
+  if (!counts) return null;
+  if (option === "awaiting_payment") return counts.paymentDue;
+  if (option === "to_pack") return counts.needsPreparation;
+  if (option === "waiting_pickup") return counts.waitingPickup;
+  return null;
 }
 
 function OrderListScreen() {
@@ -161,6 +272,13 @@ function OrderListScreen() {
   // URL without them gets the denied state here and a 403 from the server.
   const canReadOrders = capabilities.can("orders.read");
   const canCreateOrder = capabilities.can("orders.create");
+  // Waiting for pickup is a delivery fact; the server refuses that list (and
+  // returns no count) without delivery.read, so the chip is not offered.
+  const canReadDeliveries = capabilities.can("delivery.read");
+  const visibleFilters = ORDER_LIST_FILTERS.filter(
+    (option) => option !== "waiting_pickup" || canReadDeliveries,
+  );
+  const attentionView = isOrderAttentionFilter(filter) ? filter : null;
 
   /*
    * The whole list, a page at a time. Each page continues from the exact
@@ -199,6 +317,25 @@ function OrderListScreen() {
     enabled: !detailOpen && canReadOrders,
   });
 
+  /*
+   * The attention chips' counts: exact, server-side, over the whole
+   * organization, by the same SQL as the lists (getOrderAttentionCounts) —
+   * never the length of what this screen has loaded. Keyed and checked by
+   * principal like the list, so a switch of account or business never shows
+   * the previous one's numbers.
+   */
+  const countsQuery = useQuery({
+    queryKey: ordersKeys.attentionCounts(userId, routeOrganizationId),
+    queryFn: () =>
+      getRealOrderAttentionCounts({ expected: { userId, organizationId: routeOrganizationId } }),
+    retry: (failureCount, error) =>
+      failureCount < 2 &&
+      !isOrderListPrincipalChanged(error) &&
+      classifyOrderError(error) === "server_error",
+    enabled: !detailOpen && canReadOrders,
+  });
+  const counts = countsQuery.isError ? null : (countsQuery.data ?? null);
+
   // Keyed by id across pages. A cursor cannot hand back a row twice, but a
   // repeated React key would silently drop or reuse a row on screen.
   const orders = useMemo(() => {
@@ -213,6 +350,15 @@ function OrderListScreen() {
     }
     return list;
   }, [ordersQuery.data]);
+
+  const attentionByOrder = useMemo(() => {
+    const byOrder: Record<string, OrderAttentionDetail> = {};
+    for (const page of ordersQuery.data?.pages ?? []) Object.assign(byOrder, page.attention);
+    return byOrder;
+  }, [ordersQuery.data]);
+  // Waiting times are measured to when the rows were read, so they move with
+  // each refetch and never drift from the data they describe.
+  const now = ordersQuery.dataUpdatedAt;
 
   const listError = ordersQuery.isError ? ordersQuery.error : null;
   const principalChanged = isOrderListPrincipalChanged(listError);
@@ -280,6 +426,11 @@ function OrderListScreen() {
     focusEndWhenDone.current = false;
     void queryClient.cancelQueries({ queryKey: previous, exact: true });
     queryClient.removeQueries({ queryKey: previous, exact: true });
+    // The new list is read fresh, so its chip's number is too.
+    void queryClient.invalidateQueries({
+      queryKey: ordersKeys.attentionCounts(userId, routeOrganizationId),
+      exact: true,
+    });
   }, [queryClient, userId, routeOrganizationId, filter]);
 
   function selectFilter(next: OrderListFilter) {
@@ -372,17 +523,29 @@ function OrderListScreen() {
           <div ref={filterRowRef}>
             {/* A named group of toggle buttons, announced as "Filter orders". */}
             <ChipRow role="group" label={t("orderList.filtersLabel")} className="mb-3 py-0.5">
-              {ORDER_LIST_FILTERS.map((option) => (
-                <Chip
-                  key={option}
-                  selected={option === filter}
-                  onClick={() => selectFilter(option)}
-                  // The chosen filter carries a mark as well as its colour.
-                  icon={option === filter ? <Check className="size-4" aria-hidden /> : undefined}
-                >
-                  {t(orderListFilterLabelKey(option))}
-                </Chip>
-              ))}
+              {visibleFilters.map((option) => {
+                const count = attentionCount(counts, option);
+                return (
+                  <Chip
+                    key={option}
+                    selected={option === filter}
+                    onClick={() => selectFilter(option)}
+                    // The chosen filter carries a mark as well as its colour.
+                    icon={option === filter ? <Check className="size-4" aria-hidden /> : undefined}
+                    count={count ?? undefined}
+                    ariaLabel={
+                      count === null
+                        ? undefined
+                        : t("orderList.attention.countLabel", {
+                            label: t(orderListFilterLabelKey(option)),
+                            count,
+                          })
+                    }
+                  >
+                    {t(orderListFilterLabelKey(option))}
+                  </Chip>
+                );
+              })}
             </ChipRow>
           </div>
         ) : null}
@@ -479,7 +642,18 @@ function OrderListScreen() {
               )
             ) : null}
 
-            {hasPages ? orders.map((order) => <OrderRow key={order.id} order={order} />) : null}
+            {hasPages
+              ? orders.map((order) => (
+                  <OrderRow
+                    key={order.id}
+                    order={order}
+                    view={attentionView}
+                    attention={attentionByOrder[order.id]}
+                    can={capabilities.can}
+                    now={now}
+                  />
+                ))
+              : null}
           </div>
         ) : null}
 

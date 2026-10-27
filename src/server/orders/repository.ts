@@ -42,7 +42,7 @@ import type {
   OrderListCursor,
   OrderStatusAxis,
 } from "./types";
-import type { OrderListFilter } from "@/lib/order-list-filters";
+import { PAYMENT_DUE_STATUSES, type OrderListFilter } from "@/lib/order-list-filters";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db = supabaseAdmin as any;
@@ -329,7 +329,10 @@ export async function listOrders(
   opts: ListOrdersOptions = {},
 ): Promise<OrderRow[]> {
   const filtered = () => {
-    let query = db.from("orders").select("*").eq("organization_id", organizationId);
+    let query = db
+      .from("orders")
+      .select(orderListSelect(opts.list_filter))
+      .eq("organization_id", organizationId);
     if (opts.customer_id) query = query.eq("customer_id", opts.customer_id);
     if (opts.lifecycle_status) query = query.eq("lifecycle_status", opts.lifecycle_status);
     if (opts.payment_status) query = query.eq("payment_status", opts.payment_status);
@@ -337,7 +340,7 @@ export async function listOrders(
     if (opts.fulfillment_statuses && opts.fulfillment_statuses.length > 0) {
       query = query.in("fulfillment_status", opts.fulfillment_statuses);
     }
-    if (opts.list_filter) query = applyOrderListFilter(query, opts.list_filter);
+    if (opts.list_filter) query = applyOrderListFilter(query, opts.list_filter, organizationId);
     return query;
   };
 
@@ -363,28 +366,79 @@ export async function listOrders(
 }
 
 /**
+ * How many of the organization's orders one Orders-screen filter holds — the
+ * same organization scope and the same applyOrderListFilter as the list, so a
+ * count can never disagree with the rows paged under it. PostgREST's exact
+ * count over the whole filtered set (head only), never a loaded page's length.
+ */
+export async function countOrdersByListFilter(
+  organizationId: string,
+  filter: OrderListFilter,
+): Promise<number> {
+  const query = applyOrderListFilter(
+    db
+      .from("orders")
+      .select(filter === "waiting_pickup" ? `id, ${READY_DELIVERY_JOIN}` : "id", {
+        count: "exact",
+        head: true,
+      })
+      .eq("organization_id", organizationId),
+    filter,
+    organizationId,
+  );
+  const { count, error } = await query;
+  if (error) throw new Error(`countOrdersByListFilter: ${errMessage(error)}`);
+  if (typeof count !== "number") {
+    throw new Error("countOrdersByListFilter: exact count unavailable");
+  }
+  return count;
+}
+
+/**
+ * `waiting_pickup` joins the order's deliveries: `!inner` keeps only orders
+ * with a delivery the filter admits, and PostgREST returns each order once
+ * however many deliveries match. The embedded ids are never read.
+ */
+const READY_DELIVERY_JOIN = "deliveries!inner(id)";
+
+function orderListSelect(filter: OrderListFilter | undefined): string {
+  return filter === "waiting_pickup" ? `*, ${READY_DELIVERY_JOIN}` : "*";
+}
+
+/**
  * One Orders-screen filter as SQL. The meaning of each filter, and why, is in
  * src/lib/order-list-filters.ts; orderMatchesListFilter there is the
  * specification this is tested against over every combination of the three
  * status columns.
  *
  * Every value below is a constant of this file: a filter crosses the network
- * only as one of the eight names, validated by the server function, and the
+ * only as one of the nine names, validated by the server function, and the
  * one `.or()` group is a fixed string. The predicate is ANDed with the
  * organization and with the cursor's bounds, so it can only narrow the
  * caller's own list.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the untyped `db` chain, see the file header
-function applyOrderListFilter(query: any, filter: OrderListFilter): any {
+function applyOrderListFilter(query: any, filter: OrderListFilter, organizationId: string): any {
   switch (filter) {
     case "all":
       return query;
     case "awaiting_payment":
-      return query.neq("lifecycle_status", "cancelled").in("payment_status", ["unpaid", "pending"]);
+      return query
+        .neq("lifecycle_status", "cancelled")
+        .in("payment_status", [...PAYMENT_DUE_STATUSES]);
     case "draft":
       return query.eq("lifecycle_status", "draft").neq("fulfillment_status", "cancelled");
     case "to_pack":
       return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "unfulfilled");
+    case "waiting_pickup":
+      // Needs READY_DELIVERY_JOIN in the select (orderListSelect, countOrdersByListFilter).
+      // The delivery is held to the same organization as the order.
+      return query
+        .eq("lifecycle_status", "confirmed")
+        .neq("fulfillment_status", "fulfilled")
+        .neq("fulfillment_status", "cancelled")
+        .eq("deliveries.status", "ready")
+        .eq("deliveries.organization_id", organizationId);
     case "processing":
       return query.eq("lifecycle_status", "confirmed").eq("fulfillment_status", "processing");
     case "fulfilled":
@@ -394,7 +448,7 @@ function applyOrderListFilter(query: any, filter: OrderListFilter): any {
     case "cancelled":
       return query.or("lifecycle_status.eq.cancelled,fulfillment_status.eq.cancelled");
     default: {
-      // A name outside the eight is a programming error, never "everything".
+      // A name outside the nine is a programming error, never "everything".
       const unknown: never = filter;
       throw new Error(`listOrders: unknown list filter ${String(unknown)}`);
     }
@@ -544,4 +598,94 @@ export async function findLocationForOrg(
     throw new Error(`findLocationForOrg: ${errMessage(error)}`);
   }
   return data ?? null;
+}
+
+// ── Attention-view details (read-only, org-scoped, one page of orders) ───────
+// Batched by the ids of ONE page (at most ORDER_LIST_PAGE_MAX + 1 orders), so
+// each is a single bounded read. Every read is scoped to the organization as
+// well as to the ids: an id from another tenant matches nothing.
+
+export interface AttentionCustomerRow {
+  id: string;
+  display_name: string;
+}
+
+export async function listCustomerNamesForOrg(
+  organizationId: string,
+  customerIds: readonly string[],
+): Promise<AttentionCustomerRow[]> {
+  if (customerIds.length === 0) return [];
+  const { data, error } = await db
+    .from("customers")
+    .select("id, display_name")
+    .eq("organization_id", organizationId)
+    .in("id", [...customerIds]);
+  if (error) throw new Error(`listCustomerNamesForOrg: ${errMessage(error)}`);
+  return (data ?? []) as AttentionCustomerRow[];
+}
+
+export interface AttentionPaymentTotalRow {
+  order_id: string;
+  currency: string;
+  received_minor: number;
+}
+
+/** The Payment ledger's per-order totals (migration 040's order_payment_totals). */
+export async function listPaymentTotalsForOrders(
+  organizationId: string,
+  orderIds: readonly string[],
+): Promise<AttentionPaymentTotalRow[]> {
+  if (orderIds.length === 0) return [];
+  const { data, error } = await db
+    .from("order_payment_totals")
+    .select("order_id, currency, received_minor")
+    .eq("organization_id", organizationId)
+    .in("order_id", [...orderIds]);
+  if (error) throw new Error(`listPaymentTotalsForOrders: ${errMessage(error)}`);
+  return (data ?? []) as AttentionPaymentTotalRow[];
+}
+
+export interface AttentionDeliveryRow {
+  id: string;
+  order_id: string;
+  status: string;
+  cod_amount_minor: number | null;
+  created_at: string;
+}
+
+export async function listDeliveriesForOrders(
+  organizationId: string,
+  orderIds: readonly string[],
+): Promise<AttentionDeliveryRow[]> {
+  if (orderIds.length === 0) return [];
+  const { data, error } = await db
+    .from("deliveries")
+    .select("id, order_id, status, cod_amount_minor, created_at")
+    .eq("organization_id", organizationId)
+    .in("order_id", [...orderIds])
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
+  if (error) throw new Error(`listDeliveriesForOrders: ${errMessage(error)}`);
+  return (data ?? []) as AttentionDeliveryRow[];
+}
+
+export interface AttentionReadyEventRow {
+  delivery_id: string;
+  created_at: string;
+}
+
+/** When each delivery last moved to `ready`, from its append-only history. */
+export async function listReadyEventsForDeliveries(
+  organizationId: string,
+  deliveryIds: readonly string[],
+): Promise<AttentionReadyEventRow[]> {
+  if (deliveryIds.length === 0) return [];
+  const { data, error } = await db
+    .from("delivery_status_history")
+    .select("delivery_id, created_at")
+    .eq("organization_id", organizationId)
+    .in("delivery_id", [...deliveryIds])
+    .eq("to_status", "ready");
+  if (error) throw new Error(`listReadyEventsForDeliveries: ${errMessage(error)}`);
+  return (data ?? []) as AttentionReadyEventRow[];
 }

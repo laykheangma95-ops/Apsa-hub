@@ -361,7 +361,7 @@ const CURSOR_TIMESTAMP_RE =
  * caller's OWN list — the repository filters on the server-resolved
  * organization before it applies one.
  *
- * `filter` is one of the eight names in src/lib/order-list-filters.ts and
+ * `filter` is one of the nine names in src/lib/order-list-filters.ts and
  * nothing else; the server turns it into SQL. Omitted → all orders.
  */
 export const listOrdersPageFn = createServerFn()
@@ -395,3 +395,14 @@ export const listOrdersPageFn = createServerFn()
       filter: data?.filter,
     });
   });
+
+/**
+ * The three attention views' exact counts (src/server/orders/service.ts,
+ * getOrderAttentionCounts). Takes nothing: tenant and member come from the
+ * session, as for listOrdersPageFn.
+ */
+export const getOrderAttentionCountsFn = createServerFn().handler(async () => {
+  const authCtx = await resolveAuthContext();
+  const { getOrderAttentionCounts } = await import("@/server/orders/service");
+  return getOrderAttentionCounts(authCtx);
+});

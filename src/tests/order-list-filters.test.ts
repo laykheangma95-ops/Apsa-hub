@@ -1,5 +1,5 @@
 /**
- * The Orders screen's eight filters — vocabulary, meaning and labels.
+ * The Orders screen's nine filters — vocabulary, meaning and labels.
  *
  * The SQL behind each filter is proven against the real repository and every
  * migration in src/tests/orders-pagination-mounted.runtime.ts (case FA); this
@@ -13,8 +13,10 @@ import en from "@/locales/en.json";
 import km from "@/locales/km.json";
 import {
   DEFAULT_ORDER_LIST_FILTER,
+  ORDER_ATTENTION_FILTERS,
   ORDER_LIST_FILTERS,
   ORDER_PROGRESS_FILTERS,
+  PAYMENT_DUE_STATUSES,
   isOrderListFilter,
   orderListFilterLabelKey,
   orderMatchesListFilter,
@@ -47,28 +49,32 @@ function lookup(dict: unknown, key: string): unknown {
   }, dict);
 }
 
-describe("the eight filters", () => {
-  it("are exactly these eight, All first", () => {
+describe("the nine filters", () => {
+  it("are exactly these nine: All, then the three attention views, then progress", () => {
     expect([...ORDER_LIST_FILTERS]).toEqual([
       "all",
       "awaiting_payment",
-      "draft",
       "to_pack",
+      "waiting_pickup",
+      "draft",
       "processing",
       "fulfilled",
       "completed",
       "cancelled",
     ]);
     expect(DEFAULT_ORDER_LIST_FILTER).toBe("all");
+    expect([...ORDER_ATTENTION_FILTERS]).toEqual(["awaiting_payment", "to_pack", "waiting_pickup"]);
   });
 
   it("match exactly the combinations written out by hand", () => {
     const counts = Object.fromEntries(ORDER_LIST_FILTERS.map((f) => [f, matching(f).length]));
     expect(counts).toEqual({
       all: 64,
-      awaiting_payment: 24,
+      awaiting_payment: 36,
       draft: 12,
       to_pack: 4,
+      // A delivery fact: no combination of the three columns alone is waiting.
+      waiting_pickup: 0,
       processing: 4,
       fulfilled: 4,
       completed: 12,
@@ -99,11 +105,12 @@ describe("the eight filters", () => {
     }
   });
 
-  it("Awaiting payment is Home's 'Orders awaiting payment', combination for combination", () => {
+  it("Payment due is Home's 'Orders awaiting payment', combination for combination", () => {
     // src/server/home/repository.ts getHomeOrderSummary:
-    //   .neq("lifecycle_status", "cancelled").in("payment_status", ["unpaid", "pending"])
+    //   .neq("lifecycle_status", "cancelled").in("payment_status", PAYMENT_DUE_STATUSES)
+    expect([...PAYMENT_DUE_STATUSES]).toEqual(["unpaid", "pending", "failed"]);
     const home = (a: OrderListFilterAxes) =>
-      a.lifecycle !== "cancelled" && ["unpaid", "pending"].includes(a.payment);
+      a.lifecycle !== "cancelled" && ["unpaid", "pending", "failed"].includes(a.payment);
     for (const axes of EVERY) {
       expect(orderMatchesListFilter("awaiting_payment", axes)).toBe(home(axes));
     }
@@ -115,6 +122,36 @@ describe("the eight filters", () => {
     };
     expect(orderMatchesListFilter("awaiting_payment", cod)).toBe(true);
     expect(orderMatchesListFilter("to_pack", cod)).toBe(true);
+    // Every attempt failed and nothing was received (migration 040): still due.
+    expect(orderMatchesListFilter("awaiting_payment", { ...cod, payment: "failed" })).toBe(true);
+    expect(orderMatchesListFilter("awaiting_payment", { ...cod, payment: "paid" })).toBe(false);
+  });
+
+  it("Waiting for pickup: confirmed, a ready delivery, goods neither delivered nor cancelled", () => {
+    for (const axes of EVERY) {
+      const ready = { ...axes, readyDelivery: true };
+      expect(orderMatchesListFilter("waiting_pickup", ready)).toBe(
+        axes.lifecycle === "confirmed" &&
+          axes.fulfillment !== "fulfilled" &&
+          axes.fulfillment !== "cancelled",
+      );
+      // Without a ready delivery nothing waits for a courier — packed or not.
+      expect(orderMatchesListFilter("waiting_pickup", axes)).toBe(false);
+    }
+    // A packed COD order waiting for the courier is also Payment due: packing is not payment.
+    const codWaiting: OrderListFilterAxes = {
+      lifecycle: "confirmed",
+      payment: "unpaid",
+      fulfillment: "processing",
+      readyDelivery: true,
+    };
+    expect(orderMatchesListFilter("waiting_pickup", codWaiting)).toBe(true);
+    expect(orderMatchesListFilter("awaiting_payment", codWaiting)).toBe(true);
+    expect(orderMatchesListFilter("to_pack", codWaiting)).toBe(false);
+    // Cancelled is never waiting work.
+    expect(
+      orderMatchesListFilter("waiting_pickup", { ...codWaiting, lifecycle: "cancelled" }),
+    ).toBe(false);
   });
 
   it("To pack plus Processing is the Ready-to-Pack queue, nothing more and nothing less", () => {
@@ -131,7 +168,7 @@ describe("the eight filters", () => {
 });
 
 describe("filter names from outside", () => {
-  it("accepts only the eight names; everything else is All", () => {
+  it("accepts only the nine names; everything else is All", () => {
     for (const filter of ORDER_LIST_FILTERS) {
       expect(isOrderListFilter(filter)).toBe(true);
       expect(parseOrderListFilter(filter)).toBe(filter);
@@ -162,8 +199,8 @@ describe("labels", () => {
       expect(typeof label).toBe("string");
       expect((label as string).trim().length).toBeGreaterThan(0);
     }
-    expect(new Set(enLabels).size).toBe(8);
-    expect(new Set(kmLabels).size).toBe(8);
+    expect(new Set(enLabels).size).toBe(9);
+    expect(new Set(kmLabels).size).toBe(9);
     for (const label of kmLabels) expect(label as string).toMatch(/[ក-៿]/);
     for (const label of kmLabels) expect(label as string).not.toMatch(/[A-Za-z]/);
   });
@@ -182,6 +219,12 @@ describe("labels", () => {
       expect(lookup(km, key) as string).toMatch(/[ក-៿]/);
     }
     expect(lookup(km, "orderList.endFiltered.body_other") as string).toContain("{{count}}");
+  });
+
+  it("the attention views carry the names merchants asked for", () => {
+    expect(lookup(en, "orderList.filters.awaiting_payment")).toBe("Payment due");
+    expect(lookup(en, "orderList.filters.to_pack")).toBe("Needs preparation");
+    expect(lookup(en, "orderList.filters.waiting_pickup")).toBe("Packed · Waiting for pickup");
   });
 
   it("chip labels reuse the words the row's own status chips use", () => {

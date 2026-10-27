@@ -67,6 +67,12 @@ export const ordersKeys = {
    */
   listPagesFor: (userId: string, organizationId: string, filter: OrderListFilter) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "list", "pages", filter] as const,
+  /**
+   * The attention chips' counts. Under `list`, so every list invalidation
+   * (a new order, a payment, a delivery move) refreshes the counts with it.
+   */
+  attentionCounts: (userId: string, organizationId: string) =>
+    [ORDERS_QUERY_ROOT, userId, organizationId, "list", "attention"] as const,
   /** One production Order's detail. */
   detail: (userId: string, organizationId: string, orderId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "detail", orderId] as const,
