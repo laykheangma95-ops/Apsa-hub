@@ -58,8 +58,10 @@ the order note or customer name so each order can be identified. Record each
 order's code.
 
 Arrange delivery on an order that is **already packed** readies the new delivery
-at once (auto-ready, `readyPackedOrderDelivery`). Only an induced failure of
-that step leaves it pending; see F15.
+at once (auto-ready, `readyPackedOrderDelivery`). So no fixture here ends with a
+packed order whose delivery is still pending. That state is covered by the local
+tests only (`order-attention-lists`, "packed, pending delivery never readied").
+This rehearsal requires no privilege or grant change of any kind.
 
 | Label                    | Actions after Confirm                                                                         | Expected view(s)                                          |
 | ------------------------ | --------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -90,36 +92,6 @@ If any action above is not offered by the UI for the member, record it as
 | Packed · Needs delivery     | 3     | F4, F7, F8                                                                        |
 | Packed · Waiting for pickup | 5     | F5, F6, F12, F13, F14                                                             |
 
-F15 below is **not** part of these totals.
-
-### 1.1 F15 — induced auto-ready failure (optional, separate)
-
-A packed order whose delivery stays `pending` (never readied) cannot be produced
-by the normal flows above, because Arrange delivery auto-readies it. It only
-happens when the auto-ready step fails. To rehearse that path, induce the
-failure deliberately, on **staging only**, with the project owner's approval,
-**after** §2 has been run and recorded for F1–F14:
-
-1. Read-only check that the grant is present:
-   `select has_function_privilege('service_role', 'public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid)', 'EXECUTE');`
-   must return `true`.
-2. Create and confirm order **F15 packed-unreadied**, then Pack Order.
-3. Withdraw the grant for the shortest possible window (this is a staging
-   **write**; every Arrange delivery on staging stays pending while it is in
-   force):
-   `revoke execute on function public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid) from service_role;`
-4. On F15, Arrange delivery. The delivery is created; the best-effort auto-ready
-   fails and is ignored, so it stays `pending`.
-5. Restore the grant immediately:
-   `grant execute on function public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid) to service_role;`
-   Then repeat step 1; it must return `true` again. Record both times.
-6. Verify (read-only): F15 is `packed_needs_delivery` in §2.1, so Packed · Needs
-   delivery = 4 (F4, F7, F8, F15). The row's reason is "delivery not ready" with
-   no list action. F15 is absent from Waiting for pickup. F15 is unpaid, so
-   Payment due = 14.
-7. Recover through the app: on F15's Order detail, use **Retry delivery ready**.
-   F15 moves to Waiting for pickup (6), and Packed · Needs delivery returns to 3.
-
 ## 2. Read-only verification
 
 Every request below is a `GET` or `HEAD`. Every SQL statement is a `SELECT`
@@ -129,7 +101,7 @@ Every request below is a `GET` or `HEAD`. Every SQL statement is a `SELECT`
 
 ```sql
 -- One row per fixture order: the facts every view is defined by.
-select o.order_number, o.lifecycle_status, o.payment_status, o.fulfillment_status,
+select o.id, o.created_at, o.order_number, o.lifecycle_status, o.payment_status, o.fulfillment_status,
        public.order_currently_packed_v1(o.organization_id, o.id) as packed,
        (select string_agg(d.status::text, ',' order by d.created_at)
           from deliveries d where d.organization_id = o.organization_id and d.order_id = o.id) as deliveries,
@@ -146,6 +118,26 @@ for the rest. F14 has `packed = true` and `deliveries = failed,ready`; its ready
 delivery puts it in Waiting for pickup, not in the view. F5, F6, F12 and F13
 show one `ready` delivery each.
 
+**Baseline.** Before §2.2, save this result. It has 14 rows, already in the list
+order `created_at desc, id desc`, with each row's fixture label (F1–F14) written
+next to it. From it, write down three baselines. Each is the **ids** of the
+labelled orders, in the order they appear in this result:
+
+```sh
+BASE_WAIT=(<id F?> ...)      # exactly F5, F6, F12, F13, F14 — 5 ids, in §2.1 row order
+BASE_PACK=(<id F?> ...)      # exactly F1, F2, F3            — 3 ids, in §2.1 row order
+BASE_RECOVER=(<id F?> ...)   # exactly F4, F7, F8            — 3 ids, in §2.1 row order
+```
+
+Fewer ids only for fixtures recorded N/A in §1, never otherwise. Also record
+whether any two fixture orders share a `created_at` (the same-timestamp
+boundary):
+
+```sql
+select created_at, count(*) from orders
+where organization_id = :'ORG' group by created_at having count(*) > 1;
+```
+
 ### 2.2 Waiting for pickup — the embed, exactly as the repository sends it
 
 ```sh
@@ -156,10 +148,9 @@ WAIT="organization_id=eq.$ORG&lifecycle_status=eq.confirmed&fulfillment_status=n
 curl -sS -I "${H[@]}" -H "Prefer: count=exact" \
   "$API/orders?select=id,deliveries!inner(id)&$WAIT" | grep -i content-range
 
-# First page, one row per order, newest first (limit 2 forces pagination).
-curl -sS "${H[@]}" \
-  "$API/orders?select=*,deliveries!inner(id)&$WAIT&order=created_at.desc,id.desc&limit=2" \
-  | jq '[.[] | {order_number, created_at, id, n_deliveries: (.deliveries|length)}]'
+# One row per order: each row's deliveries array holds only the ready one.
+curl -sS "${H[@]}" "$API/orders?select=*,deliveries!inner(id)&$WAIT&order=created_at.desc,id.desc" \
+  | jq '[.[] | {order_number, n_deliveries: (.deliveries|length)}]'
 ```
 
 Expect:
@@ -167,25 +158,98 @@ Expect:
 - [ ] Count = 5 (F5, F6, F12, F13, F14).
 - [ ] Only those orders. F14 has two deliveries (an old failed one and a new
       ready one) and appears **once**. Each row's `deliveries` array holds only
-      the ready delivery.
+      the ready delivery (`n_deliveries` = 1 on every row).
 - [ ] F9 (in transit) and F10 (delivered) are absent.
 
-Keyset continuation (what `listOrdersBefore` sends). Take the 2nd row of a
-`limit=2` page as the cursor `C_AT` / `C_ID`. Both values are from the response;
-URL-encode `C_AT` (its `+` becomes `%2B`).
+**Pagination: walk every page to the end, exactly as the repository does.**
+`listOrdersPage` with page size `P` asks for `P+1` rows. A continuation
+(`listOrdersBefore`) sends two requests, each with `limit=P+1`:
+
+- the **same instant**: `created_at=eq.C`, `id=lt.I`, ordered by `id desc`;
+- everything **older**: `created_at=lt.C`, ordered by `created_at desc, id desc`.
+
+It concatenates them (same-instant rows first), keeps the first `P+1`, and shows
+the first `P`. It continues from the `P`-th row only when a `(P+1)`-th row
+exists; otherwise the list has ended. `walk` below does exactly that, until
+exhausted. It needs bash, curl and jq.
 
 ```sh
-curl -sS "${H[@]}" "$API/orders?select=*,deliveries!inner(id)&$WAIT&created_at=eq.$C_AT&id=lt.$C_ID&order=id.desc&limit=2" | jq '[.[].order_number]'
-curl -sS "${H[@]}" "$API/orders?select=*,deliveries!inner(id)&$WAIT&created_at=lt.$C_AT&order=created_at.desc,id.desc&limit=2" | jq '[.[].order_number]'
+# walk BASE P -> prints a JSON array of every row served, page by page, in order.
+# BASE: "<relation>?select=...&<filters>" (no order/limit). Stops non-zero on any anomaly.
+walk() {
+  local base="$1" P="$2" n=0 rows page same older at C_AT="" C_ID="" ALL='[]'
+  while :; do
+    n=$((n+1))
+    [ "$n" -le 50 ] || { echo "STOP: more than 50 pages" >&2; return 1; }
+    if [ -z "$C_ID" ]; then
+      rows=$(curl -sS "${H[@]}" "$API/$base&order=created_at.desc,id.desc&limit=$((P+1))")
+    else
+      at=$(jq -rn --arg v "$C_AT" '$v|@uri')
+      same=$(curl -sS "${H[@]}" "$API/$base&created_at=eq.$at&id=lt.$C_ID&order=id.desc&limit=$((P+1))")
+      older=$(curl -sS "${H[@]}" "$API/$base&created_at=lt.$at&order=created_at.desc,id.desc&limit=$((P+1))")
+      for r in "$same" "$older"; do
+        jq -e 'type == "array"' <<<"$r" >/dev/null || { echo "STOP: error response: $r" >&2; return 1; }
+      done
+      echo "page $n: same-instant rows $(jq length <<<"$same")" >&2
+      rows=$(jq -n --argjson a "$same" --argjson b "$older" "(\$a + \$b)[0:$((P+1))]")
+    fi
+    jq -e 'type == "array"' <<<"$rows" >/dev/null || { echo "STOP: error response: $rows" >&2; return 1; }
+    [ "$(jq length <<<"$rows")" -le "$((P+1))" ] || { echo "STOP: more than P+1 rows" >&2; return 1; }
+    page=$(jq "[.[0:$P][] | {id, order_number, created_at}]" <<<"$rows")
+    ALL=$(jq -n --argjson a "$ALL" --argjson b "$page" '$a + $b')
+    [ "$(jq length <<<"$rows")" -gt "$P" ] || break          # no (P+1)-th row: exhausted
+    local next_id; next_id=$(jq -r '.[-1].id' <<<"$page")
+    [ "$next_id" != "$C_ID" ] || { echo "STOP: cursor did not advance" >&2; return 1; }
+    C_AT=$(jq -r '.[-1].created_at' <<<"$page"); C_ID="$next_id"
+  done
+  echo "$ALL"
+}
+
+# check RESULT BASELINE_IDS... -> PASS only if every row was served exactly once, in baseline order.
+check() {
+  local result="$1"; shift
+  local rows distinct
+  rows=$(jq length <<<"$result"); distinct=$(jq '[.[].id] | unique | length' <<<"$result")
+  [ "$rows" -eq "$distinct" ] || { echo "FAIL: duplicate rows ($rows rows, $distinct distinct)"; return 1; }
+  [ "$rows" -eq "$#" ] || { echo "FAIL: $rows rows served, baseline has $#"; return 1; }
+  diff <(jq -r '.[].id' <<<"$result") <(printf '%s\n' "$@") \
+    || { echo "FAIL: rows missing, extra or out of order (diff above)"; return 1; }
+  echo "PASS: $rows rows, each exactly once, in baseline order"
+}
+
+for P in 1 2 50; do   # 1 and 2 force 5 and 3 pages; 50 is the screen's default page size
+  R=$(walk "orders?select=*,deliveries!inner(id)&$WAIT" "$P") || { echo "P=$P: STOPPED"; continue; }
+  echo "P=$P"; check "$R" "${BASE_WAIT[@]}"
+done
 ```
 
-- [ ] Page 1 + the continuation = the full list from the first call, in order,
-      with no repeats or gaps.
+- [ ] For every `P` (1, 2, 50), `check` prints the PASS line for 5 rows (fewer
+      only by fixtures recorded N/A), with no `STOP` and no `FAIL`. The
+      concatenated pages, never a single page, must equal `BASE_WAIT`. With
+      `P=50` everything is on one page.
+- [ ] The number of rows served equals the exact count above (5).
+- [ ] Same-timestamp boundary: every continuation printed its same-instant row
+      count.
+  - If the §2.1 tie query returned no rows, the same-instant request must have
+    returned 0 on every page. Record "no tie in fixture". Tie paging is proven
+    only locally (`orders-pagination-mounted` case G, through the PGlite
+    stand-in, not PostgREST).
+  - If it returned a tie between two orders of the **same** view, that view's
+    walks crossed it: a continuation printed a non-zero same-instant count, and
+    the walks must still pass. Record which labels were tied. A tie between
+    orders of different views exercises nothing; record it as "no tie in view".
+
+**Stop conditions (record FAIL and stop §2):** any `STOP` or `FAIL` line, any
+non-array (error) response, a count that differs from the rows served, or any
+row id outside its baseline.
 
 Tenant isolation:
 
-- [ ] The same requests with `$ORG_B` in place of `$ORG` (both places) return
-      only `ORG_B`'s orders. The request with `organization_id=eq.$ORG` and
+- [ ] `walk` with `$ORG_B` in place of `$ORG` (both places in `WAIT`) serves only
+      `ORG_B`'s orders. Check it with `check` against `ORG_B`'s own baseline,
+      taken from the §2.1 query run for `ORG_B`, limited to orders with a
+      `ready` delivery.
+- [ ] The request with `organization_id=eq.$ORG` and
       `deliveries.organization_id=eq.$ORG_B` returns `[]` and count 0.
 
 ### 2.3 Needs preparation and Packed · Needs delivery — the view
@@ -194,7 +258,17 @@ Tenant isolation:
 for STATE in needs_packing packed_needs_delivery; do
   Q="organization_id=eq.$ORG&preparation_state=eq.$STATE"
   curl -sS -I "${H[@]}" -H "Prefer: count=exact" "$API/order_preparation_queue_v1?select=id&$Q" | grep -i content-range
-  curl -sS "${H[@]}" "$API/order_preparation_queue_v1?select=*&$Q&order=created_at.desc,id.desc&limit=2" | jq '[.[].order_number]'
+  curl -sS "${H[@]}" "$API/order_preparation_queue_v1?select=*&$Q&order=created_at.desc,id.desc" \
+    | jq '[.[] | {order_number, preparation_state}]'
+done
+
+for P in 1 2 50; do
+  for STATE in needs_packing packed_needs_delivery; do
+    if [ "$STATE" = needs_packing ]; then BASE=("${BASE_PACK[@]}"); else BASE=("${BASE_RECOVER[@]}"); fi
+    R=$(walk "order_preparation_queue_v1?select=*&organization_id=eq.$ORG&preparation_state=eq.$STATE" "$P") \
+      || { echo "$STATE P=$P: STOPPED"; continue; }
+    echo "$STATE P=$P"; check "$R" "${BASE[@]}"
+  done
 done
 ```
 
@@ -202,8 +276,9 @@ done
       (F4, F7, F8). Either is fewer by exactly the fixtures recorded N/A.
 - [ ] Rows carry every `orders` column plus `preparation_state` (the app maps
       them as orders).
-- [ ] The same two-request keyset continuation as §2.2 returns the rest without
-      repeats or gaps.
+- [ ] Every walk (`P` = 1, 2, 50, both states) has `check` print the PASS line
+      for 3 rows (fewer only by fixtures recorded N/A), with no `STOP` or `FAIL`.
+      The §2.2 stop conditions apply.
 
 Browser keys are refused (no rows can leak):
 
@@ -271,10 +346,10 @@ Migration 065 applied to staging at / by:
 Operator:                       Date:
 §2.1 ground truth:              PASS / FAIL (notes)
 §2.2 waiting_pickup embed/count/pagination/isolation:  PASS / FAIL
+     walks P=1/2/50 vs BASE_WAIT:   PASS / FAIL ; same-instant: no tie in fixture / tie crossed
 §2.3 preparation view list/count/pagination/browser refusal:  PASS / FAIL
+     walks P=1/2/50 vs BASE_PACK / BASE_RECOVER:  PASS / FAIL
 §2.4 app end to end:            PASS / FAIL
-§1.1 F15 induced auto-ready failure (optional): NOT RUN / PASS / FAIL
-     grant withdrawn at / restored at / re-checked true:
 §2.5 cost (largest tenant, ms): count __ / page __ / waiting __ ; PostgREST __
 Fixtures N/A (not reachable):
 Residual risks:
