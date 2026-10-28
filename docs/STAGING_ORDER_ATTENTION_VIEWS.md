@@ -50,10 +50,16 @@ What this proves that local tests cannot:
 ## 1. Disposable fixture — built only through the app's own flows
 
 Sign in to the staging preview as the test organization's Owner. For each row,
-create a POS or manual order (one item, USD), then perform the listed actions
-**in order** through the UI (Order detail, Pack Order, Arrange delivery, the
-delivery screen, Courier Handoff). Put the label in the order note or customer
-name so each order can be identified. Record each order's code.
+create an order (one item, USD) from Orders → New order, or from POS **without**
+recording a payment at checkout. Record **no payment** unless the row says so.
+Then perform the listed actions **in order** through the UI (Order detail, Pack
+Order, Arrange delivery, the delivery screen, Courier Handoff). Put the label in
+the order note or customer name so each order can be identified. Record each
+order's code.
+
+Arrange delivery on an order that is **already packed** readies the new delivery
+at once (auto-ready, `readyPackedOrderDelivery`). Only an induced failure of
+that step leaves it pending; see F15.
 
 | Label                    | Actions after Confirm                                                                         | Expected view(s)                                          |
 | ------------------------ | --------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -65,15 +71,54 @@ name so each order can be identified. Record each order's code.
 | F6 arranged-then-packed  | Arrange delivery → Pack Order (delivery → ready)                                              | Waiting for pickup                                        |
 | F7 packed-cancelled      | as F5, then **Cancel** the ready delivery from the delivery screen (not a fulfillment reopen) | Packed · Needs delivery (reason: last delivery cancelled) |
 | F8 packed-handoff-failed | as F5 → Courier Handoff (in transit) → mark **Failed**                                        | Packed · Needs delivery (reason: last delivery failed)    |
-| F9 in-transit            | as F5 → Courier Handoff                                                                       | none of the packing views; Payment due if unpaid          |
+| F9 in-transit            | as F5 → Courier Handoff                                                                       | none of the packing views; Payment due                    |
 | F10 delivered            | as F9 → mark Delivered                                                                        | none of the packing views                                 |
 | F11 cancelled            | Cancel order (before any delivery)                                                            | none                                                      |
 | F12 COD ready            | Arrange delivery **with COD amount** → Pack Order                                             | Waiting for pickup **and** Payment due                    |
 | F13 partly paid ready    | Record a partial payment and confirm it → Pack → Arrange delivery                             | Waiting for pickup **and** Payment due (Received X of Y)  |
-| F14 two attempts         | as F8, then Arrange delivery again (new pending)                                              | Packed · Needs delivery (reason: delivery not ready)      |
+| F14 two attempts         | as F8, then Arrange delivery again (still packed, so the new delivery auto-readies)           | Waiting for pickup (deliveries: failed, then ready)       |
 
 If any action above is not offered by the UI for the member, record it as
 **N/A — not reachable** rather than writing rows by SQL.
+
+**Expected totals for F1–F14** (reduce by exactly the fixtures recorded N/A):
+
+| View                        | Count | Orders                                                                            |
+| --------------------------- | ----- | --------------------------------------------------------------------------------- |
+| Payment due                 | 13    | every fixture order except F11 (cancelled); none is fully paid (F13 is part paid) |
+| Needs preparation           | 3     | F1, F2, F3                                                                        |
+| Packed · Needs delivery     | 3     | F4, F7, F8                                                                        |
+| Packed · Waiting for pickup | 5     | F5, F6, F12, F13, F14                                                             |
+
+F15 below is **not** part of these totals.
+
+### 1.1 F15 — induced auto-ready failure (optional, separate)
+
+A packed order whose delivery stays `pending` (never readied) cannot be produced
+by the normal flows above, because Arrange delivery auto-readies it. It only
+happens when the auto-ready step fails. To rehearse that path, induce the
+failure deliberately, on **staging only**, with the project owner's approval,
+**after** §2 has been run and recorded for F1–F14:
+
+1. Read-only check that the grant is present:
+   `select has_function_privilege('service_role', 'public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid)', 'EXECUTE');`
+   must return `true`.
+2. Create and confirm order **F15 packed-unreadied**, then Pack Order.
+3. Withdraw the grant for the shortest possible window (this is a staging
+   **write**; every Arrange delivery on staging stays pending while it is in
+   force):
+   `revoke execute on function public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid) from service_role;`
+4. On F15, Arrange delivery. The delivery is created; the best-effort auto-ready
+   fails and is ignored, so it stays `pending`.
+5. Restore the grant immediately:
+   `grant execute on function public.ready_packed_delivery_v1(uuid,uuid,uuid,uuid) to service_role;`
+   Then repeat step 1; it must return `true` again. Record both times.
+6. Verify (read-only): F15 is `packed_needs_delivery` in §2.1, so Packed · Needs
+   delivery = 4 (F4, F7, F8, F15). The row's reason is "delivery not ready" with
+   no list action. F15 is absent from Waiting for pickup. F15 is unpaid, so
+   Payment due = 14.
+7. Recover through the app: on F15's Order detail, use **Retry delivery ready**.
+   F15 moves to Waiting for pickup (6), and Packed · Needs delivery returns to 3.
 
 ## 2. Read-only verification
 
@@ -96,8 +141,10 @@ order by o.created_at desc, o.id desc;
 ```
 
 Expected: each order's `preparation_state` matches the table in §1:
-`needs_packing` for F1–F3, `packed_needs_delivery` for F4, F7, F8 and F14, and
-null for the rest.
+`needs_packing` for F1–F3, `packed_needs_delivery` for F4, F7 and F8, and null
+for the rest. F14 has `packed = true` and `deliveries = failed,ready`; its ready
+delivery puts it in Waiting for pickup, not in the view. F5, F6, F12 and F13
+show one `ready` delivery each.
 
 ### 2.2 Waiting for pickup — the embed, exactly as the repository sends it
 
@@ -117,9 +164,9 @@ curl -sS "${H[@]}" \
 
 Expect:
 
-- [ ] Count = 4 (F5, F6, F12, F13).
-- [ ] Only those orders. F14 has an old failed and a new pending delivery, so it
-      is absent. No order appears twice. Each row's `deliveries` array holds only
+- [ ] Count = 5 (F5, F6, F12, F13, F14).
+- [ ] Only those orders. F14 has two deliveries (an old failed one and a new
+      ready one) and appears **once**. Each row's `deliveries` array holds only
       the ready delivery.
 - [ ] F9 (in transit) and F10 (delivered) are absent.
 
@@ -151,8 +198,8 @@ for STATE in needs_packing packed_needs_delivery; do
 done
 ```
 
-- [ ] `needs_packing` count = 3 (F1, F2, F3). `packed_needs_delivery` count = 4
-      (F4, F7, F8, F14), or fewer by exactly the fixtures recorded N/A.
+- [ ] `needs_packing` count = 3 (F1, F2, F3). `packed_needs_delivery` count = 3
+      (F4, F7, F8). Either is fewer by exactly the fixtures recorded N/A.
 - [ ] Rows carry every `orders` column plus `preparation_state` (the app maps
       them as orders).
 - [ ] The same two-request keyset continuation as §2.2 returns the rest without
@@ -170,8 +217,9 @@ curl -sS -o /dev/null -w "%{http_code}\n" -H "apikey: $ANON" -H "Authorization: 
 
 ### 2.4 The app, end to end
 
-- [ ] On the staging preview, as Owner: each chip's number equals the counts
-      above. Each list shows exactly the expected orders, with the reasons and
+- [ ] On the staging preview, as Owner: the chips read Payment due 13, Needs
+      preparation 3, Packed · Needs delivery 3, Waiting for pickup 5 (the §1
+      totals). Each list shows exactly the expected orders, with the reasons and
       next steps from §1.
 - [ ] As a member with only `orders.read`: Waiting for pickup is not offered, and
       the other three are.
@@ -225,6 +273,8 @@ Operator:                       Date:
 §2.2 waiting_pickup embed/count/pagination/isolation:  PASS / FAIL
 §2.3 preparation view list/count/pagination/browser refusal:  PASS / FAIL
 §2.4 app end to end:            PASS / FAIL
+§1.1 F15 induced auto-ready failure (optional): NOT RUN / PASS / FAIL
+     grant withdrawn at / restored at / re-checked true:
 §2.5 cost (largest tenant, ms): count __ / page __ / waiting __ ; PostgREST __
 Fixtures N/A (not reachable):
 Residual risks:
