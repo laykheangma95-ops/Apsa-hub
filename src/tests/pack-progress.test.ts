@@ -16,6 +16,8 @@ import {
 
 const SCOPE = { userId: "user-A", organizationId: "org-A", orderId: "order-1" };
 const T0 = 1_800_000_000_000;
+/** The server's packing round when the progress was recorded. */
+const ROUND = 2;
 
 function requirement(orderItemId: string, variantId: string, quantityRequired: number) {
   return {
@@ -81,12 +83,13 @@ afterEach(() => {
 describe("save / read / clear", () => {
   it("round-trips confirmed units and the parcel check, without product details", () => {
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }], true);
-    savePackProgress(SCOPE, session, T0);
+    savePackProgress(SCOPE, session, ROUND, T0);
     const record = readPackProgress(SCOPE, T0 + 1);
     expect(record).toEqual({
       parcelCode: "PCL-1",
       parcelVerified: true,
       packed: [{ orderItemId: "line-1", variantId: "variant-1", method: "scan", scannedAt: T0 }],
+      packRound: ROUND,
       updatedAt: T0,
     });
     const raw = globalThis.sessionStorage.getItem("apsa.pack-progress.v1") ?? "";
@@ -97,17 +100,18 @@ describe("save / read / clear", () => {
     savePackProgress(
       SCOPE,
       withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]),
+      ROUND,
       T0,
     );
-    savePackProgress(SCOPE, fresh(), T0 + 1);
+    savePackProgress(SCOPE, fresh(), ROUND, T0 + 1);
     expect(readPackProgress(SCOPE, T0 + 2)).toBeNull();
   });
 
   it("clear removes only this scope", () => {
     const other = { ...SCOPE, orderId: "order-2" };
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
-    savePackProgress(SCOPE, session, T0);
-    savePackProgress(other, session, T0);
+    savePackProgress(SCOPE, session, ROUND, T0);
+    savePackProgress(other, session, ROUND, T0);
     clearPackProgress(SCOPE, T0 + 1);
     expect(readPackProgress(SCOPE, T0 + 2)).toBeNull();
     expect(readPackProgress(other, T0 + 2)).not.toBeNull();
@@ -115,7 +119,7 @@ describe("save / read / clear", () => {
 
   it("is scoped by member, organization and order", () => {
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
-    savePackProgress(SCOPE, session, T0);
+    savePackProgress(SCOPE, session, ROUND, T0);
     expect(readPackProgress({ ...SCOPE, userId: "user-B" }, T0)).toBeNull();
     expect(readPackProgress({ ...SCOPE, organizationId: "org-B" }, T0)).toBeNull();
     expect(readPackProgress({ ...SCOPE, orderId: "order-2" }, T0)).toBeNull();
@@ -126,6 +130,7 @@ describe("save / read / clear", () => {
     savePackProgress(
       SCOPE,
       withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]),
+      ROUND,
       T0,
     );
     expect(readPackProgress(SCOPE, T0 + PACK_PROGRESS_TTL_MS - 1)).not.toBeNull();
@@ -135,7 +140,7 @@ describe("save / read / clear", () => {
   it("keeps at most the newest records", () => {
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
     for (let i = 0; i <= PACK_PROGRESS_MAX_RECORDS; i++) {
-      savePackProgress({ ...SCOPE, orderId: `order-${i}` }, session, T0 + i);
+      savePackProgress({ ...SCOPE, orderId: `order-${i}` }, session, ROUND, T0 + i);
     }
     expect(readPackProgress({ ...SCOPE, orderId: "order-0" }, T0 + 100)).toBeNull();
     expect(
@@ -154,14 +159,14 @@ describe("save / read / clear", () => {
       throw new Error("QuotaExceededError");
     };
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
-    expect(() => savePackProgress(SCOPE, session, T0)).not.toThrow();
+    expect(() => savePackProgress(SCOPE, session, ROUND, T0)).not.toThrow();
     expect(readPackProgress(SCOPE, T0)).toBeNull();
   });
 
   it("without sessionStorage, a page-lifetime copy stands in", () => {
     delete (globalThis as { sessionStorage?: Storage }).sessionStorage;
     const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
-    savePackProgress(SCOPE, session, T0);
+    savePackProgress(SCOPE, session, ROUND, T0);
     expect(readPackProgress(SCOPE, T0)?.packed).toHaveLength(1);
     clearPackProgress(SCOPE, T0);
     expect(readPackProgress(SCOPE, T0)).toBeNull();
@@ -182,6 +187,7 @@ describe("restorePackSession", () => {
         method: (unit.method ?? "manual") as "manual",
         scannedAt: T0 + i,
       })),
+      packRound: ROUND,
       updatedAt: T0,
       ...extra,
     };
@@ -189,7 +195,7 @@ describe("restorePackSession", () => {
 
   it("nothing saved: the fresh session unchanged", () => {
     const session = fresh();
-    expect(restorePackSession(session, null)).toBe(session);
+    expect(restorePackSession(session, null, ROUND)).toBe(session);
   });
 
   it("restores units for current lines and keeps requirements from the server", () => {
@@ -199,6 +205,7 @@ describe("restorePackSession", () => {
         { orderItemId: "line-1", variantId: "variant-1" },
         { orderItemId: "line-2", variantId: "variant-2", method: "scan" },
       ]),
+      ROUND,
     );
     expect(restored.requirements).toBe(REQUIREMENTS);
     expect(restored.packed.map((p) => [p.orderItemId, p.method])).toEqual([
@@ -215,6 +222,7 @@ describe("restorePackSession", () => {
         { orderItemId: "line-1", variantId: "variant-other" },
         { orderItemId: "line-1", variantId: "variant-1" },
       ]),
+      ROUND,
     );
     expect(restored.packed.map((p) => p.orderItemId)).toEqual(["line-1"]);
   });
@@ -227,6 +235,7 @@ describe("restorePackSession", () => {
         { orderItemId: "line-2", variantId: "variant-2" },
         { orderItemId: "line-2", variantId: "variant-2" },
       ]),
+      ROUND,
     );
     expect(restored.packed).toHaveLength(1);
   });
@@ -235,6 +244,7 @@ describe("restorePackSession", () => {
     const restored = restorePackSession(
       fresh(),
       saved([{ orderItemId: "line-1", variantId: "variant-1" }], { parcelVerified: true }),
+      ROUND,
     );
     expect(restored.parcelVerified).toBe(true);
     expect(restored.packed).toHaveLength(1);
@@ -252,10 +262,39 @@ describe("restorePackSession", () => {
         ],
         { parcelVerified: true },
       ),
+      ROUND,
     );
     expect(restored).toBe(session);
     expect(restored.parcelVerified).toBe(false);
     expect(restored.packed).toHaveLength(0);
+  });
+
+  it("another packing round (packed, then reopened): nothing is restored", () => {
+    // Same parcel, same lines, same variants: only the server's round differs.
+    const session = fresh();
+    const restored = restorePackSession(
+      session,
+      saved(
+        [
+          { orderItemId: "line-1", variantId: "variant-1" },
+          { orderItemId: "line-2", variantId: "variant-2" },
+        ],
+        { parcelVerified: true },
+      ),
+      ROUND + 2,
+    );
+    expect(restored).toBe(session);
+    expect(restored.parcelVerified).toBe(false);
+    expect(restored.packed).toHaveLength(0);
+  });
+
+  it("the round recorded with the progress is the one saved", () => {
+    const session = withUnits(fresh(), [{ orderItemId: "line-1", variantId: "variant-1" }]);
+    savePackProgress(SCOPE, session, 0, T0);
+    const record = readPackProgress(SCOPE, T0);
+    expect(record?.packRound).toBe(0);
+    expect(restorePackSession(fresh(), record, 0).packed).toHaveLength(1);
+    expect(restorePackSession(fresh(), record, 2).packed).toHaveLength(0);
   });
 });
 
@@ -264,6 +303,7 @@ describe("malformed saved data starts fresh, never crashes", () => {
     parcelCode: "PCL-1",
     parcelVerified: false,
     packed: [{ orderItemId: "line-1", variantId: "variant-1", method: "scan", scannedAt: T0 }],
+    packRound: ROUND,
     updatedAt: T0,
   };
   const malformed: [string, unknown][] = [
@@ -285,6 +325,9 @@ describe("malformed saved data starts fresh, never crashes", () => {
     ["parcelCode not a string", { ...valid, parcelCode: 42 }],
     ["parcelVerified not a boolean", { ...valid, parcelVerified: "yes" }],
     ["updatedAt not a number", { ...valid, updatedAt: "today" }],
+    ["packRound missing (recorded before rounds existed)", { ...valid, packRound: undefined }],
+    ["packRound not a number", { ...valid, packRound: "2" }],
+    ["packRound not a whole number", { ...valid, packRound: 1.5 }],
   ];
 
   for (const [label, record] of malformed) {
@@ -292,7 +335,7 @@ describe("malformed saved data starts fresh, never crashes", () => {
       const session = fresh();
       let restored: PackSession | undefined;
       expect(() => {
-        restored = restorePackSession(session, record as PackProgressRecord);
+        restored = restorePackSession(session, record as PackProgressRecord, ROUND);
       }).not.toThrow();
       expect(restored).toBe(session);
     });

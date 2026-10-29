@@ -121,6 +121,50 @@ export async function isOrderCurrentlyPacked(
   return data === true;
 }
 
+/**
+ * How many fulfillment history rows of the order carry `reason`: the order's
+ * own fulfillment history plus the history of every delivery of the order.
+ * History is append-only, so the count only ever grows. Read-only, org-scoped.
+ */
+export async function countOrderFulfillmentHistoryWithReason(
+  organizationId: string,
+  orderId: string,
+  reason: string,
+): Promise<number> {
+  const orderRows = await db
+    .from("order_status_history")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .eq("axis", "fulfillment")
+    .eq("reason", reason);
+  if (orderRows.error) {
+    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(orderRows.error)}`);
+  }
+
+  const deliveries = await db
+    .from("deliveries")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId);
+  if (deliveries.error) {
+    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(deliveries.error)}`);
+  }
+  const deliveryIds = ((deliveries.data ?? []) as { id: string }[]).map((d) => d.id);
+  if (deliveryIds.length === 0) return orderRows.count ?? 0;
+
+  const deliveryRows = await db
+    .from("delivery_status_history")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organizationId)
+    .in("delivery_id", deliveryIds)
+    .eq("reason", reason);
+  if (deliveryRows.error) {
+    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(deliveryRows.error)}`);
+  }
+  return (orderRows.count ?? 0) + (deliveryRows.count ?? 0);
+}
+
 export async function findDeliveryById(
   organizationId: string,
   deliveryId: string,

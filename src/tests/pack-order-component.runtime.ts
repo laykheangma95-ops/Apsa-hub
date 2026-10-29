@@ -40,6 +40,12 @@ interface FakeServer {
   parcelCode: string | null;
   /** The data of every Mark Packed request, in order. */
   markRequests: { orderId: string; packedLines: { orderItemId: string; quantity: number }[] }[];
+  /** The server's packing round: grows each time the order is packed, by anyone. */
+  packRound: number;
+  /** Another member marks the order packed (this tab is not involved). */
+  packedElsewhere(): void;
+  /** Reopen the order's fulfillment: unpacked again, same parcel and lines. */
+  reopen(): void;
 }
 
 const server: FakeServer = {
@@ -52,6 +58,14 @@ const server: FakeServer = {
   packed: false,
   parcelCode: null,
   markRequests: [],
+  packRound: 0,
+  packedElsewhere() {
+    server.packRound += 1;
+    server.packed = true;
+  },
+  reopen() {
+    server.packed = false;
+  },
 };
 
 const navigations: unknown[] = [];
@@ -83,6 +97,7 @@ mock.module("@/api/packing", () => ({
     eligible: true,
     deliveryStatus: null,
     packed: server.packed,
+    packRound: server.packRound,
     requirements: [
       {
         orderItemId: `item|${data.orderId}`,
@@ -114,6 +129,8 @@ mock.module("@/api/packing", () => ({
   },
   markOrderPackedFn: async ({ data }: { data: FakeServer["markRequests"][number] }) => {
     server.markRequests.push({ orderId: data.orderId, packedLines: data.packedLines });
+    // The server records the packed marker when it handles the request.
+    server.packRound += 1;
     if (server.markMode === "pending") {
       return new Promise<MarkPackedResult>((resolve) => {
         server.pendingMark = resolve;
@@ -192,6 +209,7 @@ beforeEach(() => {
     packed: false,
     parcelCode: null,
     markRequests: [],
+    packRound: 0,
   });
   navigations.length = 0;
   notifications.length = 0;
@@ -544,6 +562,65 @@ describe("Pack Order: leave and resume", () => {
     expectFreshSession(A);
 
     // Packing still works, and what it saves next is well-formed again.
+    await scan(BARCODE);
+    await leave();
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
+  });
+
+  /*
+   * A reopen (reopen_order_fulfillment_v1) makes a packed order unpacked again
+   * and keeps the same parcel and order lines. Nothing confirmed in the earlier
+   * round may come back into the new one. Each case remounts the same tab well
+   * within the 12-hour lifetime of saved progress.
+   */
+
+  it("reopen after this tab marked the order packed: the new round starts at zero", async () => {
+    await mount(client(), A);
+    await packCompletely();
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+    await leave();
+
+    server.reopen();
+    await mount(client(), A);
+    expectFreshSession(A);
+  });
+
+  it("reopen after this tab left while its Mark Packed was in flight: the new round starts at zero", async () => {
+    await mount(client(), A);
+    await packCompletely();
+    server.markMode = "pending";
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await leave();
+    await act(async () => server.pendingMark?.({ kind: "packed", deliveryId: null }));
+
+    server.reopen();
+    await mount(client(), A);
+    expectFreshSession(A);
+  });
+
+  it("another member packs, the order is reopened, and this tab never saw it packed: the new round starts at zero", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    expect(text()).toContain("1 / 2 packed");
+    await leave();
+
+    server.packedElsewhere();
+    server.reopen();
+    await mount(client(), A);
+    expectFreshSession(A);
+    expect(button("Start over")).toBeUndefined();
+
+    // Progress in the new round is saved in it and resumes normally.
+    await scan(BARCODE);
+    await leave();
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
+  });
+
+  it("no reopen: progress in the current round still resumes", async () => {
+    await mount(client(), A);
     await scan(BARCODE);
     await leave();
     await mount(client(), A);

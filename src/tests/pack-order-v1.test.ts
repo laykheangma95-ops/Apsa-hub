@@ -1827,6 +1827,63 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     expect((await confirmHandoff(ctx, PARCEL_CODE, principalOf(ctx))).kind).toBe("success");
   });
 
+  it("packRound changes only when the order is packed, on either path, so a reopened round differs", async () => {
+    seedOrder();
+    rpcResponder = statefulRpc;
+    const ctx = mockCtx(ORG_A, OPS_PERMS);
+    const { markOrderPacked, getPackRequirements } = await import("../server/packing/service");
+    const { transitionFulfillmentStatus } = await import("../server/orders/service");
+    const { createDelivery } = await import("../server/deliveries/service");
+    const read = async () => {
+      const result = await getPackRequirements(ctx, ORDER_ID);
+      return { packed: result?.packed, round: result?.packRound };
+    };
+
+    const first = await read();
+    expect(first).toEqual({ packed: false, round: 0 });
+
+    // Packed with no delivery (order history marker), then reopened: same
+    // parcel and lines, unpacked again, and a different round from the first.
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
+    const packed = await read();
+    expect(packed.packed).toBe(true);
+    await transitionFulfillmentStatus(ctx, ORDER_ID, "unfulfilled", "Recount", principalOf(ctx));
+    const reopened = await read();
+    expect(reopened).toEqual({ packed: false, round: packed.round });
+    expect(reopened.round).not.toBe(first.round);
+
+    // Arranging a delivery is not packing: the round is unchanged.
+    await createDelivery(ctx, {
+      expectedPrincipal: principalOf(ctx),
+      orderId: ORDER_ID,
+      providerName: "Local courier",
+    } as any);
+    expect(await read()).toEqual(reopened);
+
+    // Packed again through the delivery (delivery history marker): new round.
+    await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx));
+    const packedAgain = await read();
+    expect(packedAgain.packed).toBe(true);
+    expect(packedAgain.round).not.toBe(reopened.round);
+  });
+
+  it("packRound counts only this organization's markers", async () => {
+    seedOrder();
+    mockOrderHistory = [
+      {
+        organization_id: ORG_B,
+        order_id: ORDER_ID,
+        axis: "fulfillment",
+        from_status: "unfulfilled",
+        to_status: "processing",
+        reason: PACK_ORDER_PACKED_REASON_CODE,
+        changed_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const { getPackRequirements } = await import("../server/packing/service");
+    expect((await getPackRequirements(mockCtx(ORG_A), ORDER_ID))?.packRound).toBe(0);
+  });
+
   it("pack → unpack → pack again (no delivery) → arrange delivery: the new delivery is ready", async () => {
     const ctx = await packThenUnpack();
     const { createDelivery } = await import("../server/deliveries/service");

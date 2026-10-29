@@ -24,6 +24,13 @@ export interface PackRequirementsResult {
   deliveryStatus: string | null;
   /** The order has already been marked packed (with or without a delivery). */
   packed: boolean;
+  /**
+   * Packing round: how many Pack Order packed markers the order's append-only
+   * fulfillment history holds. Opaque; it changes only when the order is
+   * packed again, so after a reopen it differs from the round any earlier
+   * pack progress was recorded in. Never authority for anything.
+   */
+  packRound: number;
   requirements: PackRequirementRow[];
 }
 

@@ -161,6 +161,14 @@ export async function getPackRequirements(
     eligible: true,
     deliveryStatus: delivery?.status ?? null,
     packed: await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null),
+    // A reopen keeps the parcel and the order lines, so only this tells the
+    // Pack Order screen that saved progress belongs to an earlier round. It is
+    // not the packed rule (that stays in order_currently_packed_v1).
+    packRound: await deliveriesRepo.countOrderFulfillmentHistoryWithReason(
+      ctx.organizationId,
+      orderId,
+      PACK_ORDER_PACKED_REASON_CODE,
+    ),
     requirements,
   };
 }

@@ -12,7 +12,8 @@
  * reads a different record, so the identity isolation of the screen holds):
  *   parcelCode      the parcel the progress was recorded against;
  *   parcelVerified  its label was scanned and the server accepted it;
- *   packed          the confirmed units, by order line and variant only.
+ *   packed          the confirmed units, by order line and variant only;
+ *   packRound       the server's packing round the progress belongs to.
  * Product names, barcodes and quantities required are NOT stored: they always
  * come from the server's current pack requirements.
  *
@@ -21,8 +22,14 @@
  * completeness against the order itself (packing/service.ts, "incomplete"). On
  * restore, units for lines the order no longer has, or with another variant,
  * are dropped and each line is capped at what it requires. Progress recorded
- * against another parcel, or a record not exactly in the shape written here,
- * restores nothing: the packer starts fresh.
+ * against another parcel or in another packing round, or a record not exactly
+ * in the shape written here, restores nothing: the packer starts fresh.
+ *
+ * Packing round: a reopen makes a packed order unpacked again with the SAME
+ * parcel and order lines, so neither tells an earlier round from the new one.
+ * The server's packRound (getPackRequirements) changes whenever the order is
+ * packed, by anyone, so progress from before that is never brought back even
+ * when this tab never saw the order packed.
  *
  * Bounded: records untouched for 12 hours are dropped, and at most 30 are kept
  * per tab. Losing one is safe: the packer simply checks the items again.
@@ -48,6 +55,7 @@ export interface PackProgressRecord {
   parcelCode: string;
   parcelVerified: boolean;
   packed: SavedPackUnit[];
+  packRound: number;
   updatedAt: number;
 }
 
@@ -122,7 +130,8 @@ export function isPackProgressRecord(value: unknown): value is PackProgressRecor
     typeof value["updatedAt"] === "number" &&
     Number.isFinite(value["updatedAt"]) &&
     Array.isArray(value["packed"]) &&
-    value["packed"].every(isSavedPackUnit)
+    value["packed"].every(isSavedPackUnit) &&
+    Number.isInteger(value["packRound"])
   );
 }
 
@@ -149,10 +158,14 @@ export function readPackProgress(
   return load(now)[scopeId(scope)] ?? null;
 }
 
-/** Remember the session's progress; a session with nothing confirmed is forgotten. */
+/**
+ * Remember the session's progress in `packRound` (the server's round the
+ * session was started in); a session with nothing confirmed is forgotten.
+ */
 export function savePackProgress(
   scope: PackProgressScope,
   session: PackSession,
+  packRound: number,
   now = Date.now(),
 ): void {
   const store = load(now);
@@ -169,6 +182,7 @@ export function savePackProgress(
         method,
         scannedAt,
       })),
+      packRound,
       updatedAt: now,
     };
   }
@@ -186,16 +200,24 @@ export function clearPackProgress(scope: PackProgressScope, now = Date.now()): v
  * Apply saved progress to a fresh session built from the server's CURRENT
  * requirements. Only units for an existing line with the same variant are
  * kept, each line capped at its required quantity. A malformed record, or one
- * for another parcel, restores nothing (neither items nor the parcel check).
- * Pure.
+ * for another parcel or another packing round (`packRound`, the server's
+ * current one), restores nothing (neither items nor the parcel check). Pure.
  */
 export function restorePackSession(
   fresh: PackSession,
   saved: PackProgressRecord | null,
+  packRound: number,
 ): PackSession {
-  // A malformed record, or progress recorded against another parcel, restores
-  // nothing: item confirmations belong to the parcel they were packed into.
-  if (!isPackProgressRecord(saved) || saved.parcelCode !== fresh.parcelCode) return fresh;
+  // A malformed record, or progress recorded against another parcel or in an
+  // earlier packing round, restores nothing: item confirmations belong to the
+  // parcel, and the round, they were packed in.
+  if (
+    !isPackProgressRecord(saved) ||
+    saved.parcelCode !== fresh.parcelCode ||
+    saved.packRound !== packRound
+  ) {
+    return fresh;
+  }
   const remaining = new Map<string, number>();
   const variantOf = new Map<string, string>();
   for (const req of fresh.requirements) {

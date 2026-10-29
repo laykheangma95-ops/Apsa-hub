@@ -249,6 +249,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const parcelCode = packData?.parcelCode ?? "";
   // Packing never requires a delivery; the server says whether it is packed.
   const alreadyPacked = packData?.packed ?? false;
+  const packRound = packData?.packRound ?? 0;
 
   const [packSession, setPackSession] = useState<PackSession | null>(null);
   // Scans are processed strictly in order, each against the latest session, so
@@ -268,12 +269,16 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
     () => ({ userId, organizationId, orderId }),
     [userId, organizationId, orderId],
   );
+  // The server's packing round this session was started in. Progress is saved
+  // in it, so after the order is packed and reopened (same parcel and lines)
+  // a later visit sees a different round and starts fresh.
+  const sessionRoundRef = useRef(0);
 
   const commit = useCallback(
     (next: PackSession) => {
       sessionRef.current = next;
       setPackSession(next);
-      savePackProgress(progressScope, next);
+      savePackProgress(progressScope, next, sessionRoundRef.current);
     },
     [progressScope],
   );
@@ -283,7 +288,8 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
     // An order the server already reports packed resumes nothing.
     const initial = alreadyPacked
       ? fresh
-      : restorePackSession(fresh, readPackProgress(progressScope));
+      : restorePackSession(fresh, readPackProgress(progressScope), packRound);
+    sessionRoundRef.current = packRound;
     sessionRef.current = initial;
     setPackSession(initial);
   }
@@ -294,9 +300,10 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
 
   const startOver = useCallback(() => {
     if (requirements.length === 0 || !parcelCode) return;
+    sessionRoundRef.current = packRound;
     commit(createPackSession(orderId, orderNumber, parcelCode, requirements));
     setFeedback([]);
-  }, [commit, orderId, orderNumber, parcelCode, requirements]);
+  }, [commit, orderId, orderNumber, packRound, parcelCode, requirements]);
 
   const progress = useMemo(
     () => (packSession ? computePackProgress(packSession) : null),
