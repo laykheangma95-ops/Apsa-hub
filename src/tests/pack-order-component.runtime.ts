@@ -34,6 +34,10 @@ interface FakeServer {
   pendingScans: ((result: ServerProductScanResult) => void)[];
   markMode: "packed" | "pending";
   pendingMark: ((result: MarkPackedResult) => void) | null;
+  /** What getPackRequirementsFn reports as the server's packed state. */
+  packed: boolean;
+  /** The data of every Mark Packed request, in order. */
+  markRequests: { orderId: string; packedLines: { orderItemId: string; quantity: number }[] }[];
 }
 
 const server: FakeServer = {
@@ -43,6 +47,8 @@ const server: FakeServer = {
   pendingScans: [],
   markMode: "packed",
   pendingMark: null,
+  packed: false,
+  markRequests: [],
 };
 
 const navigations: unknown[] = [];
@@ -73,7 +79,7 @@ mock.module("@/api/packing", () => ({
     parcelCode: `PCL|${data.orderId}`,
     eligible: true,
     deliveryStatus: null,
-    packed: false,
+    packed: server.packed,
     requirements: [
       {
         orderItemId: `item|${data.orderId}`,
@@ -103,7 +109,8 @@ mock.module("@/api/packing", () => ({
     }
     return accepted;
   },
-  markOrderPackedFn: async () => {
+  markOrderPackedFn: async ({ data }: { data: FakeServer["markRequests"][number] }) => {
+    server.markRequests.push({ orderId: data.orderId, packedLines: data.packedLines });
     if (server.markMode === "pending") {
       return new Promise<MarkPackedResult>((resolve) => {
         server.pendingMark = resolve;
@@ -179,10 +186,28 @@ beforeEach(() => {
     pendingScans: [],
     markMode: "packed",
     pendingMark: null,
+    packed: false,
+    markRequests: [],
   });
   navigations.length = 0;
   notifications.length = 0;
+  // Pack progress is kept in the tab's sessionStorage: every test is a fresh tab.
+  (globalThis as any).sessionStorage = memoryStorage();
 });
+
+function memoryStorage(): Storage {
+  const items = new Map<string, string>();
+  return {
+    get length() {
+      return items.size;
+    },
+    clear: () => items.clear(),
+    getItem: (key: string) => items.get(key) ?? null,
+    key: (index: number) => [...items.keys()][index] ?? null,
+    removeItem: (key: string) => void items.delete(key),
+    setItem: (key: string, value: string) => void items.set(key, String(value)),
+  };
+}
 
 let mounted: ReactTestRenderer | null = null;
 
@@ -372,5 +397,131 @@ describe("PackOrderIdentityBoundary", () => {
     expect(navigations).toHaveLength(0);
     expect(notifications).toHaveLength(0);
     expectFreshSession(next);
+  });
+});
+
+/*
+ * Leaving and coming back. Unmounting the screen is Back, the phone's own back
+ * button, or opening another screen; a new QueryClient on top of that is a tab
+ * reload. sessionStorage (the tab) is all that survives either.
+ */
+describe("Pack Order: leave and resume", () => {
+  const A = { userId: USER_A, organizationId: ORG_A, orderId: ORDER_1 };
+
+  async function leave() {
+    await act(async () => mounted?.unmount());
+    mounted = null;
+  }
+
+  it("Back then return: confirmed units are still there and packing finishes from them", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    expect(text()).toContain("1 / 2 packed");
+
+    await leave();
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
+    expect(button("Mark Packed")?.props["disabled"]).toBe(true);
+
+    await confirmByHand();
+    expect(text()).toContain("2 / 2 packed");
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+    expect(server.markRequests).toEqual([
+      { orderId: ORDER_1, packedLines: [{ orderItemId: `item|${ORDER_1}`, quantity: 2 }] },
+    ]);
+    expect(navigations).toEqual([{ to: "/app/orders/$id", params: { id: ORDER_1 } }]);
+  });
+
+  it("reload (new QueryClient, same tab): progress is restored", async () => {
+    await mount(client(), A);
+    await packCompletely();
+
+    await leave();
+    await mount(client(), A);
+    expect(text()).toContain("2 / 2 packed");
+    expect(text()).toContain("Every item is in the parcel");
+    expect(button("Mark Packed")?.props["disabled"]).toBe(false);
+    // Feedback is per visit; only the confirmed units come back.
+    expect(text()).not.toContain("Correct item packed");
+  });
+
+  it("Mark Packed clears the saved progress", async () => {
+    await mount(client(), A);
+    await packCompletely();
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+
+    await leave();
+    await mount(client(), A);
+    expectFreshSession(A);
+  });
+
+  it("an order the server reports packed resumes nothing and forgets the saved progress", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    await leave();
+
+    server.packed = true;
+    await mount(client(), A);
+    expect(text()).toContain("0 / 2 packed");
+    expect(text()).toContain("This order is already packed");
+    await leave();
+
+    server.packed = false;
+    await mount(client(), A);
+    expectFreshSession(A);
+  });
+
+  it("Start over discards the progress, and leaving does not bring it back", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    expect(button("Start over")).toBeDefined();
+
+    await act(async () => button("Start over")!.props["onClick"]());
+    await settle();
+    expectFreshSession(A);
+    expect(button("Start over")).toBeUndefined();
+
+    await leave();
+    await mount(client(), A);
+    expectFreshSession(A);
+  });
+
+  it("progress is per member and organization: another member never sees it, and does not erase it", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    await leave();
+
+    server.userId = USER_B;
+    const B = { ...A, userId: USER_B };
+    await mount(client(), B);
+    expectFreshSession(B);
+    await leave();
+
+    server.userId = USER_A;
+    server.organizationId = ORG_B;
+    const otherOrg = { ...A, organizationId: ORG_B };
+    await mount(client(), otherOrg);
+    expectFreshSession(otherOrg);
+    await leave();
+
+    server.organizationId = ORG_A;
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
+  });
+
+  it("progress is per order: another order starts fresh, and the first resumes", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    await leave();
+
+    const other = { ...A, orderId: ORDER_2 };
+    await mount(client(), other);
+    expectFreshSession(other);
+    await leave();
+
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
   });
 });

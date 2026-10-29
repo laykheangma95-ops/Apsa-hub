@@ -6,6 +6,7 @@ import {
   Hand,
   Package,
   PackageCheck,
+  RotateCcw,
   ScanBarcode,
   Search,
   Tag,
@@ -50,6 +51,13 @@ import {
   type ServerParcelScanResult,
   type ServerProductScanResult,
 } from "@/lib/pack";
+import {
+  clearPackProgress,
+  readPackProgress,
+  restorePackSession,
+  savePackProgress,
+  type PackProgressScope,
+} from "@/lib/pack-progress";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 
 export const Route = createFileRoute("/app/pack/$orderId")({
@@ -254,16 +262,41 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const feedbackIdRef = useRef(0);
   const scanInputRef = useRef<HTMLInputElement>(null);
 
-  const commit = useCallback((next: PackSession) => {
-    sessionRef.current = next;
-    setPackSession(next);
-  }, []);
+  // Progress survives leaving and coming back (Back, phone navigation, reload):
+  // one record per member + organization + order (src/lib/pack-progress.ts).
+  const progressScope: PackProgressScope = useMemo(
+    () => ({ userId, organizationId, orderId }),
+    [userId, organizationId, orderId],
+  );
+
+  const commit = useCallback(
+    (next: PackSession) => {
+      sessionRef.current = next;
+      setPackSession(next);
+      savePackProgress(progressScope, next);
+    },
+    [progressScope],
+  );
 
   if (packSession === null && requirements.length > 0 && parcelCode) {
-    const initial = createPackSession(orderId, orderNumber, parcelCode, requirements);
+    const fresh = createPackSession(orderId, orderNumber, parcelCode, requirements);
+    // An order the server already reports packed resumes nothing.
+    const initial = alreadyPacked
+      ? fresh
+      : restorePackSession(fresh, readPackProgress(progressScope));
     sessionRef.current = initial;
     setPackSession(initial);
   }
+
+  useEffect(() => {
+    if (alreadyPacked) clearPackProgress(progressScope);
+  }, [alreadyPacked, progressScope]);
+
+  const startOver = useCallback(() => {
+    if (requirements.length === 0 || !parcelCode) return;
+    commit(createPackSession(orderId, orderNumber, parcelCode, requirements));
+    setFeedback([]);
+  }, [commit, orderId, orderNumber, parcelCode, requirements]);
 
   const progress = useMemo(
     () => (packSession ? computePackProgress(packSession) : null),
@@ -398,6 +431,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
       // A late result for an order/user/organization no longer on screen.
       if (!activeRef.current) return;
       if (result.kind === "packed" || result.kind === "already_packed") {
+        clearPackProgress(progressScope);
         const keys = [
           ...deliveryTransitionInvalidationKeys(userId, organizationId, orderId),
           ordersKeys.principal(userId, organizationId),
@@ -494,6 +528,16 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                     {t("packSession.readyToSeal")}
                   </span>
                 </div>
+              ) : null}
+              {!alreadyPacked && (packSession.packed.length > 0 || packSession.parcelVerified) ? (
+                <button
+                  type="button"
+                  onClick={startOver}
+                  className="tap-target mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-label text-text-secondary hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40"
+                >
+                  <RotateCcw className="size-4" aria-hidden />
+                  {t("packSession.startOver")}
+                </button>
               ) : null}
             </section>
 

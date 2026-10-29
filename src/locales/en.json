@@ -2887,6 +2887,7 @@
     "progress": "Packing progress",
     "packedCount": "{{packed}} / {{total}} packed",
     "readyToSeal": "All items packed — seal the parcel",
+    "startOver": "Start over",
     "submit": "Go",
     "itemList": "Items to pack",
     "labelHint": "Stick the printed label on the parcel, then pack each item into it.",
