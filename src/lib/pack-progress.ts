@@ -20,8 +20,9 @@
  * confirmation. Mark Packed sends per-line counts and the server re-checks
  * completeness against the order itself (packing/service.ts, "incomplete"). On
  * restore, units for lines the order no longer has, or with another variant,
- * are dropped and each line is capped at what it requires; a parcel check is
- * kept only for the same parcel.
+ * are dropped and each line is capped at what it requires. Progress recorded
+ * against another parcel, or a record not exactly in the shape written here,
+ * restores nothing: the packer starts fresh.
  *
  * Bounded: records untouched for 12 hours are dropped, and at most 30 are kept
  * per tab. Losing one is safe: the packer simply checks the items again.
@@ -87,10 +88,42 @@ function load(now: number): Store {
     }
   }
   const kept: Store = {};
-  for (const [id, record] of Object.entries(store ?? {})) {
-    if (record && now - record.updatedAt < PACK_PROGRESS_TTL_MS) kept[id] = record;
+  if (!isPlainObject(store)) return kept;
+  for (const [id, record] of Object.entries(store)) {
+    // Anything not exactly the shape this module writes is dropped, never read.
+    if (isPackProgressRecord(record) && now - record.updatedAt < PACK_PROGRESS_TTL_MS) {
+      kept[id] = record;
+    }
   }
   return kept;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSavedPackUnit(value: unknown): value is SavedPackUnit {
+  return (
+    isPlainObject(value) &&
+    typeof value["orderItemId"] === "string" &&
+    typeof value["variantId"] === "string" &&
+    (value["method"] === "scan" || value["method"] === "manual") &&
+    typeof value["scannedAt"] === "number" &&
+    Number.isFinite(value["scannedAt"])
+  );
+}
+
+/** Exactly the shape savePackProgress writes; anything else is malformed. */
+export function isPackProgressRecord(value: unknown): value is PackProgressRecord {
+  return (
+    isPlainObject(value) &&
+    typeof value["parcelCode"] === "string" &&
+    typeof value["parcelVerified"] === "boolean" &&
+    typeof value["updatedAt"] === "number" &&
+    Number.isFinite(value["updatedAt"]) &&
+    Array.isArray(value["packed"]) &&
+    value["packed"].every(isSavedPackUnit)
+  );
 }
 
 function save(store: Store): void {
@@ -152,14 +185,17 @@ export function clearPackProgress(scope: PackProgressScope, now = Date.now()): v
 /**
  * Apply saved progress to a fresh session built from the server's CURRENT
  * requirements. Only units for an existing line with the same variant are
- * kept, each line capped at its required quantity; the parcel check is kept
- * only for the same parcel. Pure.
+ * kept, each line capped at its required quantity. A malformed record, or one
+ * for another parcel, restores nothing (neither items nor the parcel check).
+ * Pure.
  */
 export function restorePackSession(
   fresh: PackSession,
   saved: PackProgressRecord | null,
 ): PackSession {
-  if (!saved) return fresh;
+  // A malformed record, or progress recorded against another parcel, restores
+  // nothing: item confirmations belong to the parcel they were packed into.
+  if (!isPackProgressRecord(saved) || saved.parcelCode !== fresh.parcelCode) return fresh;
   const remaining = new Map<string, number>();
   const variantOf = new Map<string, string>();
   for (const req of fresh.requirements) {
@@ -167,10 +203,9 @@ export function restorePackSession(
     variantOf.set(req.orderItemId, req.variantId);
   }
   const packed = [];
-  for (const unit of saved.packed ?? []) {
+  for (const unit of saved.packed) {
     const left = remaining.get(unit.orderItemId) ?? 0;
     if (left <= 0 || variantOf.get(unit.orderItemId) !== unit.variantId) continue;
-    if (unit.method !== "scan" && unit.method !== "manual") continue;
     remaining.set(unit.orderItemId, left - 1);
     packed.push({
       orderItemId: unit.orderItemId,
@@ -179,9 +214,5 @@ export function restorePackSession(
       scannedAt: unit.scannedAt,
     });
   }
-  return {
-    ...fresh,
-    parcelVerified: saved.parcelVerified === true && saved.parcelCode === fresh.parcelCode,
-    packed,
-  };
+  return { ...fresh, parcelVerified: saved.parcelVerified, packed };
 }

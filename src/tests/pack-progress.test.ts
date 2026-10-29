@@ -231,20 +231,105 @@ describe("restorePackSession", () => {
     expect(restored.packed).toHaveLength(1);
   });
 
-  it("drops units with an unknown method", () => {
+  it("same parcel: the parcel check and the item confirmations are both restored", () => {
     const restored = restorePackSession(
       fresh(),
-      saved([{ orderItemId: "line-1", variantId: "variant-1", method: "forged" }]),
+      saved([{ orderItemId: "line-1", variantId: "variant-1" }], { parcelVerified: true }),
     );
-    expect(restored.packed).toHaveLength(0);
+    expect(restored.parcelVerified).toBe(true);
+    expect(restored.packed).toHaveLength(1);
   });
 
-  it("keeps the parcel check only for the same parcel", () => {
-    expect(restorePackSession(fresh(), saved([], { parcelVerified: true })).parcelVerified).toBe(
-      true,
+  it("parcel changed: neither the parcel check nor any item confirmation is restored", () => {
+    // Regression (review of 9f9c79d): items were kept when the parcel changed.
+    const session = fresh("PCL-NEW");
+    const restored = restorePackSession(
+      session,
+      saved(
+        [
+          { orderItemId: "line-1", variantId: "variant-1" },
+          { orderItemId: "line-2", variantId: "variant-2" },
+        ],
+        { parcelVerified: true },
+      ),
     );
-    expect(
-      restorePackSession(fresh("PCL-NEW"), saved([], { parcelVerified: true })).parcelVerified,
-    ).toBe(false);
+    expect(restored).toBe(session);
+    expect(restored.parcelVerified).toBe(false);
+    expect(restored.packed).toHaveLength(0);
   });
+});
+
+describe("malformed saved data starts fresh, never crashes", () => {
+  const valid = {
+    parcelCode: "PCL-1",
+    parcelVerified: false,
+    packed: [{ orderItemId: "line-1", variantId: "variant-1", method: "scan", scannedAt: T0 }],
+    updatedAt: T0,
+  };
+  const malformed: [string, unknown][] = [
+    ["null", null],
+    ["a string", "PCL-1"],
+    ["an array", [valid]],
+    ["packed not an array", { ...valid, packed: "line-1" }],
+    ["packed missing", { ...valid, packed: undefined }],
+    ["a null unit", { ...valid, packed: [null] }],
+    ["a unit that is a string", { ...valid, packed: ["line-1"] }],
+    [
+      "a unit without orderItemId",
+      { ...valid, packed: [{ ...valid.packed[0], orderItemId: undefined }] },
+    ],
+    ["a numeric orderItemId", { ...valid, packed: [{ ...valid.packed[0], orderItemId: 7 }] }],
+    ["a unit without variantId", { ...valid, packed: [{ ...valid.packed[0], variantId: null }] }],
+    ["an unknown method", { ...valid, packed: [{ ...valid.packed[0], method: "forged" }] }],
+    ["a non-finite scannedAt", { ...valid, packed: [{ ...valid.packed[0], scannedAt: "soon" }] }],
+    ["parcelCode not a string", { ...valid, parcelCode: 42 }],
+    ["parcelVerified not a boolean", { ...valid, parcelVerified: "yes" }],
+    ["updatedAt not a number", { ...valid, updatedAt: "today" }],
+  ];
+
+  for (const [label, record] of malformed) {
+    it(`restore: ${label}`, () => {
+      const session = fresh();
+      let restored: PackSession | undefined;
+      expect(() => {
+        restored = restorePackSession(session, record as PackProgressRecord);
+      }).not.toThrow();
+      expect(restored).toBe(session);
+    });
+
+    it(`storage: ${label} is dropped on read`, () => {
+      globalThis.sessionStorage.setItem(
+        "apsa.pack-progress.v1",
+        JSON.stringify({
+          [JSON.stringify([SCOPE.userId, SCOPE.organizationId, SCOPE.orderId])]: record,
+        }),
+      );
+      expect(() => readPackProgress(SCOPE, T0)).not.toThrow();
+      expect(readPackProgress(SCOPE, T0)).toBeNull();
+    });
+  }
+
+  it("a malformed record does not take valid records with it", () => {
+    const key = (orderId: string) => JSON.stringify([SCOPE.userId, SCOPE.organizationId, orderId]);
+    globalThis.sessionStorage.setItem(
+      "apsa.pack-progress.v1",
+      JSON.stringify({ [key("order-1")]: { ...valid, packed: [null] }, [key("order-2")]: valid }),
+    );
+    expect(readPackProgress(SCOPE, T0)).toBeNull();
+    expect(readPackProgress({ ...SCOPE, orderId: "order-2" }, T0)).toEqual(
+      valid as PackProgressRecord,
+    );
+  });
+
+  for (const [label, top] of [
+    ["an array", "[1,2]"],
+    ["a number", "5"],
+    ["null", "null"],
+    ["a string", '"x"'],
+  ] as const) {
+    it(`the whole store being ${label} means nothing is remembered`, () => {
+      globalThis.sessionStorage.setItem("apsa.pack-progress.v1", top);
+      expect(readPackProgress(SCOPE, T0)).toBeNull();
+    });
+  }
 });

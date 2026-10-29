@@ -36,6 +36,8 @@ interface FakeServer {
   pendingMark: ((result: MarkPackedResult) => void) | null;
   /** What getPackRequirementsFn reports as the server's packed state. */
   packed: boolean;
+  /** Overrides the order's parcel code (a parcel replaced between visits). */
+  parcelCode: string | null;
   /** The data of every Mark Packed request, in order. */
   markRequests: { orderId: string; packedLines: { orderItemId: string; quantity: number }[] }[];
 }
@@ -48,6 +50,7 @@ const server: FakeServer = {
   markMode: "packed",
   pendingMark: null,
   packed: false,
+  parcelCode: null,
   markRequests: [],
 };
 
@@ -76,7 +79,7 @@ mock.module("@/api/capabilities", () => ({
 mock.module("@/api/packing", () => ({
   getPackRequirementsFn: async ({ data }: { data: { orderId: string } }) => ({
     orderNumber: `ORD|${data.orderId}`,
-    parcelCode: `PCL|${data.orderId}`,
+    parcelCode: server.parcelCode ?? `PCL|${data.orderId}`,
     eligible: true,
     deliveryStatus: null,
     packed: server.packed,
@@ -187,6 +190,7 @@ beforeEach(() => {
     markMode: "packed",
     pendingMark: null,
     packed: false,
+    parcelCode: null,
     markRequests: [],
   });
   navigations.length = 0;
@@ -507,6 +511,41 @@ describe("Pack Order: leave and resume", () => {
     await leave();
 
     server.organizationId = ORG_A;
+    await mount(client(), A);
+    expect(text()).toContain("1 / 2 packed");
+  });
+
+  it("the parcel changed while away: no item confirmation comes back", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    expect(text()).toContain("1 / 2 packed");
+    await leave();
+
+    server.parcelCode = `PCL-REPLACED|${ORDER_1}`;
+    await mount(client(), A);
+    expectFreshSession(A);
+    expect(button("Start over")).toBeUndefined();
+  });
+
+  it("malformed saved progress: the screen starts fresh and does not crash", async () => {
+    const key = JSON.stringify([USER_A, ORG_A, ORDER_1]);
+    globalThis.sessionStorage.setItem(
+      "apsa.pack-progress.v1",
+      JSON.stringify({
+        [key]: {
+          parcelCode: `PCL|${ORDER_1}`,
+          parcelVerified: true,
+          packed: [null],
+          updatedAt: Date.now(),
+        },
+      }),
+    );
+    await mount(client(), A);
+    expectFreshSession(A);
+
+    // Packing still works, and what it saves next is well-formed again.
+    await scan(BARCODE);
+    await leave();
     await mount(client(), A);
     expect(text()).toContain("1 / 2 packed");
   });
