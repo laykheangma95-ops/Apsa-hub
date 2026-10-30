@@ -5,6 +5,7 @@
  * partial response into an authoritative Home number.
  */
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { PAYMENT_DUE_STATUSES } from "@/lib/order-list-filters";
 import type { Money } from "@/types";
 import type {
   HomeActiveVariantRow,
@@ -100,7 +101,10 @@ export async function getHomeOrderSummary(
     ),
     requireExactCount(
       "getHome orders awaiting payment",
-      baseCount().neq("lifecycle_status", "cancelled").in("payment_status", ["unpaid", "pending"]),
+      // The Orders "Payment due" filter's predicate (src/lib/order-list-filters.ts).
+      baseCount()
+        .neq("lifecycle_status", "cancelled")
+        .in("payment_status", [...PAYMENT_DUE_STATUSES]),
     ),
     requireExactCount(
       "getHome orders needing action",
