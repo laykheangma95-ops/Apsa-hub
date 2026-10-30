@@ -39,7 +39,13 @@ interface FakeServer {
   /** Overrides the order's parcel code (a parcel replaced between visits). */
   parcelCode: string | null;
   /** The data of every Mark Packed request, in order. */
-  markRequests: { orderId: string; packedLines: { orderItemId: string; quantity: number }[] }[];
+  markRequests: {
+    orderId: string;
+    packedLines: { orderItemId: string; quantity: number }[];
+    expectedPackRound: unknown;
+  }[];
+  /** getPackRequirementsFn leaves packRound out (a broken or older server). */
+  roundMissing: boolean;
   /** The server's packing round: grows each time the order is packed, by anyone. */
   packRound: number;
   /** Another member marks the order packed (this tab is not involved). */
@@ -58,6 +64,7 @@ const server: FakeServer = {
   packed: false,
   parcelCode: null,
   markRequests: [],
+  roundMissing: false,
   packRound: 0,
   packedElsewhere() {
     server.packRound += 1;
@@ -97,7 +104,7 @@ mock.module("@/api/packing", () => ({
     eligible: true,
     deliveryStatus: null,
     packed: server.packed,
-    packRound: server.packRound,
+    ...(server.roundMissing ? {} : { packRound: server.packRound }),
     requirements: [
       {
         orderItemId: `item|${data.orderId}`,
@@ -128,7 +135,15 @@ mock.module("@/api/packing", () => ({
     return accepted;
   },
   markOrderPackedFn: async ({ data }: { data: FakeServer["markRequests"][number] }) => {
-    server.markRequests.push({ orderId: data.orderId, packedLines: data.packedLines });
+    server.markRequests.push({
+      orderId: data.orderId,
+      packedLines: data.packedLines,
+      expectedPackRound: data.expectedPackRound,
+    });
+    // Like mark_order_packed_v1 (migration 066): another round is refused.
+    if (data.expectedPackRound !== server.packRound) {
+      return { kind: "stale_round" } satisfies MarkPackedResult;
+    }
     // The server records the packed marker when it handles the request.
     server.packRound += 1;
     if (server.markMode === "pending") {
@@ -209,6 +224,7 @@ beforeEach(() => {
     packed: false,
     parcelCode: null,
     markRequests: [],
+    roundMissing: false,
     packRound: 0,
   });
   navigations.length = 0;
@@ -450,7 +466,11 @@ describe("Pack Order: leave and resume", () => {
     await act(async () => button("Mark Packed")!.props["onClick"]());
     await settle();
     expect(server.markRequests).toEqual([
-      { orderId: ORDER_1, packedLines: [{ orderItemId: `item|${ORDER_1}`, quantity: 2 }] },
+      {
+        orderId: ORDER_1,
+        packedLines: [{ orderItemId: `item|${ORDER_1}`, quantity: 2 }],
+        expectedPackRound: 0,
+      },
     ]);
     expect(navigations).toEqual([{ to: "/app/orders/$id", params: { id: ORDER_1 } }]);
   });
@@ -617,6 +637,56 @@ describe("Pack Order: leave and resume", () => {
     await leave();
     await mount(client(), A);
     expect(text()).toContain("1 / 2 packed");
+  });
+
+  it("two members, screen still open: another member packs and reopens, this screen's Mark Packed is refused and resets", async () => {
+    await mount(client(), A);
+    await scan(BARCODE);
+    expect(text()).toContain("1 / 2 packed");
+
+    // While this screen stays mounted, another member packs and the order is reopened.
+    server.packedElsewhere();
+    server.reopen();
+
+    await confirmByHand();
+    expect(text()).toContain("2 / 2 packed");
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+
+    // Sent with the round this screen started in, and refused by the server.
+    expect(server.markRequests).toEqual([
+      {
+        orderId: ORDER_1,
+        packedLines: [{ orderItemId: `item|${ORDER_1}`, quantity: 2 }],
+        expectedPackRound: 0,
+      },
+    ]);
+    expect(notifications).toEqual([
+      "error:Someone else packed this order and it was reopened after you started. Your earlier checks were cleared — please pack it again.",
+    ]);
+    expect(navigations).toEqual([]);
+    // The stale ticks are gone, on screen and in the tab.
+    expectFreshSession(A);
+    await leave();
+    await mount(client(), A);
+    expectFreshSession(A);
+
+    // The new round packs normally, sent with the current round.
+    await packCompletely();
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+    expect(server.markRequests.at(-1)?.expectedPackRound).toBe(1);
+    expect(navigations).toEqual([{ to: "/app/orders/$id", params: { id: ORDER_1 } }]);
+  });
+
+  it("a missing packing round is a safety error: no session, nothing saved, no Mark Packed", async () => {
+    server.roundMissing = true;
+    await mount(client(), A);
+    expect(text()).toContain("Could not load");
+    expect(text()).not.toContain("0 / 2 packed");
+    expect(button("Mark Packed")).toBeUndefined();
+    expect(globalThis.sessionStorage.getItem("apsa.pack-progress.v1")).toBeNull();
+    expect(server.markRequests).toEqual([]);
   });
 
   it("no reopen: progress in the current round still resumes", async () => {

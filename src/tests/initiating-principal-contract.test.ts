@@ -340,11 +340,10 @@ SERVICE_CASES.push(
       'ctx.require("orders.read")',
       'ctx.require("delivery.handoff")',
       "ordersRepo.findOrderById(",
-      "moveDeliveryToReady(",
-      "ordersRepo.recordOrderPacked(",
+      "ordersRepo.markOrderPacked(",
     ],
     writesAs:
-      /moveDeliveryToReady\(ctx\.organizationId, ctx\.userId, delivery\)[\s\S]*ordersRepo\.recordOrderPacked\(ctx\.organizationId, orderId, ctx\.userId\)/,
+      /ordersRepo\.markOrderPacked\(\s*ctx\.organizationId,\s*orderId,\s*ctx\.userId,\s*expectedPackRound,?\s*\)/,
   },
   {
     name: "retryPackedDeliveryReady",
@@ -743,7 +742,7 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(pack).toContain("onClick={() => markPacked.mutate({ userId, organizationId })}");
     expect(pack).toContain("mutationFn: async (startedAs: InitiatingPrincipal)");
     expect(pack).toMatch(
-      /markOrderPackedFn\(\{\s*data: \{ orderId, packedLines: buildPackedLines\(current\), expectedPrincipal: startedAs \},\s*\}\)/,
+      /markOrderPackedFn\(\{\s*data: \{\s*orderId,\s*packedLines: buildPackedLines\(current\),\s*expectedPrincipal: startedAs,\s*expectedPackRound,\s*\},\s*\}\)/,
     );
     expect(pack).toMatch(/key=\{identity\}/);
 

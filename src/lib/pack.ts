@@ -119,6 +119,7 @@ export type MarkPackedResult =
   | { kind: "packed"; deliveryId: string | null }
   | { kind: "already_packed"; deliveryId: string | null }
   | { kind: "incomplete" }
+  | { kind: "stale_round" }
   | { kind: "no_parcel" }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };

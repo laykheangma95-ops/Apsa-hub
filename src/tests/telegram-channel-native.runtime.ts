@@ -131,8 +131,10 @@ beforeAll(async () => {
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
   `);
+  // Every migration up to and including 064: this suite proves 064, so a
+  // later migration never changes what it measures (as migration-062-native).
   const migrations = readdirSync("supabase/migrations")
-    .filter((n) => /^\d+.*\.sql$/.test(n))
+    .filter((n) => /^\d+.*\.sql$/.test(n) && n <= "064_telegram_channel.sql")
     .sort();
   expect(migrations.at(-1)).toBe("064_telegram_channel.sql");
   for (const name of migrations) {

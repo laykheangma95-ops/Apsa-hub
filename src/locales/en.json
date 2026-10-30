@@ -2925,6 +2925,7 @@
       "alreadyPacked": "This order is already packed",
       "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
       "incomplete": "Some items are not packed yet.",
+      "staleRound": "Someone else packed this order and it was reopened after you started. Your earlier checks were cleared — please pack it again.",
       "failed": "Could not mark the order packed. Please try again."
     },
     "error": {

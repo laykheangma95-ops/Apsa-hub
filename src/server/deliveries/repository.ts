@@ -122,47 +122,21 @@ export async function isOrderCurrentlyPacked(
 }
 
 /**
- * How many fulfillment history rows of the order carry `reason`: the order's
- * own fulfillment history plus the history of every delivery of the order.
- * History is append-only, so the count only ever grows. Read-only, org-scoped.
+ * The order's packing round (order_pack_round_v1, migration 066): how many
+ * Pack Order packed markers its fulfillment and delivery history hold. One
+ * scalar computed in the database, so no row page limit can drop delivery
+ * history from it. Anything but a whole number is an error, never round zero.
  */
-export async function countOrderFulfillmentHistoryWithReason(
-  organizationId: string,
-  orderId: string,
-  reason: string,
-): Promise<number> {
-  const orderRows = await db
-    .from("order_status_history")
-    .select("id", { count: "exact", head: true })
-    .eq("organization_id", organizationId)
-    .eq("order_id", orderId)
-    .eq("axis", "fulfillment")
-    .eq("reason", reason);
-  if (orderRows.error) {
-    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(orderRows.error)}`);
+export async function getOrderPackRound(organizationId: string, orderId: string): Promise<number> {
+  const { data, error } = await db.rpc("order_pack_round_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+  });
+  if (error) throw new Error(`getOrderPackRound: ${message(error)}`);
+  if (typeof data !== "number" || !Number.isInteger(data) || data < 0) {
+    throw new Error("getOrderPackRound: no packing round returned");
   }
-
-  const deliveries = await db
-    .from("deliveries")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .eq("order_id", orderId);
-  if (deliveries.error) {
-    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(deliveries.error)}`);
-  }
-  const deliveryIds = ((deliveries.data ?? []) as { id: string }[]).map((d) => d.id);
-  if (deliveryIds.length === 0) return orderRows.count ?? 0;
-
-  const deliveryRows = await db
-    .from("delivery_status_history")
-    .select("id", { count: "exact", head: true })
-    .eq("organization_id", organizationId)
-    .in("delivery_id", deliveryIds)
-    .eq("reason", reason);
-  if (deliveryRows.error) {
-    throw new Error(`countOrderFulfillmentHistoryWithReason: ${message(deliveryRows.error)}`);
-  }
-  return (orderRows.count ?? 0) + (deliveryRows.count ?? 0);
+  return data;
 }
 
 export async function findDeliveryById(
