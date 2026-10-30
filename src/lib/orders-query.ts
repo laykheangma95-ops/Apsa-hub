@@ -48,6 +48,13 @@ export const ordersKeys = {
   list: (userId: string, organizationId: string) =>
     [ORDERS_QUERY_ROOT, userId, organizationId, "list"] as const,
   /**
+   * One order work queue (payment due / not prepared / waiting for courier).
+   * Under the principal partition, so every order, packing or delivery
+   * mutation that invalidates `principal` refreshes it too.
+   */
+  workQueue: (userId: string, organizationId: string, queue: string) =>
+    [ORDERS_QUERY_ROOT, userId, organizationId, "work-queue", queue] as const,
+  /**
    * The Orders screen's paged list (an infinite query: pages plus the cursor
    * that continues them). A SUB-KEY of `list`, so every invalidation of the
    * list reaches it, while the bottom nav's plain array never shares an entry

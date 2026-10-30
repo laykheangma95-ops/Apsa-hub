@@ -1245,8 +1245,11 @@
     "cancelSheet": {
       "title": "Cancel this order?",
       "body": "If stock was already committed, it is put back automatically.",
-      "reason": "Reason (optional)",
-      "submit": "Cancel order"
+      "reason": "Reason (required)",
+      "reasonHint": "The reason stays in the order's history.",
+      "paymentKept": "Money already recorded on this order is kept. Refund it from Payments if needed.",
+      "submit": "Cancel order",
+      "keep": "Keep order"
     },
     "error": {
       "stale": {
@@ -1312,7 +1315,30 @@
     "createParcelFailed": "Could not create the APSA Parcel. Try again.",
     "createParcelNotConfirmed": "This order is no longer confirmed, so no APSA Parcel was created.",
     "printShippingLabel": "Print shipping label",
-    "shippingLabelNeedsDelivery": "Available after delivery is arranged."
+    "shippingLabelNeedsDelivery": "Available after delivery is arranged.",
+    "packDetails": {
+      "title": "Parcel",
+      "packages_one": "{{count}} package",
+      "packages_other": "{{count}} packages",
+      "weight": "{{grams}} g",
+      "shelf": "Shelf / bin: {{location}}",
+      "noShelf": "No shelf recorded"
+    },
+    "undoPacking": {
+      "action": "Undo packing",
+      "title": "Undo packing?",
+      "body": "Use this only if the parcel was packed by mistake. The order goes back to Not prepared. Payment is not changed.",
+      "readyDelivery": "Its delivery is ready for the courier — undoing cancels that booking, so arrange delivery again after repacking.",
+      "reason": "Reason (required)",
+      "reasonHint": "At least 3 characters. Saved in the order's history.",
+      "submit": "Undo packing",
+      "keep": "Keep packed",
+      "done": "Packing undone",
+      "handedOff": "This parcel is already with the courier, so packing can't be undone.",
+      "notPacked": "This order isn't packed any more.",
+      "failed": "Couldn't undo packing. Please try again.",
+      "reasonRequired": "Please give a reason."
+    }
   },
   "orderList": {
     "title": "Orders",
@@ -2924,7 +2950,8 @@
       "alreadyPacked": "This order is already packed",
       "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
       "incomplete": "Some items are not packed yet.",
-      "failed": "Could not mark the order packed. Please try again."
+      "failed": "Could not mark the order packed. Please try again.",
+      "invalidDetails": "Check the parcel details and try again."
     },
     "error": {
       "title": "Could not load pack session",
@@ -2937,7 +2964,16 @@
     "history": {
       "packed": "Packed",
       "deliveryReady": "Ready — order already packed",
-      "reopened": "Cancelled — order reopened for packing"
+      "reopened": "Cancelled — order reopened for packing",
+      "packingUndone": "Packing undone"
+    },
+    "details": {
+      "title": "Parcel details",
+      "packageCount": "Number of packages",
+      "weight": "Weight in grams (optional)",
+      "shelf": "Shelf / bin (optional)",
+      "shelfPlaceholder": "e.g. A-3",
+      "hint": "Saving these does not mark the order paid, handed off or delivered."
     }
   },
   "shipping": {
@@ -3207,5 +3243,82 @@
       "stale": "The inspection changed since you opened it. Check the updated figures and confirm again.",
       "invalidLines": "Every item needs a damaged count between 0 and its quantity."
     }
+  },
+  "orderWork": {
+    "title": "Order work",
+    "subtitle": "What needs doing next",
+    "entry": "Work queues",
+    "entryLabel": "Open a work queue",
+    "queuesLabel": "Choose a work queue",
+    "queues": {
+      "payment_due": "Payment due",
+      "not_prepared": "Not prepared",
+      "awaiting_handoff": "Waiting for courier"
+    },
+    "queueHint": {
+      "payment_due": "Confirmed orders whose money has not arrived yet, including cash on delivery.",
+      "not_prepared": "Confirmed orders that still need packing. Oldest first.",
+      "awaiting_handoff": "Packed parcels waiting for a driver. Oldest first."
+    },
+    "facts": {
+      "payment": "Payment",
+      "preparation": "Preparation",
+      "parcel": "Parcel"
+    },
+    "payment": {
+      "paid": "Paid",
+      "cod_due": "COD — collect {{amount}}",
+      "due": "Due {{amount}}",
+      "review": "Payment to review",
+      "failed": "Payment failed"
+    },
+    "preparation": {
+      "not_prepared": "Not prepared",
+      "packed": "Packed"
+    },
+    "parcel": {
+      "on_bench": "Not packed yet",
+      "waiting_for_courier": "Waiting for courier",
+      "with_courier": "With courier",
+      "delivered": "Delivered"
+    },
+    "shelf": "Shelf / bin: {{location}}",
+    "noShelf": "No shelf recorded",
+    "packages_one": "{{count}} package",
+    "packages_other": "{{count}} packages",
+    "noCustomer": "No customer",
+    "open": "Open order",
+    "next": {
+      "pack_order": "Pack",
+      "courier_handoff": "Hand to courier",
+      "arrange_delivery": "Arrange delivery",
+      "record_payment": "Record payment",
+      "review_payment": "Review payment",
+      "track_delivery": "Track delivery",
+      "confirm_order": "Confirm",
+      "complete_order": "Complete",
+      "open": "Open order"
+    },
+    "waiting": "Waiting on someone else",
+    "empty": {
+      "payment_due": {
+        "title": "No payments due",
+        "body": "Every confirmed order is paid."
+      },
+      "not_prepared": {
+        "title": "Nothing to prepare",
+        "body": "Every confirmed order is packed or with a courier."
+      },
+      "awaiting_handoff": {
+        "title": "No parcels waiting",
+        "body": "Packed parcels waiting for a driver appear here."
+      }
+    },
+    "error": {
+      "title": "This list didn't load",
+      "body": "Check your connection and try again."
+    },
+    "limitNote": "Showing the oldest {{count}}. Clear these to see more.",
+    "backToOrders": "Back to orders"
   }
 }

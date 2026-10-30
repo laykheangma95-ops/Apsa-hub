@@ -41,6 +41,7 @@
  * INVENTORY IS NOT MUTATED. Packing verifies that the physical items match the
  * order; stock was consumed at order confirmation.
  */
+import type { ParcelPackDetails } from "@/lib/order-work-queue";
 
 /**
  * History reason recorded when an order is marked packed — on the order
@@ -119,6 +120,7 @@ export type MarkPackedResult =
   | { kind: "packed"; deliveryId: string | null }
   | { kind: "already_packed"; deliveryId: string | null }
   | { kind: "incomplete" }
+  | { kind: "invalid_details" }
   | { kind: "no_parcel" }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };
@@ -127,6 +129,13 @@ export type MarkPackedResult =
 export function isPackedDeliveryStatus(status: string | null | undefined): boolean {
   return status === "ready" || status === "in_transit";
 }
+
+/**
+ * Order history reason of the first of the two rows Undo packing writes when the
+ * order's fulfillment is already 'unfulfilled' (migration 065,
+ * undo_order_packing_v1). The staff member's own reason is on the second row.
+ */
+export const PACKING_UNDONE_STEP_REASON_CODE = "system:packing_undone";
 
 /** Localized text for a history reason this module wrote; null for any other reason. */
 export function packHistoryReasonMessage(
@@ -140,6 +149,8 @@ export function packHistoryReasonMessage(
       return t("packSession.history.deliveryReady");
     case ORDER_FULFILLMENT_REOPENED_REASON_CODE:
       return t("packSession.history.reopened");
+    case PACKING_UNDONE_STEP_REASON_CODE:
+      return t("packSession.history.packingUndone");
     default:
       return null;
   }
@@ -150,6 +161,10 @@ export interface OrderPackState {
   packed: boolean;
   /** Only returned to members who may hand off (delivery.handoff); else null. */
   parcelCode: string | null;
+  /** Parcel details and shelf / bin recorded at Mark Packed; only while packed. */
+  packDetails: ParcelPackDetails | null;
+  /** The parcel is with the courier or delivered: packing can no longer be undone. */
+  handedOff: boolean;
 }
 
 // ── Order detail fulfillment actions ────────────────────────────────────────

@@ -3,6 +3,7 @@
  *
  * Never import this file from browser-bundled code.
  */
+import type { ParcelPackDetails } from "@/lib/order-work-queue";
 
 export interface PackRequirementRow {
   orderItemId: string;
@@ -31,6 +32,10 @@ export interface OrderPackStateResult {
   packed: boolean;
   /** Only returned to members holding delivery.handoff; otherwise null. */
   parcelCode: string | null;
+  /** Parcel details recorded at Mark Packed; only while the order is packed. */
+  packDetails: ParcelPackDetails | null;
+  /** The parcel has left with the courier (in transit / delivered): packing can no longer be undone. */
+  handedOff: boolean;
 }
 
 // ── Server-side scan validation results ────────────────────────────────────
@@ -57,6 +62,7 @@ export type MarkPackedResult =
   | { kind: "packed"; deliveryId: string | null }
   | { kind: "already_packed"; deliveryId: string | null }
   | { kind: "incomplete" }
+  | { kind: "invalid_details" }
   | { kind: "no_parcel" }
   | { kind: "invalid_order" }
   | { kind: "transition_failed"; reason: string };

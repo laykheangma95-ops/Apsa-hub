@@ -126,3 +126,54 @@ export async function countOrderItems(organizationId: string, orderId: string): 
   }
   return count;
 }
+
+// ── Pack records (migration 065) ───────────────────────────────────────────
+
+export interface ParcelPackDetailsInput {
+  packageCount: number;
+  weightGrams: number | null;
+  storageLocation: string | null;
+}
+
+export interface ParcelPackRecordRow {
+  package_count: number;
+  weight_grams: number | null;
+  storage_location: string | null;
+  recorded_at: string;
+}
+
+/** Append one pack record through record_parcel_pack_details_v1 (validated and org-scoped there). */
+export async function recordParcelPackDetails(
+  organizationId: string,
+  orderId: string,
+  recordedBy: string,
+  details: ParcelPackDetailsInput,
+): Promise<{ status: string; record_id?: string }> {
+  const { data, error } = await db.rpc("record_parcel_pack_details_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_recorded_by: recordedBy,
+    p_package_count: details.packageCount,
+    p_weight_grams: details.weightGrams,
+    p_storage_location: details.storageLocation,
+  });
+  if (error) throw new Error(`recordParcelPackDetails: ${errMessage(error)}`);
+  return data as { status: string; record_id?: string };
+}
+
+/** The newest pack record for the order, or null. Callers show it only while the order is packed. */
+export async function findLatestPackRecord(
+  organizationId: string,
+  orderId: string,
+): Promise<ParcelPackRecordRow | null> {
+  const { data, error } = await db
+    .from("parcel_pack_records")
+    .select("package_count, weight_grams, storage_location, recorded_at")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .order("recorded_at", { ascending: false })
+    .limit(1);
+  if (error) throw new Error(`findLatestPackRecord: ${errMessage(error)}`);
+  const rows = (data ?? []) as ParcelPackRecordRow[];
+  return rows[0] ?? null;
+}

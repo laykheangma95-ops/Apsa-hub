@@ -822,6 +822,11 @@ async function tapConfirmOrder() {
 async function tapCancelOrder() {
   await waitFor(() => button(en.order.cancel), "Cancel order");
   await click(button(en.order.cancel), "Cancel order");
+  // A reason is required before the sheet's Cancel order is enabled.
+  await typeInto(
+    document.getElementById("cancel-order-reason") as HTMLInputElement | null,
+    "Customer changed mind",
+  );
   await click(button(en.order.cancelSheet.submit, dialog()!), "Cancel order (sheet)");
 }
 const completeActionButton = () => button(en.order.next.action.complete_order);

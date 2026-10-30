@@ -937,8 +937,10 @@ describe("production boundary", () => {
       // belongs to the PR #121 security repair, not this UI phase;
       // 063 (order cancellation custody guard) belongs to Orders cancellation safety;
       // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
-      // to the Telegram provider phase.
-      return Number.isFinite(prefix) && prefix > 64;
+      // to the Telegram provider phase;
+      // 065 (parcel pack records, undo packing, order work queues) belongs to the
+      // Order and Parcel workflow.
+      return Number.isFinite(prefix) && prefix > 65;
     });
     expect(beyond047).toEqual([]);
   });

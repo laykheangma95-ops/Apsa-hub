@@ -107,6 +107,10 @@ let mockVariants: any[] = [];
 let mockDeliveries: any[] = [];
 let mockOrderHistory: any[] = [];
 let mockDeliveryHistory: any[] = [];
+/** Pack records (migration 065), newest first — the mock chain ignores order(). */
+let mockPackRecords: any[] = [];
+/** record_parcel_pack_details_v1 calls, kept apart from the status writes in rpcCalls. */
+let packDetailCalls: any[] = [];
 let rpcCalls: { fn: string; args: any }[] = [];
 /** Every table read, in order (the record of reads; rpcCalls is the record of writes). */
 let tableReads: string[] = [];
@@ -171,6 +175,7 @@ function makeMockDb() {
     deliveries: () => mockDeliveries,
     order_status_history: () => mockOrderHistory,
     delivery_status_history: () => mockDeliveryHistory,
+    parcel_pack_records: () => mockPackRecords,
   };
   return {
     from(table: string) {
@@ -182,6 +187,23 @@ function makeMockDb() {
       // a read, not a write, so rpcCalls — the record of writes — skips it).
       if (fn === "order_currently_packed_v1") {
         return { data: mockOrderCurrentlyPacked(args.p_organization_id, args.p_order_id) };
+      }
+      // Parcel details (065) describe the parcel and change no status, so they
+      // are recorded apart from the status writes the tests below count.
+      if (fn === "record_parcel_pack_details_v1") {
+        packDetailCalls.push(args);
+        mockPackRecords.unshift({
+          organization_id: args.p_organization_id,
+          order_id: args.p_order_id,
+          package_count: args.p_package_count,
+          weight_grams: args.p_weight_grams,
+          storage_location: args.p_storage_location,
+          recorded_at: nextTxTimestamp(),
+        });
+        return {
+          data: { status: "success", record_id: `rec-${packDetailCalls.length}` },
+          error: null,
+        };
       }
       rpcCalls.push({ fn, args });
       return { data: rpcResponder(fn, args), error: null };
@@ -344,6 +366,8 @@ beforeEach(async () => {
   mockDeliveries = [];
   mockOrderHistory = [];
   mockDeliveryHistory = [];
+  mockPackRecords = [];
+  packDetailCalls = [];
   rpcCalls = [];
   tableReads = [];
   rpcResponder = () => ({ status: "success" });
@@ -1096,6 +1120,13 @@ describe("pack without delivery", () => {
     expect(await getOrderPackState(mockCtx(ORG_A), ORDER_ID)).toEqual({
       packed: true,
       parcelCode: PARCEL_CODE,
+      packDetails: {
+        packageCount: 1,
+        weightGrams: null,
+        storageLocation: null,
+        recordedAt: expect.any(String),
+      },
+      handedOff: false,
     });
   });
 
@@ -1179,7 +1210,7 @@ describe("pack without delivery", () => {
     seedOrder();
     const { getOrderPackState } = await import("../server/packing/service");
     const state = await getOrderPackState(mockCtx(ORG_A, ["orders.read"]), ORDER_ID);
-    expect(state).toEqual({ packed: false, parcelCode: null });
+    expect(state).toEqual({ packed: false, parcelCode: null, packDetails: null, handedOff: false });
   });
 });
 

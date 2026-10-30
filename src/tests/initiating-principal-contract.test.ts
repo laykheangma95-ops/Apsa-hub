@@ -487,7 +487,7 @@ const PROTECTED_FNS: [string, string[]][] = [
       "cancelDeliveryFn",
     ],
   ],
-  ["src/api/packing.ts", ["markOrderPackedFn", "retryPackedDeliveryReadyFn"]],
+  ["src/api/packing.ts", ["markOrderPackedFn", "retryPackedDeliveryReadyFn", "undoOrderPackingFn"]],
   ["src/api/handoff.ts", ["confirmHandoffFn"]],
 ];
 /** POST functions in those files that are deliberately outside the contract. */
@@ -743,9 +743,17 @@ describe("every call site passes the principal its attempt was started as", () =
     expect(pack).toContain("onClick={() => markPacked.mutate({ userId, organizationId })}");
     expect(pack).toContain("mutationFn: async (startedAs: InitiatingPrincipal)");
     expect(pack).toMatch(
-      /markOrderPackedFn\(\{\s*data: \{ orderId, packedLines: buildPackedLines\(current\), expectedPrincipal: startedAs \},\s*\}\)/,
+      /markOrderPackedFn\(\{\s*data: \{\s*orderId,\s*packedLines: buildPackedLines\(current\),\s*expectedPrincipal: startedAs,\s*details,\s*\},\s*\}\)/,
     );
     expect(pack).toMatch(/key=\{identity\}/);
+
+    // Undo packing (migration 065): same discipline.
+    const undo = read("src/components/fulfillment/PackedParcelPanel.tsx");
+    expect(undo).toContain("startedAs: { userId, organizationId }");
+    expect(undo).toContain(
+      "undoOrderPackingFn({ data: { orderId, reason: text, expectedPrincipal: startedAs } })",
+    );
+    expect(undo).toMatch(/key=\{identity\}/);
 
     const retry = read("src/components/fulfillment/RetryDeliveryReadyAction.tsx");
     expect(retry).toContain("retry.mutate({ userId, organizationId });");

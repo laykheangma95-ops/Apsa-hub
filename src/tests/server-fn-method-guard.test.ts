@@ -87,6 +87,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   validatePackParcelScanFn: { reason: "scan comparison; writes nothing" },
   validatePackProductScanFn: { reason: "scan comparison; writes nothing" },
   getOrderPackStateFn: { reason: "pack state read" },
+  listOrderWorkQueueFn: { reason: "order work queue read" },
   resolveParcelIdentityFn: { reason: "parcel lookup read" },
   resolveParcelCodeFn: { reason: "parcel lookup read" },
   getDeliveryByIdFn: { reason: "detail read" },

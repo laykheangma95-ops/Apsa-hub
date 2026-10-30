@@ -1552,14 +1552,18 @@ describe("Test 19: No arbitrary-update escape hatch", () => {
     // unfulfilled reopen that also retires a ready delivery; record_order_packed_v1
     // (also 054) is Pack Order's marker write with no delivery;
     // recover_order_parcel_v1 (migration 059) creates the APSA Parcel a confirmed
-    // order is missing, under the order lock. There is still no generic order
-    // UPDATE — every write is one of these specific RPCs.
+    // order is missing, under the order lock. undo_order_packing_v1 (migration
+    // 065) is Undo packing — reason required, refused once handed off, audit in
+    // the same transaction; list_order_work_queue_v1 (065) is a read. There is
+    // still no generic order UPDATE — every write is one of these specific RPCs.
     expect(rpcNames.sort()).toEqual([
       "create_order_v3",
+      "list_order_work_queue_v1",
       "record_order_packed_v1",
       "recover_order_parcel_v1",
       "reopen_order_fulfillment_v1",
       "transition_order_status_v1",
+      "undo_order_packing_v1",
       "update_order_shipping_v1",
     ]);
   });
@@ -1798,7 +1802,8 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       executableSql(readSource("supabase/migrations/044_order_idempotency_delivery_fee.sql")) +
       executableSql(readSource("supabase/migrations/047_order_shipping_snapshot.sql")) +
       executableSql(readSource("supabase/migrations/054_pack_order_readiness_guards.sql")) +
-      executableSql(readSource("supabase/migrations/059_recover_order_parcel.sql"));
+      executableSql(readSource("supabase/migrations/059_recover_order_parcel.sql")) +
+      executableSql(readSource("supabase/migrations/065_order_parcel_workflow.sql"));
     // The other migration-054 functions — ready_packed_delivery_v1,
     // order_currently_packed_v1 and the re-declared transition_delivery_status_v1
     // and create_delivery_v1 — are called by the deliveries repository, not this
@@ -1809,6 +1814,8 @@ describe("Test 23: RPC EXECUTE privileges (review blocker 1)", () => {
       "order_currently_packed_v1",
       "transition_delivery_status_v1",
       "create_delivery_v1",
+      // 065: Mark Packed's parcel details are written by the parcels repository.
+      "record_parcel_pack_details_v1",
     ]);
     const granted = [
       ...new Set(

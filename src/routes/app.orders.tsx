@@ -35,6 +35,7 @@ import {
   type OrderListFilter,
 } from "@/lib/order-list-filters";
 import { ordersKeys } from "@/lib/orders-query";
+import { ORDER_WORK_QUEUES, isOrderWorkQueue, type OrderWorkQueue } from "@/lib/order-work-queue";
 import { customerKeys } from "@/lib/customers-query";
 import { shortTime } from "@/lib/format";
 import { formatMoney } from "@/lib/money";
@@ -47,9 +48,20 @@ import type { Order } from "@/types";
  * names a filter: the server decides what it means and whose orders it reads.
  */
 export const Route = createFileRoute("/app/orders")({
-  validateSearch: (search: Record<string, unknown>): { filter?: OrderListFilter } => {
+  /*
+   * `queue` names an Order work queue (/app/orders/work). It is declared here,
+   * on the parent, so it rides along into Order detail and its Back returns to
+   * that queue — navigation only, never a data change.
+   */
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { filter?: OrderListFilter; queue?: OrderWorkQueue } => {
     const filter = parseOrderListFilter(search["filter"]);
-    return filter === DEFAULT_ORDER_LIST_FILTER ? {} : { filter };
+    const queue = search["queue"];
+    return {
+      ...(filter === DEFAULT_ORDER_LIST_FILTER ? {} : { filter }),
+      ...(isOrderWorkQueue(queue) ? { queue } : {}),
+    };
   },
   head: () => ({
     meta: [
@@ -368,6 +380,29 @@ function OrderListScreen() {
          * answered: a denial or a changed principal shows no controls that
          * would ask the server again for a list it will not give.
          */}
+        {showFilters ? (
+          /*
+           * The three work queues: where staff go to see what needs doing.
+           * Links wrap rather than clip, so long Khmer labels stay whole.
+           */
+          <nav aria-label={t("orderWork.entryLabel")} className="mb-3">
+            <p className="text-caption mb-1.5 text-text-muted">{t("orderWork.entry")}</p>
+            <ul className="flex flex-wrap gap-2">
+              {ORDER_WORK_QUEUES.map((queue) => (
+                <li key={queue}>
+                  <Link
+                    to="/app/orders/work"
+                    search={{ queue }}
+                    className="press tap-target text-label inline-flex min-h-11 items-center rounded-xl border border-border-default bg-surface-primary px-3 py-2 text-text-primary hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40"
+                  >
+                    {t(`orderWork.queues.${queue}`)}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ) : null}
+
         {showFilters ? (
           <div ref={filterRowRef}>
             {/* A named group of toggle buttons, announced as "Filter orders". */}

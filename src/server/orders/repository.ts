@@ -266,6 +266,66 @@ export async function reopenFulfillment(
   return data as TransitionRpcResult;
 }
 
+/**
+ * Undo a mistaken Mark Packed (migration 065, undo_order_packing_v1): clears the
+ * packed state with a required reason, refuses once the parcel is with the
+ * courier, and writes the history row and the audit row in one transaction.
+ */
+export async function undoOrderPacking(
+  organizationId: string,
+  orderId: string,
+  changedBy: string,
+  reason: string,
+): Promise<TransitionRpcResult> {
+  const { data, error } = await db.rpc("undo_order_packing_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_changed_by: changedBy,
+    p_reason: reason,
+  });
+  if (error) throw new Error(`undoOrderPacking: ${errMessage(error)}`);
+  return data as TransitionRpcResult;
+}
+
+/** One row of list_order_work_queue_v1 (migration 065), exactly as the RPC returns it. */
+export interface OrderWorkQueueRow {
+  order_id: string;
+  order_number: string;
+  created_at: string;
+  currency: string;
+  total_minor: number;
+  customer_id: string | null;
+  lifecycle_status: string;
+  payment_status: string;
+  refund_status: string;
+  fulfillment_status: string;
+  packed: boolean;
+  active_delivery_id: string | null;
+  active_delivery_status: string | null;
+  latest_delivery_status: string | null;
+  any_delivered: boolean;
+  cod_amount_minor: number | null;
+  parcel_code: string | null;
+  package_count: number | null;
+  weight_grams: number | null;
+  storage_location: string | null;
+  packed_recorded_at: string | null;
+}
+
+export async function listOrderWorkQueue(
+  organizationId: string,
+  queue: string,
+  limit: number,
+): Promise<OrderWorkQueueRow[]> {
+  const { data, error } = await db.rpc("list_order_work_queue_v1", {
+    p_organization_id: organizationId,
+    p_queue: queue,
+    p_limit: limit,
+  });
+  if (error) throw new Error(`listOrderWorkQueue: ${errMessage(error)}`);
+  return (data ?? []) as OrderWorkQueueRow[];
+}
+
 // ── Reads (all org-scoped) ────────────────────────────────────────────────────
 
 /**

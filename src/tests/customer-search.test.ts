@@ -765,7 +765,9 @@ describe("No migration was required, and the schema says why", () => {
     // PR #121 security repair), and 063 (order cancellation custody guard —
     // Orders P1 cancellation safety), and 064 (Telegram channel connections and
     // its first-contact Customer creation — the Telegram provider phase, not
-    // this search phase); anything from 065 up would be new.
-    expect(migrations.filter((f) => /^06[5-9]|^0[7-9]\d/.test(f))).toEqual([]);
+    // this search phase), and 065 (parcel pack records, undo packing and order
+    // work queues — the Order and Parcel workflow); anything from 066 up would be
+    // new.
+    expect(migrations.filter((f) => /^06[6-9]|^0[7-9]\d/.test(f))).toEqual([]);
   });
 });
