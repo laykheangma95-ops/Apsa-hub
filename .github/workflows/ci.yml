@@ -164,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [current, quiet]
+        variant: [current, prewarm]
         replica: [1, 2, 3, 4, 5]
     services:
       postgres:

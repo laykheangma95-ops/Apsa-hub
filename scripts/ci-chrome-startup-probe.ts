@@ -141,6 +141,31 @@ console.log(
     `browser=${browser} -> ${fs.realpathSync(browser)} cpus=${os.cpus().length} ` +
     `mem=${Math.round(os.totalmem() / 1e9)}GB uptime=${Math.round(os.uptime())}s`,
 );
+if (variant === "prewarm") {
+  // Sequentially read every file in the browser's install directory so the
+  // launch below finds them in the page cache instead of faulting them in.
+  const dir = path.dirname(fs.realpathSync(browser));
+  const t0 = performance.now();
+  let bytes = 0;
+  let files = 0;
+  const buf = Buffer.allocUnsafe(1 << 20);
+  const walk = (d: string) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) {
+        const fd = fs.openSync(p, "r");
+        let n: number;
+        while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) bytes += n;
+        fs.closeSync(fd);
+        files++;
+      }
+    }
+  };
+  walk(dir);
+  const ms = Math.round(performance.now() - t0);
+  console.log(`::notice title=prewarm ${ms}ms::dir=${dir} files=${files} MB=${Math.round(bytes / 1e6)} ms=${ms} psiIO=${psi("io")}`);
+}
 await launch("cold");
 for (let i = 1; i <= warm; i++) await launch(`warm${i}`);
 const version = Bun.spawnSync([browser, "--version"]).stdout.toString().trim();
