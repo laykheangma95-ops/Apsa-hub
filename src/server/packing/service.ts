@@ -402,17 +402,10 @@ export async function markOrderPacked(
   const items = await ordersRepo.listOrderItems(ctx.organizationId, orderId);
   if (!isPackingComplete(items, packedLines)) return { kind: "incomplete" };
 
-  const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
-  const alreadyPacked = await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null);
-  // Packed with no delivery left to ready: nothing to write. (Packed with a
-  // delivery left pending still readies it, below.)
-  if (alreadyPacked && (!delivery || isPackedDeliveryStatus(delivery.status))) {
-    return { kind: "already_packed", deliveryId: delivery?.id ?? null };
-  }
-
-  // The round check and the packing write are one locked transaction
-  // (mark_order_packed_v1, migration 066): no pack or reopen can commit
-  // between them.
+  // The round check, the already-packed check and the packing write are one
+  // locked transaction (mark_order_packed_v1, migration 066): no pack or
+  // reopen can commit between them, and an earlier round is refused before
+  // any "already packed" answer. No separate read decides the outcome here.
   const result = await ordersRepo.markOrderPacked(
     ctx.organizationId,
     orderId,
@@ -422,9 +415,10 @@ export async function markOrderPacked(
   switch (result.status) {
     case "success":
       return {
-        kind: alreadyPacked ? "already_packed" : "packed",
+        kind: result.was_packed === true ? "already_packed" : "packed",
         deliveryId: result.delivery_id ?? null,
       };
+    case "already_packed":
     case "already_ready":
       return { kind: "already_packed", deliveryId: result.delivery_id ?? null };
     case "stale_round":

@@ -249,6 +249,8 @@ export interface MarkOrderPackedRpcResult {
   status: string;
   current_round?: number;
   delivery_id?: string;
+  /** On success: the order was already packed; only its pending delivery was readied. */
+  was_packed?: boolean;
 }
 
 /**

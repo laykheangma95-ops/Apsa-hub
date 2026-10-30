@@ -144,6 +144,9 @@ mock.module("@/api/packing", () => ({
     if (data.expectedPackRound !== server.packRound) {
       return { kind: "stale_round" } satisfies MarkPackedResult;
     }
+    // Current round, order already packed: acknowledged, nothing recorded.
+    if (server.packed)
+      return { kind: "already_packed", deliveryId: null } satisfies MarkPackedResult;
     // The server records the packed marker when it handles the request.
     server.packRound += 1;
     if (server.markMode === "pending") {
@@ -662,7 +665,7 @@ describe("Pack Order: leave and resume", () => {
       },
     ]);
     expect(notifications).toEqual([
-      "error:Someone else packed this order and it was reopened after you started. Your earlier checks were cleared — please pack it again.",
+      "error:Someone else packed this order after you started. Your checks were cleared — check the order before packing again.",
     ]);
     expect(navigations).toEqual([]);
     // The stale ticks are gone, on screen and in the tab.
@@ -677,6 +680,43 @@ describe("Pack Order: leave and resume", () => {
     await settle();
     expect(server.markRequests.at(-1)?.expectedPackRound).toBe(1);
     expect(navigations).toEqual([{ to: "/app/orders/$id", params: { id: ORDER_1 } }]);
+  });
+
+  it("another member packs while this screen is open and the order is STILL packed: refused as stale, not acknowledged", async () => {
+    await mount(client(), A); // round 0
+    await scan(BARCODE);
+    server.packedElsewhere(); // round 1, still packed (no reopen)
+
+    await confirmByHand();
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+
+    expect(server.markRequests.map((r) => r.expectedPackRound)).toEqual([0]);
+    expect(notifications).toEqual([
+      "error:Someone else packed this order after you started. Your checks were cleared — check the order before packing again.",
+    ]);
+    expect(notifications.some((n) => n.startsWith("success:"))).toBe(false);
+    expect(navigations).toEqual([]);
+    // Reloaded: the server's packed state, with none of this screen's ticks.
+    expect(text()).toContain("This order is already packed");
+    expect(text()).toContain("0 / 2 packed");
+    expect(globalThis.sessionStorage.getItem("apsa.pack-progress.v1")).toBe("{}");
+  });
+
+  it("the server acknowledges a current-round request as already packed: success notice, progress cleared, back to the order", async () => {
+    await mount(client(), A); // round 0
+    await packCompletely();
+    server.packed = true; // packed for this same round by the time the request lands
+
+    await act(async () => button("Mark Packed")!.props["onClick"]());
+    await settle();
+
+    expect(server.markRequests.map((r) => r.expectedPackRound)).toEqual([0]);
+    expect(notifications).toEqual(["success:This order is already packed"]);
+    expect(navigations).toEqual([{ to: "/app/orders/$id", params: { id: ORDER_1 } }]);
+    await leave();
+    await mount(client(), A);
+    expect(text()).toContain("0 / 2 packed");
   });
 
   it("a missing packing round is a safety error: no session, nothing saved, no Mark Packed", async () => {

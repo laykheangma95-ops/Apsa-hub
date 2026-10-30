@@ -689,6 +689,7 @@ describe("markOrderPacked — server re-validates completion", () => {
   it("is idempotent once the delivery is ready (no transition attempted)", async () => {
     seedOrder();
     seedDelivery("ready");
+    rpcResponder = statefulRpc;
     const { markOrderPacked } = await import("../server/packing/service");
     const result = await markOrderPacked(
       mockCtx(ORG_A),
@@ -698,7 +699,10 @@ describe("markOrderPacked — server re-validates completion", () => {
       currentRound(),
     );
     expect(result.kind).toBe("already_packed");
-    expect(rpcCalls).toHaveLength(0);
+    // Decided by the one locked call (round first), which moves nothing.
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["mark_order_packed_v1"]);
+    expect(mockDeliveryHistory).toHaveLength(0);
+    expect(mockDeliveries[0].status).toBe("ready");
     expect(isPackedDeliveryStatus("ready")).toBe(true);
     expect(isPackedDeliveryStatus("in_transit")).toBe(true);
     expect(isPackedDeliveryStatus("pending")).toBe(false);
@@ -898,6 +902,7 @@ function statefulRpc(fn: string, args: any): any {
     if (!order) return { status: "not_found" };
     const round = mockPackRound(org, order.id);
     if (round !== args.p_expected_round) return { status: "stale_round", current_round: round };
+    const wasPacked = mockOrderCurrentlyPacked(org, order.id);
     const delivery = mockDeliveries.find(
       (d) =>
         d.order_id === order.id &&
@@ -905,6 +910,7 @@ function statefulRpc(fn: string, args: any): any {
         ["pending", "preparing", "ready", "in_transit"].includes(d.status),
     );
     if (!delivery) {
+      if (wasPacked) return { status: "already_packed" };
       return statefulRpc("record_order_packed_v1", {
         p_organization_id: org,
         p_order_id: order.id,
@@ -932,7 +938,7 @@ function statefulRpc(fn: string, args: any): any {
       });
       if (step.status !== "success") return { status: step.status, delivery_id: delivery.id };
     }
-    return { status: "success", delivery_id: delivery.id };
+    return { status: "success", delivery_id: delivery.id, was_packed: wasPacked };
   }
   if (fn === "record_order_packed_v1") {
     // Mirrors migration 054: the no-delivery Mark Packed marker, under the locks.
@@ -1239,6 +1245,7 @@ describe("pack without delivery", () => {
       currentRound(),
     );
     rpcCalls = [];
+    const historyBefore = mockOrderHistory.length;
     const again = await markOrderPacked(
       mockCtx(ORG_A),
       ORDER_ID,
@@ -1247,7 +1254,9 @@ describe("pack without delivery", () => {
       currentRound(),
     );
     expect(again).toEqual({ kind: "already_packed", deliveryId: null });
-    expect(rpcCalls).toHaveLength(0);
+    // One locked call (round first), and nothing written.
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["mark_order_packed_v1"]);
+    expect(mockOrderHistory).toHaveLength(historyBefore);
   });
 
   it("an order already 'processing' with no delivery still records the packed marker", async () => {
@@ -2050,6 +2059,45 @@ describe("packed clears when the order's fulfillment is reopened", () => {
     ).toEqual({ kind: "stale_round" });
     expect(mockDeliveryHistory.length + mockOrderHistory.length).toBe(historyBefore);
   });
+
+  for (const path of ["no delivery", "delivery"] as const) {
+    it(`still packed, ${path}: a screen from before another member packed gets stale_round, not already_packed`, async () => {
+      seedOrder();
+      if (path === "delivery") seedDelivery("pending");
+      rpcResponder = statefulRpc;
+      const ctx = mockCtx(ORG_A, OPS_PERMS);
+      const { markOrderPacked } = await import("../server/packing/service");
+      const screenRound = currentRound(); // member A loads round 0
+      // Member B packs; the order is still packed when A submits.
+      expect(
+        (await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx), screenRound)).kind,
+      ).toBe("packed");
+      const historyBefore = mockOrderHistory.length + mockDeliveryHistory.length;
+      expect(
+        await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx), screenRound),
+      ).toEqual({ kind: "stale_round" });
+      expect(mockOrderHistory.length + mockDeliveryHistory.length).toBe(historyBefore);
+    });
+
+    it(`still packed, ${path}: a request with the current round is acknowledged already_packed and writes nothing`, async () => {
+      seedOrder();
+      if (path === "delivery") seedDelivery("pending");
+      rpcResponder = statefulRpc;
+      const ctx = mockCtx(ORG_A, OPS_PERMS);
+      const { markOrderPacked } = await import("../server/packing/service");
+      await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx), currentRound());
+      const historyBefore = mockOrderHistory.length + mockDeliveryHistory.length;
+      const roundBefore = currentRound();
+      expect(
+        await markOrderPacked(ctx, ORDER_ID, COMPLETE_LINES, principalOf(ctx), roundBefore),
+      ).toEqual({
+        kind: "already_packed",
+        deliveryId: path === "delivery" ? "delivery-1" : null,
+      });
+      expect(mockOrderHistory.length + mockDeliveryHistory.length).toBe(historyBefore);
+      expect(currentRound()).toBe(roundBefore);
+    });
+  }
 
   it("an unchanged round packs: a screen opened after the reopen succeeds", async () => {
     seedOrder();

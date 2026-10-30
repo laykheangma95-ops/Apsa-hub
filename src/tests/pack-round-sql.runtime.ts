@@ -168,6 +168,54 @@ describe("mark_order_packed_v1 refuses an earlier round", () => {
     expect(await deliveryStatus(replacement)).toBe("pending");
   });
 
+  it("still packed: an earlier round is refused before any already-packed answer", async () => {
+    for (const viaDelivery of [false, true]) {
+      const order = await confirmedOrder();
+      if (viaDelivery) await arrange(order);
+      const screen = await round(order);
+      expect((await mark(order, screen)).status).toBe("success"); // another member packs
+      const before = await historyRows(order);
+      expect((await mark(order, screen)).status).toBe("stale_round");
+      expect(await historyRows(order)).toBe(before);
+    }
+  });
+
+  it("still packed, current round: acknowledged without writing (no re-record, round unchanged)", async () => {
+    // No delivery: the order's own marker.
+    const order = await confirmedOrder();
+    expect((await mark(order, 0)).status).toBe("success");
+    const current = await round(order);
+    const before = await historyRows(order);
+    expect(await mark(order, current)).toEqual({ status: "already_packed" });
+    expect(await historyRows(order)).toBe(before);
+    expect(await round(order)).toBe(current);
+
+    // Through a delivery that is already ready.
+    const viaDelivery = await confirmedOrder();
+    const delivery = await arrange(viaDelivery);
+    expect((await mark(viaDelivery, 0)).status).toBe("success");
+    const deliveryRound = await round(viaDelivery);
+    const deliveryBefore = await historyRows(viaDelivery);
+    expect(await mark(viaDelivery, deliveryRound)).toEqual({
+      status: "already_ready",
+      delivery_id: delivery,
+    });
+    expect(await historyRows(viaDelivery)).toBe(deliveryBefore);
+  });
+
+  it("packed before a delivery was arranged, current round: the pending delivery is readied and reported as already packed", async () => {
+    const order = await confirmedOrder();
+    expect((await mark(order, 0)).status).toBe("success");
+    const delivery = await arrange(order); // create_delivery_v1 leaves it pending here
+    await f.db.query(`update deliveries set status='pending' where id=$1`, [delivery]);
+    expect(await mark(order, await round(order))).toEqual({
+      status: "success",
+      delivery_id: delivery,
+      was_packed: true,
+    });
+    expect(await deliveryStatus(delivery)).toBe("ready");
+  });
+
   it("an unchanged round packs: the screen opened after the reopen succeeds", async () => {
     const order = await confirmedOrder();
     expect((await mark(order, 0)).status).toBe("success");

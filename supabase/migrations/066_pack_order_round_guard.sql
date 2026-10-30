@@ -25,16 +25,22 @@
 --   2. re-read the active delivery under the order lock ('retry' if it moved,
 --      exactly like reopen_order_fulfillment_v1);
 --   3. compare the round with p_expected_round, the round the packer's screen
---      was started in: any other value → 'stale_round', nothing written;
---   4. pack through the EXISTING writers, unchanged:
+--      was started in: any other value → 'stale_round', nothing written —
+--      also while the order is still packed (a screen from before another
+--      member packed is never acknowledged as 'already packed');
+--   4. with the current round, an order already packed (order_currently_packed_v1)
+--      and no delivery left to ready → 'already_packed', nothing written;
+--   5. otherwise pack through the EXISTING writers, unchanged:
 --        no delivery  → record_order_packed_v1
 --        delivery     → transition_delivery_status_v1 pending → preparing →
 --                       ready, each step tagged with the marker (what the
 --                       service did step by step before, now in one
 --                       transaction: a failed step rolls back the earlier one)
 -- Every writer of packed markers and every reopen takes this order row lock
--- (054), so between step 3 and step 4 no pack or reopen can commit: the round
--- check and the packing write are atomic. A NULL or negative expected round is
+-- (054), so between step 3 and step 5 no pack or reopen can commit: the round
+-- check, the packed check and the packing write are atomic. A success reports
+-- 'was_packed' (the order was already packed and only its pending delivery
+-- was readied). A NULL or negative expected round is
 -- refused ('round_required') — it is never read as round zero.
 --
 -- Executable by service_role only, like every 054 function.
@@ -89,6 +95,7 @@ DECLARE
   v_recheck      RECORD;
   v_has_recheck  BOOLEAN;
   v_round        INTEGER;
+  v_was_packed   BOOLEAN;
   v_step         JSONB;
   v_marker       CONSTANT TEXT := 'pack_order_packed';
 BEGIN
@@ -129,7 +136,13 @@ BEGIN
     RETURN jsonb_build_object('status', 'stale_round', 'current_round', v_round);
   END IF;
 
+  -- Current round: an order already packed is acknowledged, never re-recorded.
+  v_was_packed := public.order_currently_packed_v1(p_organization_id, p_order_id);
+
   IF NOT v_has_delivery THEN
+    IF v_was_packed THEN
+      RETURN jsonb_build_object('status', 'already_packed');
+    END IF;
     RETURN public.record_order_packed_v1(p_organization_id, p_order_id, p_changed_by);
   END IF;
 
@@ -155,7 +168,9 @@ BEGIN
     RETURN jsonb_build_object('status', SQLERRM, 'delivery_id', v_delivery.id);
   END;
 
-  RETURN jsonb_build_object('status', 'success', 'delivery_id', v_delivery.id);
+  RETURN jsonb_build_object(
+    'status', 'success', 'delivery_id', v_delivery.id, 'was_packed', v_was_packed
+  );
 END;
 $$;
 
