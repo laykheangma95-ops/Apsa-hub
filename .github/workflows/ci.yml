@@ -136,6 +136,8 @@ jobs:
         # appends ~11k lines of service-container (postgres) logs, which push
         # the runner's own failure lines out of any log tail. pipefail keeps
         # bun's exit status as the step's.
+        env:
+          APSA_CHROME_PATH: ${{ github.workspace }}/scripts/ci-fake-chrome/chrome  # DISPOSABLE
         run: |
           set -o pipefail
           bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$' 2>&1 | tee test-output.txt
