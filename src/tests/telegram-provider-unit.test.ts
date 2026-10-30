@@ -125,7 +125,7 @@ describe("credential protection", () => {
   it("refuses a tampered ciphertext and a different key", async () => {
     const sealed = await encryptCredential(TOKEN, KEY);
     const [v, iv, body] = sealed.split(".");
-    const flipped = `${v}.${iv}.${body!.slice(0, -2)}${body!.endsWith("A") ? "B" : "A"}${body!.slice(-1)}`;
+    const flipped = `${v}.${iv}.${body!.slice(0, -2)}${body!.at(-2) === "A" ? "B" : "A"}${body!.slice(-1)}`;
     await expect(decryptCredential(flipped, KEY)).rejects.toThrow("could not be decrypted");
     const other = readCredentialKey(Buffer.alloc(32, 4).toString("base64"));
     await expect(decryptCredential(sealed, other)).rejects.toThrow("could not be decrypted");
