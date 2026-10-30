@@ -300,52 +300,310 @@ interface Cdp {
   close(): Promise<void>;
 }
 
+/**
+ * How long Chromium may take to print its DevTools endpoint after spawn. With
+ * the executable preloaded, the first launch on CI runners measured 0.8–2.1 s
+ * (~0.1 s warm).
+ */
+const STARTUP_DEADLINE_MS = 20_000;
+
+interface Preload {
+  files: string[];
+  bytes: number;
+  ms: number;
+}
+
+/**
+ * Reads the browser executable once, sequentially, so the launch that follows
+ * finds it in the page cache.
+ *
+ * On a fresh GitHub runner the browser has never been read, and its first
+ * launch faults about 215 MB in from a cold disk, one page at a time (~1,800
+ * major page faults). Measured on ubuntu-latest (/usr/bin/chromium), that
+ * launch took 7.8–30.6 s, of which only 0.2–0.5 s was CPU: a disk wait, not
+ * Chromium work, and on its own enough to run past the startup deadline.
+ * Most of those reads are the executable itself. Read sequentially before
+ * the launch (6.3–9.2 s for 527 MB there), it is no longer part of startup. Wrapper scripts (/usr/bin/google-chrome ->
+ * /opt/google/chrome/google-chrome) launch the `chrome` binary beside them.
+ */
+function preloadBrowser(browser: string): Preload {
+  const executable = fs.realpathSync(browser);
+  const sibling = path.join(path.dirname(executable), "chrome");
+  const files = [executable];
+  if (sibling !== executable && fs.existsSync(sibling)) files.push(sibling);
+  const result: Preload = { files, bytes: 0, ms: 0 };
+  const started = performance.now();
+  const buffer = Buffer.allocUnsafe(1 << 20);
+  for (const file of files) {
+    const fd = fs.openSync(file, "r");
+    try {
+      let n: number;
+      while ((n = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) result.bytes += n;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  result.ms = Math.round(performance.now() - started);
+  return result;
+}
+
+function readProc(file: string): string {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Linux only: CPU time, major page faults and bytes read from disk for the
+ * browser's process tree, to tell a busy, a starved and a stuck browser apart.
+ */
+function processTreeStats(root: number): string {
+  if (!fs.existsSync(`/proc/${root}/stat`)) return "unavailable";
+  const fields = (pid: number) => {
+    const stat = readProc(`/proc/${pid}/stat`);
+    return stat ? stat.slice(stat.lastIndexOf(")") + 2).split(" ") : null;
+  };
+  const children = new Map<number, number[]>();
+  for (const name of fs.readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    const ppid = Number(fields(Number(name))?.[1]);
+    children.set(ppid, [...(children.get(ppid) ?? []), Number(name)]);
+  }
+  let procs = 0;
+  let cpuTicks = 0;
+  let majorFaults = 0;
+  let readBytes = 0;
+  const queue = [root];
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    const f = fields(pid);
+    if (!f) continue;
+    procs++;
+    majorFaults += Number(f[9]);
+    cpuTicks += Number(f[11]) + Number(f[12]);
+    readBytes += Number(readProc(`/proc/${pid}/io`).match(/^read_bytes: (\d+)/m)?.[1] ?? 0);
+    queue.push(...(children.get(pid) ?? []));
+  }
+  // utime/stime are in clock ticks, 100 per second on Linux.
+  return (
+    `${procs} processes, ${cpuTicks * 10} ms CPU, ${majorFaults} major page faults, ` +
+    `${(readBytes / 1e6).toFixed(0)} MB read from disk`
+  );
+}
+
+/** One report line; a line whose facts cannot be read says so instead of throwing. */
+function reportLine(label: string, describe: () => string): string {
+  try {
+    return `${label}: ${describe()}`;
+  } catch (error) {
+    return `${label}: unavailable (${(error as Error).message})`;
+  }
+}
+
+/**
+ * Why the browser did not become ready: everything a CI log needs to tell.
+ * Best-effort: each line is collected on its own, so a failure here never
+ * replaces the startup error being diagnosed.
+ */
+async function startupReport(
+  child: ReturnType<typeof Bun.spawn>,
+  browser: string,
+  preload: Preload,
+  elapsedMs: number,
+  stderr: string[],
+): Promise<string> {
+  // Sampled before the exit check below, while the process tree still exists.
+  const tree = reportLine("process tree", () =>
+    child.exitCode === null ? processTreeStats(child.pid) : "exited",
+  );
+  await Promise.race([child.exited, Bun.sleep(200)]).catch(() => {});
+  return [
+    reportLine("browser", () => `${browser} -> ${fs.realpathSync(browser)}`),
+    reportLine(
+      "preloaded",
+      () =>
+        `${(preload.bytes / 1e6).toFixed(0)} MB in ${preload.ms} ms: ${preload.files.join(", ")}`,
+    ),
+    reportLine(`after ${elapsedMs} ms`, () =>
+      child.exitCode === null
+        ? "still running"
+        : `exited (code ${child.exitCode}${child.signalCode ? `, signal ${child.signalCode}` : ""})`,
+    ),
+    tree,
+    reportLine("host", () => {
+      const load = os
+        .loadavg()
+        .map((l) => l.toFixed(2))
+        .join(" ");
+      const image = process.env["ImageOS"]
+        ? `${process.env["ImageOS"]} ${process.env["ImageVersion"] ?? ""}`
+        : "n/a";
+      return (
+        `${os.cpus().length} CPUs, load ${load}, ${(os.freemem() / 1e9).toFixed(1)} GB free, ` +
+        `runner image ${image}`
+      );
+    }),
+    // The "some" line of each pressure file, e.g. "avg10=33.43 avg60=11.98 avg300=4.19".
+    reportLine("pressure (some)", () =>
+      ["cpu", "io", "memory"]
+        .map((kind) => {
+          const some = readProc(`/proc/pressure/${kind}`).split("\n")[0] ?? "";
+          return `${kind}: ${some.replace(/^some | total=\d+/g, "") || "n/a"}`;
+        })
+        .join("; "),
+    ),
+    `stderr (time since spawn), ${stderr.length} lines:`,
+    ...stderr.slice(-40).map((line) => `  ${line.slice(0, 300)}`),
+  ].join("\n");
+}
+
+/** How long teardown waits for the browser's processes to go after SIGKILL. */
+const KILL_WAIT_MS = 5_000;
+
+/**
+ * Kills the browser and every process it started. The browser is spawned
+ * detached, as the leader of its own process group, and Chromium's helpers
+ * (zygotes, GPU, network, renderers) stay in that group, so one SIGKILL to the
+ * group reaches them all. Killing only the browser does not: a child that
+ * outlives its parent is re-parented to init and keeps running. Throws if the
+ * browser has not exited, or the group is not empty, within KILL_WAIT_MS.
+ */
+async function killBrowser(child: ReturnType<typeof Bun.spawn>): Promise<void> {
+  const alive = () => {
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  if (alive()) process.kill(-child.pid, "SIGKILL");
+  const deadline = performance.now() + KILL_WAIT_MS;
+  const exited = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(KILL_WAIT_MS).then(() => false),
+  ]);
+  while (alive() && performance.now() < deadline) await Bun.sleep(50);
+  if (!exited || alive()) {
+    throw new Error(
+      `Chromium process group ${child.pid} still running ${KILL_WAIT_MS} ms after SIGKILL`,
+    );
+  }
+}
+
 async function openPage(browser: string, html: string): Promise<Cdp> {
+  const preload = preloadBrowser(browser);
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch: () => new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } }),
   });
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-layout-"));
-  const child = Bun.spawn(
-    [
-      browser,
-      "--headless=new",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profile}`,
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--disable-extensions",
-      "--mute-audio",
-    ],
-    { stdout: "ignore", stderr: "pipe" },
-  );
+  let profile: string | undefined;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  // Every step runs even if an earlier one fails; their errors are thrown
+  // together at the end. SIGKILL, not SIGTERM: Chromium can ignore a SIGTERM
+  // that arrives during startup, and then `exited` never settles.
   const teardown = async () => {
-    child.kill();
-    await child.exited;
-    server.stop(true);
-    fs.rmSync(profile, { recursive: true, force: true });
+    const errors: unknown[] = [];
+    const attempt = async (step: () => unknown) => {
+      try {
+        await step();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    if (child) await attempt(() => killBrowser(child!));
+    await attempt(async () => {
+      const stopped = Promise.resolve(server.stop(true));
+      // A rejection after the bound has already failed this step is not news.
+      stopped.catch(() => {});
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Server did not stop within ${KILL_WAIT_MS} ms`)),
+          KILL_WAIT_MS,
+        );
+      });
+      try {
+        await Promise.race([stopped, bound]);
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+    if (profile) await attempt(() => fs.rmSync(profile!, { recursive: true, force: true }));
+    if (errors.length > 0) throw new AggregateError(errors, "Chromium teardown failed");
   };
   try {
-    let stderr = "";
-    const decoder = new TextDecoder();
-    const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
-    const deadline = Date.now() + 20_000;
-    let ws: string | null = null;
-    while (!ws) {
-      if (Date.now() > deadline) throw new Error(`No DevTools endpoint.\n${stderr.slice(-2000)}`);
-      const { value, done } = await reader.read();
-      if (done) throw new Error(`Chromium exited.\n${stderr.slice(-2000)}`);
-      stderr += decoder.decode(value, { stream: true });
-      ws = stderr.match(/ws:\/\/[^\s]+/)?.[0] ?? null;
+    profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-layout-"));
+    const spawnedAt = performance.now();
+    const elapsed = () => Math.round(performance.now() - spawnedAt);
+    const browserProcess = Bun.spawn(
+      [
+        browser,
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--mute-audio",
+      ],
+      // detached: its own session and process group, so teardown can kill
+      // every process it starts (see killBrowser).
+      { stdout: "ignore", stderr: "pipe", detached: true },
+    );
+    child = browserProcess;
+    // Every stderr line, stamped with the time since spawn, read until the
+    // pipe closes; the DevTools endpoint is the line carrying a ws:// URL.
+    const stderr: string[] = [];
+    const endpoint = new Promise<string>((resolve, reject) => {
+      void (async () => {
+        const reader = (browserProcess.stderr as ReadableStream<Uint8Array>).getReader();
+        const decoder = new TextDecoder();
+        let pending = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          pending += decoder.decode(value, { stream: true });
+          const lines = pending.split("\n");
+          pending = lines.pop()!;
+          for (const line of lines) {
+            if (stderr.length < 200) stderr.push(`+${elapsed()}ms ${line}`);
+            const ws = line.match(/ws:\/\/\S+/)?.[0];
+            if (ws) resolve(ws);
+          }
+        }
+        reject(new Error("Chromium exited before printing a DevTools endpoint."));
+      })().catch(reject);
+    });
+    // Rejects later, when teardown closes the pipe after a missed deadline.
+    endpoint.catch(() => {});
+    // A wall-clock deadline: it fires even if Chromium prints nothing at all.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`No DevTools endpoint within ${STARTUP_DEADLINE_MS} ms.`)),
+        STARTUP_DEADLINE_MS,
+      );
+    });
+    let ws: string;
+    try {
+      ws = await Promise.race([endpoint, deadline]);
+    } catch (error) {
+      const report = await startupReport(browserProcess, browser, preload, elapsed(), stderr).catch(
+        (reportError: Error) => `diagnostics unavailable: ${reportError.message}`,
+      );
+      throw new Error(`${(error as Error).message}\n${report}`, { cause: error });
+    } finally {
+      clearTimeout(timer);
     }
-    void (async () => {
-      while (!(await reader.read()).done);
-    })().catch(() => {});
     const host = new URL(ws.replace(/^ws:/, "http:")).host;
     const target = (await fetch(`http://${host}/json/new?about:blank`, { method: "PUT" }).then(
       (r) => r.json(),
@@ -404,7 +662,14 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
       },
     };
   } catch (error) {
-    await teardown();
+    // The startup failure is the error that matters; a cleanup failure on top
+    // of it is logged, never thrown in its place.
+    await teardown().catch((cleanupError: unknown) =>
+      console.error(
+        "[parcel-label-layout] teardown after a failed startup also failed:",
+        cleanupError,
+      ),
+    );
     throw error;
   }
 }
@@ -497,9 +762,11 @@ describe.skipIf(!READY && !ON_CI)("parcel label — rendered geometry in Chromiu
     }
   }, 90_000);
 
+  // Above teardown's own bounds (KILL_WAIT_MS for the browser, then for the
+  // server), so a slow step fails with its own error, not a hook timeout.
   afterAll(async () => {
     await cdp?.close();
-  });
+  }, 30_000);
 
   it("renders every fixture", () => {
     expect(measured.map((m) => m.id)).toEqual(LAYOUT_FIXTURES.map((f) => f.id));

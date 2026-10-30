@@ -131,7 +131,27 @@ jobs:
         # PR #32). It is excluded from the blocking run and executed
         # separately below as informational only, so it cannot mask a
         # genuinely new failure in the other 1140+ tests.
-        run: bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$'
+        #
+        # The output is also saved to test-output.txt: after this job GitHub
+        # appends ~11k lines of service-container (postgres) logs, which push
+        # the runner's own failure lines out of any log tail. pipefail keeps
+        # bun's exit status as the step's.
+        run: |
+          set -o pipefail
+          bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$' 2>&1 | tee test-output.txt
+      - name: Test failure summary
+        if: failure()
+        run: |
+          { echo '### Test failures'; echo '```'
+            grep -E '^\(fail\)|^error:|^ +[0-9]+ (pass|fail|skip|todo)$|^Ran [0-9]+ tests' test-output.txt || echo 'no runner summary in test-output.txt'
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-attempt-${{ github.run_attempt }}
+          path: test-output.txt
+          retention-days: 14
       - name: Run known-flaky auth-hardening test (informational only)
         continue-on-error: true
         run: bun test src/tests/auth-hardening.test.ts
