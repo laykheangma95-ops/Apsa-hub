@@ -60,7 +60,11 @@ function read(file: string): string {
 }
 
 function psi(kind: string): string {
-  return read(`/proc/pressure/${kind}`).split("\n")[0]?.replace(/ total=\d+/, "") ?? "";
+  return (
+    read(`/proc/pressure/${kind}`)
+      .split("\n")[0]
+      ?.replace(/ total=\d+/, "") ?? ""
+  );
 }
 
 /** Sum utime+stime (ticks) and major faults over the process tree rooted at pid. */
@@ -127,7 +131,10 @@ async function launch(label: string) {
     `${label} variant=${variant} ready=${ready}ms procs=${stats.procs} cpu=${stats.cpuMs}ms ` +
     `majflt=${stats.majflt} readMB=${stats.readMB} ` +
     `psiIO[before]=${psiBefore.io} psiIO[after]=${psi("io")} psiCPU[after]=${psi("cpu")} ` +
-    `load=${os.loadavg().map((l) => l.toFixed(2)).join("/")}`;
+    `load=${os
+      .loadavg()
+      .map((l) => l.toFixed(2))
+      .join("/")}`;
   console.log(summary);
   console.log(lines.join("\n"));
   console.log(`::notice title=${label} ${ready}ms::${summary} | ${lines.slice(0, 14).join(" | ")}`);
@@ -142,29 +149,19 @@ console.log(
     `mem=${Math.round(os.totalmem() / 1e9)}GB uptime=${Math.round(os.uptime())}s`,
 );
 if (variant === "prewarm") {
-  // Sequentially read every file in the browser's install directory so the
-  // launch below finds them in the page cache instead of faulting them in.
-  const dir = path.dirname(fs.realpathSync(browser));
+  // The same pre-read the test now does: the executable only.
+  const file = fs.realpathSync(browser);
   const t0 = performance.now();
   let bytes = 0;
-  let files = 0;
   const buf = Buffer.allocUnsafe(1 << 20);
-  const walk = (d: string) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (e.isFile()) {
-        const fd = fs.openSync(p, "r");
-        let n: number;
-        while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) bytes += n;
-        fs.closeSync(fd);
-        files++;
-      }
-    }
-  };
-  walk(dir);
+  const fd = fs.openSync(file, "r");
+  let n: number;
+  while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) bytes += n;
+  fs.closeSync(fd);
   const ms = Math.round(performance.now() - t0);
-  console.log(`::notice title=prewarm ${ms}ms::dir=${dir} files=${files} MB=${Math.round(bytes / 1e6)} ms=${ms} psiIO=${psi("io")}`);
+  console.log(
+    `::notice title=prewarm ${ms}ms::file=${file} MB=${Math.round(bytes / 1e6)} ms=${ms} psiIO=${psi("io")}`,
+  );
 }
 await launch("cold");
 for (let i = 1; i <= warm; i++) await launch(`warm${i}`);
