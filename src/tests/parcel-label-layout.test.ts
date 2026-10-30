@@ -393,7 +393,20 @@ function processTreeStats(root: number): string {
   );
 }
 
-/** Why the browser did not become ready: everything a CI log needs to tell. */
+/** One report line; a line whose facts cannot be read says so instead of throwing. */
+function reportLine(label: string, describe: () => string): string {
+  try {
+    return `${label}: ${describe()}`;
+  } catch (error) {
+    return `${label}: unavailable (${(error as Error).message})`;
+  }
+}
+
+/**
+ * Why the browser did not become ready: everything a CI log needs to tell.
+ * Best-effort: each line is collected on its own, so a failure here never
+ * replaces the startup error being diagnosed.
+ */
 async function startupReport(
   child: ReturnType<typeof Bun.spawn>,
   browser: string,
@@ -402,34 +415,83 @@ async function startupReport(
   stderr: string[],
 ): Promise<string> {
   // Sampled before the exit check below, while the process tree still exists.
-  const tree = child.exitCode === null ? processTreeStats(child.pid) : "exited";
-  await Promise.race([child.exited, Bun.sleep(200)]);
-  const state =
-    child.exitCode === null
-      ? "still running"
-      : `exited (code ${child.exitCode}${child.signalCode ? `, signal ${child.signalCode}` : ""})`;
-  // The "some" line of each pressure file, e.g. "avg10=33.43 avg60=11.98 avg300=4.19".
-  const pressure = ["cpu", "io", "memory"].map((kind) => {
-    const some = readProc(`/proc/pressure/${kind}`).split("\n")[0] ?? "";
-    return `${kind}: ${some.replace(/^some | total=\d+/g, "") || "n/a"}`;
-  });
-  const load = os
-    .loadavg()
-    .map((l) => l.toFixed(2))
-    .join(" ");
-  const image = process.env["ImageOS"]
-    ? `${process.env["ImageOS"]} ${process.env["ImageVersion"] ?? ""}`
-    : "n/a";
+  const tree = reportLine("process tree", () =>
+    child.exitCode === null ? processTreeStats(child.pid) : "exited",
+  );
+  await Promise.race([child.exited, Bun.sleep(200)]).catch(() => {});
   return [
-    `browser: ${browser} -> ${fs.realpathSync(browser)}`,
-    `preloaded ${(preload.bytes / 1e6).toFixed(0)} MB in ${preload.ms} ms: ${preload.files.join(", ")}`,
-    `after ${elapsedMs} ms: ${state}; process tree: ${tree}`,
-    `host: ${os.cpus().length} CPUs, load ${load}, ${(os.freemem() / 1e9).toFixed(1)} GB free, ` +
-      `runner image ${image}`,
-    `pressure (some): ${pressure.join("; ")}`,
+    reportLine("browser", () => `${browser} -> ${fs.realpathSync(browser)}`),
+    reportLine(
+      "preloaded",
+      () =>
+        `${(preload.bytes / 1e6).toFixed(0)} MB in ${preload.ms} ms: ${preload.files.join(", ")}`,
+    ),
+    reportLine(`after ${elapsedMs} ms`, () =>
+      child.exitCode === null
+        ? "still running"
+        : `exited (code ${child.exitCode}${child.signalCode ? `, signal ${child.signalCode}` : ""})`,
+    ),
+    tree,
+    reportLine("host", () => {
+      const load = os
+        .loadavg()
+        .map((l) => l.toFixed(2))
+        .join(" ");
+      const image = process.env["ImageOS"]
+        ? `${process.env["ImageOS"]} ${process.env["ImageVersion"] ?? ""}`
+        : "n/a";
+      return (
+        `${os.cpus().length} CPUs, load ${load}, ${(os.freemem() / 1e9).toFixed(1)} GB free, ` +
+        `runner image ${image}`
+      );
+    }),
+    // The "some" line of each pressure file, e.g. "avg10=33.43 avg60=11.98 avg300=4.19".
+    reportLine("pressure (some)", () =>
+      ["cpu", "io", "memory"]
+        .map((kind) => {
+          const some = readProc(`/proc/pressure/${kind}`).split("\n")[0] ?? "";
+          return `${kind}: ${some.replace(/^some | total=\d+/g, "") || "n/a"}`;
+        })
+        .join("; "),
+    ),
     `stderr (time since spawn), ${stderr.length} lines:`,
     ...stderr.slice(-40).map((line) => `  ${line.slice(0, 300)}`),
   ].join("\n");
+}
+
+/** How long teardown waits for the browser's processes to go after SIGKILL. */
+const KILL_WAIT_MS = 5_000;
+
+/**
+ * Kills the browser and every process it started. The browser is spawned
+ * detached, as the leader of its own process group, and Chromium's helpers
+ * (zygotes, GPU, network, renderers) stay in that group, so one SIGKILL to the
+ * group reaches them all. Killing only the browser does not: a child that
+ * outlives its parent is re-parented to init and keeps running. Throws if the
+ * browser has not exited, or the group is not empty, within KILL_WAIT_MS.
+ */
+async function killBrowser(child: ReturnType<typeof Bun.spawn>): Promise<void> {
+  const alive = () => {
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  if (alive()) process.kill(-child.pid, "SIGKILL");
+  const deadline = performance.now() + KILL_WAIT_MS;
+  const exited = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(KILL_WAIT_MS).then(() => false),
+  ]);
+  while (alive() && performance.now() < deadline) await Bun.sleep(50);
+  if (!exited || alive()) {
+    throw new Error(
+      `Chromium process group ${child.pid} still running ${KILL_WAIT_MS} ms after SIGKILL`,
+    );
+  }
 }
 
 async function openPage(browser: string, html: string): Promise<Cdp> {
@@ -439,41 +501,55 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
     hostname: "127.0.0.1",
     fetch: () => new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } }),
   });
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-layout-"));
-  const spawnedAt = performance.now();
-  const elapsed = () => Math.round(performance.now() - spawnedAt);
-  const child = Bun.spawn(
-    [
-      browser,
-      "--headless=new",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profile}`,
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--disable-extensions",
-      "--mute-audio",
-    ],
-    { stdout: "ignore", stderr: "pipe" },
-  );
+  let profile: string | undefined;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  // Every step runs even if an earlier one fails; their errors are thrown
+  // together at the end. SIGKILL, not SIGTERM: Chromium can ignore a SIGTERM
+  // that arrives during startup, and then `exited` never settles.
   const teardown = async () => {
-    // SIGKILL: Chromium can ignore a SIGTERM that arrives during startup,
-    // and then `exited` never settles. Its child processes exit with it.
-    child.kill("SIGKILL");
-    await child.exited;
-    server.stop(true);
-    fs.rmSync(profile, { recursive: true, force: true });
+    const errors: unknown[] = [];
+    const attempt = async (step: () => unknown) => {
+      try {
+        await step();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    if (child) await attempt(() => killBrowser(child!));
+    await attempt(() => Promise.race([server.stop(true), Bun.sleep(KILL_WAIT_MS)]));
+    if (profile) await attempt(() => fs.rmSync(profile!, { recursive: true, force: true }));
+    if (errors.length > 0) throw new AggregateError(errors, "Chromium teardown failed");
   };
   try {
+    profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-layout-"));
+    const spawnedAt = performance.now();
+    const elapsed = () => Math.round(performance.now() - spawnedAt);
+    const browserProcess = Bun.spawn(
+      [
+        browser,
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--mute-audio",
+      ],
+      // detached: its own session and process group, so teardown can kill
+      // every process it starts (see killBrowser).
+      { stdout: "ignore", stderr: "pipe", detached: true },
+    );
+    child = browserProcess;
     // Every stderr line, stamped with the time since spawn, read until the
     // pipe closes; the DevTools endpoint is the line carrying a ws:// URL.
     const stderr: string[] = [];
     const endpoint = new Promise<string>((resolve, reject) => {
       void (async () => {
-        const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
+        const reader = (browserProcess.stderr as ReadableStream<Uint8Array>).getReader();
         const decoder = new TextDecoder();
         let pending = "";
         for (;;) {
@@ -505,8 +581,10 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
     try {
       ws = await Promise.race([endpoint, deadline]);
     } catch (error) {
-      const report = await startupReport(child, browser, preload, elapsed(), stderr);
-      throw new Error(`${(error as Error).message}\n${report}`);
+      const report = await startupReport(browserProcess, browser, preload, elapsed(), stderr).catch(
+        (reportError: Error) => `diagnostics unavailable: ${reportError.message}`,
+      );
+      throw new Error(`${(error as Error).message}\n${report}`, { cause: error });
     } finally {
       clearTimeout(timer);
     }
@@ -568,7 +646,14 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
       },
     };
   } catch (error) {
-    await teardown();
+    // The startup failure is the error that matters; a cleanup failure on top
+    // of it is logged, never thrown in its place.
+    await teardown().catch((cleanupError: unknown) =>
+      console.error(
+        "[parcel-label-layout] teardown after a failed startup also failed:",
+        cleanupError,
+      ),
+    );
     throw error;
   }
 }
