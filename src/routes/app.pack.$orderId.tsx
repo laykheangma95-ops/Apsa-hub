@@ -6,6 +6,7 @@ import {
   Hand,
   Package,
   PackageCheck,
+  RotateCcw,
   ScanBarcode,
   Search,
   Tag,
@@ -50,6 +51,13 @@ import {
   type ServerParcelScanResult,
   type ServerProductScanResult,
 } from "@/lib/pack";
+import {
+  clearPackProgress,
+  readPackProgress,
+  restorePackSession,
+  savePackProgress,
+  type PackProgressScope,
+} from "@/lib/pack-progress";
 import type { InitiatingPrincipal } from "@/lib/initiating-principal";
 
 export const Route = createFileRoute("/app/pack/$orderId")({
@@ -241,6 +249,9 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const parcelCode = packData?.parcelCode ?? "";
   // Packing never requires a delivery; the server says whether it is packed.
   const alreadyPacked = packData?.packed ?? false;
+  // The server's packing round. Missing is a safety error, never round zero.
+  const packRound = packData && Number.isInteger(packData.packRound) ? packData.packRound : null;
+  const roundMissing = packData != null && packRound === null;
 
   const [packSession, setPackSession] = useState<PackSession | null>(null);
   // Scans are processed strictly in order, each against the latest session, so
@@ -254,16 +265,49 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const feedbackIdRef = useRef(0);
   const scanInputRef = useRef<HTMLInputElement>(null);
 
-  const commit = useCallback((next: PackSession) => {
-    sessionRef.current = next;
-    setPackSession(next);
-  }, []);
+  // Progress survives leaving and coming back (Back, phone navigation, reload):
+  // one record per member + organization + order (src/lib/pack-progress.ts).
+  const progressScope: PackProgressScope = useMemo(
+    () => ({ userId, organizationId, orderId }),
+    [userId, organizationId, orderId],
+  );
+  // The server's packing round this session was started in. Progress is saved
+  // in it, so after the order is packed and reopened (same parcel and lines)
+  // a later visit sees a different round and starts fresh.
+  const sessionRoundRef = useRef<number | null>(null);
 
-  if (packSession === null && requirements.length > 0 && parcelCode) {
-    const initial = createPackSession(orderId, orderNumber, parcelCode, requirements);
+  const commit = useCallback(
+    (next: PackSession) => {
+      sessionRef.current = next;
+      setPackSession(next);
+      if (sessionRoundRef.current !== null) {
+        savePackProgress(progressScope, next, sessionRoundRef.current);
+      }
+    },
+    [progressScope],
+  );
+
+  if (packSession === null && requirements.length > 0 && parcelCode && packRound !== null) {
+    const fresh = createPackSession(orderId, orderNumber, parcelCode, requirements);
+    // An order the server already reports packed resumes nothing.
+    const initial = alreadyPacked
+      ? fresh
+      : restorePackSession(fresh, readPackProgress(progressScope), packRound);
+    sessionRoundRef.current = packRound;
     sessionRef.current = initial;
     setPackSession(initial);
   }
+
+  useEffect(() => {
+    if (alreadyPacked) clearPackProgress(progressScope);
+  }, [alreadyPacked, progressScope]);
+
+  const startOver = useCallback(() => {
+    if (requirements.length === 0 || !parcelCode || packRound === null) return;
+    sessionRoundRef.current = packRound;
+    commit(createPackSession(orderId, orderNumber, parcelCode, requirements));
+    setFeedback([]);
+  }, [commit, orderId, orderNumber, packRound, parcelCode, requirements]);
 
   const progress = useMemo(
     () => (packSession ? computePackProgress(packSession) : null),
@@ -389,15 +433,24 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
     mutationFn: async (startedAs: InitiatingPrincipal): Promise<MarkPackedResult> => {
       const current = sessionRef.current;
       if (!current) return { kind: "incomplete" };
+      // The round this session started in; the server refuses any other.
+      const expectedPackRound = sessionRoundRef.current;
+      if (expectedPackRound === null) throw new Error("No packing round");
       const { markOrderPackedFn } = await import("@/api/packing");
       return markOrderPackedFn({
-        data: { orderId, packedLines: buildPackedLines(current), expectedPrincipal: startedAs },
+        data: {
+          orderId,
+          packedLines: buildPackedLines(current),
+          expectedPrincipal: startedAs,
+          expectedPackRound,
+        },
       });
     },
     onSuccess: async (result) => {
       // A late result for an order/user/organization no longer on screen.
       if (!activeRef.current) return;
       if (result.kind === "packed" || result.kind === "already_packed") {
+        clearPackProgress(progressScope);
         const keys = [
           ...deliveryTransitionInvalidationKeys(userId, organizationId, orderId),
           ordersKeys.principal(userId, organizationId),
@@ -416,6 +469,19 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
         );
         void navigate({ to: "/app/orders/$id", params: { id: orderId } });
         return;
+      }
+      if (result.kind === "stale_round") {
+        // The order was packed (and reopened) since this session started: its
+        // confirmations belong to that earlier round. Forget them and start
+        // the current round from the server's requirements.
+        clearPackProgress(progressScope);
+        await queryClient.refetchQueries({
+          queryKey: packingKeys.requirements(userId, organizationId, orderId),
+        });
+        if (!activeRef.current) return;
+        sessionRef.current = null;
+        setPackSession(null);
+        setFeedback([]);
       }
       notifyError(t(markPackedErrorKey(result)));
     },
@@ -439,7 +505,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
 
         {canRead && query.isLoading ? <DetailSkeleton /> : null}
 
-        {canRead && query.isError ? (
+        {canRead && (query.isError || roundMissing) ? (
           <OperationalState
             tone="danger"
             title={t("packSession.error.title")}
@@ -494,6 +560,16 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                     {t("packSession.readyToSeal")}
                   </span>
                 </div>
+              ) : null}
+              {!alreadyPacked && (packSession.packed.length > 0 || packSession.parcelVerified) ? (
+                <button
+                  type="button"
+                  onClick={startOver}
+                  className="tap-target mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-label text-text-secondary hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40"
+                >
+                  <RotateCcw className="size-4" aria-hidden />
+                  {t("packSession.startOver")}
+                </button>
               ) : null}
             </section>
 
@@ -667,6 +743,8 @@ function markPackedErrorKey(result: MarkPackedResult): string {
   switch (result.kind) {
     case "incomplete":
       return "packSession.markPacked.incomplete";
+    case "stale_round":
+      return "packSession.markPacked.staleRound";
     default:
       return "packSession.markPacked.failed";
   }

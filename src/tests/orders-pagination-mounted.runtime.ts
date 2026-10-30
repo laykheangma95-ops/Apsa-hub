@@ -40,6 +40,7 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { afterEach, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { financialFixture } from "./helpers/payment-order-fixture";
+import { postgrestOverPglite } from "./helpers/postgrest-pglite";
 
 // Well past waitFor's own 5 s budget: a case that hangs fails on its own
 // "Timed out waiting" and stops there. With bun's 5 s default the two raced,
@@ -161,10 +162,20 @@ async function dbOrder(org: string, filter: OrderListFilter = "all"): Promise<st
     lifecycle_status: OrderListFilterAxes["lifecycle"];
     payment_status: OrderListFilterAxes["payment"];
     fulfillment_status: OrderListFilterAxes["fulfillment"];
+    packed: boolean;
+    ready_delivery: boolean;
+    delivery_out: boolean;
   }>(
-    `select order_number, lifecycle_status, payment_status, fulfillment_status
-       from orders where organization_id=$1
-     order by created_at desc, id desc`,
+    // The packed rule and the delivery facts the attention views read, straight
+    // from the database's own definitions (order_currently_packed_v1, 054).
+    `select o.order_number, o.lifecycle_status, o.payment_status, o.fulfillment_status,
+            public.order_currently_packed_v1(o.organization_id, o.id) as packed,
+            exists (select 1 from deliveries d where d.organization_id = o.organization_id
+                      and d.order_id = o.id and d.status = 'ready') as ready_delivery,
+            exists (select 1 from deliveries d where d.organization_id = o.organization_id
+                      and d.order_id = o.id and d.status in ('in_transit','delivered')) as delivery_out
+       from orders o where o.organization_id=$1
+     order by o.created_at desc, o.id desc`,
     [org],
   );
   return result.rows
@@ -173,6 +184,9 @@ async function dbOrder(org: string, filter: OrderListFilter = "all"): Promise<st
         lifecycle: row.lifecycle_status,
         payment: row.payment_status,
         fulfillment: row.fulfillment_status,
+        packed: row.packed,
+        readyDelivery: row.ready_delivery,
+        deliveryOut: row.delivery_out,
       }),
     )
     .map((row) => row.order_number);
@@ -194,130 +208,14 @@ function signInAs(userId: string, organizationId: string) {
 // ── Supabase admin client → PGlite, rows rendered the way PostgREST renders them
 
 function sqlTransport() {
-  const identifier = (value: string) => {
-    if (!/^[a-z_0-9]+$/.test(value)) throw new Error(`Invalid test identifier: ${value}`);
-    return value;
-  };
-  function select(table: string) {
-    const where: string[] = [];
-    const values: unknown[] = [];
-    const ordering: string[] = [];
-    let columns = "*";
-    let single: "single" | "maybe" | null = null;
-    let max: number | undefined;
-    let skip: number | undefined;
-    let counted = false;
-    let headOnly = false;
-    const compare = (op: string) => (key: string, value: unknown) => {
-      values.push(value);
-      where.push(`${identifier(key)} ${op} $${values.length}`);
-      return chain;
-    };
-    const chain: any = {
-      select(cols = "*", options: { count?: "exact"; head?: boolean } = {}) {
-        if (cols !== "*" && !/^[a-z_0-9, ]+$/.test(cols)) {
-          throw new Error(`Unsupported test select: ${cols}`);
-        }
-        columns = cols;
-        counted = options.count === "exact";
-        headOnly = options.head === true;
-        return chain;
-      },
-      eq: compare("="),
-      neq: compare("<>"),
-      lt: compare("<"),
-      gt: compare(">"),
-      gte: compare(">="),
-      // PostgREST's or=(a.eq.x,b.eq.y): only the eq form the repository uses.
-      or(expression: string) {
-        const terms = expression.split(",").map((term) => {
-          const match = /^([a-z_]+)\.eq\.([a-z_]+)$/.exec(term);
-          if (!match) throw new Error(`Unsupported test or(): ${expression}`);
-          values.push(match[2]);
-          return `${identifier(match[1]!)} = $${values.length}`;
-        });
-        where.push(`(${terms.join(" or ")})`);
-        return chain;
-      },
-      in(key: string, list: unknown[]) {
-        const params = list.map((value) => {
-          values.push(value);
-          return `$${values.length}`;
-        });
-        where.push(list.length ? `${identifier(key)} in (${params.join(",")})` : "false");
-        return chain;
-      },
-      order(key: string, options: { ascending: boolean }) {
-        ordering.push(`${identifier(key)} ${options.ascending ? "asc" : "desc"}`);
-        return chain;
-      },
-      limit(n: number) {
-        max = n;
-        return chain;
-      },
-      range(from: number, to: number) {
-        skip = from;
-        max = to - from + 1;
-        return chain;
-      },
-      single() {
-        single = "single";
-        return chain;
-      },
-      maybeSingle() {
-        single = "maybe";
-        return chain;
-      },
-      async execute() {
-        const filtered = where.length ? ` where ${where.join(" and ")}` : "";
-        let count: number | null = null;
-        if (counted) {
-          // PostgREST's exact count: every row the filters admit, before any
-          // order, limit or offset.
-          try {
-            const total = await f.db.query<{ n: number }>(
-              `select count(*)::int as n from ${table}${filtered}`,
-              values,
-            );
-            count = total.rows[0]!.n;
-          } catch (error) {
-            return { data: null, count: null, error };
-          }
-          if (headOnly) return { data: null, count, error: null };
-        }
-        let inner = `select ${columns} from ${table}${filtered}`;
-        if (ordering.length) inner += ` order by ${ordering.join(",")}`;
-        if (max !== undefined) inner += ` limit ${max}`;
-        if (skip !== undefined) inner += ` offset ${skip}`;
-        try {
-          // json_agg, as PostgREST: timestamptz becomes ISO text with its
-          // microseconds intact, never a JavaScript Date.
-          const result = await f.db.query<{ rows: unknown[] }>(
-            `select coalesce(json_agg(t), '[]'::json) as rows from (${inner}) t`,
-            values,
-          );
-          const rows = result.rows[0]!.rows as unknown[];
-          if (single) {
-            if (rows.length) return { data: rows[0], error: null };
-            return single === "maybe"
-              ? { data: null, error: null }
-              : { data: null, error: { code: "PGRST116", message: "no rows" } };
-          }
-          return { data: rows, count, error: null };
-        } catch (error) {
-          return { data: null, error };
-        }
-      },
-      then(ok: (value: unknown) => unknown, fail?: (reason: unknown) => unknown) {
-        return chain.execute().then(ok, fail);
-      },
-    };
-    return chain;
-  }
+  // The shared PGlite PostgREST stand-in (it also answers the Waiting for
+  // pickup filter's deliveries embed); audit rows are not this suite's subject.
+  const transport = postgrestOverPglite(f.db);
   return {
+    rpc: transport.rpc,
     from(table: string) {
       if (table === "audit_logs") return { insert: async () => ({ error: null }) };
-      return select(identifier(table));
+      return transport.from(table);
     },
   };
 }
@@ -1219,20 +1117,28 @@ describe("Orders list pagination — the server function boundary", () => {
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 //
-// The eight Orders filters (src/lib/order-list-filters.ts), through the same
+// The nine Orders filters (src/lib/order-list-filters.ts), through the same
 // real server function, service, repository and SQL as the cases above.
 
 const CHIP: Record<OrderListFilter, string> = {
   all: "All",
-  awaiting_payment: "Awaiting payment",
+  awaiting_payment: "Payment due",
+  to_pack: "Needs preparation",
+  packed_needs_delivery: "Packed · Needs delivery",
+  waiting_pickup: "Packed · Waiting for pickup",
   draft: "Drafts",
-  to_pack: "To pack",
   processing: "Processing",
   fulfilled: "Fulfilled, not completed",
   completed: "Completed",
   cancelled: "Cancelled",
 };
 const FILTERS = Object.keys(CHIP) as OrderListFilter[];
+/**
+ * The chips this screen's member is offered. The capability snapshot below
+ * holds orders.read and orders.create, not delivery.read, so Packed · Waiting
+ * for pickup — a delivery fact the server refuses without it — is not offered.
+ */
+const VISIBLE = FILTERS.filter((filter) => filter !== "waiting_pickup");
 const END_FILTERED = "No older orders match this filter";
 const EMPTY_FILTERED = "No orders match this filter";
 
@@ -1288,14 +1194,19 @@ function chipButtons(): HTMLButtonElement[] {
 }
 
 /** The chips that announce themselves as pressed. */
+/** A chip's label, without the count badge the attention chips carry. */
+function chipLabel(button: Element): string {
+  return (button.querySelector(".chip-text")?.textContent ?? button.textContent ?? "").trim();
+}
+
 function pressedChips(): string[] {
   return chipButtons()
     .filter((button) => button.getAttribute("aria-pressed") === "true")
-    .map((button) => (button.textContent ?? "").trim());
+    .map(chipLabel);
 }
 
 async function choose(filter: OrderListFilter) {
-  const chip = chipButtons().find((b) => (b.textContent ?? "").trim() === CHIP[filter]);
+  const chip = chipButtons().find((b) => chipLabel(b) === CHIP[filter]);
   if (!chip) throw new Error(`No "${CHIP[filter]}" chip. Screen: ${text().slice(0, 400)}`);
   await act(async () => {
     chip.click();
@@ -1338,18 +1249,25 @@ describe("Orders filters — each filter is exactly its server-side predicate", 
     // not only checked against itself.
     expect(Object.fromEntries(FILTERS.map((f) => [f, served[f]!.length]))).toEqual({
       all: 64,
-      awaiting_payment: 24, // 3 live lifecycles × {unpaid, pending} × 4 fulfillments
+      awaiting_payment: 36, // 3 live lifecycles × {unpaid, pending, failed} × 4 fulfillments
       draft: 12, // 4 payments × 3 non-cancelled fulfillments
-      to_pack: 4,
+      // Confirmed, unfulfilled or processing, never packed (no Pack Order marker
+      // and no delivery here): 2 fulfillments × 4 payments.
+      to_pack: 8,
+      packed_needs_delivery: 0, // nothing here is packed (order-attention-lists covers it)
+      waiting_pickup: 0, // no deliveries in this organization (order-attention-lists covers them)
       processing: 4,
       fulfilled: 4,
       completed: 12,
       cancelled: 28, // 16 cancelled sales + 12 cancelled fulfillments of live ones
     });
 
-    // The six progress filters partition the list: every order exactly once.
-    const progress = ["draft", "to_pack", "processing", "fulfilled", "completed", "cancelled"];
-    const placed = progress.flatMap((f) => served[f]!);
+    // The five progress filters, plus confirmed-and-unfulfilled, partition the
+    // list: every order exactly once. With no packing marker and no delivery,
+    // Needs preparation is exactly confirmed ∧ (unfulfilled ∨ processing).
+    const progress = ["draft", "processing", "fulfilled", "completed", "cancelled"];
+    const confirmedUnfulfilled = served.to_pack!.filter((c) => !served.processing!.includes(c));
+    const placed = [...progress.flatMap((f) => served[f]!), ...confirmedUnfulfilled];
     expectNoDuplicates(placed);
     expect([...placed].sort()).toEqual([...served.all!].sort());
 
@@ -1360,7 +1278,7 @@ describe("Orders filters — each filter is exactly its server-side predicate", 
     for (const code of served.awaiting_payment!) {
       const o: any = byCode.get(code);
       expect(o.lifecycleStatus).not.toBe("cancelled");
-      expect(["unpaid", "pending"]).toContain(o.paymentStatus);
+      expect(["unpaid", "pending", "failed"]).toContain(o.paymentStatus);
     }
     for (const code of served.cancelled!) {
       const o: any = byCode.get(code);
@@ -1424,7 +1342,7 @@ describe("Orders filters — paging a filtered list", () => {
     setRouteSearch({ filter: "to_pack" });
     await mount();
 
-    expect(pressedChips()).toEqual(["To pack"]);
+    expect(pressedChips()).toEqual(["Needs preparation"]);
     expect(shown()).toEqual((await dbOrder(org, "to_pack")).slice(0, 50));
     expect(text()).not.toContain(END_FILTERED);
 
@@ -1487,7 +1405,8 @@ describe("Orders filters — paging a filtered list", () => {
     const firstPage = shown();
 
     // Meanwhile: new orders to pack, new drafts, and one older order still to
-    // load starts packing (it leaves this filter).
+    // load is packed (Mark Packed's record: fulfillment to processing with the
+    // Pack Order marker — record_order_packed_v1), so it leaves this filter.
     await seedOrders(
       org,
       7,
@@ -1500,6 +1419,14 @@ describe("Orders filters — paging a filtered list", () => {
       `update orders set fulfillment_status='processing'
         where organization_id=$1 and order_number='CPACK-0110'`,
       [org],
+    );
+    await f.db.query(
+      `insert into order_status_history(organization_id,order_id,axis,from_status,to_status,
+         changed_by,reason,changed_at)
+       select organization_id, id, 'fulfillment', 'unfulfilled', 'processing', $2,
+         'pack_order_packed', clock_timestamp()
+       from orders where organization_id=$1 and order_number='CPACK-0110'`,
+      [org, U1],
     );
 
     await loadEverything();
@@ -1640,7 +1567,7 @@ describe("Orders filters — changing filter while a request is in flight", () =
     await act(async () => {
       for (const filter of ["draft", "cancelled", "awaiting_payment", "completed"] as const) {
         chipButtons()
-          .find((b) => (b.textContent ?? "").trim() === CHIP[filter])!
+          .find((b) => chipLabel(b) === CHIP[filter])!
           .click();
       }
     });
@@ -1926,21 +1853,21 @@ describe("Orders filters — URL, language and accessibility", () => {
 
     await choose("awaiting_payment");
     expect(searchNavigations.at(-1)).toEqual({ filter: "awaiting_payment" });
-    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(pressedChips()).toEqual(["Payment due"]);
     // Tapping the chip already selected asks for nothing new.
     calls.length = 0;
     await choose("awaiting_payment");
     expect(listCalls()).toHaveLength(0);
   });
 
-  it("FY. eight chips, one pressed, in a labelled group; each a real button reachable by keyboard", async () => {
+  it("FY. every offered chip, one pressed, in a labelled group; each a real button reachable by keyboard", async () => {
     const { org } = await newOrg();
     await seedOrders(org, 3, "FACC");
     signInAs(U1, org);
     await mount();
 
     const buttons = chipButtons();
-    expect(buttons.map((b) => (b.textContent ?? "").trim())).toEqual(FILTERS.map((f) => CHIP[f]));
+    expect(buttons.map((b) => chipLabel(b))).toEqual(VISIBLE.map((f) => CHIP[f]));
     expect(buttons.every((b) => b.type === "button" && !b.disabled)).toBe(true);
     expect(buttons.every((b) => ["true", "false"].includes(b.getAttribute("aria-pressed")!))).toBe(
       true,
@@ -1951,16 +1878,16 @@ describe("Orders filters — URL, language and accessibility", () => {
     const marked = () =>
       chipButtons()
         .filter((b) => b.querySelector("svg"))
-        .map((b) => (b.textContent ?? "").trim());
+        .map((b) => chipLabel(b));
     expect(marked()).toEqual(["All"]);
     await choose("to_pack");
-    expect(marked()).toEqual(["To pack"]);
-    expect(pressedChips()).toEqual(["To pack"]);
+    expect(marked()).toEqual(["Needs preparation"]);
+    expect(pressedChips()).toEqual(["Needs preparation"]);
     // A chip label is never cut: no truncation on the chip or its text.
     expect(buttons.some((b) => /truncate|line-clamp/.test(b.innerHTML + b.className))).toBe(false);
   });
 
-  it("GA. a screen reader meets the chips as ONE group named 'Filter orders' that holds all eight", async () => {
+  it("GA. a screen reader meets the chips as ONE group named 'Filter orders' that holds every chip", async () => {
     const { org } = await newOrg();
     await seedOrders(org, 2, "FGRP");
     signInAs(U1, org);
@@ -1977,16 +1904,16 @@ describe("Orders filters — URL, language and accessibility", () => {
     );
     expect(named).toEqual([group!]);
 
-    // Each of the eight chips belongs to that group (its nearest group is it),
+    // Each offered chip belongs to that group (its nearest group is it),
     // keeps its own name, and announces whether it is pressed.
     const chips = [...document.querySelectorAll("button")].filter((button) =>
-      FILTERS.some((f) => (button.textContent ?? "").trim() === CHIP[f]),
+      FILTERS.some((f) => chipLabel(button) === CHIP[f]),
     );
-    expect(chips).toHaveLength(FILTERS.length);
+    expect(chips).toHaveLength(VISIBLE.length);
     expect(chips.every((chip) => chip.closest('[role="group"]') === group)).toBe(true);
-    expect(
-      chips.map((chip) => [(chip.textContent ?? "").trim(), chip.getAttribute("aria-pressed")]),
-    ).toEqual(FILTERS.map((f) => [CHIP[f], f === "all" ? "true" : "false"]));
+    expect(chips.map((chip) => [chipLabel(chip), chip.getAttribute("aria-pressed")])).toEqual(
+      VISIBLE.map((f) => [CHIP[f], f === "all" ? "true" : "false"]),
+    );
 
     // Choosing a chip moves the pressed state inside the same group.
     await choose("processing");
@@ -2054,13 +1981,13 @@ describe("Orders filters — URL, language and accessibility", () => {
     // In Khmer the same group carries the Khmer name.
     const group = groupNamed(km.orderList.filtersLabel);
     expect(group).not.toBeNull();
-    const labels = [...group!.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
-    expect(labels).toEqual(FILTERS.map((f) => km.orderList.filters[f]));
+    const labels = [...group!.querySelectorAll("button")].map((b) => chipLabel(b));
+    expect(labels).toEqual(VISIBLE.map((f) => km.orderList.filters[f]));
     expect(text()).toContain(km.orderList.endFiltered.title);
 
     await act(async () => {
       [...group!.querySelectorAll("button")]
-        .find((b) => (b.textContent ?? "").trim() === km.orderList.filters.completed)!
+        .find((b) => chipLabel(b) === km.orderList.filters.completed)!
         .click();
     });
     await readsSettled();
@@ -2133,14 +2060,14 @@ describe("Home → Orders — the card's number is the list it opens", () => {
     signInAs(U1, org);
 
     const counts = await homeOrderCounts(org);
-    // 24 of the 64 combinations (3 live lifecycles × unpaid|pending × 4
+    // 36 of the 64 combinations (3 live lifecycles × unpaid|pending|failed × 4
     // fulfillments) plus the 60 drafts.
-    expect(counts.awaitingPaymentCount).toBe(84);
+    expect(counts.awaitingPaymentCount).toBe(96);
 
     const destination = await openFromHomeCard("awaiting_payment");
     expect(destination.search).toEqual({ filter: "awaiting_payment" });
     // Arrives with the filter chosen and visible, and asks the server for it.
-    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(pressedChips()).toEqual(["Payment due"]);
     expect(listCalls()[0]!.data).toEqual({ filter: "awaiting_payment" });
 
     await loadEverything();
@@ -2191,7 +2118,7 @@ describe("Home → Orders — the card's number is the list it opens", () => {
 
     // Home renders no card at zero; a saved link or Back can still land here.
     await openFromHomeCard("awaiting_payment");
-    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(pressedChips()).toEqual(["Payment due"]);
     expect(shown()).toEqual([]);
     expect(text()).toContain(EMPTY_FILTERED);
     expect(text()).not.toContain(END_FILTERED);
@@ -2215,7 +2142,7 @@ describe("Home → Orders — the card's number is the list it opens", () => {
 
     signInAs(U1, b.org);
     await rerender();
-    expect(pressedChips()).toEqual(["Awaiting payment"]);
+    expect(pressedChips()).toEqual(["Payment due"]);
     expect(shown().every((code) => code.startsWith("HORGB-"))).toBe(true);
     expect(shown()).toHaveLength((await homeOrderCounts(b.org)).awaitingPaymentCount);
     expect(shown()).toHaveLength(12);

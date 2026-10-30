@@ -10,7 +10,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dir, "../..");
 
-it("Pack Order state resets on order, user and organization switch and drops late responses", () => {
+it("Pack Order state resets on order, user and organization switch, drops late responses, and resumes after leaving", () => {
   const result = spawnSync(
     process.execPath,
     ["test", path.join(root, "src/tests/pack-order-component.runtime.ts")],

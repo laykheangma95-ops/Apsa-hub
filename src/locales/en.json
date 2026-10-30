@@ -1353,9 +1353,11 @@
     "filtersLabel": "Filter orders",
     "filters": {
       "all": "All",
-      "awaiting_payment": "Awaiting payment",
+      "awaiting_payment": "Payment due",
+      "to_pack": "Needs preparation",
+      "packed_needs_delivery": "Packed · Needs delivery",
+      "waiting_pickup": "Packed · Waiting for pickup",
       "draft": "Drafts",
-      "to_pack": "To pack",
       "processing": "Processing",
       "fulfilled": "Fulfilled, not completed",
       "completed": "Completed",
@@ -1370,6 +1372,32 @@
       "title": "No older orders match this filter",
       "body_one": "{{count}} matching order shown. Orders that change status move in or out when the list refreshes.",
       "body_other": "{{count}} matching orders shown. Orders that change status move in or out when the list refreshes."
+    },
+    "attention": {
+      "waited": {
+        "minutes_one": "Waiting {{count}} minute",
+        "minutes_other": "Waiting {{count}} minutes",
+        "hours_one": "Waiting {{count}} hour",
+        "hours_other": "Waiting {{count}} hours",
+        "days_one": "Waiting {{count}} day",
+        "days_other": "Waiting {{count}} days"
+      },
+      "readyWaited": {
+        "minutes_one": "Ready {{count}} minute",
+        "minutes_other": "Ready {{count}} minutes",
+        "hours_one": "Ready {{count}} hour",
+        "hours_other": "Ready {{count}} hours",
+        "days_one": "Ready {{count}} day",
+        "days_other": "Ready {{count}} days"
+      },
+      "readyTimeUnknown": "Ready time not recorded",
+      "staffNotTracked": "Assigned staff: not tracked yet",
+      "received": "Received {{received}} of {{total}}",
+      "cod": "Cash on delivery — the courier collects",
+      "packedDeliveryUnknown": "Packed, not with a courier yet. Open the order to see its delivery.",
+      "next": "Next: {{action}}",
+      "nextTeammate": "Next step needs a teammate with access",
+      "countLabel": "{{label}}: {{count}} orders"
     }
   },
   "orderCreate": {
@@ -1729,8 +1757,14 @@
     "currencyLabel": "Main selling currency",
     "currencyHint": "Your product prices and orders use this currency. It cannot be changed in the app later, so choose the one you price in.",
     "currency": {
-      "USD": { "label": "US dollar (USD)", "example": "$12.50" },
-      "KHR": { "label": "Khmer riel (KHR)", "example": "50,000៛" }
+      "USD": {
+        "label": "US dollar (USD)",
+        "example": "$12.50"
+      },
+      "KHR": {
+        "label": "Khmer riel (KHR)",
+        "example": "50,000៛"
+      }
     },
     "submit": "Create business",
     "submitting": "Creating your business",
@@ -2887,6 +2921,7 @@
     "progress": "Packing progress",
     "packedCount": "{{packed}} / {{total}} packed",
     "readyToSeal": "All items packed — seal the parcel",
+    "startOver": "Start over",
     "submit": "Go",
     "itemList": "Items to pack",
     "labelHint": "Stick the printed label on the parcel, then pack each item into it.",
@@ -2924,6 +2959,7 @@
       "alreadyPacked": "This order is already packed",
       "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
       "incomplete": "Some items are not packed yet.",
+      "staleRound": "Someone else packed this order after you started. Your checks were cleared — check the order before packing again.",
       "failed": "Could not mark the order packed. Please try again."
     },
     "error": {
