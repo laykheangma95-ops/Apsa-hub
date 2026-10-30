@@ -302,8 +302,8 @@ interface Cdp {
 
 /**
  * How long Chromium may take to print its DevTools endpoint after spawn. With
- * the executable preloaded, CI runners measured 0.2–1.2 s for the first
- * launch (~0.1 s warm).
+ * the executable preloaded, the first launch on CI runners measured 0.8–2.1 s
+ * (~0.1 s warm).
  */
 const STARTUP_DEADLINE_MS = 20_000;
 
@@ -322,8 +322,8 @@ interface Preload {
  * major page faults). Measured on ubuntu-latest (/usr/bin/chromium), that
  * launch took 7.8–30.6 s, of which only 0.2–0.5 s was CPU: a disk wait, not
  * Chromium work, and on its own enough to run past the startup deadline.
- * Most of those reads are the executable itself, which a large sequential
- * read brings in far faster. Wrapper scripts (/usr/bin/google-chrome ->
+ * Most of those reads are the executable itself. Read sequentially before
+ * the launch (6.3–9.2 s for 527 MB there), it is no longer part of startup. Wrapper scripts (/usr/bin/google-chrome ->
  * /opt/google/chrome/google-chrome) launch the `chrome` binary beside them.
  */
 function preloadBrowser(browser: string): Preload {
