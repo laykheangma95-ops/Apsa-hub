@@ -1,0 +1,240 @@
+/**
+ * Pack Order progress that survives leaving the screen.
+ *
+ * Packing is physical work, and a packer is often interrupted: they go back to
+ * the order, answer a customer, the phone reloads the tab, or they press the
+ * phone's own back button. Pack progress used to live only in the screen's
+ * React state, so any of these threw away every scan and manual confirmation
+ * and the whole parcel had to be checked again.
+ *
+ * One record per member + organization + order, in this tab's sessionStorage
+ * (never shared across principals; another member or organization in this tab
+ * reads a different record, so the identity isolation of the screen holds):
+ *   parcelCode      the parcel the progress was recorded against;
+ *   parcelVerified  its label was scanned and the server accepted it;
+ *   packed          the confirmed units, by order line and variant only;
+ *   packRound       the server's packing round the progress belongs to.
+ * Product names, barcodes and quantities required are NOT stored: they always
+ * come from the server's current pack requirements.
+ *
+ * Never authority: this is a working aid for the packer, exactly like a manual
+ * confirmation. Mark Packed sends per-line counts and the server re-checks
+ * completeness against the order itself (packing/service.ts, "incomplete"). On
+ * restore, units for lines the order no longer has, or with another variant,
+ * are dropped and each line is capped at what it requires. Progress recorded
+ * against another parcel or in another packing round, or a record not exactly
+ * in the shape written here, restores nothing: the packer starts fresh.
+ *
+ * Packing round: a reopen makes a packed order unpacked again with the SAME
+ * parcel and order lines, so neither tells an earlier round from the new one.
+ * The server's packRound (getPackRequirements) changes whenever the order is
+ * packed, by anyone, so progress from before that is never brought back even
+ * when this tab never saw the order packed.
+ *
+ * Bounded: records untouched for 12 hours are dropped, and at most 30 are kept
+ * per tab. Losing one is safe: the packer simply checks the items again.
+ * Where sessionStorage cannot be used, a page-lifetime copy stands in, and a
+ * write it refuses (quota) simply remembers nothing.
+ */
+import type { PackMethod, PackSession } from "@/lib/pack";
+
+export interface PackProgressScope {
+  userId: string;
+  organizationId: string;
+  orderId: string;
+}
+
+export interface SavedPackUnit {
+  orderItemId: string;
+  variantId: string;
+  method: PackMethod;
+  scannedAt: number;
+}
+
+export interface PackProgressRecord {
+  parcelCode: string;
+  parcelVerified: boolean;
+  packed: SavedPackUnit[];
+  packRound: number;
+  updatedAt: number;
+}
+
+const STORAGE_ITEM = "apsa.pack-progress.v1";
+export const PACK_PROGRESS_TTL_MS = 12 * 60 * 60 * 1000;
+export const PACK_PROGRESS_MAX_RECORDS = 30;
+
+type Store = Record<string, PackProgressRecord>;
+
+/** Used only when sessionStorage is unavailable: lives as long as the page. */
+let fallback: Store = {};
+
+function scopeId(scope: PackProgressScope): string {
+  return JSON.stringify([scope.userId, scope.organizationId, scope.orderId]);
+}
+
+/** This tab's sessionStorage, or null where it cannot be used (SSR, blocked). */
+function tabStorage(): Storage | null {
+  try {
+    const storage = globalThis.sessionStorage;
+    if (!storage) return null;
+    storage.getItem(STORAGE_ITEM);
+    return storage;
+  } catch {
+    return null;
+  }
+}
+
+function load(now: number): Store {
+  const storage = tabStorage();
+  let store: Store = fallback;
+  if (storage) {
+    try {
+      const raw = storage.getItem(STORAGE_ITEM);
+      store = raw ? (JSON.parse(raw) as Store) : {};
+    } catch {
+      store = {};
+    }
+  }
+  const kept: Store = {};
+  if (!isPlainObject(store)) return kept;
+  for (const [id, record] of Object.entries(store)) {
+    // Anything not exactly the shape this module writes is dropped, never read.
+    if (isPackProgressRecord(record) && now - record.updatedAt < PACK_PROGRESS_TTL_MS) {
+      kept[id] = record;
+    }
+  }
+  return kept;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSavedPackUnit(value: unknown): value is SavedPackUnit {
+  return (
+    isPlainObject(value) &&
+    typeof value["orderItemId"] === "string" &&
+    typeof value["variantId"] === "string" &&
+    (value["method"] === "scan" || value["method"] === "manual") &&
+    typeof value["scannedAt"] === "number" &&
+    Number.isFinite(value["scannedAt"])
+  );
+}
+
+/** Exactly the shape savePackProgress writes; anything else is malformed. */
+export function isPackProgressRecord(value: unknown): value is PackProgressRecord {
+  return (
+    isPlainObject(value) &&
+    typeof value["parcelCode"] === "string" &&
+    typeof value["parcelVerified"] === "boolean" &&
+    typeof value["updatedAt"] === "number" &&
+    Number.isFinite(value["updatedAt"]) &&
+    Array.isArray(value["packed"]) &&
+    value["packed"].every(isSavedPackUnit) &&
+    Number.isInteger(value["packRound"])
+  );
+}
+
+function save(store: Store): void {
+  const newestFirst = Object.entries(store).sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
+  const bounded = Object.fromEntries(newestFirst.slice(0, PACK_PROGRESS_MAX_RECORDS));
+  const storage = tabStorage();
+  if (!storage) {
+    fallback = bounded;
+    return;
+  }
+  try {
+    storage.setItem(STORAGE_ITEM, JSON.stringify(bounded));
+  } catch {
+    // Quota exceeded: this progress is not remembered. Safe — re-check the items.
+  }
+}
+
+/** This principal's saved progress for this order, or null. */
+export function readPackProgress(
+  scope: PackProgressScope,
+  now = Date.now(),
+): PackProgressRecord | null {
+  return load(now)[scopeId(scope)] ?? null;
+}
+
+/**
+ * Remember the session's progress in `packRound` (the server's round the
+ * session was started in); a session with nothing confirmed is forgotten.
+ */
+export function savePackProgress(
+  scope: PackProgressScope,
+  session: PackSession,
+  packRound: number,
+  now = Date.now(),
+): void {
+  const store = load(now);
+  const id = scopeId(scope);
+  if (session.packed.length === 0 && !session.parcelVerified) {
+    delete store[id];
+  } else {
+    store[id] = {
+      parcelCode: session.parcelCode,
+      parcelVerified: session.parcelVerified,
+      packed: session.packed.map(({ orderItemId, variantId, method, scannedAt }) => ({
+        orderItemId,
+        variantId,
+        method,
+        scannedAt,
+      })),
+      packRound,
+      updatedAt: now,
+    };
+  }
+  save(store);
+}
+
+/** Forget this principal's progress for this order (packed, or started over). */
+export function clearPackProgress(scope: PackProgressScope, now = Date.now()): void {
+  const store = load(now);
+  delete store[scopeId(scope)];
+  save(store);
+}
+
+/**
+ * Apply saved progress to a fresh session built from the server's CURRENT
+ * requirements. Only units for an existing line with the same variant are
+ * kept, each line capped at its required quantity. A malformed record, or one
+ * for another parcel or another packing round (`packRound`, the server's
+ * current one), restores nothing (neither items nor the parcel check). Pure.
+ */
+export function restorePackSession(
+  fresh: PackSession,
+  saved: PackProgressRecord | null,
+  packRound: number,
+): PackSession {
+  // A malformed record, or progress recorded against another parcel or in an
+  // earlier packing round, restores nothing: item confirmations belong to the
+  // parcel, and the round, they were packed in.
+  if (
+    !isPackProgressRecord(saved) ||
+    saved.parcelCode !== fresh.parcelCode ||
+    saved.packRound !== packRound
+  ) {
+    return fresh;
+  }
+  const remaining = new Map<string, number>();
+  const variantOf = new Map<string, string>();
+  for (const req of fresh.requirements) {
+    remaining.set(req.orderItemId, req.quantityRequired);
+    variantOf.set(req.orderItemId, req.variantId);
+  }
+  const packed = [];
+  for (const unit of saved.packed) {
+    const left = remaining.get(unit.orderItemId) ?? 0;
+    if (left <= 0 || variantOf.get(unit.orderItemId) !== unit.variantId) continue;
+    remaining.set(unit.orderItemId, left - 1);
+    packed.push({
+      orderItemId: unit.orderItemId,
+      variantId: unit.variantId,
+      method: unit.method,
+      scannedAt: unit.scannedAt,
+    });
+  }
+  return { ...fresh, parcelVerified: saved.parcelVerified, packed };
+}

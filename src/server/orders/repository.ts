@@ -248,6 +248,39 @@ export async function recordOrderPacked(
   return data as TransitionRpcResult;
 }
 
+/** Result of mark_order_packed_v1 (migration 066). */
+export interface MarkOrderPackedRpcResult {
+  status: string;
+  current_round?: number;
+  delivery_id?: string;
+  /** On success: the order was already packed; only its pending delivery was readied. */
+  was_packed?: boolean;
+}
+
+/**
+ * Mark Packed's one write, in one locked transaction (migration 066,
+ * mark_order_packed_v1): the packing round is compared with `expectedRound`
+ * under the order lock, then the order is packed through the existing 054
+ * writers (record_order_packed_v1, or the marker-tagged delivery transitions).
+ * Never through transitionStatus: that stamps the transaction-start time.
+ */
+export async function markOrderPacked(
+  organizationId: string,
+  orderId: string,
+  changedBy: string | null,
+  expectedRound: number,
+): Promise<MarkOrderPackedRpcResult> {
+  const { data, error } = await db.rpc("mark_order_packed_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+    p_changed_by: changedBy,
+    p_expected_round: expectedRound,
+  });
+
+  if (error) throw new Error(`markOrderPacked: ${errMessage(error)}`);
+  return data as MarkOrderPackedRpcResult;
+}
+
 /**
  * Reopen fulfillment (processing → unfulfilled) in ONE transaction with
  * cancelling the order's 'ready' delivery, so delivery readiness never

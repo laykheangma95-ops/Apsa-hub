@@ -281,6 +281,7 @@ const cases: Case[] = [
       orderId: ORDER,
       packedLines: [{ orderItemId: ITEM, quantity: 1 }],
       expectedPrincipal: STARTED_AS,
+      expectedPackRound: 0,
     },
     invalid: { orderId: ORDER, packedLines: [] },
     sensitive: [ORDER, ITEM],

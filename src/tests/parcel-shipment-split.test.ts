@@ -364,6 +364,7 @@ function makeDb(world: World) {
         return { data: { status: "success", from, to: d["status"] }, error: null };
       }
       if (name === "order_currently_packed_v1") return { data: world.packed, error: null };
+      if (name === "order_pack_round_v1") return { data: 0, error: null };
       if (name === "ready_packed_delivery_v1") {
         const d = world.tables["deliveries"]!.find(
           (r) => r["order_id"] === args["p_order_id"] && r["status"] === "pending",

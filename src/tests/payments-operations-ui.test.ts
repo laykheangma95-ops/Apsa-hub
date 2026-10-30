@@ -938,8 +938,9 @@ describe("production boundary", () => {
       // 063 (order cancellation custody guard) belongs to Orders cancellation safety;
       // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
       // to the Telegram provider phase;
-      // 065 (order preparation queue view) belongs to the Orders attention views.
-      return Number.isFinite(prefix) && prefix > 65;
+      // 065 (order preparation queue view) belongs to the Orders attention views;
+      // 066 (Pack Order packing-round guard) belongs to the packing phase.
+      return Number.isFinite(prefix) && prefix > 66;
     });
     expect(beyond047).toEqual([]);
   });

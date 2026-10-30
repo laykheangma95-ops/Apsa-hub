@@ -109,13 +109,21 @@ export const markOrderPackedFn = createServerFn({ method: "POST" })
           .max(500),
         // Refuse-only: the principal this Mark Packed was started as.
         expectedPrincipal: expectedPrincipalSchema,
+        // The packing round the screen started in; required — never defaulted.
+        expectedPackRound: z.number().int().nonnegative(),
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const authCtx = await resolveAuthContext();
     const { markOrderPacked } = await import("@/server/packing/service");
-    return markOrderPacked(authCtx, data.orderId, data.packedLines, data.expectedPrincipal);
+    return markOrderPacked(
+      authCtx,
+      data.orderId,
+      data.packedLines,
+      data.expectedPrincipal,
+      data.expectedPackRound,
+    );
   });
 
 // ── getOrderPackStateFn ──────────────────────────────────────────────────────

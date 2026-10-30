@@ -121,6 +121,24 @@ export async function isOrderCurrentlyPacked(
   return data === true;
 }
 
+/**
+ * The order's packing round (order_pack_round_v1, migration 066): how many
+ * Pack Order packed markers its fulfillment and delivery history hold. One
+ * scalar computed in the database, so no row page limit can drop delivery
+ * history from it. Anything but a whole number is an error, never round zero.
+ */
+export async function getOrderPackRound(organizationId: string, orderId: string): Promise<number> {
+  const { data, error } = await db.rpc("order_pack_round_v1", {
+    p_organization_id: organizationId,
+    p_order_id: orderId,
+  });
+  if (error) throw new Error(`getOrderPackRound: ${message(error)}`);
+  if (typeof data !== "number" || !Number.isInteger(data) || data < 0) {
+    throw new Error("getOrderPackRound: no packing round returned");
+  }
+  return data;
+}
+
 export async function findDeliveryById(
   organizationId: string,
   deliveryId: string,

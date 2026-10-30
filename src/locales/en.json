@@ -2921,6 +2921,7 @@
     "progress": "Packing progress",
     "packedCount": "{{packed}} / {{total}} packed",
     "readyToSeal": "All items packed — seal the parcel",
+    "startOver": "Start over",
     "submit": "Go",
     "itemList": "Items to pack",
     "labelHint": "Stick the printed label on the parcel, then pack each item into it.",
@@ -2958,6 +2959,7 @@
       "alreadyPacked": "This order is already packed",
       "packedBody": "Arrange delivery if it is not arranged yet, then hand the sealed parcel to the courier.",
       "incomplete": "Some items are not packed yet.",
+      "staleRound": "Someone else packed this order after you started. Your checks were cleared — check the order before packing again.",
       "failed": "Could not mark the order packed. Please try again."
     },
     "error": {
