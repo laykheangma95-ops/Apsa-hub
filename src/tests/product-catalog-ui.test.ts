@@ -1924,6 +1924,7 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
     // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
     // to the Telegram provider phase.
+    // 065 (order preparation queue view) belongs to the Orders attention views.
     // 066 (Pack Order packing-round guard) belongs to the packing phase.
     expect(migrations.at(-1)).toBe("066_pack_order_round_guard.sql");
     for (const required of [

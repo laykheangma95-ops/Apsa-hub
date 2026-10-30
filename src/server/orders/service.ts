@@ -78,7 +78,12 @@ import {
   type OrderCancelBlockedCode,
 } from "@/lib/order-cancel-blocked";
 import { isReservedOperationalReason } from "@/lib/operational-reasons";
-import { DEFAULT_ORDER_LIST_FILTER, type OrderListFilter } from "@/lib/order-list-filters";
+import {
+  DEFAULT_ORDER_LIST_FILTER,
+  isOrderAttentionFilter,
+  type OrderListFilter,
+} from "@/lib/order-list-filters";
+import { buildOrderAttention, type OrderAttentionDetail } from "./attention";
 import { ORDER_SOURCES } from "./types";
 import type {
   OrderRow,
@@ -1269,6 +1274,11 @@ export interface OrderListPage {
   nextCursor: OrderListCursor | null;
   servedAs: { userId: string; organizationId: string };
   filter: OrderListFilter;
+  /**
+   * Per-order facts for the three attention views (src/server/orders/attention.ts),
+   * keyed by order id; empty for every other filter.
+   */
+  attention: Record<string, OrderAttentionDetail>;
 }
 
 /**
@@ -1292,8 +1302,11 @@ export async function listOrdersPage(
   } = {},
 ): Promise<OrderListPage> {
   ctx.require("orders.read");
-  const limit = Math.min(Math.max(opts.limit ?? ORDER_LIST_PAGE_SIZE, 1), ORDER_LIST_PAGE_MAX);
   const filter = opts.filter ?? DEFAULT_ORDER_LIST_FILTER;
+  // Membership of this list is a delivery fact: only a member who may read
+  // deliveries may ask which orders have one waiting for the courier.
+  if (filter === "waiting_pickup") ctx.require("delivery.read");
+  const limit = Math.min(Math.max(opts.limit ?? ORDER_LIST_PAGE_SIZE, 1), ORDER_LIST_PAGE_MAX);
   const rows = await repo.listOrders(ctx.organizationId, {
     limit: limit + 1,
     before: opts.before,
@@ -1306,5 +1319,46 @@ export async function listOrdersPage(
     nextCursor: rows.length > limit && last ? { createdAt: last.created_at, id: last.id } : null,
     servedAs: { userId: ctx.userId, organizationId: ctx.organizationId },
     filter,
+    attention: isOrderAttentionFilter(filter) ? await buildOrderAttention(ctx, filter, page) : {},
+  };
+}
+
+/**
+ * The exact size of each attention view, for the Orders screen's chips.
+ *
+ * Each count runs the list's own filter SQL over the caller's whole
+ * organization (repo.countOrdersByListFilter), so a chip's number and the
+ * rows paged under it are one predicate. `waitingPickup` is null for a member
+ * who may not read deliveries — the same grant listOrdersPage requires for
+ * that list. `servedAs` lets the browser refuse counts answered for another
+ * principal, exactly as for a list page.
+ */
+export interface OrderAttentionCounts {
+  paymentDue: number;
+  needsPreparation: number;
+  packedNeedsDelivery: number;
+  waitingPickup: number | null;
+  servedAs: { userId: string; organizationId: string };
+}
+
+export async function getOrderAttentionCounts(
+  ctx: AuthorizationContext,
+): Promise<OrderAttentionCounts> {
+  ctx.require("orders.read");
+  const organizationId = ctx.organizationId;
+  const [paymentDue, needsPreparation, packedNeedsDelivery, waitingPickup] = await Promise.all([
+    repo.countOrdersByListFilter(organizationId, "awaiting_payment"),
+    repo.countOrdersByListFilter(organizationId, "to_pack"),
+    repo.countOrdersByListFilter(organizationId, "packed_needs_delivery"),
+    ctx.can("delivery.read")
+      ? repo.countOrdersByListFilter(organizationId, "waiting_pickup")
+      : Promise.resolve(null),
+  ]);
+  return {
+    paymentDue,
+    needsPreparation,
+    packedNeedsDelivery,
+    waitingPickup,
+    servedAs: { userId: ctx.userId, organizationId },
   };
 }

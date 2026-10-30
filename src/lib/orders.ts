@@ -11,7 +11,9 @@ import type {
   OrderDetail as ServerOrderDetail,
   OrderLineDetail as ServerOrderLineDetail,
   OrderListPage as ServerOrderListPage,
+  OrderAttentionCounts as ServerOrderAttentionCounts,
 } from "@/server/orders/service";
+import type { OrderAttentionDetail } from "@/server/orders/attention";
 import type { OrderListCursor, OrderSourceDb } from "@/server/orders/types";
 import type { OrderListFilter } from "@/lib/order-list-filters";
 import { orderCancelBlockedCodeOf, type OrderCancelBlockedCode } from "@/lib/order-cancel-blocked";
@@ -307,13 +309,24 @@ export function orderCancelBlockedReason(err: unknown): OrderCancelBlockedReason
 
 // ── Orders list pages ─────────────────────────────────────────────────────────
 
-export type { OrderListCursor };
+export type { OrderListCursor, OrderAttentionDetail };
 
 /** One page of the Orders list, mapped for the UI and accepted for one principal. */
 export interface RealOrderPage {
   orders: Order[];
   /** Null only when the server found nothing older than this page. */
   nextCursor: OrderListCursor | null;
+  /** Attention-view facts by order id; empty outside the three attention views. */
+  attention: Record<string, OrderAttentionDetail>;
+}
+
+/** The attention chips' counts, accepted for one principal. */
+export interface RealOrderAttentionCounts {
+  paymentDue: number;
+  needsPreparation: number;
+  packedNeedsDelivery: number;
+  /** null: this member may not read deliveries, so the view is not offered. */
+  waitingPickup: number | null;
 }
 
 /**
@@ -358,7 +371,34 @@ export function acceptOrderListPage(
   if (page.filter !== filter) {
     throw new Error("The order list was answered for a different filter");
   }
-  return { orders: page.orders.map(mapOrderSummaryToUi), nextCursor: page.nextCursor };
+  return {
+    orders: page.orders.map(mapOrderSummaryToUi),
+    nextCursor: page.nextCursor,
+    attention: page.attention ?? {},
+  };
+}
+
+/**
+ * The attention counts get the same identity check as a list page: counts
+ * answered for another member or organization are refused, never shown on
+ * this principal's chips.
+ */
+export function acceptOrderAttentionCounts(
+  counts: ServerOrderAttentionCounts,
+  expected: { userId: string; organizationId: string },
+): RealOrderAttentionCounts {
+  if (
+    counts.servedAs.userId !== expected.userId ||
+    counts.servedAs.organizationId !== expected.organizationId
+  ) {
+    throw new OrderListPrincipalChangedError();
+  }
+  return {
+    paymentDue: counts.paymentDue,
+    needsPreparation: counts.needsPreparation,
+    packedNeedsDelivery: counts.packedNeedsDelivery,
+    waitingPickup: counts.waitingPickup,
+  };
 }
 
 // ── Prepare-Order checkout routing ────────────────────────────────────────────

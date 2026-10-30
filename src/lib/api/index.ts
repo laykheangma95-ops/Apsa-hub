@@ -4,10 +4,12 @@
  */
 import { usd } from "@/lib/money";
 import {
+  acceptOrderAttentionCounts,
   acceptOrderListPage,
   mapOrderDetailToUi,
   mapOrderSummaryToUi,
   type OrderListCursor,
+  type RealOrderAttentionCounts,
   type RealOrderDetail,
   type RealOrderPage,
 } from "@/lib/orders";
@@ -1209,6 +1211,18 @@ export async function listRealOrdersPage(input: {
     },
   });
   return acceptOrderListPage(page, input.expected, input.filter);
+}
+
+/**
+ * The Orders screen's attention counts (Payment due, Needs preparation,
+ * Packed · Waiting for pickup). Refused unless the server answered for
+ * `expected`, like a list page.
+ */
+export async function getRealOrderAttentionCounts(input: {
+  expected: { userId: string; organizationId: string };
+}): Promise<RealOrderAttentionCounts> {
+  const { getOrderAttentionCountsFn } = await import("@/api/orders");
+  return acceptOrderAttentionCounts(await getOrderAttentionCountsFn(), input.expected);
 }
 
 /** Production Order detail — src/routes/app.orders.$id.tsx (real-UUID branch). */
