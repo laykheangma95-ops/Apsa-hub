@@ -300,13 +300,148 @@ interface Cdp {
   close(): Promise<void>;
 }
 
+/**
+ * How long Chromium may take to print its DevTools endpoint after spawn. With
+ * the executable preloaded, CI runners measured 0.2–1.2 s for the first
+ * launch (~0.1 s warm).
+ */
+const STARTUP_DEADLINE_MS = 20_000;
+
+interface Preload {
+  files: string[];
+  bytes: number;
+  ms: number;
+}
+
+/**
+ * Reads the browser executable once, sequentially, so the launch that follows
+ * finds it in the page cache.
+ *
+ * On a fresh GitHub runner the browser has never been read, and its first
+ * launch faults about 215 MB in from a cold disk, one page at a time (~1,800
+ * major page faults). Measured on ubuntu-latest (/usr/bin/chromium), that
+ * launch took 7.8–30.6 s, of which only 0.2–0.5 s was CPU: a disk wait, not
+ * Chromium work, and on its own enough to run past the startup deadline.
+ * Most of those reads are the executable itself, which a large sequential
+ * read brings in far faster. Wrapper scripts (/usr/bin/google-chrome ->
+ * /opt/google/chrome/google-chrome) launch the `chrome` binary beside them.
+ */
+function preloadBrowser(browser: string): Preload {
+  const executable = fs.realpathSync(browser);
+  const sibling = path.join(path.dirname(executable), "chrome");
+  const files = [executable];
+  if (sibling !== executable && fs.existsSync(sibling)) files.push(sibling);
+  const result: Preload = { files, bytes: 0, ms: 0 };
+  const started = performance.now();
+  const buffer = Buffer.allocUnsafe(1 << 20);
+  for (const file of files) {
+    const fd = fs.openSync(file, "r");
+    try {
+      let n: number;
+      while ((n = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) result.bytes += n;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  result.ms = Math.round(performance.now() - started);
+  return result;
+}
+
+function readProc(file: string): string {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Linux only: CPU time, major page faults and bytes read from disk for the
+ * browser's process tree, to tell a busy, a starved and a stuck browser apart.
+ */
+function processTreeStats(root: number): string {
+  if (!fs.existsSync(`/proc/${root}/stat`)) return "unavailable";
+  const fields = (pid: number) => {
+    const stat = readProc(`/proc/${pid}/stat`);
+    return stat ? stat.slice(stat.lastIndexOf(")") + 2).split(" ") : null;
+  };
+  const children = new Map<number, number[]>();
+  for (const name of fs.readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    const ppid = Number(fields(Number(name))?.[1]);
+    children.set(ppid, [...(children.get(ppid) ?? []), Number(name)]);
+  }
+  let procs = 0;
+  let cpuTicks = 0;
+  let majorFaults = 0;
+  let readBytes = 0;
+  const queue = [root];
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    const f = fields(pid);
+    if (!f) continue;
+    procs++;
+    majorFaults += Number(f[9]);
+    cpuTicks += Number(f[11]) + Number(f[12]);
+    readBytes += Number(readProc(`/proc/${pid}/io`).match(/^read_bytes: (\d+)/m)?.[1] ?? 0);
+    queue.push(...(children.get(pid) ?? []));
+  }
+  // utime/stime are in clock ticks, 100 per second on Linux.
+  return (
+    `${procs} processes, ${cpuTicks * 10} ms CPU, ${majorFaults} major page faults, ` +
+    `${(readBytes / 1e6).toFixed(0)} MB read from disk`
+  );
+}
+
+/** Why the browser did not become ready: everything a CI log needs to tell. */
+async function startupReport(
+  child: ReturnType<typeof Bun.spawn>,
+  browser: string,
+  preload: Preload,
+  elapsedMs: number,
+  stderr: string[],
+): Promise<string> {
+  // Sampled before the exit check below, while the process tree still exists.
+  const tree = child.exitCode === null ? processTreeStats(child.pid) : "exited";
+  await Promise.race([child.exited, Bun.sleep(200)]);
+  const state =
+    child.exitCode === null
+      ? "still running"
+      : `exited (code ${child.exitCode}${child.signalCode ? `, signal ${child.signalCode}` : ""})`;
+  // The "some" line of each pressure file, e.g. "avg10=33.43 avg60=11.98 avg300=4.19".
+  const pressure = ["cpu", "io", "memory"].map((kind) => {
+    const some = readProc(`/proc/pressure/${kind}`).split("\n")[0] ?? "";
+    return `${kind}: ${some.replace(/^some | total=\d+/g, "") || "n/a"}`;
+  });
+  const load = os
+    .loadavg()
+    .map((l) => l.toFixed(2))
+    .join(" ");
+  const image = process.env["ImageOS"]
+    ? `${process.env["ImageOS"]} ${process.env["ImageVersion"] ?? ""}`
+    : "n/a";
+  return [
+    `browser: ${browser} -> ${fs.realpathSync(browser)}`,
+    `preloaded ${(preload.bytes / 1e6).toFixed(0)} MB in ${preload.ms} ms: ${preload.files.join(", ")}`,
+    `after ${elapsedMs} ms: ${state}; process tree: ${tree}`,
+    `host: ${os.cpus().length} CPUs, load ${load}, ${(os.freemem() / 1e9).toFixed(1)} GB free, ` +
+      `runner image ${image}`,
+    `pressure (some): ${pressure.join("; ")}`,
+    `stderr (time since spawn), ${stderr.length} lines:`,
+    ...stderr.slice(-40).map((line) => `  ${line.slice(0, 300)}`),
+  ].join("\n");
+}
+
 async function openPage(browser: string, html: string): Promise<Cdp> {
+  const preload = preloadBrowser(browser);
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch: () => new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } }),
   });
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "apsa-parcel-layout-"));
+  const spawnedAt = performance.now();
+  const elapsed = () => Math.round(performance.now() - spawnedAt);
   const child = Bun.spawn(
     [
       browser,
@@ -325,27 +460,56 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
     { stdout: "ignore", stderr: "pipe" },
   );
   const teardown = async () => {
-    child.kill();
+    // SIGKILL: Chromium can ignore a SIGTERM that arrives during startup,
+    // and then `exited` never settles. Its child processes exit with it.
+    child.kill("SIGKILL");
     await child.exited;
     server.stop(true);
     fs.rmSync(profile, { recursive: true, force: true });
   };
   try {
-    let stderr = "";
-    const decoder = new TextDecoder();
-    const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
-    const deadline = Date.now() + 20_000;
-    let ws: string | null = null;
-    while (!ws) {
-      if (Date.now() > deadline) throw new Error(`No DevTools endpoint.\n${stderr.slice(-2000)}`);
-      const { value, done } = await reader.read();
-      if (done) throw new Error(`Chromium exited.\n${stderr.slice(-2000)}`);
-      stderr += decoder.decode(value, { stream: true });
-      ws = stderr.match(/ws:\/\/[^\s]+/)?.[0] ?? null;
+    // Every stderr line, stamped with the time since spawn, read until the
+    // pipe closes; the DevTools endpoint is the line carrying a ws:// URL.
+    const stderr: string[] = [];
+    const endpoint = new Promise<string>((resolve, reject) => {
+      void (async () => {
+        const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
+        const decoder = new TextDecoder();
+        let pending = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          pending += decoder.decode(value, { stream: true });
+          const lines = pending.split("\n");
+          pending = lines.pop()!;
+          for (const line of lines) {
+            if (stderr.length < 200) stderr.push(`+${elapsed()}ms ${line}`);
+            const ws = line.match(/ws:\/\/\S+/)?.[0];
+            if (ws) resolve(ws);
+          }
+        }
+        reject(new Error("Chromium exited before printing a DevTools endpoint."));
+      })().catch(reject);
+    });
+    // Rejects later, when teardown closes the pipe after a missed deadline.
+    endpoint.catch(() => {});
+    // A wall-clock deadline: it fires even if Chromium prints nothing at all.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`No DevTools endpoint within ${STARTUP_DEADLINE_MS} ms.`)),
+        STARTUP_DEADLINE_MS,
+      );
+    });
+    let ws: string;
+    try {
+      ws = await Promise.race([endpoint, deadline]);
+    } catch (error) {
+      const report = await startupReport(child, browser, preload, elapsed(), stderr);
+      throw new Error(`${(error as Error).message}\n${report}`);
+    } finally {
+      clearTimeout(timer);
     }
-    void (async () => {
-      while (!(await reader.read()).done);
-    })().catch(() => {});
     const host = new URL(ws.replace(/^ws:/, "http:")).host;
     const target = (await fetch(`http://${host}/json/new?about:blank`, { method: "PUT" }).then(
       (r) => r.json(),
