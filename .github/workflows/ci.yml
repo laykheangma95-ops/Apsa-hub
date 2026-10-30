@@ -156,31 +156,6 @@ jobs:
         continue-on-error: true
         run: bun test src/tests/auth-hardening.test.ts
 
-  # DISPOSABLE (to be removed before merge): Chrome cold-start measurements
-  # on fresh runners for the parcel-label "No DevTools endpoint" investigation.
-  chrome-startup-probe:
-    name: Chrome startup probe (${{ matrix.variant }} #${{ matrix.replica }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [current, prewarm]
-        replica: [1, 2, 3, 4, 5]
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - run: bun install --frozen-lockfile
-      - run: bun scripts/ci-chrome-startup-probe.ts ${{ matrix.variant }} 3
-
   migration-safety:
     name: Migration safety check
     runs-on: ubuntu-latest
