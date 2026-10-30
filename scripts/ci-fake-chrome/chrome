@@ -1,5 +1,0 @@
-#!/bin/bash
-# DISPOSABLE: a browser that never prints a DevTools endpoint.
-trap "" TERM
-for i in 1 2 3; do echo "[1:2:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address" >&2; sleep 2; done
-while :; do sleep 1; done

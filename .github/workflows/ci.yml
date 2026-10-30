@@ -136,11 +136,16 @@ jobs:
         # appends ~11k lines of service-container (postgres) logs, which push
         # the runner's own failure lines out of any log tail. pipefail keeps
         # bun's exit status as the step's.
-        env:
-          APSA_CHROME_PATH: ${{ github.workspace }}/scripts/ci-fake-chrome/chrome  # DISPOSABLE
         run: |
           set -o pipefail
-          bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$' 2>&1 | tee test-output.txt
+          bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$' --reporter=junit --reporter-outfile=junit.xml 2>&1 | tee test-output.txt
+      # DISPOSABLE: report which browser-launching files run, in order, on CI.
+      - name: Browser test order (disposable)
+        if: always()
+        run: |
+          echo "::notice title=readdir order::$(ls -U src/tests | grep -n -E 'bottom-sheet-focus-trap.test|parcel-label-layout.test|parcel-label-revocation.test|pos-payment-stacking.test' | tr '\n' ' ')"
+          echo "::notice title=junit order::$(grep -o '<testsuite name=\"src/tests/[^\"]*\"[^>]*' junit.xml | grep -n -E 'bottom-sheet-focus-trap.test|parcel-label-layout.test|parcel-label-revocation.test|pos-payment-stacking.test' | sed -E 's/tests=.*time=/time=/' | tr '\n' ' ')"
+          echo "::notice title=junit first files::$(grep -o '<testsuite name=\"src/tests/[^\"]*\"' junit.xml | head -5 | tr '\n' ' ')"
       - name: Test failure summary
         if: failure()
         run: |
