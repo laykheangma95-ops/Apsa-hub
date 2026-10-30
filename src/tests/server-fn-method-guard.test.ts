@@ -75,6 +75,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   findOrderByCodeFn: { reason: "lookup read" },
   listOrdersFn: { reason: "list read" },
   listOrdersPageFn: { reason: "paged list read" },
+  getOrderAttentionCountsFn: { reason: "attention view counts read" },
   getPaymentByIdFn: { reason: "detail read" },
   listPaymentsFn: { reason: "list read" },
   getPaymentReconciliationFn: { reason: "summary read" },

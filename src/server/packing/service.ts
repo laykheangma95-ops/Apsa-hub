@@ -47,7 +47,7 @@ import * as parcelsRepo from "@/server/parcels/repository";
 import * as deliveriesRepo from "@/server/deliveries/repository";
 import { classifyScan } from "@/lib/barcode/scan-router";
 import { normalizeScanInput, upcAToEan13, ean13ToUpcA } from "@/lib/barcode/normalize";
-import { PACK_ORDER_PACKED_REASON_CODE, isPackedDeliveryStatus } from "@/lib/pack";
+import { isPackedDeliveryStatus } from "@/lib/pack";
 import type {
   MarkPackedResult,
   OrderPackStateResult,
@@ -161,6 +161,10 @@ export async function getPackRequirements(
     eligible: true,
     deliveryStatus: delivery?.status ?? null,
     packed: await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null),
+    // A reopen keeps the parcel and the order lines, so only this tells the
+    // Pack Order screen that saved progress belongs to an earlier round. It is
+    // not the packed rule (that stays in order_currently_packed_v1).
+    packRound: await deliveriesRepo.getOrderPackRound(ctx.organizationId, orderId),
     requirements,
   };
 }
@@ -376,10 +380,16 @@ export async function markOrderPacked(
   packedLines: readonly PackedLineInput[],
   /** Refuse-only (assertExpectedPrincipal): who started this Mark Packed. */
   expectedPrincipal: ExpectedPrincipal,
+  /** The packing round (getPackRequirements.packRound) the screen started in. */
+  expectedPackRound: number,
 ): Promise<MarkPackedResult> {
   assertExpectedPrincipal(ctx, expectedPrincipal);
   ctx.require("orders.read");
   ctx.require("delivery.handoff");
+  // A missing round is a safety error, never round zero.
+  if (!Number.isInteger(expectedPackRound) || expectedPackRound < 0) {
+    throw publicError("A packing round is required", 400);
+  }
 
   const order = await ordersRepo.findOrderById(ctx.organizationId, orderId);
   if (!order || !isPackEligible(order.lifecycle_status, order.fulfillment_status)) {
@@ -392,25 +402,30 @@ export async function markOrderPacked(
   const items = await ordersRepo.listOrderItems(ctx.organizationId, orderId);
   if (!isPackingComplete(items, packedLines)) return { kind: "incomplete" };
 
-  const delivery = await deliveriesRepo.findActiveDeliveryForOrder(ctx.organizationId, orderId);
-  const alreadyPacked = await isOrderPacked(ctx.organizationId, orderId, delivery?.status ?? null);
-
-  if (delivery) {
-    const moved = await moveDeliveryToReady(ctx.organizationId, ctx.userId, delivery);
-    if (moved.kind === "failed") return { kind: "transition_failed", reason: moved.reason };
-    return {
-      kind: alreadyPacked || moved.kind === "already_ready" ? "already_packed" : "packed",
-      deliveryId: delivery.id,
-    };
+  // The round check, the already-packed check and the packing write are one
+  // locked transaction (mark_order_packed_v1, migration 066): no pack or
+  // reopen can commit between them, and an earlier round is refused before
+  // any "already packed" answer. No separate read decides the outcome here.
+  const result = await ordersRepo.markOrderPacked(
+    ctx.organizationId,
+    orderId,
+    ctx.userId,
+    expectedPackRound,
+  );
+  switch (result.status) {
+    case "success":
+      return {
+        kind: result.was_packed === true ? "already_packed" : "packed",
+        deliveryId: result.delivery_id ?? null,
+      };
+    case "already_packed":
+    case "already_ready":
+      return { kind: "already_packed", deliveryId: result.delivery_id ?? null };
+    case "stale_round":
+      return { kind: "stale_round" };
+    default:
+      return { kind: "transition_failed", reason: result.status };
   }
-
-  if (alreadyPacked) return { kind: "already_packed", deliveryId: null };
-
-  const recorded = await ordersRepo.recordOrderPacked(ctx.organizationId, orderId, ctx.userId);
-  if (recorded.status !== "success") {
-    return { kind: "transition_failed", reason: recorded.status };
-  }
-  return { kind: "packed", deliveryId: null };
 }
 
 /**
@@ -512,48 +527,6 @@ export async function retryPackedDeliveryReady(
     default:
       return { kind: "transition_failed", reason: result.status };
   }
-}
-
-type DeliveryReadyOutcome =
-  { kind: "ready" } | { kind: "already_ready" } | { kind: "failed"; reason: string };
-
-/** pending → preparing → ready (as needed), each step tagged with the packed reason. */
-async function moveDeliveryToReady(
-  organizationId: string,
-  userId: string,
-  delivery: { id: string; status: string },
-): Promise<DeliveryReadyOutcome> {
-  if (isPackedDeliveryStatus(delivery.status)) return { kind: "already_ready" };
-
-  let steps: readonly (readonly ["pending" | "preparing", "preparing" | "ready"])[];
-  if (delivery.status === "pending") {
-    steps = [
-      ["pending", "preparing"],
-      ["preparing", "ready"],
-    ];
-  } else if (delivery.status === "preparing") {
-    steps = [["preparing", "ready"]];
-  } else {
-    return { kind: "failed", reason: "invalid_transition" };
-  }
-
-  for (const [from, to] of steps) {
-    const result = await deliveriesRepo.transitionDelivery(
-      organizationId,
-      delivery.id,
-      from,
-      to,
-      userId,
-      PACK_ORDER_PACKED_REASON_CODE,
-    );
-    if (result.status !== "success") {
-      if (result.status === "stale" && isPackedDeliveryStatus(result.current)) {
-        return { kind: "already_ready" };
-      }
-      return { kind: "failed", reason: result.status };
-    }
-  }
-  return { kind: "ready" };
 }
 
 /**

@@ -148,6 +148,7 @@ mock.module("@/api/packing", () => ({
       eligible: true,
       deliveryStatus: null,
       packed: order.packed,
+      packRound: 0,
       requirements: [
         {
           orderItemId: ITEM_A,

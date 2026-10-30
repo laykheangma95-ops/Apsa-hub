@@ -199,8 +199,9 @@ const ATTENTION_PERMISSION: Record<AttentionRoute, UiPermissionKey> = {
  * EXACTLY the orders Home counted, so the list the merchant lands on is the
  * number they tapped:
  *
- *   awaiting_payment  Home counts lifecycle not cancelled AND payment unpaid or
- *                     pending (src/server/home/repository.ts). The
+ *   awaiting_payment  Home counts lifecycle not cancelled AND payment unpaid,
+ *                     pending or failed (PAYMENT_DUE_STATUSES, src/server/home/
+ *                     repository.ts). The
  *                     awaiting_payment filter is that predicate, column for
  *                     column (src/lib/order-list-filters.ts).
  *
