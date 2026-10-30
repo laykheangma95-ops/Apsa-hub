@@ -516,7 +516,23 @@ async function openPage(browser: string, html: string): Promise<Cdp> {
       }
     };
     if (child) await attempt(() => killBrowser(child!));
-    await attempt(() => Promise.race([server.stop(true), Bun.sleep(KILL_WAIT_MS)]));
+    await attempt(async () => {
+      const stopped = Promise.resolve(server.stop(true));
+      // A rejection after the bound has already failed this step is not news.
+      stopped.catch(() => {});
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Server did not stop within ${KILL_WAIT_MS} ms`)),
+          KILL_WAIT_MS,
+        );
+      });
+      try {
+        await Promise.race([stopped, bound]);
+      } finally {
+        clearTimeout(timer);
+      }
+    });
     if (profile) await attempt(() => fs.rmSync(profile!, { recursive: true, force: true }));
     if (errors.length > 0) throw new AggregateError(errors, "Chromium teardown failed");
   };
@@ -746,9 +762,11 @@ describe.skipIf(!READY && !ON_CI)("parcel label — rendered geometry in Chromiu
     }
   }, 90_000);
 
+  // Above teardown's own bounds (KILL_WAIT_MS for the browser, then for the
+  // server), so a slow step fails with its own error, not a hook timeout.
   afterAll(async () => {
     await cdp?.close();
-  });
+  }, 30_000);
 
   it("renders every fixture", () => {
     expect(measured.map((m) => m.id)).toEqual(LAYOUT_FIXTURES.map((f) => f.id));
