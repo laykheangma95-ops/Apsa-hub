@@ -842,3 +842,103 @@ describe("Finding 4: migration 062 applied BEFORE the application (the old code'
     ]);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Migration 068 (provisional) — the lifecycle / outstanding-balance refusals,
+// through the real server functions: the public 409 codes, and nothing written
+// (no payment, event, history or audit row).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("068 through the server functions", () => {
+  async function seedDraft(): Promise<string> {
+    as(USER_A);
+    const order = await orders.createOrderFn({
+      data: {
+        source: "MANUAL",
+        items: [{ variantId: tea.variant, quantity: 2, productId: tea.product }],
+        idempotencyKey: freshKey("order"),
+        expectedPrincipal: P_A,
+      },
+    });
+    return order.id;
+  }
+  const pay = (orderId: string, amountMinor: number, change: Json = {}) => ({
+    orderId,
+    method: "cash",
+    amountMinor,
+    idempotencyKey: freshKey("pay"),
+    expectedPrincipal: P_A,
+    ...change,
+  });
+
+  it("draft and cancelled orders: 409 order_not_payable, nothing written", async () => {
+    const draft = await seedDraft();
+    const cancelled = await seedConfirmed();
+    // Setup only (this harness grants no orders.cancel): the real cancellation SQL.
+    const [cancel] = await rows(
+      `select transition_order_status_v1($1, $2, 'lifecycle', 'confirmed', 'cancelled', $3, 'test') as r`,
+      [ORG_A, cancelled, USER_A],
+    );
+    expect(cancel!.r.status).toBe("success");
+    const before = await ledgerCounts();
+    for (const orderId of [draft, cancelled]) {
+      expect(await call(payments.recordPaymentFn, pay(orderId, 1000))).toEqual({
+        ok: false,
+        code: "order_not_payable",
+        status: 409,
+      });
+    }
+    expect(await ledgerCounts()).toEqual(before);
+  });
+
+  it("more than the outstanding balance: 409 payment_exceeds_outstanding; the fitting remainder is accepted", async () => {
+    const orderId = await seedConfirmed();
+    expect(codeOf(await call(payments.recordPaymentFn, pay(orderId, 6000)))).toBe("ok");
+    const before = await ledgerCounts();
+    expect(await call(payments.recordPaymentFn, pay(orderId, 4001))).toEqual({
+      ok: false,
+      code: "payment_exceeds_outstanding",
+      status: 409,
+    });
+    expect(await ledgerCounts()).toEqual(before);
+    expect(codeOf(await call(payments.recordPaymentFn, pay(orderId, 4000)))).toBe("ok");
+  });
+
+  it("the original request's retry replays once the balance is covered; nothing is written again", async () => {
+    const orderId = await seedConfirmed();
+    const request = pay(orderId, 10000);
+    const first = await call(payments.recordPaymentFn, request);
+    expect(first.ok).toBe(true);
+    const before = await ledgerCounts();
+    const retry = await call(payments.recordPaymentFn, request);
+    expect(retry.ok && retry.value.id).toBe(first.ok && first.value.id);
+    expect(await ledgerCounts()).toEqual(before);
+  });
+
+  it("confirming a claim recorded before 068 beyond the total: 409 payment_exceeds_outstanding, nothing written", async () => {
+    const orderId = await seedConfirmed();
+    const settled = await withMigration.recordBefore068(10000, "cash", orderId);
+    const excess = await withMigration.recordBefore068(5000, "khqr", orderId);
+    await withMigration.verifyBefore068(settled);
+    const before = await ledgerCounts();
+    expect(
+      await call(payments.verifyPaymentFn, {
+        paymentId: excess,
+        to: "staff_confirmed",
+        expectedPrincipal: P_A,
+      }),
+    ).toEqual({ ok: false, code: "payment_exceeds_outstanding", status: 409 });
+    expect(await ledgerCounts()).toEqual(before);
+    // Rejecting the excess claim lowers it and is accepted.
+    expect(
+      codeOf(
+        await call(payments.verifyPaymentFn, {
+          paymentId: excess,
+          to: "mismatch",
+          reason: "Not received",
+          expectedPrincipal: P_A,
+        }),
+      ),
+    ).toBe("ok");
+  });
+});

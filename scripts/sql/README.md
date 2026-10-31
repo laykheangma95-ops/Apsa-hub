@@ -31,3 +31,22 @@ Do not edit, reformat or regenerate it; any change is a new file and a new revie
   `docs/RELEASE_CHECKLIST.md` §8b step 1, which requires the exact expected
   blocked result. Any deviation is a stop. No result of this file authorizes
   migration 061 by itself.
+
+## `apsa_068_payment_legacy_inventory.sql`
+
+Read-only inventory of legacy payment states that migration 068 (payment
+lifecycle guard — number provisional, pending the owner's policy decision in
+`docs/proposals/PAYMENT_LIFECYCLE_POLICY.md`) would handle differently.
+
+- **Staging only, before 068.** Run it as `postgres`, never against production
+  without a separate decision.
+- **Aggregates only.** Counts and per-currency minor-unit sums; no order,
+  payment, customer, organization or reference identifier.
+- **Run it with psql**, whole file, one session, output outside the repository:
+
+  ```sh
+  psql -X -q -v ON_ERROR_STOP=1 --csv -f scripts/sql/apsa_068_payment_legacy_inventory.sql -o <outside-repo>/inventory-068.csv
+  ```
+
+  Valid only with exit status 0 and a `99.01` row. Review each non-empty row
+  with the owner (policy document §6) before any decision to apply 068.
