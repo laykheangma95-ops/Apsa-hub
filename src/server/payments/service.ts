@@ -405,6 +405,27 @@ function idempotencyConflict(): Error {
   );
 }
 
+/**
+ * Migration 068 (provisional, pending the owner's payment policy): a new claim
+ * needs a confirmed order, and must fit within the order's outstanding
+ * balance. Decided under the order lock; nothing was written.
+ */
+function orderNotPayable(): Error {
+  return publicError(
+    "This order cannot take a payment in its current state",
+    409,
+    "order_not_payable",
+  );
+}
+
+function exceedsOutstanding(): Error {
+  return publicError(
+    "The payment is more than the order's outstanding balance",
+    409,
+    "payment_exceeds_outstanding",
+  );
+}
+
 function recordFailureToError(result: { status: string }): Error {
   switch (result.status) {
     case "invalid_amount":
@@ -416,6 +437,10 @@ function recordFailureToError(result: { status: string }): Error {
       return notFound("Order not found");
     case "idempotency_conflict":
       return idempotencyConflict();
+    case "order_not_payable":
+      return orderNotPayable();
+    case "exceeds_outstanding":
+      return exceedsOutstanding();
     default:
       return new Error(`Payment record failed: ${result.status}`);
   }
@@ -446,6 +471,10 @@ function verifyFailureToError(result: { status: string; current?: string }): Err
       );
     case "terminal":
       return conflict(`Payment is ${result.current ?? "terminal"} and can no longer be modified`);
+    case "order_not_payable":
+      return orderNotPayable();
+    case "exceeds_outstanding":
+      return exceedsOutstanding();
     default:
       return new Error(`Payment verification failed: ${result.status}`);
   }

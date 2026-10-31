@@ -2149,7 +2149,7 @@ describe("Order detail: a late confirm / cancel response never restores an order
 /** A private bank reference, its own per case (a repeated reference is flagged as a duplicate). */
 let PRIVATE_REF = "";
 let privateRefSeq = 0;
-const PRIVATE_AMOUNT = "12345"; // ៛12,345
+const PRIVATE_AMOUNT = "4321"; // ៛4,321 — within the ៛10,000 order, twice (migration 068 refuses an overpayment)
 const paymentNotice = en.order.paymentRecordedNotice;
 async function typePaymentDraft(amount = PRIVATE_AMOUNT, reference = PRIVATE_REF) {
   await waitFor(() => button(en.order.recordPayment), "Record payment");
@@ -2173,7 +2173,7 @@ function draftOnScreen() {
     fields: values.filter((v) => v.includes(PRIVATE_REF) || v === PRIVATE_AMOUNT),
     text: [
       ...(text().includes(PRIVATE_REF) ? [PRIVATE_REF] : []),
-      ...(sheet.includes("12,345") ? ["12,345 (sheet)"] : []),
+      ...(sheet.includes("4,321") ? ["4,321 (sheet)"] : []),
     ],
   };
 }
@@ -2254,7 +2254,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
           userId: USER_A,
           organizationId: ORG_A,
         });
-        expectOnePaymentByA(await orderState(orderId), 12345);
+        expectOnePaymentByA(await orderState(orderId), 4321);
       });
     }
   }
@@ -2276,7 +2276,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     expect(dialog()).not.toBeNull();
     expect(fields).toContain("777");
     expect(notices()).not.toContain(paymentNotice);
-    expectOnePaymentByA(await orderState(orderId), 12345);
+    expectOnePaymentByA(await orderState(orderId), 4321);
   });
 
   it("A → B → A after a delayed FAILURE: A's sheet comes back empty, and A's retry replays A's one payment under A's original key", async () => {
@@ -2301,7 +2301,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     );
     expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
     expect(new Set(paymentKeys()).size).toBe(1); // the same key: a replay, not a second payment
-    expectOnePaymentByA(after, 12345);
+    expectOnePaymentByA(after, 4321);
   });
 
   it("opened from the Next step panel, A → B → A while A's submit is still in flight: the retry reuses A's key, so the late original and the retry are one payment", async () => {
@@ -2339,7 +2339,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     );
     expect(outcomesOf("payment")).toEqual(["ok", "ok"]);
     expect(new Set(paymentKeys()).size).toBe(1); // the parked key came back: a replay
-    expectOnePaymentByA(after, 12345);
+    expectOnePaymentByA(after, 4321);
   });
 
   it("A → B → A after a delayed SUCCESS: A's sheet comes back empty and a new payment gets a new key", async () => {
@@ -2354,14 +2354,14 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     await releaseResponse();
     expect(dialog()).toBeNull();
     expect(draftOnScreen()).toEqual(noDraft);
-    expectOnePaymentByA(await orderState(orderId), 12345);
+    expectOnePaymentByA(await orderState(orderId), 4321);
     await typePaymentDraft("500", "");
     await submitPaymentSheet("a second payment");
     await waitFor(() => outcomesOf("payment").length === 2, "the second payment");
     expect(new Set(paymentKeys()).size).toBe(2);
     const after = await orderState(orderId);
     expect(after.payments.map((p) => [who(p.recorded_by), p.amount_minor])).toEqual([
-      ["A", 12345],
+      ["A", 4321],
       ["A", 500],
     ]);
   });
@@ -2380,7 +2380,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     expect(draftOnScreen()).toEqual(noDraft);
     expect(dialog()).toBeNull();
     expect(notices()).not.toContain(paymentNotice);
-    expectOnePaymentByA(await orderState(orderId), 12345);
+    expectOnePaymentByA(await orderState(orderId), 4321);
   });
 
   it("A stays signed in: Record payment still records once, closes the sheet and says a claim was recorded", async () => {
@@ -2390,7 +2390,7 @@ describe("Order detail: Record payment's draft and late outcome stay with the me
     await submitPaymentSheet();
     await waitFor(() => notices().includes(paymentNotice), "the recorded notice");
     expect(dialog()).toBeNull();
-    expectOnePaymentByA(await orderState(orderId), 12345);
+    expectOnePaymentByA(await orderState(orderId), 4321);
   });
 });
 
@@ -3099,7 +3099,7 @@ function ledgerEvidence(label: string, ledger: Awaited<ReturnType<typeof payment
 }
 /** Exactly one payment, A's, with one creation event and one creation audit. */
 function expectOneLogicalPayment(ledger: Awaited<ReturnType<typeof paymentLedger>>) {
-  expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+  expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 4321, 1]]);
   expect(ledger.allRecordAudits).toBe(1);
 }
 
@@ -3194,8 +3194,8 @@ describe("Order detail: an unresolved payment's retry identity survives the scre
     ledgerEvidence("late success under B, then a new payment", ledger);
     expect(new Set(paymentKeys()).size).toBe(2);
     expect(ledger.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([
-      ["A", 12345, 1],
-      ["A", 12345, 1],
+      ["A", 4321, 1],
+      ["A", 4321, 1],
     ]);
     expect(ledger.allRecordAudits).toBe(2);
   });
@@ -3218,7 +3218,7 @@ describe("Order detail: an unresolved payment's retry identity survives the scre
   });
 
   const changes = [
-    { label: "amount", amount: "12346", reference: () => PRIVATE_REF, method: null },
+    { label: "amount", amount: "4322", reference: () => PRIVATE_REF, method: null },
     {
       label: "reference",
       amount: PRIVATE_AMOUNT,
@@ -3263,7 +3263,7 @@ describe("Order detail: an unresolved payment's retry identity survives the scre
   it("two unresolved payments at once: each one's retry after the remount replays its own identity", async () => {
     const orderId = await seedConfirmed();
     await openOrderDetail(orderId);
-    for (const amount of ["12345", "700"]) {
+    for (const amount of ["4321", "700"]) {
       await typePaymentDraft(amount, amount === "700" ? "" : PRIVATE_REF);
       holdResponseNext.add("payment");
       loseNextResponse.add("payment");
@@ -3278,16 +3278,16 @@ describe("Order detail: an unresolved payment's retry identity survives the scre
     await submitPaymentSheet("retry 700");
     await waitFor(() => outcomesOf("payment").length === 3, "retry 700");
     await waitFor(() => dialog() === null, "sheet closed");
-    await typePaymentDraft("12345", PRIVATE_REF);
-    await submitPaymentSheet("retry 12345");
-    await waitFor(() => outcomesOf("payment").length === 4, "retry 12345");
+    await typePaymentDraft("4321", PRIVATE_REF);
+    await submitPaymentSheet("retry 4321");
+    await waitFor(() => outcomesOf("payment").length === 4, "retry 4321");
     const keys = paymentKeys();
     expect(keys[2]).toBe(keys[1]);
     expect(keys[3]).toBe(keys[0]);
     const ledger = await paymentLedger(orderId);
     ledgerEvidence("two unresolved", ledger);
     expect(ledger.rows.map((r) => [r.amount, r.createdEvents])).toEqual([
-      [12345, 1],
+      [4321, 1],
       [700, 1],
     ]);
     expect(ledger.allRecordAudits).toBe(2);
@@ -3352,8 +3352,8 @@ describe("Order detail: an unresolved payment's retry identity survives the scre
     const l1 = await paymentLedger(o1);
     const l2 = await paymentLedger(o2);
     ledgerEvidence("order isolation O1", l1);
-    expect(l1.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
-    expect(l2.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 12345, 1]]);
+    expect(l1.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 4321, 1]]);
+    expect(l2.rows.map((r) => [r.by, r.amount, r.createdEvents])).toEqual([["A", 4321, 1]]);
     expect(l1.allRecordAudits).toBe(2); // one creation audit per order's one payment
   });
 });

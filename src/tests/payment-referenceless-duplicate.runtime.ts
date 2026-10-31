@@ -26,6 +26,18 @@ const referencelessBlock = () => {
   return sql.slice(start, end);
 };
 
+/**
+ * The default fixture, its default Order given room for two equal claims.
+ * Migration 068 (provisional) refuses a new claim beyond the outstanding
+ * balance, so a second full-total claim is now refused before 043's
+ * suspicion is ever reached; this file proves 043's suspicion itself, which
+ * applies to claims that fit. (The refusal is proven in
+ * payment-lifecycle-guard-pg.runtime.ts.)
+ */
+function duplicateFixture() {
+  return financialFixture(false, false, { orderTotal: 20000 });
+}
+
 async function recordRaw(
   f: Awaited<ReturnType<typeof financialFixture>>,
   org: string,
@@ -84,7 +96,7 @@ describe("PRE-FIX / POST-FIX proof", () => {
   });
 
   it("AFTER 043: the same lost-response retry sequence, within the window, flags the second row and protects settled truth", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "post-fix-a");
       expect(first.duplicate_suspected).toBe(false);
@@ -114,7 +126,7 @@ describe("PRE-FIX / POST-FIX proof", () => {
 
 describe("Migration 043 — reference-less duplicate algorithm", () => {
   it("A. same Order/method/amount with different idempotency keys: second is duplicate_suspected", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "key-a");
       const second = await recordRaw(f, f.org, f.order, "cash", 10000, null, "key-b");
@@ -136,7 +148,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("B. same idempotency key replays the same payment — no duplicate row is created", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const a = await recordRaw(f, f.org, f.order, "cash", 10000, null, "same-key");
       const b = await recordRaw(f, f.org, f.order, "cash", 10000, null, "same-key");
@@ -152,7 +164,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("C. a legitimate equal-amount split payment is still recordable, may be duplicate_suspected, and is never rejected", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const order = await f.newOrder(f.org, 20000);
       const a = await recordRaw(f, f.org, order, "cash", 10000, null, "split-a");
@@ -172,7 +184,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("D. a different amount is not flagged", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       await recordRaw(f, f.org, f.order, "cash", 10000, null, "amt-a");
       const second = await recordRaw(f, f.org, f.order, "cash", 9000, null, "amt-b");
@@ -183,7 +195,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("E. a different method is not flagged", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       await recordRaw(f, f.org, f.order, "cash", 10000, null, "meth-a");
       const second = await recordRaw(f, f.org, f.order, "bank_transfer", 10000, null, "meth-b");
@@ -194,7 +206,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("F. a different Order is not flagged", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       await recordRaw(f, f.org, f.order, "cash", 10000, null, "ord-a");
       const other = await f.newOrder();
@@ -206,7 +218,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("G. a different organization is isolated (behavioral, complements the structural org-predicate assertion below)", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       await recordRaw(f, f.org, f.order, "cash", 10000, null, "org-a");
       const orderB = await f.newOrder(f.orgB);
@@ -218,7 +230,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("H. a previously reversed Payment is excluded from suspicion", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "rev-a");
       await f.reverse(first.payment_id!);
@@ -230,9 +242,9 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("I. queued identical reference-less requests still serialize to exactly one flagged row of two", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
-      const order = await f.newOrder();
+      const order = await f.newOrder(f.org, 20000);
       const [a, b] = await Promise.all([
         recordRaw(f, f.org, order, "cash", 10000, null, "race-a"),
         recordRaw(f, f.org, order, "cash", 10000, null, "race-b"),
@@ -249,7 +261,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("J. provider-reference duplicate semantics are unchanged by 043", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "khqr", 10000, "TXN-1", null);
       const second = await recordRaw(f, f.org, f.order, "khqr", 5000, "TXN-1", null);
@@ -278,7 +290,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
     // that drops the `reference = v_reference` predicate — which would make
     // any other active payment in the organization look like a reference
     // collision — is caught here.
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "khqr", 10000, "TXN-A", null);
       const second = await recordRaw(f, f.org, f.order, "khqr", 10000, "TXN-B", null);
@@ -290,7 +302,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("K. a payment created just outside the 10-minute window is not flagged", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "win-a");
       await f.db.query(
@@ -305,7 +317,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("K. a payment created just inside the 10-minute window is flagged", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "win2-a");
       await f.db.query(
@@ -320,7 +332,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("duplicate_suspected is never auto-verified: status stays pending until a human verifies", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       await recordRaw(f, f.org, f.order, "cash", 10000, null, "auto-a");
       const second = await recordRaw(f, f.org, f.order, "cash", 10000, null, "auto-b");
@@ -337,7 +349,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("a duplicate_suspected payment can still be explicitly verified through the normal state machine", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       // Order total exceeds either single payment, so verifying only the
       // flagged one leaves the order still 'pending' — this isolates the
@@ -369,7 +381,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("recording a suspected duplicate never rejects it and never mutates the earlier Payment", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const first = await recordRaw(f, f.org, f.order, "cash", 10000, null, "keep-a");
       const before = (await f.db.query("select * from payments where id=$1", [first.payment_id]))
@@ -385,7 +397,7 @@ describe("Migration 043 — reference-less duplicate algorithm", () => {
   });
 
   it("cross-tenant reference-less isolation also holds at the RPC boundary (not_found, no leak)", async () => {
-    const f = await financialFixture();
+    const f = await duplicateFixture();
     try {
       const orderB = await f.newOrder(f.orgB);
       const foreign = await recordRaw(f, f.orgB, orderB, "cash", 10000, null, "cross-a");

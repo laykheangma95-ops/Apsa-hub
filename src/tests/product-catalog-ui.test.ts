@@ -1924,7 +1924,10 @@ describe("J. the new screens keep the server/browser boundary", () => {
     // 063 (order cancellation custody guard) belongs to Orders cancellation safety.
     // 064 (Telegram channel connections, inbound ingest, outbound replies) belongs
     // to the Telegram provider phase.
-    expect(migrations.at(-1)).toBe("064_telegram_channel.sql");
+    // 068 (payment lifecycle / outstanding-balance guard — PROVISIONAL number,
+    // pending the 065–067 sequence of PRs #136/#137/#139) belongs to the
+    // payment lifecycle repair.
+    expect(migrations.at(-1)).toBe("068_payment_lifecycle_guard.sql");
     for (const required of [
       "017_product_categories.sql",
       "018_products.sql",

@@ -93,7 +93,7 @@ import {
   isPaymentId,
   isRefundConfirmationRequired,
   isTerminalUiPaymentStatus,
-  paymentErrorKey,
+  paymentErrorMessageKey,
   paymentNeedsReview,
   refundEventsOf,
   refundedMinorOf,
@@ -262,7 +262,7 @@ function PaymentDetailScreen() {
       void navigate({ to: "/sign-in" });
       return;
     }
-    const message = t(paymentErrorKey(kind));
+    const message = t(paymentErrorMessageKey(err));
     setActionError(message);
     notifyError(message);
   }

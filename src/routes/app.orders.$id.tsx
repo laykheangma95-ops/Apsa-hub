@@ -84,7 +84,7 @@ import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliver
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
   classifyPaymentError,
-  paymentErrorKey,
+  paymentErrorMessageKey,
   paymentNeedsReview,
   type UiPayment,
   type UiOrderSettlement,
@@ -918,18 +918,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    */
   const settlement = canReconcile ? (settlementQuery.data ?? null) : null;
   /*
-   * Recording money against a cancelled order is not a thing the merchant can
-   * usefully do, and a draft order is not yet an agreement to pay. Both are
-   * re-checked server-side; this only decides whether to offer the control.
+   * Only a confirmed order takes a new payment: a draft is not yet an
+   * agreement to pay, a cancelled order will not be paid, and a completed one
+   * is already paid. record_payment_v2 refuses the same under the order lock
+   * (migration 068, provisional); this only decides whether to offer the control.
    */
-  const orderAcceptsPayment =
-    order.lifecycleStatus !== "cancelled" && order.lifecycleStatus !== "draft";
+  const orderAcceptsPayment = order.lifecycleStatus === "confirmed";
   const showRecordPayment = orderAcceptsPayment && (canRecordPayment || canMarkCod);
   const paymentsErrorKind = paymentsQuery.isError
     ? classifyPaymentError(paymentsQuery.error)
     : null;
   const recordPaymentError = recordPaymentMutation.error
-    ? t(paymentErrorKey(classifyPaymentError(recordPaymentMutation.error)))
+    ? t(paymentErrorMessageKey(recordPaymentMutation.error))
     : null;
 
   const historyItems: TimelineItem[] = [...(order.statusHistory ?? [])]

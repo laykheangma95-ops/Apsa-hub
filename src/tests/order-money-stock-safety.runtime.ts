@@ -579,6 +579,8 @@ describe("I. delivery fee is part of the order total", () => {
   it("the delivery fee is owed exactly like goods: paying only the goods leaves the order pending", async () => {
     const result = await create(createArgs({ delivery: 300 }));
     const order = result.order_id as string;
+    // Only a confirmed order takes a payment (migration 068, provisional).
+    expect((await transition(f.org, order, "draft", "confirmed")).status).toBe("success");
     await f.verify(await f.record(1500, "cash", null, order));
     expect((await f.state(order)).payment_status).toBe("pending");
     await f.verify(await f.record(300, "cash", null, order));

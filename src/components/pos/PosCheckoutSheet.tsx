@@ -27,7 +27,7 @@ import { localName } from "@/lib/format";
 import { useLanguage } from "@/lib/i18n";
 import { approximateCounterpart, calculateChange, formatMoney } from "@/lib/money";
 import { classifyOrderError, isOrderCurrencyMismatch, type RealOrderDetail } from "@/lib/orders";
-import { classifyPaymentError, paymentErrorKey } from "@/lib/payments";
+import { paymentErrorMessageKey } from "@/lib/payments";
 import { UnpricedCartNotice } from "@/components/pos/PosCart";
 import {
   checkoutBlock,
@@ -1125,7 +1125,7 @@ export function PosCheckoutSheet({
           pending={recordPaymentMutation.isPending}
           error={
             recordPaymentMutation.error
-              ? t(paymentErrorKey(classifyPaymentError(recordPaymentMutation.error)))
+              ? t(paymentErrorMessageKey(recordPaymentMutation.error))
               : null
           }
           onConfirm={(submit) =>

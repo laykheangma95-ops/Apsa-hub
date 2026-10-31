@@ -2593,7 +2593,9 @@
       "not_found": "This payment is no longer available.",
       "conflict": "This payment changed while you had it open. Reload and try again.",
       "invalid": "That could not be accepted. Check the amount and the reason.",
-      "server_error": "Something went wrong. Nothing was changed."
+      "server_error": "Something went wrong. Nothing was changed.",
+      "order_not_payable": "This order cannot take a payment now. Only a confirmed order that is not yet completed can.",
+      "exceeds_outstanding": "That is more than the order still owes. Record only the amount that is outstanding."
     }
   },
   "apsi": {

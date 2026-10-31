@@ -533,3 +533,30 @@ export function isRefundConfirmationRequired(err: unknown): boolean {
 export function paymentErrorKey(kind: PaymentErrorKind): string {
   return `payments.errors.${kind}`;
 }
+
+/**
+ * The order cannot take this claim (migration 068, provisional): it is not a
+ * confirmed order, or the amount is more than its outstanding balance. Both
+ * are 409s, but "reload and try again" would be the wrong advice. Matched on
+ * the public code, and on service.ts's own message where a code does not
+ * survive the boundary.
+ */
+export type PaymentClaimRefusal = "order_not_payable" | "exceeds_outstanding";
+
+export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "order_not_payable") return "order_not_payable";
+  if (code === "payment_exceeds_outstanding") return "exceeds_outstanding";
+  if (statusCodeOf(err) !== 409) return null;
+  const message = messageOf(err);
+  if (/cannot take a payment/i.test(message)) return "order_not_payable";
+  if (/outstanding balance/i.test(message)) return "exceeds_outstanding";
+  return null;
+}
+
+/** i18n key for a payment error: a claim refusal when it is one, else its kind. */
+export function paymentErrorMessageKey(err: unknown): string {
+  const refusal = paymentClaimRefusalOf(err);
+  if (refusal) return `payments.errors.${refusal}`;
+  return paymentErrorKey(classifyPaymentError(err));
+}

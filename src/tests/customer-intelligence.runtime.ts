@@ -118,6 +118,12 @@ const ids = {
 };
 
 let orderSeq = 0;
+/**
+ * Orders seeded as completed are inserted confirmed and completed once every
+ * payment is seeded: only a confirmed order takes a payment (migration 068,
+ * provisional), so the real order of events is confirm → pay → complete.
+ */
+const completeAfterSeeding: string[] = [];
 async function order(
   tenant: string,
   customer: string | null,
@@ -154,10 +160,11 @@ async function order(
       subtotal,
       actor,
       o.createdAt,
-      o.lifecycle,
+      o.lifecycle === "completed" ? "confirmed" : o.lifecycle,
       o.conversationRef ?? null,
     ],
   );
+  if (o.lifecycle === "completed") completeAfterSeeding.push(id);
   let n = 0;
   for (const l of o.lines) {
     n += 1;
@@ -384,11 +391,13 @@ beforeAll(async () => {
     conversationRef: "conv-ref-OPAQUE-123",
     lines: [A("Red / L", ids.vRedL, 1)],
   });
-  await pay(orgA, ids.o2, "cod", 1500);
+  // The reversed KHQR first: a pending COD claim occupies the whole balance
+  // (migration 068, provisional), and a reversal frees it.
   const reversed = await pay(orgA, ids.o2, "khqr", 1500);
   await verify(orgA, reversed);
   const rev = await rpc("reverse_payment_v1", [orgA, reversed, actor, "test reversal"]);
   if (rev.status !== "success") throw new Error(`reverse: ${JSON.stringify(rev)}`);
+  await pay(orgA, ids.o2, "cod", 1500);
   await delivery(orgA, ids.o2, "in_transit", "2026-09-06T03:00:00.000Z");
 
   // o3 confirmed, KHR, manual: A Black/M ×1 at ៛40,000. Paid in cash, ៛10,000 refunded.
@@ -485,6 +494,13 @@ beforeAll(async () => {
     ids.pB,
   ]);
   await db.query(`update products set name_km='Live name A' where id = $1`, [ids.pA]);
+  // Replica mode, as when the corrupt cross-tenant order above was planted:
+  // it is among these, and the same-tenant triggers would refuse it again.
+  await db.exec("SET session_replication_role = replica");
+  await db.query(`update orders set lifecycle_status = 'completed' where id = any($1::uuid[])`, [
+    completeAfterSeeding,
+  ]);
+  await db.exec("SET session_replication_role = origin");
 });
 
 afterAll(async () => {

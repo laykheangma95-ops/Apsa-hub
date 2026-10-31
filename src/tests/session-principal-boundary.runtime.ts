@@ -416,6 +416,16 @@ function startOrder(as: { userId: string; organizationId: string }, variant = VA
   };
   return { data, sendFrom: (browser: Browser) => send(browser, () => createOrderFn({ data })) };
 }
+/** Setup only: confirm an order directly in SQL — only a confirmed order takes a payment (migration 068, provisional). */
+async function confirmDirectly(orgId: string, orderId: string) {
+  const r = (
+    await db.query<{ r: { status: string } }>(
+      `select transition_order_status_v1($1, $2, 'lifecycle', 'draft', 'confirmed', $3, null) as r`,
+      [orgId, orderId, MEMBER_A],
+    )
+  ).rows[0]!.r;
+  if (r.status !== "success") throw new Error(`setup: confirm ${JSON.stringify(r)}`);
+}
 function startPayment(
   as: { userId: string; organizationId: string },
   orderId: string,
@@ -607,6 +617,7 @@ describe("matching principal: the request executes, as the server-derived princi
     signIn(browser, MEMBER_A);
     const created = await outcome(startOrder(principal(MEMBER_A, ORG_A)).sendFrom(browser));
     if (!created.ok) throw new Error("setup: order not created");
+    await confirmDirectly(ORG_A, created.value.id);
     const before = await writeSurface();
     const result = await outcome(
       startPayment(principal(MEMBER_A, ORG_A), created.value.id).sendFrom(browser),
@@ -665,6 +676,7 @@ describe("member switch: started as member A, dispatched after the session becam
     signIn(browser, MEMBER_A);
     const created = await outcome(startOrder(principal(MEMBER_A, ORG_A)).sendFrom(browser));
     if (!created.ok) throw new Error("setup: order not created");
+    await confirmDirectly(ORG_A, created.value.id);
     const payment = startPayment(principal(MEMBER_A, ORG_A), created.value.id);
     signIn(browser, MEMBER_B);
     const before = await writeSurface();

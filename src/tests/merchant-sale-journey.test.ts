@@ -530,7 +530,8 @@ describe("Failure never renders as success", () => {
   });
 
   it("the record-payment error is classified, not shown as a generic crash", () => {
-    expect(source).toContain("paymentErrorKey(classifyPaymentError(recordPaymentMutation.error))");
+    // paymentErrorMessageKey: a claim refusal (068) by name, else classifyPaymentError.
+    expect(source).toContain("paymentErrorMessageKey(recordPaymentMutation.error)");
   });
 });
 

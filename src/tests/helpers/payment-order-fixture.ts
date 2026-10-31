@@ -4,11 +4,12 @@ import { readFileSync, readdirSync } from "node:fs";
 /**
  * `omit`: migration-file prefixes to leave out entirely (e.g. ["062_"] — a
  * database the application reaches before migration 062 has been applied).
+ * `orderTotal`: the default Order's total (minor units).
  */
 export async function financialFixture(
   skipAuthority = false,
   skipReferencelessDuplicate = false,
-  { omit = [] }: { omit?: string[] } = {},
+  { omit = [], orderTotal = 10000 }: { omit?: string[]; orderTotal?: number } = {},
 ) {
   const db = new PGlite();
   await db.exec(`
@@ -41,6 +42,13 @@ export async function financialFixture(
     // re-states 043's recording body (stamping the request digest) — so it waits
     // for 040 and for 043 alike.
     if ((skipAuthority || skipReferencelessDuplicate) && name.startsWith("062_")) continue;
+    // 068 re-declares 062's record_payment_v2 and 040's verify_payment_v1 (and
+    // refuses to run without them), so it waits for — and is omitted with — 062.
+    if (
+      (skipAuthority || skipReferencelessDuplicate || omit.includes("062_")) &&
+      name.startsWith("068_")
+    )
+      continue;
     try {
       await db.exec(readFileSync(`supabase/migrations/${name}`, "utf8"));
     } catch (error) {
@@ -60,13 +68,15 @@ export async function financialFixture(
   async function newOrder(tenant = org, total = 10000) {
     const id = crypto.randomUUID();
     await db.query(
+      // Confirmed: only a confirmed order takes a new payment (migration 068).
       `insert into orders(id,organization_id,order_number,source,currency,
-      subtotal_minor,total_minor,created_by) values($1,$2,$1::uuid::text,'MANUAL','USD',$3,$3,$4)`,
+      subtotal_minor,total_minor,created_by,lifecycle_status)
+      values($1,$2,$1::uuid::text,'MANUAL','USD',$3,$3,$4,'confirmed')`,
       [id, tenant, total, actor],
     );
     return id;
   }
-  const order = await newOrder();
+  const order = await newOrder(org, orderTotal);
   async function rpc(name: string, args: unknown[]) {
     const params = args.map((_, i) => `$${i + 1}`).join(",");
     const result = await db.query<{ result: Record<string, unknown> }>(
@@ -94,6 +104,51 @@ export async function financialFixture(
     ]);
     if (result.status !== "success") throw new Error(JSON.stringify(result));
     return result.payment_id as string;
+  }
+  /**
+   * A claim recorded the way record_payment_v2 recorded it before migration
+   * 068 — no lifecycle or outstanding-balance check (the recording body, then
+   * the order's derived state, in one transaction). Data like this can exist
+   * in a database that ran an earlier release; the view and reconciliation
+   * must still classify it.
+   */
+  async function recordBefore068(amount: number, method = "cash", target = order) {
+    return db.transaction(async (tx) => {
+      const result = (
+        await tx.query<{ result: Record<string, unknown> }>(
+          `select record_payment_before_order_v1($1,$2,$3,$4,$5,null,null,null) as result`,
+          [org, target, actor, method, amount],
+        )
+      ).rows[0]!.result;
+      if (result.status !== "success") throw new Error(JSON.stringify(result));
+      await tx.query(`select sync_order_payment_state($1,$2,$3,'Payment recorded')`, [
+        org,
+        target,
+        actor,
+      ]);
+      return result.payment_id as string;
+    });
+  }
+  /** Verification as it ran before migration 068 (no balance check), with the order's derived state. */
+  async function verifyBefore068(payment: string, to = "staff_confirmed", from = "unverified") {
+    return db.transaction(async (tx) => {
+      const result = (
+        await tx.query<{ result: Record<string, unknown> }>(
+          `select verify_payment_before_order_v1($1,$2,$3,$4,$5,'test',null) as result`,
+          [org, payment, actor, from, to],
+        )
+      ).rows[0]!.result;
+      if (result.status !== "success") throw new Error(JSON.stringify(result));
+      const target = (
+        await tx.query<{ order_id: string }>("select order_id from payments where id=$1", [payment])
+      ).rows[0]!.order_id;
+      await tx.query(`select sync_order_payment_state($1,$2,$3,'Payment verification')`, [
+        org,
+        target,
+        actor,
+      ]);
+      return result;
+    });
   }
   async function verify(
     payment: string,
@@ -127,6 +182,8 @@ export async function financialFixture(
     order,
     rpc,
     record,
+    recordBefore068,
+    verifyBefore068,
     verify,
     refund,
     reverse,
@@ -145,6 +202,7 @@ export async function financialFixture(
       await db.exec(
         readFileSync("supabase/migrations/062_financial_replay_refund_audit_atomicity.sql", "utf8"),
       );
+      await db.exec(readFileSync("supabase/migrations/068_payment_lifecycle_guard.sql", "utf8"));
     },
   };
 }

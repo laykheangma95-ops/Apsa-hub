@@ -134,7 +134,8 @@ beforeAll(async () => {
   const migrations = readdirSync("supabase/migrations")
     .filter((n) => /^\d+.*\.sql$/.test(n))
     .sort();
-  expect(migrations.at(-1)).toBe("064_telegram_channel.sql");
+  // Every migration through 064 (and any later one) is applied; 064 must be among them.
+  expect(migrations).toContain("064_telegram_channel.sql");
   for (const name of migrations) {
     try {
       await sql.unsafe(readFileSync(`supabase/migrations/${name}`, "utf8"));

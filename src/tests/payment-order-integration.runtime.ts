@@ -137,8 +137,10 @@ describe("Payment transaction authority and isolation", () => {
 
   it("overpayments and refunded partial receipts do not misclassify an Order", async () => {
     const order = await f.newOrder();
-    const payment = await f.record(15000, "cash", null, order);
-    await f.verify(payment);
+    // Migration 068 (provisional) refuses recording beyond the total; an
+    // overpaid order can still exist from an earlier release.
+    const payment = await f.recordBefore068(15000, "cash", order);
+    await f.verifyBefore068(payment);
     await f.refund(payment, 10000);
     expect(await f.state(order)).toMatchObject({
       payment_status: "paid",
@@ -547,10 +549,13 @@ describe("Payment transaction authority and isolation", () => {
 
   it("split payments settling above the order total surface as a net_minor > total_minor drift, still coarsely 'paid'", async () => {
     const order = await f.newOrder(f.org, 10000);
-    const a = await f.record(10000, "cash", null, order);
-    const b = await f.record(1000, "bank_transfer", null, order);
-    await f.verify(a);
-    await f.verify(b, "bank_verified");
+    // Recorded and settled before migration 068 (provisional), which now
+    // refuses both the excess claim and its settlement; the drift must still
+    // be visible for such data.
+    const a = await f.recordBefore068(10000, "cash", order);
+    const b = await f.recordBefore068(1000, "bank_transfer", order);
+    await f.verifyBefore068(a);
+    await f.verifyBefore068(b, "bank_verified");
     const totalMinor = (
       await f.db.query<{ total_minor: number }>("select total_minor from orders where id=$1", [
         order,
