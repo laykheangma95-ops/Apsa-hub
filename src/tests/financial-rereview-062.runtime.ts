@@ -915,30 +915,43 @@ describe("068 through the server functions", () => {
     expect(await ledgerCounts()).toEqual(before);
   });
 
-  it("confirming a claim recorded before 068 beyond the total: 409 payment_exceeds_outstanding, nothing written", async () => {
+  it("a claim recorded before 068 beyond the total is confirmed, not stranded; reopening a rejected claim is 409", async () => {
     const orderId = await seedConfirmed();
     const settled = await withMigration.recordBefore068(10000, "cash", orderId);
     const excess = await withMigration.recordBefore068(5000, "khqr", orderId);
     await withMigration.verifyBefore068(settled);
-    const before = await ledgerCounts();
-    expect(
-      await call(payments.verifyPaymentFn, {
-        paymentId: excess,
-        to: "staff_confirmed",
-        expectedPrincipal: P_A,
-      }),
-    ).toEqual({ ok: false, code: "payment_exceeds_outstanding", status: 409 });
-    expect(await ledgerCounts()).toEqual(before);
-    // Rejecting the excess claim lowers it and is accepted.
+    const confirmed = await call(payments.verifyPaymentFn, {
+      paymentId: excess,
+      to: "staff_confirmed",
+      reason: "Matched on the bank statement",
+      expectedPrincipal: P_A,
+    });
+    expect(codeOf(confirmed)).toBe("ok");
+    const [event] = await rows(
+      `select metadata from payment_events where payment_id = $1 and event_type = 'staff_confirmed'`,
+      [excess],
+    );
+    expect(event!.metadata).toEqual({ order_excess_minor: 5000, order_total_minor: 10000 });
+    // Rejected, it cannot be reopened while the other payment covers the total.
     expect(
       codeOf(
         await call(payments.verifyPaymentFn, {
           paymentId: excess,
           to: "mismatch",
-          reason: "Not received",
+          reason: "Duplicate after all",
           expectedPrincipal: P_A,
         }),
       ),
     ).toBe("ok");
+    const before = await ledgerCounts();
+    expect(
+      await call(payments.verifyPaymentFn, {
+        paymentId: excess,
+        to: "unverified",
+        reason: "Reopen",
+        expectedPrincipal: P_A,
+      }),
+    ).toEqual({ ok: false, code: "payment_claim_exceeds_total", status: 409 });
+    expect(await ledgerCounts()).toEqual(before);
   });
 });

@@ -471,10 +471,14 @@ function verifyFailureToError(result: { status: string; current?: string }): Err
       );
     case "terminal":
       return conflict(`Payment is ${result.current ?? "terminal"} and can no longer be modified`);
-    case "order_not_payable":
-      return orderNotPayable();
-    case "exceeds_outstanding":
-      return exceedsOutstanding();
+    case "claim_exceeds_total":
+      // Migration 068: reopening a rejected claim is a new claim, and other
+      // payments already cover the order total.
+      return publicError(
+        "Other payments already cover this order's total; this claim cannot be reopened",
+        409,
+        "payment_claim_exceeds_total",
+      );
     default:
       return new Error(`Payment verification failed: ${result.status}`);
   }

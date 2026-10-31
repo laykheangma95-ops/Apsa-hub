@@ -64,9 +64,9 @@ ord AS (
   FROM public.order_payment_totals t
   JOIN public.orders o ON o.id = t.order_id AND o.organization_id = t.organization_id
 ),
--- 068's verify rule, per claim it would judge:
---   pending → paid    received + principal > total, or a draft order
---   failed → pending  received + other pending + principal − refunded > total
+-- 068's verify rule, per claim:
+--   pending → paid    confirmed; received + principal > total (or a draft) creates an excess
+--   failed → pending  refused when received + other pending + principal − refunded > total
 judged AS (
   SELECT pa.*, od.received_minor,
     od.pending_minor - CASE WHEN pa.status = 'pending' THEN pa.amount_minor ELSE 0 END
@@ -117,9 +117,9 @@ findings (check_id, category, currency, organizations, orders, payments, amount_
   GROUP BY status, currency
   -- 4. Claims 068 would refuse to confirm (or to reinstate)
   UNION ALL
-  SELECT '04.01', 'pending_claim_068_refuses_to_confirm', currency,
+  SELECT '04.01', 'pending_claim_confirmation_creates_excess', currency,
     COUNT(DISTINCT organization_id), COUNT(DISTINCT order_id), COUNT(*), SUM(amount_minor),
-    'Pending claims whose confirmation 068 refuses: draft order, or received + this claim > total. They can still be rejected or reversed, not refunded.'
+    'Pending claims whose confirmation would take received above the total (or that sit on a draft). 068 still confirms them, stamps the excess on the confirmation event and leaves the order flagged overpaid until the excess is rejected (mismatch/reverse) or refunded.'
   FROM judged
   WHERE status = 'pending' AND (lifecycle = 'draft' OR received_minor + amount_minor > total_minor)
   GROUP BY currency
@@ -149,7 +149,7 @@ expected (check_id, category) AS (
          ('03.01', 'draft_order_payment_pending'),
          ('03.02', 'draft_order_payment_paid'),
          ('03.03', 'draft_order_payment_refunded'),
-         ('04.01', 'pending_claim_068_refuses_to_confirm'),
+         ('04.01', 'pending_claim_confirmation_creates_excess'),
          ('04.02', 'rejected_claim_068_refuses_to_reinstate'),
          ('09.01', 'context_payments_by_currency')
 ),

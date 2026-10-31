@@ -21,6 +21,9 @@ describe("payment claim refusals (068)", () => {
     expect(paymentClaimRefusalOf(serverError("x", 409, "payment_exceeds_outstanding"))).toBe(
       "exceeds_outstanding",
     );
+    expect(paymentClaimRefusalOf(serverError("x", 409, "payment_claim_exceeds_total"))).toBe(
+      "claim_exceeds_total",
+    );
   });
 
   it("falls back to service.ts's own message on a 409 only", () => {
@@ -60,10 +63,24 @@ describe("payment claim refusals (068)", () => {
   });
 
   it("has an English and a Khmer message for each refusal", () => {
-    for (const key of ["order_not_payable", "exceeds_outstanding"] as const) {
+    for (const key of [
+      "order_not_payable",
+      "exceeds_outstanding",
+      "claim_exceeds_total",
+    ] as const) {
       expect((en.payments.errors as Record<string, string>)[key]).toBeString();
       expect((km.payments.errors as Record<string, string>)[key]).toBeString();
     }
+  });
+});
+
+describe("Record payment copy asks for the amount kept, not the cash tendered", () => {
+  it("never tells the cashier to record what was handed over", () => {
+    const sheets = [en.order.recordPaymentSheet, km.order.recordPaymentSheet];
+    expect(en.order.recordPaymentSheet.amountHint).toContain("amount kept for this order");
+    expect(en.order.recordPaymentSheet.amountHint).toContain("change");
+    expect(en.order.recordPaymentSheet.body).not.toMatch(/handed over/i);
+    for (const sheet of sheets) expect(sheet.amountHint).toContain("{{amount}}");
   });
 });
 

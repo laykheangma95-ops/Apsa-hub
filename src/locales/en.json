@@ -1285,10 +1285,10 @@
     },
     "recordPaymentSheet": {
       "title": "Record payment",
-      "body": "Write down money the customer has handed over. Confirming it as received is a separate step.",
+      "body": "Write down the money kept for this order. Confirming it as received is a separate step.",
       "methodLabel": "How was it paid",
       "amountLabel": "Amount ({{currency}})",
-      "amountHint": "Order total {{amount}}. Record only what was handed over this time.",
+      "amountHint": "Order total {{amount}}. Record the amount kept for this order — give any change back separately.",
       "referenceLabel": "Reference (optional)",
       "referenceHint": "A transfer number or receipt number, if there is one.",
       "pendingNote": "This is recorded as a claim. It is not counted as paid until someone confirms the money arrived.",
@@ -2595,7 +2595,8 @@
       "invalid": "That could not be accepted. Check the amount and the reason.",
       "server_error": "Something went wrong. Nothing was changed.",
       "order_not_payable": "This order cannot take a payment now. Only a confirmed order that is not yet completed can.",
-      "exceeds_outstanding": "That is more than the order still owes. Record only the amount that is outstanding."
+      "exceeds_outstanding": "That is more than the order still owes. Record only the amount that is outstanding.",
+      "claim_exceeds_total": "Other payments already cover this order's total, so this claim can't be reopened. Reverse or flag the other payment first if it was wrong."
     }
   },
   "apsi": {

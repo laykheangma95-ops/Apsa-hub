@@ -42,24 +42,21 @@
 --                                          outstanding_minor, currency}
 --   Nothing is written in either case: no payment, event, history or audit.
 --
--- verify_payment_v1, for a transition that RAISES the order's claim:
---   pending → paid (staff_confirmed / manager_verified / bank_verified)
---     raises received; failed → pending (mismatch → unverified) reinstates a
---     claim. Refused when:
---       lifecycle = 'draft'             → order_not_payable
---       pending → paid: received afterwards would exceed total_minor
---       failed → pending: the claim afterwards would exceed total_minor
---                                       → exceeds_outstanding
---   Settling is measured against received money only, so two over-claims
---   recorded before 068 cannot block each other: the first to be confirmed
---   settles, the other is then refused.
---   With the record rule in place, a pending payment is already counted in the
---   claim, so pending → paid can only exceed the total for a claim recorded
---   before this migration. Transitions that lower or keep the claim (to
---   mismatch, paid → stronger verification) are never refused.
---   A CANCELLED order is deliberately not refused here: money recorded before
---   the cancellation must still be confirmable, because refund_payment_v2 only
---   refunds a 'paid' payment — refusing it would leave real money unrefundable.
+-- verify_payment_v1 — confirmation never strands money that arrived:
+--   pending → paid (staff_confirmed / manager_verified / bank_verified) is NOT
+--     refused, whatever the lifecycle or balance. After the record rule, a
+--     pending claim always fits the total, so a confirmation can only exceed
+--     it for a claim recorded before 068 — and refund_payment_v2 refunds only
+--     a confirmed payment, so refusing it would leave money that really
+--     arrived unrefundable (main allowed it; policy P5 keeps the same path open
+--     after a cancellation). When the confirmation takes received above the
+--     total, the excess is stamped on that confirmation's immutable payment
+--     event (metadata.order_excess_minor, order_total_minor); the existing
+--     reconciliation `overpaid` flag then shows it until it is refunded.
+--   failed → pending (mismatch → unverified) reinstates a claim, so it is a
+--     new claim and follows the record rule: refused when the claim afterwards
+--     would exceed the total → {status: 'claim_exceeds_total', outstanding_minor}.
+--   Transitions that lower or keep the claim are never refused.
 --
 -- Reversals, refunds and corrections only lower or keep the claim and are
 -- unchanged. Deliveries' cod_amount_minor is operational, not a claim, and is
@@ -89,6 +86,11 @@
 --   5. Payment on a completed order: refused (it is already paid).
 --   6. Cancelled orders: no new payment; earlier claims stay confirmable so
 --      that they can be refunded.
+--   7. Legacy claims (recorded before 068) stay confirmable even on a draft or
+--      above the total, so that money that arrived can be refunded; the excess
+--      is stamped and flagged, never silently absorbed.
+--   NOT decided here: recording a real overpayment (a transfer above the
+--      total) at its true amount — see docs/proposals/PAYMENT_LIFECYCLE_POLICY.md.
 --
 -- Forward-only. No table, column, index, policy or grant changes; both
 -- functions keep their signatures, owners and grants (CREATE OR REPLACE).
@@ -191,8 +193,9 @@ CREATE OR REPLACE FUNCTION public.verify_payment_v1(
 DECLARE
   target uuid;
   result jsonb;
-  v_order record;
   v_payment record;
+  v_total bigint;
+  v_received bigint;
   v_held bigint;
   v_claimed bigint;
 BEGIN
@@ -208,39 +211,38 @@ BEGIN
     ELSE false END, false)
   THEN RETURN jsonb_build_object('status','invalid_transition'); END IF;
 
-  -- 068: a transition that raises the order's claim. The order row is locked
-  -- (lock_payment_order); the stale / terminal checks stay with the body, so
-  -- only a payment that is still in the expected state is judged here.
+  -- 068. The order row is locked (lock_payment_order); the stale / terminal
+  -- checks stay with the body, so only a payment still in the expected state
+  -- is judged here.
   SELECT id, status, verification_state, amount_minor INTO v_payment FROM public.payments
     WHERE id = p_payment_id AND organization_id = p_organization_id;
   IF v_payment.verification_state::text = p_expected_from AND (
        (v_payment.status = 'pending' AND p_to IN ('staff_confirmed','manager_verified','bank_verified'))
     OR (v_payment.status = 'failed' AND p_to = 'unverified')) THEN
-    SELECT lifecycle_status, total_minor, currency INTO v_order FROM public.orders
+    SELECT total_minor INTO v_total FROM public.orders
       WHERE id = target AND organization_id = p_organization_id;
-    IF v_order.lifecycle_status = 'draft' THEN
-      RETURN jsonb_build_object('status', 'order_not_payable', 'lifecycle', 'draft');
-    END IF;
-    -- What this payment contributes now: nothing while pending, its refunded
-    -- amount while failed (order_payment_totals).
-    SELECT COALESCE(SUM(e.amount_minor), 0) INTO v_held FROM public.payment_events e
-      WHERE e.payment_id = p_payment_id AND e.organization_id = p_organization_id
-        AND e.event_type = 'refund';
-    IF v_payment.status = 'pending' THEN v_held := 0; END IF;
-    -- Settling (pending → paid) is measured against money already received,
-    -- so two over-claims cannot block each other's confirmation; reinstating a
-    -- rejected claim (failed → pending) against every claim, as recording is.
-    SELECT t.received_minor + CASE WHEN v_payment.status = 'pending' THEN 0
-        ELSE COALESCE((SELECT SUM(p.amount_minor) FROM public.payments p
-          WHERE p.organization_id = p_organization_id AND p.order_id = target
-            AND p.status = 'pending' AND p.id <> p_payment_id), 0) END
-      INTO v_claimed
-      FROM public.order_payment_totals t
-     WHERE t.order_id = target AND t.organization_id = p_organization_id;
-    IF v_claimed - v_held + v_payment.amount_minor > v_order.total_minor THEN
-      RETURN jsonb_build_object('status', 'exceeds_outstanding',
-        'outstanding_minor', GREATEST(v_order.total_minor - (v_claimed - v_held), 0),
-        'currency', v_order.currency);
+    SELECT received_minor INTO v_received FROM public.order_payment_totals
+      WHERE order_id = target AND organization_id = p_organization_id;
+    IF v_payment.status = 'failed' THEN
+      -- Reinstating a rejected claim is a new claim: the record rule. What it
+      -- contributes while failed is its refunded amount (order_payment_totals).
+      SELECT COALESCE(SUM(e.amount_minor), 0) INTO v_held FROM public.payment_events e
+        WHERE e.payment_id = p_payment_id AND e.organization_id = p_organization_id
+          AND e.event_type = 'refund';
+      SELECT v_received - v_held + COALESCE(SUM(p.amount_minor), 0) INTO v_claimed
+        FROM public.payments p
+       WHERE p.organization_id = p_organization_id AND p.order_id = target
+         AND p.status = 'pending' AND p.id <> p_payment_id;
+      IF v_claimed + v_payment.amount_minor > v_total THEN
+        RETURN jsonb_build_object('status', 'claim_exceeds_total',
+          'outstanding_minor', GREATEST(v_total - v_claimed, 0));
+      END IF;
+    ELSIF v_received + v_payment.amount_minor > v_total THEN
+      -- Settling a claim recorded before 068 above the total: allowed, and the
+      -- excess it creates is written into its own immutable event.
+      p_metadata := COALESCE(p_metadata, '{}'::jsonb) || jsonb_build_object(
+        'order_excess_minor', v_received + v_payment.amount_minor - GREATEST(v_received, v_total),
+        'order_total_minor', v_total);
     END IF;
   END IF;
 

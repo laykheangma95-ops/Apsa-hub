@@ -258,6 +258,21 @@ async function state(db: Db, order: string) {
   };
 }
 
+/** The metadata on a payment's confirmation event (staff / manager / bank), {} when none. */
+async function verificationMetadata(payment: string): Promise<Json> {
+  const rows = await fixed.sql`select metadata from payment_events where payment_id = ${payment}
+    and event_type in ('staff_confirmed', 'manager_verified', 'bank_verified')
+    order by created_at desc limit 1`;
+  return (rows[0]?.metadata as Json | null) ?? {};
+}
+
+/** The net held (received − refunded) — what reconciliation compares to the total for `overpaid`. */
+async function net(order: string): Promise<number> {
+  const [r] =
+    await fixed.sql`select net_minor::int as n from order_payment_totals where order_id = ${order}`;
+  return r.n as number;
+}
+
 async function waitUntilBlockedOnLock(db: Db, pid: number): Promise<void> {
   for (let i = 0; i < 200; i++) {
     const [row] = await db.sql`select wait_event_type from pg_stat_activity where pid = ${pid}`;
@@ -409,16 +424,22 @@ describe("068: only a confirmed order takes a new payment", () => {
     expect((await record(fixed, cancelled, 100, null, "cheque"))["status"]).toBe("invalid_method");
   });
 
-  it("a payment cannot be confirmed on a draft order (a claim recorded before 068)", async () => {
+  it("a deposit recorded on a draft before 068 can be confirmed and refunded — never stranded", async () => {
+    const draft = await newOrder(fixed, "draft");
+    const payment = await legacyClaim(fixed, draft, TOTAL, "khqr");
+    expect((await verify(fixed, payment, "unverified", "bank_verified"))["status"]).toBe("success");
+    expect(await state(fixed, draft)).toMatchObject({ lifecycle: "draft", payment: "paid" });
+    expect((await refund(fixed, payment, TOTAL))["status"]).toBe("success");
+    expect(await state(fixed, draft)).toMatchObject({ refund: "full", refunded: TOTAL });
+    // ...and the draft still takes no new money.
+    expect((await record(fixed, draft, 100))["status"]).toBe("order_not_payable");
+  });
+
+  it("a legacy draft claim that did not arrive is rejected instead; lowering a claim is never refused", async () => {
     const draft = await newOrder(fixed, "draft");
     const payment = await legacyClaim(fixed, draft, TOTAL);
-    expect(await verify(fixed, payment)).toEqual({
-      status: "order_not_payable",
-      lifecycle: "draft",
-    });
-    expect((await state(fixed, draft)).payment).toBe("pending");
-    // Lowering the claim is never refused.
     expect((await verify(fixed, payment, "unverified", "mismatch"))["status"]).toBe("success");
+    expect((await state(fixed, draft)).payment).toBe("failed");
   });
 });
 
@@ -521,28 +542,65 @@ describe("068: a new claim must fit the outstanding balance", () => {
     const khqr = await record(fixed, order, TOTAL, undefined, "khqr");
     expect(khqr["status"]).toBe("success");
     // Reinstating the COD claim would now exceed the total.
-    expect(await verify(fixed, codId, "mismatch", "unverified")).toMatchObject({
-      status: "exceeds_outstanding",
+    expect(await verify(fixed, codId, "mismatch", "unverified")).toEqual({
+      status: "claim_exceeds_total",
       outstanding_minor: 0,
     });
     expect((await verify(fixed, khqr["payment_id"] as string))["status"]).toBe("success");
     expect(await state(fixed, order)).toMatchObject({ payment: "paid", received: TOTAL });
   });
 
-  it("confirming an over-claim recorded before 068 is refused; confirming the one that fits succeeds", async () => {
+  it("a legacy over-claim that really arrived: confirmed with its excess stamped, flagged overpaid, the excess refunded", async () => {
     const order = await newOrder(fixed);
     const a = await legacyClaim(fixed, order, TOTAL);
-    const b = await legacyClaim(fixed, order, TOTAL);
+    const b = await legacyClaim(fixed, order, 5000, "khqr");
     expect((await verify(fixed, a))["status"]).toBe("success");
-    expect(await verify(fixed, b)).toMatchObject({
-      status: "exceeds_outstanding",
-      outstanding_minor: 0,
+    // The first confirmation fits: no excess on its event.
+    expect(await verificationMetadata(a)).toEqual({});
+    expect((await verify(fixed, b, "unverified", "bank_verified"))["status"]).toBe("success");
+    // The excess it creates is written into its own immutable event.
+    expect(await verificationMetadata(b)).toEqual({
+      order_excess_minor: 5000,
+      order_total_minor: TOTAL,
     });
-    expect(await state(fixed, order)).toMatchObject({ payment: "paid", received: TOTAL });
+    expect(await state(fixed, order)).toMatchObject({ payment: "paid", received: TOTAL + 5000 });
+    expect(await net(order)).toBe(TOTAL + 5000); // reconciliation: overpaid by 5000
+    // Returning the excess: a refund on the payment that over-collected.
+    expect((await refund(fixed, b, 5000))["status"]).toBe("success");
+    expect(await net(order)).toBe(TOTAL); // no longer overpaid
+    expect(await state(fixed, order)).toMatchObject({ payment: "paid", refund: "partial" });
+    // ...and the order still takes no new money.
+    expect((await record(fixed, order, 1))["status"]).toBe("exceeds_outstanding");
     // A stronger verification of the settled payment changes no claim and is allowed.
     expect((await verify(fixed, a, "staff_confirmed", "manager_verified"))["status"]).toBe(
       "success",
     );
+  });
+});
+
+// ── 068: confirmation under the order lock ───────────────────────────────────
+
+describe("068: concurrent confirmations of legacy claims", () => {
+  it("the second waits on the order lock and stamps the excess the first one's commit left", async () => {
+    const order = await newOrder(fixed);
+    const a = await legacyClaim(fixed, order, 8000);
+    const b = await legacyClaim(fixed, order, 8000, "khqr");
+    await pair(fixed, async (x, y) => {
+      await x`begin`;
+      expect((await verifyOn(x, a))["status"]).toBe("success");
+      const pid = await backendPid(y);
+      const pending = verifyOn(y, b, "unverified", "bank_verified");
+      await waitUntilBlockedOnLock(fixed, pid);
+      await x`commit`;
+      expect((await pending)["status"]).toBe("success");
+    });
+    expect(await verificationMetadata(a)).toEqual({});
+    // Computed after the lock: received 8000 (committed) + 8000 → 6000 above 10000.
+    expect(await verificationMetadata(b)).toEqual({
+      order_excess_minor: 6000,
+      order_total_minor: TOTAL,
+    });
+    expect(await net(order)).toBe(16000);
   });
 });
 
@@ -817,12 +875,21 @@ describe("legacy inventory (read-only, aggregates only)", () => {
       (
         await legacy.sql`select id from payments where order_id = ${order} and status = 'pending'`
       )[0].id as string;
-    expect((await verify(legacy, await pendingRow(o2)))["status"]).toBe("exceeds_outstanding");
-    expect((await verify(legacy, await pendingRow(o4)))["status"]).toBe("order_not_payable");
-    expect((await verify(legacy, await pendingRow(o1)))["status"]).toBe("success"); // 01.01 stays confirmable
+    // 04.01: confirmable — the excess is stamped, then flagged overpaid.
+    const o2Pending = await pendingRow(o2);
+    expect((await verify(legacy, o2Pending))["status"]).toBe("success");
+    expect(
+      (
+        await legacy.sql`select metadata from payment_events where payment_id = ${o2Pending}
+          and event_type = 'staff_confirmed'`
+      )[0].metadata,
+    ).toEqual({ order_excess_minor: 5000, order_total_minor: TOTAL });
+    expect((await verify(legacy, await pendingRow(o4)))["status"]).toBe("success"); // draft deposit
+    expect((await verify(legacy, await pendingRow(o1)))["status"]).toBe("success"); // 01.01
+    // 04.02: reinstating the rejected COD claim is refused.
     expect(
       (await verify(legacy, cod["payment_id"] as string, "mismatch", "unverified"))["status"],
-    ).toBe("exceeds_outstanding");
+    ).toBe("claim_exceeds_total");
     expect(r.get("99.01")).toBeDefined();
   });
 
