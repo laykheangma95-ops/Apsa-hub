@@ -194,6 +194,8 @@ describe("APSA rule: mutations are POST, GET is read-only", () => {
       "verifyPaymentFn",
       "reversePaymentFn",
       "refundPaymentFn",
+      "recordPaymentWithExcessFn",
+      "returnPaymentExcessFn",
       "correctPaymentFn",
       "attachPaymentEvidenceFn",
       // returns / inventory

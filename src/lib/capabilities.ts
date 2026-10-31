@@ -99,6 +99,10 @@ export const UI_PERMISSION_KEYS = [
   "payments.refund",
   "payments.reverse",
   "payments.reconcile",
+  // payments.record_excess (migration 068, DRAFT): the manager-level "Record
+  // with excess" affordance on Order detail. recordPaymentWithExcess requires
+  // it; returning the excess is an ordinary refund (payments.refund).
+  "payments.record_excess",
   // Customers — src/server/customers/service.ts. update_basic gates the
   // Customer 360 "Edit" affordance (updateCustomer requires it); editing the
   // phone additionally needs view_sensitive, which updateCustomer re-checks.

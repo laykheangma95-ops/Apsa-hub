@@ -41,6 +41,10 @@ export type AuditAction =
   | "payments.verify"
   | "payments.reverse"
   | "payments.refund"
+  // Written inside record_payment_with_excess_v1 / return_payment_excess_v1
+  // (migration 068) in the same transaction as the ledger write.
+  | "payments.record_excess"
+  | "payments.return_excess"
   | "inventory.adjust"
   | "products.price_change"
   | "products.delete"
@@ -68,6 +72,8 @@ export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
   "payments.override",
   "payments.reverse",
   "payments.refund",
+  "payments.record_excess",
+  "payments.return_excess",
   "inventory.adjust",
   "customers.export",
   "team.remove",

@@ -235,6 +235,74 @@ export const refundPaymentFn = createServerFn({ method: "POST" })
     });
   });
 
+// ── recordPaymentWithExcessFn / returnPaymentExcessFn (migration 068, DRAFT) ──
+//
+// A real bank / KHQR transfer above the outstanding amount, recorded at its
+// full amount (manager-level payments.record_excess), and the return of that
+// excess through the ordinary refund (payments.refund). The reference is
+// required for traceability; it never proves the transfer happened.
+
+export const recordPaymentWithExcessFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z
+      .object({
+        orderId: z.string().uuid("Invalid order ID"),
+        method: z.enum(["khqr", "bank_transfer"]),
+        amountMinor: z.number().int().positive("amountMinor must be a positive integer"),
+        reference: z.string().trim().min(1, "The transfer reference is required").max(200),
+        reason: z.string().trim().min(1, "A reason is required").max(1000),
+        // REQUIRED: one logical recording, re-sent verbatim on every retry.
+        idempotencyKey: z.string().trim().min(1).max(200),
+        // The outstanding amount on screen when this was started: a
+        // precondition, never an amount (refused when it no longer holds).
+        expectedOutstandingMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { recordPaymentWithExcess } = await import("@/server/payments/service");
+    return recordPaymentWithExcess(authCtx, {
+      orderId: data.orderId,
+      method: data.method,
+      amountMinor: data.amountMinor,
+      reference: data.reference,
+      reason: data.reason,
+      idempotencyKey: data.idempotencyKey,
+      expectedOutstandingMinor: data.expectedOutstandingMinor,
+      expectedPrincipal: data.expectedPrincipal,
+    });
+  });
+
+export const returnPaymentExcessFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z
+      .object({
+        paymentId: z.string().uuid("Invalid payment ID"),
+        amountMinor: z.number().int().positive("amountMinor must be a positive integer"),
+        reason: z.string().trim().min(1, "A refund reason is required").max(1000),
+        idempotencyKey: z.string().trim().min(1).max(200),
+        expectedRefundedMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        acknowledgedRefundIds: z.array(z.string().uuid()).max(100),
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { returnPaymentExcess } = await import("@/server/payments/service");
+    return returnPaymentExcess(authCtx, {
+      paymentId: data.paymentId,
+      amountMinor: data.amountMinor,
+      reason: data.reason,
+      idempotencyKey: data.idempotencyKey,
+      expectedRefundedMinor: data.expectedRefundedMinor,
+      acknowledgedRefundIds: data.acknowledgedRefundIds,
+      expectedPrincipal: data.expectedPrincipal,
+    });
+  });
+
 // ── correctPaymentFn ──────────────────────────────────────────────────────────
 
 export const correctPaymentFn = createServerFn({ method: "POST" })

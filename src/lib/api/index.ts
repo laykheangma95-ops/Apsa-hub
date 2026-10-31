@@ -2207,6 +2207,67 @@ export async function refundRealPayment(
   return mapPaymentDetailToUi(detail);
 }
 
+/**
+ * Migration 068 (DRAFT pilot policy): a bank / KHQR transfer above the order's
+ * outstanding amount, recorded at the full amount received. Manager-level
+ * (payments.record_excess). `expectedOutstandingMinor` is the outstanding
+ * amount the member was shown — a precondition the server refuses on.
+ */
+export interface RecordRealPaymentWithExcessInput {
+  orderId: string;
+  method: "khqr" | "bank_transfer";
+  amountMinor: number;
+  reference: string;
+  reason: string;
+  idempotencyKey: string;
+  expectedOutstandingMinor: number;
+}
+
+/** `principal`: refuse-only (CORRECTION-004), as for every payment mutation. */
+export async function recordRealPaymentWithExcess(
+  principal: InitiatingPrincipal,
+  input: RecordRealPaymentWithExcessInput,
+): Promise<UiPaymentDetail> {
+  const { recordPaymentWithExcessFn } = await import("@/api/payments");
+  const detail = await recordPaymentWithExcessFn({
+    data: {
+      orderId: input.orderId,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      reference: input.reference,
+      reason: input.reason,
+      idempotencyKey: input.idempotencyKey,
+      expectedOutstandingMinor: input.expectedOutstandingMinor,
+      expectedPrincipal: principal,
+    },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
+/**
+ * Return (part of) a payment's recorded excess: the ordinary refund, bounded to
+ * the excess, labelled by its own evidence event (migration 068).
+ */
+export async function returnRealPaymentExcess(
+  paymentId: string,
+  principal: InitiatingPrincipal,
+  refund: RealRefundRequest,
+): Promise<UiPaymentDetail> {
+  const { returnPaymentExcessFn } = await import("@/api/payments");
+  const detail = await returnPaymentExcessFn({
+    data: {
+      paymentId,
+      amountMinor: refund.amountMinor,
+      reason: refund.reason,
+      expectedRefundedMinor: refund.expectedRefundedMinor,
+      idempotencyKey: refund.idempotencyKey,
+      acknowledgedRefundIds: refund.acknowledgedRefundIds,
+      expectedPrincipal: principal,
+    },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
 /** Reverse a claimed or settled payment. Appends an event; never deletes the record. */
 export async function reverseRealPayment(
   paymentId: string,

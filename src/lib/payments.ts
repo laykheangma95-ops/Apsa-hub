@@ -199,6 +199,8 @@ export interface UiOrderSettlement {
   refundStatus: string;
   overpaid: boolean;
   overpaidAmount: Money | null;
+  /** What a new payment may still claim (server-derived; migration 068). */
+  outstanding: Money;
 }
 
 export function mapOrderSettlementToUi(row: ServerOrderSettlement): UiOrderSettlement {
@@ -212,6 +214,7 @@ export function mapOrderSettlementToUi(row: ServerOrderSettlement): UiOrderSettl
     refundStatus: row.refundStatus,
     overpaid: row.overpaid,
     overpaidAmount: row.overpaidAmount,
+    outstanding: row.outstandingMinor,
   };
 }
 
@@ -471,6 +474,74 @@ export function refundedMinorOf(detail: UiPaymentDetail): number {
   return refundEventsOf(detail).reduce((sum, event) => sum + (event.amount?.amount ?? 0), 0);
 }
 
+// ── Recorded excess (migration 068, DRAFT pilot policy) ──────────────────────
+
+function metadataNumber(metadata: JsonValue | null, key: string): number | null {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const value = (metadata as Record<string, JsonValue>)[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/**
+ * The excess this payment was recorded with ("Record with excess"), read from
+ * its immutable created event; null for every other payment.
+ */
+export function recordedExcessOf(detail: UiPaymentDetail): Money | null {
+  const created = detail.events.find((event) => event.eventType === "created");
+  const excess = created ? metadataNumber(created.metadata, "excess_minor") : null;
+  return excess !== null && excess > 0
+    ? { amount: excess, currency: detail.amount.currency }
+    : null;
+}
+
+/**
+ * The refunds that returned this payment's recorded excess: exactly those an
+ * `excess_returned` evidence event names. An ordinary refund is never in this
+ * set, even when its amount equals the excess.
+ */
+export function excessReturnRefundIds(detail: UiPaymentDetail): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const event of detail.events) {
+    if (event.eventType !== "excess_returned") continue;
+    const metadata = event.metadata;
+    if (metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)) {
+      const id = (metadata as Record<string, JsonValue>)["refund_event_id"];
+      if (typeof id === "string") ids.add(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The excess an amount received would carry above `outstanding` (integer minor
+ * units, same currency), or null when it is not above it. Display only: the
+ * server derives the excess itself under the order lock.
+ */
+export function excessAbove(amountMinor: number, outstanding: Money): Money | null {
+  return amountMinor > outstanding.amount
+    ? { amount: amountMinor - outstanding.amount, currency: outstanding.currency }
+    : null;
+}
+
+/**
+ * The recorded excess not yet returned, by the ledger's own running total (the
+ * latest `excess_returned` event's excess_returned_total_minor). The server
+ * bounds a return further — never past the sale itself.
+ */
+export function unreturnedExcessOf(detail: UiPaymentDetail): Money | null {
+  const recorded = recordedExcessOf(detail);
+  if (!recorded) return null;
+  let returned = 0;
+  for (const event of detail.events) {
+    if (event.eventType !== "excess_returned") continue;
+    returned = Math.max(
+      returned,
+      metadataNumber(event.metadata, "excess_returned_total_minor") ?? 0,
+    );
+  }
+  return { amount: Math.max(recorded.amount - returned, 0), currency: recorded.currency };
+}
+
 // ── Error classification ──────────────────────────────────────────────────────
 //
 // src/server/payments/service.ts throws Error instances carrying a
@@ -543,18 +614,32 @@ export function paymentErrorKey(kind: PaymentErrorKind): string {
  * survive the boundary.
  */
 export type PaymentClaimRefusal =
-  "order_not_payable" | "exceeds_outstanding" | "claim_exceeds_total";
+  | "order_not_payable"
+  | "exceeds_outstanding"
+  | "claim_exceeds_total"
+  | "outstanding_changed"
+  | "no_excess"
+  | "no_recorded_excess"
+  | "exceeds_returnable_excess";
 
 export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null {
   const code = (err as { code?: unknown } | null)?.code;
   if (code === "order_not_payable") return "order_not_payable";
   if (code === "payment_exceeds_outstanding") return "exceeds_outstanding";
   if (code === "payment_claim_exceeds_total") return "claim_exceeds_total";
+  if (code === "payment_outstanding_changed") return "outstanding_changed";
+  if (code === "payment_no_excess") return "no_excess";
+  if (code === "payment_no_recorded_excess") return "no_recorded_excess";
+  if (code === "payment_exceeds_returnable_excess") return "exceeds_returnable_excess";
   if (statusCodeOf(err) !== 409) return null;
   const message = messageOf(err);
   if (/cannot take a payment/i.test(message)) return "order_not_payable";
   if (/outstanding balance/i.test(message)) return "exceeds_outstanding";
   if (/cannot be reopened/i.test(message)) return "claim_exceeds_total";
+  if (/outstanding amount changed/i.test(message)) return "outstanding_changed";
+  if (/not above the outstanding amount/i.test(message)) return "no_excess";
+  if (/not recorded with an excess/i.test(message)) return "no_recorded_excess";
+  if (/excess that can still be returned/i.test(message)) return "exceeds_returnable_excess";
   return null;
 }
 

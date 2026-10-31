@@ -124,6 +124,7 @@ export function PaymentRefundSheet({
   open,
   onOpenChange,
   principal,
+  excess = null,
   pending,
   error,
   review,
@@ -135,6 +136,12 @@ export function PaymentRefundSheet({
   onOpenChange: (open: boolean) => void;
   /** This payment's own amount, for reference. Never used in a calculation. */
   principal: Money;
+  /**
+   * Migration 068 (DRAFT): the sheet returns this payment's recorded excess —
+   * the same refund, bounded by the server to the excess still unreturned
+   * (this amount, for reference). null for an ordinary refund.
+   */
+  excess?: Money | null;
   pending: boolean;
   error: string | null;
   /** The refunds already on this payment, when the server asked for a review. */
@@ -165,8 +172,10 @@ export function PaymentRefundSheet({
     <BottomSheet
       open={open}
       onOpenChange={onOpenChange}
-      title={t("payments.actions.refund.title")}
-      description={t("payments.actions.refund.body")}
+      title={t(excess ? "payments.actions.returnExcess.title" : "payments.actions.refund.title")}
+      description={t(
+        excess ? "payments.actions.returnExcess.body" : "payments.actions.refund.body",
+      )}
       snap="full"
       // Pinned rather than the last thing in the scrollable body: the amount
       // field scrolls itself into view on focus (BottomSheet's keyboard-safe
@@ -218,7 +227,13 @@ export function PaymentRefundSheet({
                 onConfirm(parsed, trimmedReason);
               }}
             >
-              {pending ? t("payments.actions.working") : t("payments.actions.refund.submit")}
+              {pending
+                ? t("payments.actions.working")
+                : t(
+                    excess
+                      ? "payments.actions.returnExcess.submit"
+                      : "payments.actions.refund.submit",
+                  )}
             </Button>
           )}
         </div>
@@ -277,7 +292,9 @@ export function PaymentRefundSheet({
             </span>
           ) : null}
           <span id="payment-refund-amount-hint" className="text-caption text-text-secondary">
-            {t("payments.actions.refund.amountHint", { amount: formatMoney(principal) })}
+            {excess
+              ? t("payments.actions.returnExcess.amountHint", { amount: formatMoney(excess) })
+              : t("payments.actions.refund.amountHint", { amount: formatMoney(principal) })}
           </span>
         </div>
 

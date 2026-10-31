@@ -262,6 +262,12 @@ export interface OrderSettlement {
   overpaid: boolean;
   /** netMinor - totalMinor when overpaid; null otherwise. */
   overpaidAmount: Money | null;
+  /**
+   * What a new payment may still claim: total − received − pending claims,
+   * never below zero (migration 068's rule). Display only — the database
+   * recomputes it under the order lock and refuses a stale value.
+   */
+  outstandingMinor: Money;
 }
 
 /**
@@ -282,6 +288,8 @@ export async function getOrderSettlement(
   const currency = row.currency as Currency;
   const overpaidAmountMinor = row.net_minor - row.total_minor;
   const overpaid = overpaidAmountMinor > 0;
+  const pendingMinor = await repo.sumPendingPaymentsForOrder(ctx.organizationId, orderId);
+  const outstanding = Math.max(row.total_minor - row.received_minor - pendingMinor, 0);
 
   return {
     orderId: row.order_id,
@@ -294,5 +302,6 @@ export async function getOrderSettlement(
     refundStatus: row.refund_status,
     overpaid,
     overpaidAmount: overpaid ? { amount: overpaidAmountMinor, currency } : null,
+    outstandingMinor: { amount: outstanding, currency },
   };
 }

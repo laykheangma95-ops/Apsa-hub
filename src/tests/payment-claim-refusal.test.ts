@@ -7,7 +7,14 @@
 import { describe, expect, it } from "bun:test";
 import en from "@/locales/en.json";
 import km from "@/locales/km.json";
-import { paymentClaimRefusalOf, paymentErrorMessageKey } from "@/lib/payments";
+import {
+  excessAbove,
+  excessReturnRefundIds,
+  paymentClaimRefusalOf,
+  paymentErrorMessageKey,
+  recordedExcessOf,
+  unreturnedExcessOf,
+} from "@/lib/payments";
 
 function serverError(message: string, statusCode: number, code?: string) {
   return Object.assign(new Error(message), { statusCode, ...(code ? { code } : {}) });
@@ -89,5 +96,69 @@ describe("Order detail offers Record payment only where the server accepts it", 
     const source = await Bun.file("src/routes/app.orders.$id.tsx").text();
     expect(source).toContain('const orderAcceptsPayment = order.lifecycleStatus === "confirmed";');
     expect(source).toContain("t(paymentErrorMessageKey(recordPaymentMutation.error))");
+  });
+});
+
+describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
+  type Detail = Parameters<typeof recordedExcessOf>[0];
+  const event = (id: string, eventType: string, amount: number | null, metadata: unknown) => ({
+    id,
+    eventType,
+    amount: amount === null ? null : { amount, currency: "USD" },
+    fromVerification: null,
+    toVerification: null,
+    actorUserId: null,
+    idempotencyKey: null,
+    reason: null,
+    metadata,
+    createdAt: "2026-10-31T00:00:00Z",
+  });
+  const detail = (events: unknown[]) =>
+    ({ amount: { amount: 10500, currency: "USD" }, events, evidence: [] }) as unknown as Detail;
+
+  it("reads the excess only from the created event, and labels only refunds named by evidence", () => {
+    const d = detail([
+      event("c", "created", 10500, { excess_minor: 500, request_digest_version: 1 }),
+      event("r1", "refund", 500, { status: "success" }), // ordinary, same amount: not labelled
+      event("r2", "refund", 300, { status: "success" }),
+      event("x2", "excess_returned", 300, {
+        refund_event_id: "r2",
+        excess_returned_total_minor: 300,
+      }),
+    ]);
+    expect(recordedExcessOf(d)).toEqual({ amount: 500, currency: "USD" });
+    expect([...excessReturnRefundIds(d)]).toEqual(["r2"]);
+    expect(unreturnedExcessOf(d)).toEqual({ amount: 200, currency: "USD" });
+  });
+
+  it("an ordinary payment has no recorded excess and no labelled refund", () => {
+    const d = detail([
+      event("c", "created", 10000, { request_digest_version: 1 }),
+      event("r", "refund", 500, {}),
+    ]);
+    expect(recordedExcessOf(d)).toBeNull();
+    expect(unreturnedExcessOf(d)).toBeNull();
+    expect(excessReturnRefundIds(d).size).toBe(0);
+  });
+
+  it("excessAbove is display-only integer arithmetic, null when not above", () => {
+    expect(excessAbove(10500, { amount: 10000, currency: "USD" })).toEqual({
+      amount: 500,
+      currency: "USD",
+    });
+    expect(excessAbove(10000, { amount: 10000, currency: "USD" })).toBeNull();
+  });
+
+  it("maps every new refusal to its own message in both locales", () => {
+    for (const [code, key] of [
+      ["payment_outstanding_changed", "outstanding_changed"],
+      ["payment_no_excess", "no_excess"],
+      ["payment_no_recorded_excess", "no_recorded_excess"],
+      ["payment_exceeds_returnable_excess", "exceeds_returnable_excess"],
+    ] as const) {
+      expect(paymentErrorMessageKey(serverError("x", 409, code))).toBe(`payments.errors.${key}`);
+      expect((en.payments.errors as Record<string, string>)[key]).toBeString();
+      expect((km.payments.errors as Record<string, string>)[key]).toBeString();
+    }
   });
 });

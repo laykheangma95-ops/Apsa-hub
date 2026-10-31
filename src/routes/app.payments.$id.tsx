@@ -67,6 +67,7 @@ import {
   getRealOrderSettlement,
   getRealPaymentDetail,
   refundRealPayment,
+  returnRealPaymentExcess,
   reverseRealPayment,
   verifyRealPayment,
 } from "@/lib/api";
@@ -95,8 +96,11 @@ import {
   isTerminalUiPaymentStatus,
   paymentErrorMessageKey,
   paymentNeedsReview,
+  excessReturnRefundIds,
+  recordedExcessOf,
   refundEventsOf,
   refundedMinorOf,
+  unreturnedExcessOf,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
   type PaymentVerificationState,
   type UiPaymentDetail,
@@ -137,6 +141,7 @@ const EVENT_TONE: Record<string, TimelineItem["tone"]> = {
   reversal: "danger",
   refund: "warning",
   duplicate_flagged: "warning",
+  excess_returned: "warning",
 };
 
 /** What every action on this screen is started for: the payment shown, as the member shown. */
@@ -156,6 +161,12 @@ interface RefundAttempt extends PaymentActionStart {
   /** Every refund on this payment the merchant has seen. */
   acknowledgedRefundIds: string[];
   scope: RefundIntentScope;
+  /**
+   * Migration 068 (DRAFT): a return of this payment's recorded excess — the
+   * same refund, through returnPaymentExcessFn, which bounds it to the excess
+   * and records the evidence behind the "excess returned" label.
+   */
+  excess: boolean;
 }
 
 /** One action tap: the screen's scope epoch and tap number at that moment. */
@@ -220,6 +231,8 @@ function PaymentDetailScreen() {
 
   const [verifyTarget, setVerifyTarget] = useState<PaymentVerificationState | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  /** The refund sheet is open to return the recorded excess (migration 068). */
+  const [refundExcess, setRefundExcess] = useState(false);
   /*
    * The server refused a new refund because the payment already has refunds
    * the merchant has not seen here (a retry after a reload, another tab,
@@ -355,13 +368,21 @@ function PaymentDetailScreen() {
 
   const refundMutation = useMutation({
     mutationFn: (attempt: RefundAttempt) =>
-      refundRealPayment(attempt.paymentId, attempt.startedAs, {
-        amountMinor: attempt.amountMinor,
-        reason: attempt.reason,
-        expectedRefundedMinor: attempt.expectedRefundedMinor,
-        idempotencyKey: attempt.idempotencyKey,
-        acknowledgedRefundIds: attempt.acknowledgedRefundIds,
-      }),
+      attempt.excess
+        ? returnRealPaymentExcess(attempt.paymentId, attempt.startedAs, {
+            amountMinor: attempt.amountMinor,
+            reason: attempt.reason,
+            expectedRefundedMinor: attempt.expectedRefundedMinor,
+            idempotencyKey: attempt.idempotencyKey,
+            acknowledgedRefundIds: attempt.acknowledgedRefundIds,
+          })
+        : refundRealPayment(attempt.paymentId, attempt.startedAs, {
+            amountMinor: attempt.amountMinor,
+            reason: attempt.reason,
+            expectedRefundedMinor: attempt.expectedRefundedMinor,
+            idempotencyKey: attempt.idempotencyKey,
+            acknowledgedRefundIds: attempt.acknowledgedRefundIds,
+          }),
     onMutate: beginActionAttempt,
     onSuccess: (detail, attempt, tap) => {
       // Not seen by the member who started it (another member, organization
@@ -378,7 +399,9 @@ function PaymentDetailScreen() {
       setRefundOpen(false);
       setActionError(null);
       invalidatePayments();
-      notifySuccess(t("payments.actions.refund.done"));
+      notifySuccess(
+        t(attempt.excess ? "payments.actions.returnExcess.done" : "payments.actions.refund.done"),
+      );
     },
     onError: (err, attempt, tap) => {
       // The key stays pending either way: an uncertain outcome is retried
@@ -410,6 +433,7 @@ function PaymentDetailScreen() {
       idempotencyKey: pending.key,
       acknowledgedRefundIds: readRefundIntent(refundScope).acknowledged,
       scope: refundScope,
+      excess: refundExcess,
     });
   }
 
@@ -550,6 +574,12 @@ function PaymentDetailScreen() {
     capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]),
   );
   const showRefund = canRefund && canRefundUiPayment(payment);
+  // Migration 068 (DRAFT): a payment recorded with an excess, and the refunds
+  // that returned it — only those its excess_returned evidence names.
+  const recordedExcess = recordedExcessOf(payment);
+  const unreturnedExcess = unreturnedExcessOf(payment);
+  const excessRefundIds = excessReturnRefundIds(payment);
+  const showReturnExcess = showRefund && unreturnedExcess !== null && unreturnedExcess.amount > 0;
   const showReverse = canReverse && canReverseUiPayment(payment);
   const hasAnyAction = verificationTargets.length > 0 || showRefund || showReverse;
 
@@ -725,6 +755,18 @@ function PaymentDetailScreen() {
               })}
             </p>
           ) : null}
+          {recordedExcess ? (
+            <div className="mb-2 flex flex-col gap-1" role="status">
+              <p className="text-body-sm text-text-primary">
+                {t("payments.excess.recorded", { amount: formatMoney(recordedExcess) })}
+              </p>
+              <p className="text-body-sm text-text-secondary">
+                {unreturnedExcess && unreturnedExcess.amount > 0
+                  ? t("payments.excess.unreturned", { amount: formatMoney(unreturnedExcess) })
+                  : t("payments.excess.allReturned")}
+              </p>
+            </div>
+          ) : null}
           {refunds.length === 0 ? (
             <p className="text-body-sm text-text-secondary">{t("payments.refunds.empty")}</p>
           ) : (
@@ -738,8 +780,15 @@ function PaymentDetailScreen() {
                     </span>
                   }
                   value={
-                    <span className="tnum text-text-primary">
-                      {event.amount ? formatMoney(event.amount) : t("payments.refunds.noAmount")}
+                    <span className="flex flex-wrap items-center justify-end gap-1.5">
+                      <span className="tnum text-text-primary">
+                        {event.amount ? formatMoney(event.amount) : t("payments.refunds.noAmount")}
+                      </span>
+                      {excessRefundIds.has(event.id) ? (
+                        <span className="text-caption rounded-full border border-border-default px-2 py-0.5 text-text-secondary">
+                          {t("payments.refunds.excessReturned")}
+                        </span>
+                      ) : null}
                     </span>
                   }
                 />
@@ -847,6 +896,22 @@ function PaymentDetailScreen() {
                   disabled={pending}
                   onClick={() => {
                     setActionError(null);
+                    setRefundExcess(false);
+                    setRefundOpen(true);
+                  }}
+                />
+              ) : null}
+
+              {showReturnExcess ? (
+                <ActionRow
+                  icon={RotateCcw}
+                  label={t("payments.actions.returnExcess.label")}
+                  description={t("payments.actions.returnExcess.rowBody")}
+                  tone="danger"
+                  disabled={pending}
+                  onClick={() => {
+                    setActionError(null);
+                    setRefundExcess(true);
                     setRefundOpen(true);
                   }}
                 />
@@ -900,6 +965,7 @@ function PaymentDetailScreen() {
           if (!open) setRefundReview(false);
         }}
         principal={payment.amount}
+        excess={refundExcess && unreturnedExcess ? unreturnedExcess : null}
         pending={refundMutation.isPending}
         error={actionError}
         review={

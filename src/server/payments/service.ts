@@ -945,6 +945,179 @@ export async function refundPayment(
   return requireDetail(ctx, input.paymentId);
 }
 
+// ── Record with excess / return the excess (migration 068, DRAFT) ────────────
+//
+// Pilot policy proposed by the owner, not yet approved. Ordinary recording
+// refuses any amount above the unclaimed total. A real bank / KHQR transfer
+// above it is recorded at its full amount only through recordPaymentWithExcess
+// (manager-level payments.record_excess), and the excess is returned through
+// returnPaymentExcess — which IS the existing refund (payments.refund), bounded
+// to the recorded excess. The transfer reference is a traceability key the
+// member typed; it never verifies that a transfer happened: the payment starts
+// pending like any other claim and only verification settles it.
+
+export const EXCESS_METHODS = ["khqr", "bank_transfer"] as const;
+export type ExcessMethod = (typeof EXCESS_METHODS)[number];
+
+export interface RecordPaymentWithExcessServiceInput {
+  orderId: string;
+  method: ExcessMethod;
+  /** The full amount actually received, integer minor units. */
+  amountMinor: number;
+  /** The transfer reference — required, never treated as proof. */
+  reference: string;
+  reason: string;
+  idempotencyKey: string;
+  /** The outstanding amount the member was shown; a different one is refused. */
+  expectedOutstandingMinor: number;
+  expectedPrincipal: ExpectedPrincipal;
+}
+
+function recordWithExcessFailureToError(result: { status: string }): Error {
+  switch (result.status) {
+    case "invalid_amount":
+      return badRequest("Amount must be a positive integer minor amount");
+    case "method_not_allowed":
+      return badRequest("Only a bank transfer or KHQR payment can be recorded with an excess");
+    case "reference_required":
+      return badRequest("The transfer reference is required");
+    case "reason_required":
+      return badRequest("A reason is required");
+    case "idempotency_key_required":
+      return badRequest("An idempotency key is required");
+    case "expected_outstanding_required":
+      return badRequest("The outstanding amount this payment was started from is required");
+    case "not_found":
+      return notFound("Order not found");
+    case "order_not_payable":
+      return orderNotPayable();
+    case "stale":
+      return publicError(
+        "The order's outstanding amount changed after this payment was started — re-read it and try again",
+        409,
+        "payment_outstanding_changed",
+      );
+    case "no_excess":
+      return publicError(
+        "The amount is not above the outstanding amount — record it as an ordinary payment",
+        409,
+        "payment_no_excess",
+      );
+    case "idempotency_conflict":
+      return idempotencyConflict();
+    default:
+      return new Error(`Payment record with excess failed: ${result.status}`);
+  }
+}
+
+/**
+ * Record a bank / KHQR transfer above the order's outstanding amount at the
+ * full amount received. Written, with its mandatory audit row, by one
+ * PostgreSQL function under the order lock.
+ */
+export async function recordPaymentWithExcess(
+  ctx: AuthorizationContext,
+  input: RecordPaymentWithExcessServiceInput,
+): Promise<PaymentDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
+  ctx.require("payments.record_excess");
+  await enforcePaymentReversalLimit(ctx);
+
+  if (!(EXCESS_METHODS as readonly string[]).includes(input.method)) {
+    throw badRequest("Only a bank transfer or KHQR payment can be recorded with an excess");
+  }
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+    throw badRequest("Amount must be a positive integer minor amount");
+  }
+  if (!input.reference?.trim()) throw badRequest("The transfer reference is required");
+  if (!input.reason?.trim()) throw badRequest("A reason is required");
+  if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()) {
+    throw badRequest("An idempotency key is required");
+  }
+  if (!Number.isInteger(input.expectedOutstandingMinor) || input.expectedOutstandingMinor < 0) {
+    throw badRequest("The outstanding amount this payment was started from is required");
+  }
+
+  const result = await repo.recordPaymentWithExcess(ctx.organizationId, ctx.userId, {
+    order_id: input.orderId,
+    method: input.method,
+    amount_minor: input.amountMinor,
+    reference: input.reference.trim(),
+    idempotency_key: input.idempotencyKey.trim(),
+    reason: input.reason.trim(),
+    expected_outstanding_minor: input.expectedOutstandingMinor,
+  });
+  if (result.status !== "success" || !result.payment_id) {
+    throw recordWithExcessFailureToError(result);
+  }
+  return requireDetail(ctx, result.payment_id);
+}
+
+export type ReturnPaymentExcessServiceInput = RefundPaymentServiceInput;
+
+/**
+ * Return (part of) a payment's recorded excess — an ordinary refund in every
+ * respect (payments.refund, key, acknowledgement, expected total, mandatory
+ * audit), bounded to the excess, and labelled "excess returned" by its own
+ * evidence event.
+ */
+export async function returnPaymentExcess(
+  ctx: AuthorizationContext,
+  input: ReturnPaymentExcessServiceInput,
+): Promise<PaymentDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
+  ctx.require("payments.refund");
+  await enforcePaymentReversalLimit(ctx);
+
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+    throw badRequest("Refund amount must be a positive integer minor amount");
+  }
+  if (!input.reason?.trim()) throw badRequest("A refund reason is required");
+  if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()) {
+    throw badRequest("A refund idempotency key is required");
+  }
+  if (!Number.isInteger(input.expectedRefundedMinor) || input.expectedRefundedMinor < 0) {
+    throw badRequest("The refunded total this refund was started from is required");
+  }
+  if (
+    !Array.isArray(input.acknowledgedRefundIds) ||
+    input.acknowledgedRefundIds.length > 100 ||
+    input.acknowledgedRefundIds.some((id) => typeof id !== "string")
+  ) {
+    throw badRequest("The refunds this refund acknowledges are required");
+  }
+
+  const result = await repo.returnPaymentExcess(
+    ctx.organizationId,
+    input.paymentId,
+    ctx.userId,
+    input.amountMinor,
+    input.reason.trim(),
+    input.idempotencyKey.trim(),
+    input.expectedRefundedMinor,
+    input.acknowledgedRefundIds,
+  );
+  if (result.status !== "success") {
+    switch (result.status) {
+      case "no_recorded_excess":
+        throw publicError(
+          "This payment was not recorded with an excess",
+          409,
+          "payment_no_recorded_excess",
+        );
+      case "exceeds_returnable_excess":
+        throw publicError(
+          "The amount is more than the excess that can still be returned",
+          409,
+          "payment_exceeds_returnable_excess",
+        );
+      default:
+        throw refundFailureToError(result);
+    }
+  }
+  return requireDetail(ctx, input.paymentId);
+}
+
 /**
  * Owner-level correction of a payment's `reference` or `note`. Never touches
  * amount/method/currency — see migration 035's correct_payment_v1 header.

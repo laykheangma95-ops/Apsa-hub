@@ -46,6 +46,8 @@ import type {
   VerifyPaymentRpcResult,
   ReversePaymentRpcResult,
   RefundPaymentRpcResult,
+  RecordPaymentWithExcessRpcResult,
+  ReturnPaymentExcessRpcResult,
   CorrectPaymentRpcResult,
   ListPaymentsOptions,
   PaymentReconciliationRow,
@@ -138,6 +140,41 @@ export async function recordPayment(
 
   if (error) throw rpcError("recordPayment", null, error);
   return data as RecordPaymentRpcResult;
+}
+
+/**
+ * Migration 068: a bank / KHQR transfer above the outstanding amount, recorded
+ * at its full amount. The function writes the payment, its created event (with
+ * the excess), the derived order state and the mandatory payments.record_excess
+ * audit row in one transaction.
+ */
+export async function recordPaymentWithExcess(
+  organizationId: string,
+  recordedBy: string | null,
+  input: {
+    order_id: string;
+    method: "khqr" | "bank_transfer";
+    amount_minor: number;
+    reference: string;
+    idempotency_key: string;
+    reason: string;
+    expected_outstanding_minor: number;
+  },
+): Promise<RecordPaymentWithExcessRpcResult> {
+  const { data, error } = await db.rpc("record_payment_with_excess_v1", {
+    p_organization_id: organizationId,
+    p_order_id: input.order_id,
+    p_recorded_by: recordedBy,
+    p_method: input.method,
+    p_amount_minor: input.amount_minor,
+    p_reference: input.reference,
+    p_idempotency_key: input.idempotency_key,
+    p_reason: input.reason,
+    p_expected_outstanding_minor: input.expected_outstanding_minor,
+  });
+
+  if (error) throw rpcError("recordPaymentWithExcess", "payments.record_excess", error);
+  return data as RecordPaymentWithExcessRpcResult;
 }
 
 export async function attachEvidence(
@@ -234,6 +271,37 @@ export async function refundPayment(
 
   if (error) throw rpcError("refundPayment", "payments.refund", error);
   return data as RefundPaymentRpcResult;
+}
+
+/**
+ * Migration 068: return (part of) a payment's recorded excess. It IS a refund
+ * (refund_payment_v2, with its key, acknowledgement, expected total and audit),
+ * bounded to the excess, plus the excess_returned evidence event and the
+ * payments.return_excess audit row — one transaction.
+ */
+export async function returnPaymentExcess(
+  organizationId: string,
+  paymentId: string,
+  actor: string | null,
+  amountMinor: number,
+  reason: string,
+  idempotencyKey: string,
+  expectedRefundedMinor: number,
+  acknowledgedRefundIds: string[],
+): Promise<ReturnPaymentExcessRpcResult> {
+  const { data, error } = await db.rpc("return_payment_excess_v1", {
+    p_organization_id: organizationId,
+    p_payment_id: paymentId,
+    p_actor: actor,
+    p_amount_minor: amountMinor,
+    p_reason: reason,
+    p_idempotency_key: idempotencyKey,
+    p_expected_refunded_minor: expectedRefundedMinor,
+    p_acknowledged_refund_ids: acknowledgedRefundIds,
+  });
+
+  if (error) throw rpcError("returnPaymentExcess", "payments.refund", error);
+  return data as ReturnPaymentExcessRpcResult;
 }
 
 export async function correctPayment(
@@ -374,6 +442,28 @@ export async function getOrderPaymentTotals(
     throw new Error(`getOrderPaymentTotals: ${errMessage(error)}`);
   }
   return (data ?? null) as OrderPaymentTotalsRow | null;
+}
+
+/**
+ * The principal of an order's PENDING payments (recorded, not yet confirmed or
+ * rejected) — the claims migration 068 counts against the total. Org-scoped.
+ */
+export async function sumPendingPaymentsForOrder(
+  organizationId: string,
+  orderId: string,
+): Promise<number> {
+  const { data, error } = await db
+    .from("payments")
+    .select("amount_minor")
+    .eq("organization_id", organizationId)
+    .eq("order_id", orderId)
+    .eq("status", "pending");
+
+  if (error) throw new Error(`sumPendingPaymentsForOrder: ${errMessage(error)}`);
+  return ((data ?? []) as { amount_minor: number }[]).reduce(
+    (sum, row) => sum + Number(row.amount_minor),
+    0,
+  );
 }
 
 // ── Cross-domain ownership checks (read-only, org-scoped) ─────────────────────

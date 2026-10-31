@@ -30,7 +30,9 @@ export type PaymentEventType =
   | "correction"
   | "reversal"
   | "refund"
-  | "duplicate_flagged";
+  | "duplicate_flagged"
+  // Migration 068: the evidence that a refund returned a recorded excess.
+  | "excess_returned";
 
 export interface PaymentRow {
   id: string;
@@ -103,6 +105,25 @@ export interface RecordPaymentRpcResult {
   payment_id?: string;
   duplicate_suspected?: boolean;
   replayed?: boolean;
+}
+
+/** Result envelope returned by record_payment_with_excess_v1 (migration 068). */
+export interface RecordPaymentWithExcessRpcResult {
+  status: string;
+  payment_id?: string;
+  duplicate_suspected?: boolean;
+  replayed?: boolean;
+  excess_minor?: number;
+  outstanding_minor?: number;
+  currency?: string;
+  lifecycle?: string;
+}
+
+/** Result envelope returned by return_payment_excess_v1 (migration 068). */
+export interface ReturnPaymentExcessRpcResult extends RefundPaymentRpcResult {
+  excess_returned?: boolean;
+  refund_event_id?: string;
+  returnable_excess_minor?: number;
 }
 
 /** Result envelope returned by attach_payment_evidence_v1. */

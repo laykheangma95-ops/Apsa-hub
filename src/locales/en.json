@@ -1283,6 +1283,24 @@
       "net": "Net",
       "overpaid": "Overpaid by {{amount}} — check this with the customer."
     },
+    "recordExcess": {
+      "open": "Record a transfer above the total",
+      "title": "Record a transfer above the total",
+      "body": "Only for a bank transfer or KHQR that really arrived for more than this order still owes. The full amount is recorded, and the excess must be refunded to the customer.",
+      "outstanding": "Still owed on this order: {{amount}}",
+      "amountLabel": "Amount received ({{currency}})",
+      "amountHint": "Enter the full amount that arrived.",
+      "excessPreview": "Excess to refund to the customer: {{amount}}",
+      "notAbove": "That is not more than the order still owes. Use Record payment instead.",
+      "referenceLabel": "Transfer reference",
+      "referenceHint": "Required so the transfer can be traced. It does not prove the money arrived — check the bank statement.",
+      "reasonLabel": "Reason",
+      "reasonHint": "Why more than the order total was received.",
+      "pendingNote": "This is recorded as a claim. It counts as paid only after someone confirms the money arrived. Cash is never recorded here: give change in hand and record only the amount kept.",
+      "submit": "Record transfer",
+      "working": "Recording…",
+      "done": "Transfer recorded. Return the excess from the payment once it is confirmed."
+    },
     "recordPaymentSheet": {
       "title": "Record payment",
       "body": "Write down the money kept for this order. Confirming it as received is a separate step.",
@@ -2476,9 +2494,15 @@
         "full": "Fully refunded"
       }
     },
+    "excess": {
+      "recorded": "Recorded with an excess of {{amount}} above the order total.",
+      "unreturned": "Still to return to the customer: {{amount}}",
+      "allReturned": "The excess has been returned."
+    },
     "refunds": {
       "title": "Refunds on this payment",
       "empty": "No refunds recorded against this payment.",
+      "excessReturned": "Excess returned",
       "noAmount": "Amount not recorded",
       "note": "Each line is one refund from the payment's permanent history. A refund never cancels the payment — it is recorded beside it."
     },
@@ -2506,6 +2530,7 @@
         "correction": "Details corrected",
         "reversal": "Payment reversed",
         "refund": "Refund recorded",
+        "excess_returned": "Excess returned to the customer",
         "duplicate_flagged": "Flagged as a possible duplicate"
       }
     },
@@ -2577,6 +2602,15 @@
           "decline": "Don't refund again"
         }
       },
+      "returnExcess": {
+        "label": "Return the excess",
+        "rowBody": "Refund the amount received above the order total.",
+        "title": "Return the excess",
+        "body": "A refund of the excess only. The sale itself stays paid.",
+        "amountHint": "Up to {{amount}} can be returned as excess.",
+        "submit": "Return excess",
+        "done": "Excess returned."
+      },
       "reverse": {
         "label": "Reverse",
         "rowBody": "Void this payment claim. Use a refund instead when money actually moved back.",
@@ -2596,7 +2630,11 @@
       "server_error": "Something went wrong. Nothing was changed.",
       "order_not_payable": "This order cannot take a payment now. Only a confirmed order that is not yet completed can.",
       "exceeds_outstanding": "That is more than the order still owes. Record only the amount that is outstanding.",
-      "claim_exceeds_total": "Other payments already cover this order's total, so this claim can't be reopened. Reverse or flag the other payment first if it was wrong."
+      "claim_exceeds_total": "Other payments already cover this order's total, so this claim can't be reopened. Reverse or flag the other payment first if it was wrong.",
+      "outstanding_changed": "What this order still owes changed after you started. The new amount is shown — check it and try again.",
+      "no_excess": "That is not more than the order still owes. Use Record payment instead.",
+      "no_recorded_excess": "This payment was not recorded with an excess.",
+      "exceeds_returnable_excess": "That is more than the excess that can still be returned."
     }
   },
   "apsi": {

@@ -673,11 +673,37 @@ async function sqlState(db: Db, role: string, statement: string): Promise<string
 }
 
 describe("068: authority under Supabase's default privileges", () => {
-  it("keeps every function's owner, SECURITY DEFINER, search_path, volatility and ACL; adds no function", async () => {
+  it("keeps every existing function's owner, SECURITY DEFINER, search_path, volatility and ACL; adds only the two excess entry points", async () => {
     const beforeAuthority = await functionAuthority(supabase);
     await supabase.sql.unsafe(readFileSync(`supabase/migrations/${MIGRATION}`, "utf8"));
     const afterAuthority = await functionAuthority(supabase);
-    expect(afterAuthority).toEqual(beforeAuthority);
+    const ADDED = [
+      "record_payment_with_excess_v1(uuid,uuid,uuid,text,bigint,text,text,text,bigint)",
+      "return_payment_excess_v1(uuid,uuid,uuid,bigint,text,text,bigint,uuid[])",
+    ];
+    const isAdded = (r: { sig: string }) =>
+      ADDED.some((sig) =>
+        r.sig
+          .replace(/^public\./, "")
+          .replace(/, /g, ",")
+          .startsWith(sig.split("(")[0]!),
+      );
+    expect(afterAuthority.filter((r: { sig: string }) => !isAdded(r))).toEqual(beforeAuthority);
+    expect(afterAuthority.filter(isAdded)).toHaveLength(2);
+    for (const r of afterAuthority.filter(isAdded) as {
+      owner: string;
+      definer: boolean;
+      config: string;
+      acl: string;
+    }[]) {
+      // Owner + service_role only, despite the default EXECUTE grants.
+      expect({ owner: r.owner, definer: r.definer, config: r.config }).toEqual({
+        owner: "postgres",
+        definer: true,
+        config: '{"search_path=public, auth"}',
+      });
+      expect(r.acl).toBe("{postgres=X/postgres,service_role=X/postgres}");
+    }
     for (const sig of GUARDED) {
       const [meta] = await supabase.sql`
         select pg_get_userbyid(proowner) as owner, prosecdef as definer, proconfig::text as config

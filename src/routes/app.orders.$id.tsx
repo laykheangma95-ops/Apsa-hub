@@ -30,6 +30,10 @@ import { CancelOrderSheet } from "@/components/orders/CancelOrderSheet";
 import { CompleteOrderSheet } from "@/components/orders/CompleteOrderSheet";
 import { OrderNextActionPanel } from "@/components/orders/OrderNextActionPanel";
 import {
+  RecordExcessPaymentSheet,
+  type RecordExcessPaymentSubmit,
+} from "@/components/orders/RecordExcessPaymentSheet";
+import {
   RecordOrderPaymentSheet,
   type RecordOrderPaymentSubmit,
 } from "@/components/orders/RecordOrderPaymentSheet";
@@ -62,6 +66,7 @@ import {
   listRealPayments,
   recordPayment,
   recordRealPayment,
+  recordRealPaymentWithExcess,
   PERMISSION_DENIED,
 } from "@/lib/api";
 import {
@@ -263,6 +268,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const [completeOpen, setCompleteOpen] = useState(false);
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
+  const [recordExcessOpen, setRecordExcessOpen] = useState(false);
   const [parcelLabelOpen, setParcelLabelOpen] = useState(false);
   const [shippingLabelOpen, setShippingLabelOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -368,6 +374,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const canReconcile = identityOk && capabilities.canSensitive("payments.reconcile");
   const canRecordPayment = identityOk && capabilities.can("payments.record");
   const canMarkCod = identityOk && capabilities.can("payments.mark_cod");
+  // Migration 068 (DRAFT): the manager-level "Record a transfer above the
+  // total". It needs the server's outstanding figure, from the settlement read.
+  const canRecordExcess = identityOk && capabilities.can("payments.record_excess");
   const canReadCustomers = identityOk && capabilities.can("customers.read");
 
   /*
@@ -631,9 +640,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
    * Called from onMutate, at the tap (see beginLifecycleAttempt). The key the
    * attempt carries stays unresolved until a success answers it.
    */
-  function beginPaymentAttempt(
-    submit: RecordOrderPaymentSubmit & OrderActionStart,
-  ): LifecycleAttempt {
+  function beginPaymentAttempt(submit: OrderActionStart): LifecycleAttempt {
     const current = lifecycleRef.current;
     current.paymentAttempt += 1;
     const scope = orderActionScopeOf(submit);
@@ -723,6 +730,36 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   });
 
   /*
+   * Migration 068 (DRAFT): a bank / KHQR transfer above the outstanding amount,
+   * recorded at its full amount. One key per opened sheet; the outstanding
+   * amount the sheet showed is sent as a precondition.
+   */
+  const recordExcessMutation = useMutation({
+    mutationFn: (submit: RecordExcessPaymentSubmit & OrderActionStart) =>
+      recordRealPaymentWithExcess(submit.startedAs, {
+        orderId: submit.orderId,
+        method: submit.method,
+        amountMinor: submit.amountMinor,
+        reference: submit.reference,
+        reason: submit.reason,
+        idempotencyKey: submit.idempotencyKey,
+        expectedOutstandingMinor: submit.expectedOutstandingMinor,
+      }),
+    onMutate: (submit) => beginPaymentAttempt(submit),
+    onSuccess: (_payment, submit, attempt) => {
+      if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
+      setRecordExcessOpen(false);
+      invalidateAfterPayment();
+      setNotice(t("order.recordExcess.done"));
+    },
+    onError: (_err, submit, attempt) => {
+      if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
+      // A stale outstanding amount is re-read so the sheet shows the new one.
+      invalidateAfterPayment();
+    },
+  });
+
+  /*
    * A principal or order change, committed: what was started, typed or told
    * for the previous principal or order is not the next one's. No pending or
    * failed Confirm / Cancel / Record payment state, no notice, no open cancel
@@ -736,6 +773,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const { reset: resetCancel } = cancelMutation;
   const { reset: resetComplete } = completeMutation;
   const { reset: resetRecordPayment } = recordPaymentMutation;
+  const { reset: resetRecordExcess } = recordExcessMutation;
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
     if (current.scope === actionScope) return;
@@ -745,12 +783,21 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     resetCancel();
     resetComplete();
     resetRecordPayment();
+    resetRecordExcess();
     setNotice(null);
     setCancelOpen(false);
     setCompleteOpen(false);
     setCreateDeliveryOpen(false);
     setRecordPaymentOpen(false);
-  }, [actionScope, resetConfirm, resetCancel, resetComplete, resetRecordPayment]);
+    setRecordExcessOpen(false);
+  }, [
+    actionScope,
+    resetConfirm,
+    resetCancel,
+    resetComplete,
+    resetRecordPayment,
+    resetRecordExcess,
+  ]);
   useLayoutEffect(() => {
     const current = lifecycleRef.current;
     return () => {
@@ -931,6 +978,11 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const recordPaymentError = recordPaymentMutation.error
     ? t(paymentErrorMessageKey(recordPaymentMutation.error))
     : null;
+  const recordExcessError = recordExcessMutation.error
+    ? t(paymentErrorMessageKey(recordExcessMutation.error))
+    : null;
+  // Offered only with the server's outstanding figure on screen.
+  const showRecordExcess = orderAcceptsPayment && canRecordExcess && settlement !== null;
 
   const historyItems: TimelineItem[] = [...(order.statusHistory ?? [])]
     .sort((a, b) => b.changedAt.localeCompare(a.changedAt))
@@ -1251,6 +1303,18 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                   onClick={openRecordPayment}
                 >
                   {t("order.recordPayment")}
+                </Button>
+              ) : null}
+              {showRecordExcess ? (
+                <Button
+                  variant="ghost"
+                  className="tap-target text-label mt-1 h-11 w-full text-text-secondary"
+                  onClick={() => {
+                    recordExcessMutation.reset();
+                    setRecordExcessOpen(true);
+                  }}
+                >
+                  {t("order.recordExcess.open")}
                 </Button>
               ) : null}
             </>
@@ -1584,6 +1648,22 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           recordPaymentMutation.mutate({ ...submit, orderId: order.id, startedAs: principal });
         }}
       />
+      {settlement ? (
+        <RecordExcessPaymentSheet
+          key={`excess:${actionScope}`}
+          open={recordExcessOpen}
+          onOpenChange={(next) => {
+            setRecordExcessOpen(next);
+            if (!next) recordExcessMutation.reset();
+          }}
+          outstanding={settlement.outstanding}
+          pending={recordExcessMutation.isPending}
+          error={recordExcessError}
+          onConfirm={(submit) =>
+            recordExcessMutation.mutate({ ...submit, orderId: order.id, startedAs: principal })
+          }
+        />
+      ) : null}
       <InternalParcelLabelDialog
         open={parcelLabelOpen}
         onClose={() => setParcelLabelOpen(false)}
