@@ -43,7 +43,7 @@ afterAll(async () => {
 
 /** A draft order with one stocked line, ready to confirm. */
 async function draftOrder(): Promise<string> {
-  const id = await f.newOrder();
+  const id = await f.newOrder(f.org, 10000, "draft");
   await f.db.query(
     `insert into order_items(organization_id,order_id,product_id,variant_id,product_name_snapshot,
        unit_price_minor,quantity,line_total_minor)
@@ -177,9 +177,9 @@ describe("migration 057 — confirmation creates the APSA Parcel atomically", ()
 
 describe("migration 058 — historical backfill (separate from runtime)", () => {
   it("backfills confirmed/completed orders once, idempotently; draft/cancelled untouched", async () => {
-    const confirmed = await f.newOrder();
-    const completed = await f.newOrder();
-    const draft = await f.newOrder();
+    const confirmed = await f.newOrder(f.org, 10000, "draft");
+    const completed = await f.newOrder(f.org, 10000, "draft");
+    const draft = await f.newOrder(f.org, 10000, "draft");
     // Historical rows written before 057 existed: confirmed without a parcel.
     await f.db.query(`update orders set lifecycle_status='confirmed' where id=$1;`, [confirmed]);
     await f.db.query(`update orders set lifecycle_status='completed' where id=$1`, [completed]);

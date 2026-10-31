@@ -765,7 +765,13 @@ describe("No migration was required, and the schema says why", () => {
     // PR #121 security repair), and 063 (order cancellation custody guard —
     // Orders P1 cancellation safety), and 064 (Telegram channel connections and
     // its first-contact Customer creation — the Telegram provider phase, not
-    // this search phase); anything from 065 up would be new.
-    expect(migrations.filter((f) => /^06[5-9]|^0[7-9]\d/.test(f))).toEqual([]);
+    // this search phase), and 068 (payment lifecycle / outstanding-balance
+    // guard — the payment lifecycle repair; PROVISIONAL number); anything else
+    // from 065 up would be new.
+    expect(
+      migrations.filter(
+        (f) => /^06[5-9]|^0[7-9]\d/.test(f) && f !== "068_payment_lifecycle_guard.sql",
+      ),
+    ).toEqual([]);
   });
 });

@@ -65,14 +65,21 @@ export async function financialFixture(
     values($1,'A','A','payment-a',$3),($2,'B','B','payment-b',$3)`,
     [org, orgB, actor],
   );
-  async function newOrder(tenant = org, total = 10000) {
+  /**
+   * Confirmed by default: only a confirmed order takes a new payment
+   * (migration 068). Pass "draft" for an order a test confirms itself.
+   */
+  async function newOrder(
+    tenant = org,
+    total = 10000,
+    lifecycle: "draft" | "confirmed" = "confirmed",
+  ) {
     const id = crypto.randomUUID();
     await db.query(
-      // Confirmed: only a confirmed order takes a new payment (migration 068).
       `insert into orders(id,organization_id,order_number,source,currency,
       subtotal_minor,total_minor,created_by,lifecycle_status)
-      values($1,$2,$1::uuid::text,'MANUAL','USD',$3,$3,$4,'confirmed')`,
-      [id, tenant, total, actor],
+      values($1,$2,$1::uuid::text,'MANUAL','USD',$3,$3,$4,$5::order_lifecycle_status)`,
+      [id, tenant, total, actor, lifecycle],
     );
     return id;
   }
