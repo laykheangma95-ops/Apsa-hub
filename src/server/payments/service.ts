@@ -44,6 +44,7 @@
 import { publicError } from "@/server/public-domain-error";
 import { reportServerError } from "@/server/observability/errors";
 import type { AuthorizationContext } from "@/server/auth/authorization";
+import { PAYMENT_REFUSALS } from "@/lib/payment-refusals";
 import { assertExpectedPrincipal, type ExpectedPrincipal } from "@/server/auth/expected-principal";
 import { auditLog } from "@/server/auth/audit";
 import { enforceRateLimits } from "@/server/rate-limit/limiter";
@@ -429,16 +430,12 @@ function idempotencyConflict(): Error {
  * balance. Decided under the order lock; nothing was written.
  */
 function orderNotPayable(): Error {
-  return publicError(
-    "This order cannot take a payment in its current state",
-    409,
-    "order_not_payable",
-  );
+  return publicError(PAYMENT_REFUSALS.order_not_payable.message, 409, "order_not_payable");
 }
 
 function exceedsOutstanding(): Error {
   return publicError(
-    "The payment is more than the order's outstanding balance",
+    PAYMENT_REFUSALS.exceeds_outstanding.message,
     409,
     "payment_exceeds_outstanding",
   );
@@ -451,7 +448,7 @@ function exceedsOutstanding(): Error {
  */
 function duplicateTransferReference(): Error {
   return publicError(
-    "This transfer reference is already recorded on another payment",
+    PAYMENT_REFUSALS.duplicate_transfer_reference.message,
     409,
     "payment_duplicate_transfer_reference",
   );
@@ -463,7 +460,7 @@ function duplicateTransferReference(): Error {
  */
 function nothingOutstanding(): Error {
   return publicError(
-    "Nothing is outstanding on this order — this transfer cannot be recorded against it",
+    PAYMENT_REFUSALS.nothing_outstanding.message,
     409,
     "payment_nothing_outstanding",
   );
@@ -520,7 +517,7 @@ function verifyFailureToError(result: { status: string; current?: string }): Err
       // Migration 068: reopening a rejected claim is a new claim, and other
       // payments already cover the order total.
       return publicError(
-        "Other payments already cover this order's total; this claim cannot be reopened",
+        PAYMENT_REFUSALS.claim_exceeds_total.message,
         409,
         "payment_claim_exceeds_total",
       );
@@ -528,7 +525,7 @@ function verifyFailureToError(result: { status: string; current?: string }): Err
       // Migration 068: a payment recorded with excess is reinstated only by
       // reinstateExcessPayment, which rechecks its excess and reference.
       return publicError(
-        "This payment was recorded with an excess — reinstate it with the excess action",
+        PAYMENT_REFUSALS.excess_reinstatement_required.message,
         409,
         "payment_excess_reinstatement_required",
       );
@@ -1058,16 +1055,12 @@ function recordWithExcessFailureToError(result: { status: string }): Error {
       return duplicateTransferReference();
     case "stale":
       return publicError(
-        "The order's outstanding amount changed after this payment was started — re-read it and try again",
+        PAYMENT_REFUSALS.outstanding_changed.message,
         409,
         "payment_outstanding_changed",
       );
     case "no_excess":
-      return publicError(
-        "The amount is not above the outstanding amount — record it as an ordinary payment",
-        409,
-        "payment_no_excess",
-      );
+      return publicError(PAYMENT_REFUSALS.no_excess.message, 409, "payment_no_excess");
     case "idempotency_conflict":
       return idempotencyConflict();
     default:
@@ -1166,13 +1159,13 @@ export async function returnPaymentExcess(
     switch (result.status) {
       case "no_recorded_excess":
         throw publicError(
-          "This payment was not recorded with an excess",
+          PAYMENT_REFUSALS.no_recorded_excess.message,
           409,
           "payment_no_recorded_excess",
         );
       case "exceeds_returnable_excess":
         throw publicError(
-          "The amount is more than the excess that can still be returned",
+          PAYMENT_REFUSALS.exceeds_returnable_excess.message,
           409,
           "payment_exceeds_returnable_excess",
         );
@@ -1218,7 +1211,7 @@ export async function reinstateExcessPayment(
         throw notFound("Payment not found");
       case "no_recorded_excess":
         throw publicError(
-          "This payment was not recorded with an excess",
+          PAYMENT_REFUSALS.no_recorded_excess.message,
           409,
           "payment_no_recorded_excess",
         );
@@ -1229,11 +1222,7 @@ export async function reinstateExcessPayment(
       case "nothing_outstanding":
         throw nothingOutstanding();
       case "excess_changed":
-        throw publicError(
-          "Other payments changed what this order still owes, so this transfer's excess is no longer the one recorded — record the transfer again with its new excess",
-          409,
-          "payment_excess_changed",
-        );
+        throw publicError(PAYMENT_REFUSALS.excess_changed.message, 409, "payment_excess_changed");
       case "duplicate_transfer_reference":
         throw duplicateTransferReference();
       default:

@@ -36,8 +36,11 @@ import {
 import {
   beginExcessRecording,
   excessRecordingFingerprint,
+  excessRecordingOutcomeOf,
   excessRecordingSettled,
+  forgetExcessRecording,
   hasPendingExcessRecording,
+  readExcessIntents,
   resetExcessRecording,
 } from "@/lib/excess-intent";
 import {
@@ -277,6 +280,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const [createDeliveryOpen, setCreateDeliveryOpen] = useState(false);
   const [recordPaymentOpen, setRecordPaymentOpen] = useState(false);
   const [recordExcessOpen, setRecordExcessOpen] = useState(false);
+  /**
+   * Why a "record with excess" was NOT sent (the intent store refused it: no
+   * room for another unknown attempt, or storage refused the write). Every
+   * existing key is kept; nothing reached the server.
+   */
+  const [excessIntentRefusal, setExcessIntentRefusal] = useState<string | null>(null);
+  /** Bumped when the intent store changes outside a mutation (forget / start over). */
+  const [, setExcessIntentVersion] = useState(0);
   const [parcelLabelOpen, setParcelLabelOpen] = useState(false);
   const [shippingLabelOpen, setShippingLabelOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -775,10 +786,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       setNotice(t("order.recordExcess.done"));
     },
     onError: (err, submit, attempt) => {
-      // A refusal is conclusive: the request under this key wrote nothing, so
-      // its key is settled. A lost response, a network or a server error is
-      // not: the key stays, so the same request later replays.
-      if (paymentClaimRefusalOf(err) !== null || classifyPaymentError(err) !== "server_error") {
+      // Settled ONLY by a refusal that proves this key wrote nothing — one of
+      // the database's write-free refusals, by code or EXACT message
+      // (src/lib/payment-refusals.ts). A network error, a timeout, an unknown
+      // or sanitized server error, a refusal raised before the database: the
+      // key stays, and the check / replay path stays offered.
+      if (excessRecordingOutcomeOf(err) === "write_free") {
         excessRecordingSettled(
           {
             userId: submit.startedAs.userId,
@@ -1013,9 +1026,17 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const recordPaymentError = recordPaymentMutation.error
     ? t(paymentErrorMessageKey(recordPaymentMutation.error))
     : null;
-  const recordExcessError = recordExcessMutation.error
-    ? t(paymentErrorMessageKey(recordExcessMutation.error))
-    : null;
+  // What the member is TOLD (separate from whether the key is settled): an
+  // identified refusal's own message; a permission or session refusal; and
+  // for anything else, that the outcome is unknown and how to check it.
+  const recordExcessError = excessIntentRefusal
+    ? excessIntentRefusal
+    : recordExcessMutation.error
+      ? paymentClaimRefusalOf(recordExcessMutation.error) !== null ||
+        ["forbidden", "unauthorized"].includes(classifyPaymentError(recordExcessMutation.error))
+        ? t(paymentErrorMessageKey(recordExcessMutation.error))
+        : t("order.recordExcess.uncertain")
+      : null;
   // Offered only with the server's outstanding figure on screen, and only
   // while it is positive: a transfer received when nothing is owed is an
   // unallocated receipt, outside this action (the server refuses it too).
@@ -1363,6 +1384,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                   className="tap-target text-label mt-1 h-11 w-full text-text-secondary"
                   onClick={() => {
                     recordExcessMutation.reset();
+                    setExcessIntentRefusal(null);
                     setRecordExcessOpen(true);
                   }}
                 >
@@ -1712,24 +1734,40 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           }}
           outstanding={settlement.outstanding}
           checkPending={excessCheckPending}
+          pendingAttempts={readExcessIntents(excessIntentScope)}
           pending={recordExcessMutation.isPending}
           error={recordExcessError}
           onConfirm={(submit) => {
             // Persisted before the request is sent: a reload mid-flight keeps it.
-            const { key } = beginExcessRecording(
-              excessIntentScope,
-              excessRecordingFingerprint(submit),
-            );
+            const begun = beginExcessRecording(excessIntentScope, {
+              fingerprint: excessRecordingFingerprint(submit),
+              method: submit.method,
+              amountMinor: submit.amountMinor,
+            });
+            if (begun.status !== "ready") {
+              // Nothing is sent; every existing key is kept.
+              recordExcessMutation.reset();
+              setExcessIntentRefusal(t(`order.recordExcess.intent.${begun.status}`));
+              return;
+            }
+            setExcessIntentRefusal(null);
             recordExcessMutation.mutate({
               ...submit,
-              idempotencyKey: key,
+              idempotencyKey: begun.entry.key,
               orderId: order.id,
               startedAs: principal,
             });
           }}
+          onForgetAttempt={(key) => {
+            forgetExcessRecording(excessIntentScope, key);
+            setExcessIntentRefusal(null);
+            setExcessIntentVersion((v) => v + 1);
+          }}
           onStartOver={() => {
             recordExcessMutation.reset();
             resetExcessRecording(excessIntentScope);
+            setExcessIntentRefusal(null);
+            setExcessIntentVersion((v) => v + 1);
           }}
         />
       ) : null}

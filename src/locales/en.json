@@ -1303,7 +1303,20 @@
       "startOver": "Start over",
       "checkOpen": "Check a transfer you recorded",
       "checkNote": "A transfer you recorded here may already be saved — its answer did not come back. Enter exactly the same details to check: it is never recorded twice. Anything else is refused while nothing is owed.",
-      "checkAmountHint": "Enter the same full amount as before."
+      "checkAmountHint": "Enter the same full amount as before.",
+      "uncertain": "We couldn't confirm whether this transfer was recorded — the answer was lost or unclear. It is kept so you can check it: enter exactly the same details again. It is never recorded twice.",
+      "intent": {
+        "capacity": "Five transfers started here still have no confirmed result, so another can't be started yet. Check one (enter the same details) or forget one you have confirmed was not recorded. Nothing was sent.",
+        "tab_capacity": "This tab is already keeping the results of transfers on 50 orders. Check or forget some of them first. Nothing was sent.",
+        "not_remembered": "This browser could not save what is needed to check this transfer later, so it was not sent. Free some space or use another tab, then try again."
+      },
+      "attempts": {
+        "title": "Transfers started here with no confirmed result",
+        "item": "{{method}} · {{amount}} · started {{time}}",
+        "forget": "Forget this attempt",
+        "forgetConsequence": "Only if you have checked this order's payments and it was NOT recorded: after forgetting, entering the same details is a new recording.",
+        "forgetConfirm": "Yes, forget it — it was not recorded"
+      }
     },
     "recordPaymentSheet": {
       "title": "Record payment",

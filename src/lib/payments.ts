@@ -60,6 +60,11 @@ import type {
 } from "@/server/payments/state-machine";
 import type { PaymentEvidenceType, PaymentEventType } from "@/server/payments/types";
 import type { Currency, Money } from "@/types";
+import {
+  paymentRefusalByCode,
+  paymentRefusalByExactMessage,
+  type PaymentClaimRefusal,
+} from "@/lib/payment-refusals";
 
 // Re-exported so screens never need their own import of the server-only
 // modules — this file's `import type` is the only place that touches them.
@@ -669,56 +674,22 @@ export function paymentErrorKey(kind: PaymentErrorKind): string {
  * confirmed order, the amount is more than its outstanding balance, or a
  * rejected claim cannot be reopened because other payments cover the total.
  * All are 409s, but "reload and try again" would be the wrong advice. Matched on
- * the public code, and on service.ts's own message where a code does not
- * survive the boundary.
+ * the public code, or on the EXACT message of src/lib/payment-refusals.ts where
+ * a code does not survive the boundary — never on a substring.
  */
-export type PaymentClaimRefusal =
-  | "order_not_payable"
-  | "exceeds_outstanding"
-  | "claim_exceeds_total"
-  | "outstanding_changed"
-  | "no_excess"
-  | "no_recorded_excess"
-  | "exceeds_returnable_excess"
-  | "nothing_outstanding"
-  | "duplicate_transfer_reference"
-  | "excess_reinstatement_required"
-  | "excess_changed";
+export type { PaymentClaimRefusal } from "@/lib/payment-refusals";
 
 export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (code === "order_not_payable") return "order_not_payable";
-  if (code === "payment_exceeds_outstanding") return "exceeds_outstanding";
-  if (code === "payment_claim_exceeds_total") return "claim_exceeds_total";
-  if (code === "payment_outstanding_changed") return "outstanding_changed";
-  if (code === "payment_no_excess") return "no_excess";
-  if (code === "payment_no_recorded_excess") return "no_recorded_excess";
-  if (code === "payment_exceeds_returnable_excess") return "exceeds_returnable_excess";
-  if (code === "payment_nothing_outstanding") return "nothing_outstanding";
-  if (code === "payment_duplicate_transfer_reference") return "duplicate_transfer_reference";
-  if (code === "payment_excess_reinstatement_required") return "excess_reinstatement_required";
-  if (code === "payment_excess_changed") return "excess_changed";
-  // Over the real server-function wire only `message` survives (statusCode and
-  // code are dropped — src/tests/helpers/server-fn-wire.ts), so the message
-  // fallback must also run when no status arrived; a status other than 409 is
-  // never a claim refusal.
+  // A structured public code, where the transport kept it.
+  const byCode = paymentRefusalByCode((err as { code?: unknown } | null)?.code);
+  if (byCode) return byCode;
+  // Over the real server-function wire only `message` survives. A status
+  // other than 409 is never a claim refusal; otherwise only an EXACT message
+  // from src/lib/payment-refusals.ts counts — "Failed to load outstanding
+  // balance" or "Upstream request already timed out" are not refusals.
   const status = statusCodeOf(err);
   if (status !== undefined && status !== 409) return null;
-  const message = messageOf(err);
-  if (/cannot take a payment/i.test(message)) return "order_not_payable";
-  if (/outstanding balance/i.test(message)) return "exceeds_outstanding";
-  if (/cannot be reopened/i.test(message)) return "claim_exceeds_total";
-  if (/outstanding amount changed/i.test(message)) return "outstanding_changed";
-  if (/not above the outstanding amount/i.test(message)) return "no_excess";
-  if (/not recorded with an excess/i.test(message)) return "no_recorded_excess";
-  if (/excess that can still be returned/i.test(message)) return "exceeds_returnable_excess";
-  if (/nothing is outstanding/i.test(message)) return "nothing_outstanding";
-  if (/reference is already recorded/i.test(message)) return "duplicate_transfer_reference";
-  if (/reinstate it with the excess action/i.test(message)) {
-    return "excess_reinstatement_required";
-  }
-  if (/excess is no longer the one recorded/i.test(message)) return "excess_changed";
-  return null;
+  return err instanceof Error ? paymentRefusalByExactMessage(err.message) : null;
 }
 
 /** i18n key for a payment error: a claim refusal when it is one, else its kind. */

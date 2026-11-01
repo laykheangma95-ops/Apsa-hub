@@ -273,20 +273,23 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     } = await import("@/lib/excess-intent");
     const scope = { userId: "u1", organizationId: "o1", orderId: "order-1" };
     const request = { method: "khqr", amountMinor: 10500, reference: "TRF-1", reason: "More" };
+    const ask = (r: typeof request) => ({
+      fingerprint: excessRecordingFingerprint(r),
+      method: r.method,
+      amountMinor: r.amountMinor,
+    });
+    const keyOf = (result: { status: string; entry?: { key: string } }) => {
+      expect(result.status).toBe("ready");
+      return result.entry!.key;
+    };
     let n = 0;
     const key = () => `k${++n}`;
-    const first = beginExcessRecording(scope, excessRecordingFingerprint(request), key);
-    // "Reload": nothing in the component survives; the store does.
-    expect(readExcessIntent(scope)?.key).toBe(first.key);
+    const first = keyOf(beginExcessRecording(scope, ask(request), key));
+    expect(readExcessIntent(scope)?.key).toBe(first);
     expect(hasPendingExcessRecording(scope)).toBe(true);
-    expect(
-      beginExcessRecording(
-        scope,
-        excessRecordingFingerprint({ ...request, reference: " TRF-1 " }),
-        key,
-      ).key,
-    ).toBe(first.key);
-    // Scoped: another order / member / organization never sees it.
+    expect(keyOf(beginExcessRecording(scope, ask({ ...request, reference: " TRF-1 " }), key))).toBe(
+      first,
+    );
     for (const other of [
       { ...scope, orderId: "order-2" },
       { ...scope, userId: "u2" },
@@ -294,22 +297,13 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     ]) {
       expect(readExcessIntent(other)).toBeNull();
     }
-    // A different (mistyped) request gets its own key and never displaces the
-    // unknown one: the original request still replays under its key.
-    const typo = beginExcessRecording(
-      scope,
-      excessRecordingFingerprint({ ...request, amountMinor: 10600 }),
-      key,
-    );
-    expect(typo.key).not.toBe(first.key);
-    excessRecordingSettled(scope, typo.key); // the server refused it: settled
-    expect(beginExcessRecording(scope, excessRecordingFingerprint(request), key).key).toBe(
-      first.key,
-    );
-    excessRecordingSettled(scope, first.key); // accepted (replayed)
-    expect(readExcessIntent(scope)).toBeNull();
+    const typo = keyOf(beginExcessRecording(scope, ask({ ...request, amountMinor: 10600 }), key));
+    expect(typo).not.toBe(first);
+    excessRecordingSettled(scope, typo);
+    expect(keyOf(beginExcessRecording(scope, ask(request), key))).toBe(first);
+    excessRecordingSettled(scope, first);
     expect(hasPendingExcessRecording(scope)).toBe(false);
-    beginExcessRecording(scope, excessRecordingFingerprint(request), key);
+    beginExcessRecording(scope, ask(request), key);
     resetExcessRecording(scope);
     expect(readExcessIntent(scope)).toBeNull();
   });
@@ -371,5 +365,164 @@ describe("068 repair — Payment detail and Payments use the server's figures", 
     expect(enKeys).toContain("payments.excessToReturn.filter");
     expect(enKeys).toContain("payments.actions.reinstateExcess.submit");
     expect(enKeys).toContain("payments.excess.state.nothing_to_return");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Replay safety: which errors settle a key, and capacity without eviction.
+// Behavioral negative controls against 8db32ba.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("replay safety — only a write-free refusal settles a key", () => {
+  it("negative control: 'Failed to load outstanding balance' and 'Upstream request already timed out' are uncertain, not refusals", async () => {
+    const { excessRecordingOutcomeOf } = await import("@/lib/excess-intent");
+    for (const message of [
+      "Failed to load outstanding balance",
+      "Upstream request already timed out",
+    ]) {
+      const err = new Error(message); // what the wire delivers: a message only
+      expect(excessRecordingOutcomeOf(err)).toBe("uncertain");
+      expect(paymentClaimRefusalOf(err)).toBeNull();
+    }
+  });
+
+  it("a structured write-free refusal, or its EXACT message, settles; a near miss does not", async () => {
+    const { excessRecordingOutcomeOf } = await import("@/lib/excess-intent");
+    const { PAYMENT_REFUSALS } = await import("@/lib/payment-refusals");
+    for (const kind of [
+      "nothing_outstanding",
+      "duplicate_transfer_reference",
+      "outstanding_changed",
+      "no_excess",
+      "order_not_payable",
+    ] as const) {
+      const { code, message } = PAYMENT_REFUSALS[kind];
+      expect(excessRecordingOutcomeOf(serverError("x", 409, code))).toBe("write_free");
+      expect(excessRecordingOutcomeOf(new Error(message))).toBe("write_free");
+      expect(excessRecordingOutcomeOf(new Error(`${message}.`))).toBe("uncertain");
+      expect(excessRecordingOutcomeOf(new Error(message.toUpperCase()))).toBe("uncertain");
+      expect(excessRecordingOutcomeOf(serverError(message, 500))).toBe("uncertain");
+    }
+  });
+
+  it("network errors, unknown server errors and pre-database refusals keep the key", async () => {
+    const { excessRecordingOutcomeOf } = await import("@/lib/excess-intent");
+    for (const err of [
+      new TypeError("Failed to fetch"),
+      new Error("Something went wrong. Reference: req_aaaaaaaaaaaaaaaaaaaa"),
+      new Error("Missing permission: payments.record_excess"),
+      new Error("Payment not found"),
+      serverError("x", 409, "idempotency_conflict"),
+      serverError("x", 409, "principal_changed"),
+      serverError("x", 429, "rate_limited"),
+      { notAnError: true },
+      null,
+    ]) {
+      expect(excessRecordingOutcomeOf(err)).toBe("uncertain");
+    }
+  });
+});
+
+describe("replay safety — capacity refuses new attempts, never evicts", () => {
+  const ask = (amountMinor: number) => ({
+    fingerprint: `fp-${amountMinor}`,
+    method: "khqr",
+    amountMinor,
+  });
+
+  it("negative control: an original attempt followed by more than five different ones still replays under its original key", async () => {
+    const { beginExcessRecording, readExcessIntents, EXCESS_INTENT_MAX_PENDING } =
+      await import("@/lib/excess-intent");
+    const scope = { userId: "cap-u", organizationId: "cap-o", orderId: "cap-order" };
+    const original = beginExcessRecording(scope, ask(10000), () => "original-key");
+    expect(original).toMatchObject({ status: "ready", entry: { key: "original-key" } });
+    let n = 0;
+    const statuses = [];
+    for (let i = 1; i <= 7; i++) {
+      statuses.push(beginExcessRecording(scope, ask(10000 + i), () => `other-${++n}`).status);
+    }
+    // Four more fit beside the original; the rest are refused, nothing evicted.
+    expect(EXCESS_INTENT_MAX_PENDING).toBe(5);
+    expect(statuses).toEqual([
+      "ready",
+      "ready",
+      "ready",
+      "ready",
+      "capacity",
+      "capacity",
+      "capacity",
+    ]);
+    expect(readExcessIntents(scope).map((e) => e.key)).toEqual([
+      "original-key",
+      "other-1",
+      "other-2",
+      "other-3",
+      "other-4",
+    ]);
+    // The original request again: its original key, even at capacity.
+    expect(beginExcessRecording(scope, ask(10000), () => "never")).toMatchObject({
+      status: "ready",
+      entry: { key: "original-key" },
+    });
+  });
+
+  it("activity on many other orders and members never evicts an unresolved key; the tab limit refuses instead", async () => {
+    const {
+      beginExcessRecording,
+      readExcessIntent,
+      resetExcessRecording,
+      EXCESS_INTENT_MAX_SCOPES,
+    } = await import("@/lib/excess-intent");
+    const keep = { userId: "tab-u0", organizationId: "tab-o", orderId: "tab-order-0" };
+    expect(beginExcessRecording(keep, ask(1), () => "keep-key").status).toBe("ready");
+    const others = [];
+    for (let i = 1; i < EXCESS_INTENT_MAX_SCOPES + 10; i++) {
+      const scope = { userId: `tab-u${i % 3}`, organizationId: "tab-o", orderId: `tab-order-${i}` };
+      others.push({ scope, status: beginExcessRecording(scope, ask(1), () => `k-${i}`).status });
+    }
+    expect(others.filter((o) => o.status === "tab_capacity").length).toBeGreaterThan(0);
+    expect(readExcessIntent(keep)?.key).toBe("keep-key");
+    // Explicit reset frees room without touching anyone else's key.
+    for (const o of others) if (o.status === "ready") resetExcessRecording(o.scope);
+    expect(readExcessIntent(keep)?.key).toBe("keep-key");
+    resetExcessRecording(keep);
+    expect(readExcessIntent(keep)).toBeNull();
+  });
+
+  it("survives a reload through sessionStorage, with no expiry; storage refusing the write refuses the attempt", async () => {
+    const backing = new Map<string, string>();
+    let refuseWrites = false;
+    const fake = {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (refuseWrites) throw new Error("QuotaExceededError");
+        backing.set(k, v);
+      },
+      removeItem: (k: string) => backing.delete(k),
+    };
+    const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+    Object.defineProperty(globalThis, "sessionStorage", { value: fake, configurable: true });
+    try {
+      const intent = await import("@/lib/excess-intent");
+      const scope = { userId: "s-u", organizationId: "s-o", orderId: "s-order" };
+      const old = Date.now() - 30 * 24 * 60 * 60 * 1000; // a month ago
+      expect(intent.beginExcessRecording(scope, ask(500), () => "stored-key", old).status).toBe(
+        "ready",
+      );
+      // A "reload": nothing in memory, only the tab's storage.
+      expect(JSON.stringify([...backing.values()])).toContain("stored-key");
+      expect(intent.readExcessIntent(scope)?.key).toBe("stored-key");
+      refuseWrites = true;
+      expect(intent.beginExcessRecording(scope, ask(600), () => "lost").status).toBe(
+        "not_remembered",
+      );
+      refuseWrites = false;
+      expect(intent.readExcessIntents(scope).map((e) => e.key)).toEqual(["stored-key"]);
+      intent.forgetExcessRecording(scope, "stored-key");
+      expect(intent.readExcessIntent(scope)).toBeNull();
+    } finally {
+      if (original) Object.defineProperty(globalThis, "sessionStorage", original);
+      else delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
+    }
   });
 });

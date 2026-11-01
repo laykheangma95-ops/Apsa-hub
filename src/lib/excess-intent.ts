@@ -10,19 +10,49 @@
  * tab's sessionStorage, not in the sheet.
  *
  * One record per member + organization + order + form purpose. It holds every
- * request whose outcome is still UNKNOWN (a lost response, a network or server
- * error): its key and a fingerprint of what was asked (method, amount,
- * reference, reason — hashed; the reference and reason text are never
- * stored). The same request again reuses its key. A different request gets a
- * new key and never displaces an unknown one, so a mistyped retry cannot lose
- * the key that would replay the original.
+ * request whose outcome is still UNKNOWN: its key, a fingerprint of what was
+ * asked (method, amount, reference, reason — hashed), and, so the member can
+ * recognise it, its method, amount and start time. The reference and reason
+ * text are never stored.
  *
- * An entry is settled — removed — when the server answers that request
- * conclusively: accepted (made now or replayed), or refused (a refusal means
- * that key wrote nothing). "Start over" clears the record. Bounded: 24 hours,
- * 5 unknown requests per order, 50 records per tab. Never authority.
+ * ── Settlement: when an entry is removed ────────────────────────────────────
+ *   * the server answered the request under its key with a payment (made now,
+ *     or a replay of the committed one);
+ *   * the server answered with one of EXCESS_RECORDING_WRITE_FREE_REFUSALS,
+ *     identified by its structured code or its EXACT message
+ *     (excessRecordingOutcomeOf below) — the database reaches those only
+ *     after answering a replay, so the key never wrote anything;
+ *   * the member forgets that one attempt, or starts over, explicitly.
+ *   Nothing else removes one: not a network error, a timeout, a malformed or
+ *   unknown response, a refusal raised before the database, a different
+ *   payload, activity on other orders, or time.
+ *
+ * ── Capacity: refused, never evicted ────────────────────────────────────────
+ *   At most EXCESS_INTENT_MAX_PENDING unknown requests per order and
+ *   EXCESS_INTENT_MAX_SCOPES orders/members per tab. When a NEW request would
+ *   exceed either, it is refused ("capacity") and every existing key is kept;
+ *   the member checks an existing one (the same details replay) or forgets
+ *   one they have confirmed was not recorded. A write that storage refuses
+ *   (quota) is refused the same way ("not_remembered"): nothing is sent that
+ *   could not be replayed after a reload.
+ *
+ * ── Limits that remain ──────────────────────────────────────────────────────
+ *   sessionStorage is this tab's only: closing the tab, clearing site data, or
+ *   another tab or device loses the keys. Then the order's own payment list
+ *   (and Payments → "Excess to return") shows what was recorded, and the
+ *   server refuses a second recording of the same transfer reference
+ *   (duplicate_transfer_reference) — never a double recording. There is no
+ *   expiry: an entry lives until it is settled or the tab's storage goes.
+ *
+ * Never authority: a key grants nothing — the server binds it to the member,
+ * the order and the request.
  */
 import { cyrb53 } from "@/lib/refund-intent";
+import {
+  EXCESS_RECORDING_WRITE_FREE_REFUSALS,
+  paymentRefusalByCode,
+  paymentRefusalByExactMessage,
+} from "@/lib/payment-refusals";
 
 export interface ExcessIntentScope {
   userId: string;
@@ -34,6 +64,9 @@ export interface PendingExcessRecording {
   key: string;
   fingerprint: string;
   startedAt: number;
+  /** For the member to recognise the attempt — never the reference or reason. */
+  method: string;
+  amountMinor: number;
 }
 
 interface ExcessIntentRecord {
@@ -41,11 +74,10 @@ interface ExcessIntentRecord {
   updatedAt: number;
 }
 
-const STORAGE_ITEM = "apsa.excess-intent.v2";
+const STORAGE_ITEM = "apsa.excess-intent.v3";
 const PURPOSE = "record_excess";
-export const EXCESS_INTENT_TTL_MS = 24 * 60 * 60 * 1000;
-export const EXCESS_INTENT_MAX_RECORDS = 50;
 export const EXCESS_INTENT_MAX_PENDING = 5;
+export const EXCESS_INTENT_MAX_SCOPES = 50;
 
 type Store = Record<string, ExcessIntentRecord>;
 
@@ -66,7 +98,7 @@ function tabStorage(): Storage | null {
   }
 }
 
-function load(now: number): Store {
+function load(): Store {
   const storage = tabStorage();
   let store: Store = fallback;
   if (storage) {
@@ -79,31 +111,23 @@ function load(now: number): Store {
   }
   const kept: Store = {};
   for (const [id, record] of Object.entries(store ?? {})) {
-    if (
-      record &&
-      Array.isArray(record.pending) &&
-      record.pending.length > 0 &&
-      now - record.updatedAt < EXCESS_INTENT_TTL_MS
-    ) {
-      kept[id] = record;
-    }
+    if (record && Array.isArray(record.pending) && record.pending.length > 0) kept[id] = record;
   }
   return kept;
 }
 
-function save(store: Store): void {
-  const newestFirst = Object.entries(store).sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
-  const bounded = Object.fromEntries(newestFirst.slice(0, EXCESS_INTENT_MAX_RECORDS));
+/** Persist the whole store — never truncated. false when storage refused it. */
+function save(store: Store): boolean {
   const storage = tabStorage();
   if (!storage) {
-    fallback = bounded;
-    return;
+    fallback = store;
+    return true;
   }
   try {
-    storage.setItem(STORAGE_ITEM, JSON.stringify(bounded));
+    storage.setItem(STORAGE_ITEM, JSON.stringify(store));
+    return true;
   } catch {
-    // Quota: nothing remembered. Safe — the server refuses a second recording
-    // of the same transfer reference.
+    return false;
   }
 }
 
@@ -118,63 +142,97 @@ export function excessRecordingFingerprint(request: {
   );
 }
 
-/** The newest request with an unknown outcome for this member, organization and order. */
-export function readExcessIntent(
-  scope: ExcessIntentScope,
-  now = Date.now(),
-): PendingExcessRecording | null {
-  return load(now)[scopeId(scope)]?.pending.at(-1) ?? null;
+/** Every request with an unknown outcome for this member, organization and order, oldest first. */
+export function readExcessIntents(scope: ExcessIntentScope): PendingExcessRecording[] {
+  return load()[scopeId(scope)]?.pending ?? [];
+}
+
+/** The newest request with an unknown outcome, if any. */
+export function readExcessIntent(scope: ExcessIntentScope): PendingExcessRecording | null {
+  return readExcessIntents(scope).at(-1) ?? null;
 }
 
 /** Is a recording on this order still of unknown outcome (e.g. its response was lost)? */
-export function hasPendingExcessRecording(scope: ExcessIntentScope, now = Date.now()): boolean {
-  return readExcessIntent(scope, now) !== null;
+export function hasPendingExcessRecording(scope: ExcessIntentScope): boolean {
+  return readExcessIntents(scope).length > 0;
 }
+
+export type BeginExcessRecordingResult =
+  | { status: "ready"; entry: PendingExcessRecording }
+  /** This order already has the maximum of unknown requests; all are kept. */
+  | { status: "capacity"; pending: PendingExcessRecording[] }
+  /** This tab already remembers the maximum of orders/members; all are kept. */
+  | { status: "tab_capacity" }
+  /** Storage refused the write: nothing may be sent that could not be replayed. */
+  | { status: "not_remembered" };
 
 /**
  * The key for the recording being submitted: an unknown request's key when it
  * asks for the same thing (a retry — replayed if it committed), else a new
- * one, added beside the others. Persisted BEFORE the request is sent, so a
- * reload mid-flight still finds it.
+ * one, added beside the others — or a refusal, keeping every existing key,
+ * when there is no room. Persisted BEFORE the request is sent.
  */
 export function beginExcessRecording(
   scope: ExcessIntentScope,
-  fingerprint: string,
+  request: { fingerprint: string; method: string; amountMinor: number },
   newKey: () => string = () => crypto.randomUUID(),
   now = Date.now(),
-): PendingExcessRecording {
-  const store = load(now);
+): BeginExcessRecordingResult {
+  const store = load();
   const id = scopeId(scope);
   const pending = store[id]?.pending ?? [];
-  const same = pending.find((entry) => entry.fingerprint === fingerprint);
-  if (same) {
-    store[id] = { pending, updatedAt: now };
-    save(store);
-    return same;
+  const same = pending.find((entry) => entry.fingerprint === request.fingerprint);
+  if (same) return { status: "ready", entry: same };
+  if (pending.length >= EXCESS_INTENT_MAX_PENDING) return { status: "capacity", pending };
+  if (!store[id] && Object.keys(store).length >= EXCESS_INTENT_MAX_SCOPES) {
+    return { status: "tab_capacity" };
   }
-  const entry = { key: newKey(), fingerprint, startedAt: now };
-  store[id] = { pending: [...pending, entry].slice(-EXCESS_INTENT_MAX_PENDING), updatedAt: now };
-  save(store);
-  return entry;
+  const entry: PendingExcessRecording = {
+    key: newKey(),
+    fingerprint: request.fingerprint,
+    startedAt: now,
+    method: request.method,
+    amountMinor: request.amountMinor,
+  };
+  store[id] = { pending: [...pending, entry], updatedAt: now };
+  return save(store) ? { status: "ready", entry } : { status: "not_remembered" };
 }
 
-/**
- * The server answered the request under this key conclusively — accepted, or
- * refused (so that key wrote nothing). Its entry is gone; the others stay.
- */
+/** Remove exactly this entry (a settled request, or the member's explicit choice). */
 export function excessRecordingSettled(scope: ExcessIntentScope, key: string): void {
-  const now = Date.now();
-  const store = load(now);
+  const store = load();
   const id = scopeId(scope);
   const remaining = (store[id]?.pending ?? []).filter((entry) => entry.key !== key);
-  if (remaining.length > 0) store[id] = { pending: remaining, updatedAt: now };
+  if (remaining.length > 0) store[id] = { pending: remaining, updatedAt: Date.now() };
   else delete store[id];
   save(store);
 }
 
+/** The member explicitly forgets ONE attempt they confirmed was not recorded. */
+export const forgetExcessRecording = excessRecordingSettled;
+
 /** The member explicitly started over: nothing is remembered for this order. */
 export function resetExcessRecording(scope: ExcessIntentScope): void {
-  const store = load(Date.now());
+  const store = load();
   delete store[scopeId(scope)];
   save(store);
+}
+
+/**
+ * What a failed "record with excess" request proves about its key:
+ *   write_free — one of EXCESS_RECORDING_WRITE_FREE_REFUSALS, by its structured
+ *                code or its EXACT message: the key wrote nothing; settle it;
+ *   uncertain  — anything else (network error, timeout, malformed or unknown
+ *                response, a refusal raised before the database): keep it.
+ * Separate from what is SHOWN to the member (paymentErrorMessageKey).
+ */
+export function excessRecordingOutcomeOf(err: unknown): "write_free" | "uncertain" {
+  const byCode = paymentRefusalByCode((err as { code?: unknown } | null)?.code);
+  const statusCode = (err as { statusCode?: unknown } | null)?.statusCode;
+  const refusal =
+    byCode ??
+    (err instanceof Error && (statusCode === undefined || statusCode === 409)
+      ? paymentRefusalByExactMessage(err.message)
+      : null);
+  return refusal && EXCESS_RECORDING_WRITE_FREE_REFUSALS.has(refusal) ? "write_free" : "uncertain";
 }

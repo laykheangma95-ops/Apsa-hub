@@ -228,9 +228,30 @@ action only while the server's outstanding figure is positive.
 - The sheet's idempotency key is kept per member + organization + order in
   this tab's session storage (`src/lib/excess-intent.ts`, the refund-intent
   pattern): the same request after a reload replays. Every request whose
-  outcome is unknown keeps its own key (a different, mistyped request never
-  displaces it); an entry is settled by a conclusive answer (accepted, or
-  refused — a refusal wrote nothing) or by "Start over".
+  outcome is unknown keeps its own key; a different (e.g. mistyped) request
+  never displaces or overwrites one.
+- **Settlement** — an entry is removed only by: a payment in the response
+  (made now or replayed); one of the database's write-free refusals —
+  `order_not_payable`, `nothing_outstanding`, `stale` (outstanding changed),
+  `no_excess`, `duplicate_transfer_reference`, which
+  `record_payment_with_excess_v1` reaches only after answering a replay of the
+  same key — identified by structured code or by its **exact** message from
+  `src/lib/payment-refusals.ts` (the only text that survives the
+  server-function wire; the boundary sanitizes every non-public error); or the
+  member explicitly forgetting that attempt (after confirming it was not
+  recorded) or starting over. Network errors, timeouts, malformed or unknown
+  responses, sanitized server errors and refusals raised before the database
+  (permission, principal, rate limit, validation, not found, idempotency
+  conflict) keep the key, and the member is told the outcome is unknown and
+  how to check it. What is _shown_ and whether the key is _settled_ are
+  separate decisions; neither uses substring matching any more.
+- **Capacity** — at most 5 unknown attempts per order and 50 orders/members
+  per tab. A new attempt beyond either is refused before anything is sent;
+  no key is ever evicted. Storage refusing the write (quota) refuses the
+  attempt too. There is no expiry. Remaining limit: closing the tab, clearing
+  site data, or another tab/device loses the keys — then the order's payment
+  list (and Payments → "Excess to return") shows what was recorded, and the
+  server refuses a second recording of the same reference.
 - A lost response can leave the order owing nothing (the recording
   committed). Order detail then offers **"Check a transfer you recorded"**
   instead of the ordinary action: re-entering the same details replays under

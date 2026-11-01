@@ -305,8 +305,17 @@ const holdResponseNext = new Set<Gated>();
 const heldResponses: (() => void)[] = [];
 /** The next request of this kind fails on the server with this error instead of running. */
 const failNextWith = new Map<Gated, unknown>();
+/**
+ * The next request of this kind reaches the browser as THIS error, as a proxy,
+ * gateway or fetch failure would deliver it — after the server committed
+ * (`commit: true`) or without the server ever running it (`commit: false`).
+ */
+const transportFailNext = new Map<Gated, { commit: boolean; error: Error }>();
 
 async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) => Promise<T>) {
+  const transport = transportFailNext.get(fn);
+  if (transport) transportFailNext.delete(fn);
+  if (transport && !transport.commit) throw transport.error;
   if (holdDispatchNext.has(fn)) {
     holdDispatchNext.delete(fn);
     await new Promise<void>((go) => dispatchGates.push(go));
@@ -342,6 +351,7 @@ async function serve<T>(fn: Gated, data: Json, run: (ctx: AuthorizationContext) 
   }
   if (holdResponse) await new Promise<void>((release) => heldResponses.push(release));
   if (lose) throw new TypeError("Failed to fetch");
+  if (transport) throw transport.error;
   // What the screen receives is what the real boundary and TanStack's
   // serialization deliver: only the message (src/tests/helpers/server-fn-wire.ts).
   if ("error" in outcome) throw await overServerFnWire(outcome.error, WIRE_FILE[fn]);
@@ -686,6 +696,7 @@ afterEach(async () => {
   for (const release of heldResponses) release();
   heldResponses.length = 0;
   failNextWith.clear();
+  transportFailNext.clear();
   realDeliveryReads = false;
   resetGrants();
   route.userId = server.userId = USER_A;
@@ -3522,6 +3533,167 @@ describe("Record with excess: a lost response, then a reload", () => {
       for (const key of EXCESS_GRANTS) grants.get(USER_A)!.delete(key);
       sessionStorage.clear();
     }
+  });
+
+  async function withExcessGrants(run: () => Promise<void>) {
+    for (const key of EXCESS_GRANTS) grants.get(USER_A)!.add(key);
+    sessionStorage.clear();
+    try {
+      await run();
+    } finally {
+      for (const key of EXCESS_GRANTS) grants.get(USER_A)!.delete(key);
+      sessionStorage.clear();
+    }
+  }
+  const startButton = () => checkButton() ?? openButton();
+  async function openSheet() {
+    await waitFor(() => startButton(), "the excess action");
+    await click(startButton(), "the excess action");
+  }
+  const dialogText = () => dialog()?.textContent ?? "";
+  /** Does this tab still remember an unresolved key for this order (any storage version)? */
+  const remembered = (orderId: string) => {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const name = sessionStorage.key(i);
+      if (name && (sessionStorage.getItem(name) ?? "").includes(orderId)) return true;
+    }
+    return false;
+  };
+
+  it("negative control: 'Upstream request already timed out' after commit keeps the key — the browser says it is unknown, and the same details replay", async () => {
+    await withExcessGrants(async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await openSheet();
+      await fillExcess("12000", "TRF-UNSURE-1", "Customer sent 12,000");
+      transportFailNext.set("payment", {
+        commit: true,
+        error: new Error("Upstream request already timed out"),
+      });
+      await submitExcess();
+      await waitFor(() => outcomes.length === 1, "the server's answer");
+      expect(outcomes).toEqual(["ok"]);
+      expect(await excessPayments(orderId)).toHaveLength(1);
+      // 8db32ba settled the key here ("already" → conflict): no replay left.
+      await settle(6);
+      expect(remembered(orderId)).toBe(true);
+      // Useful feedback, not a generic "conflict" — and the key is kept.
+      await waitFor(
+        () => dialogText().includes(en.order.recordExcess.uncertain),
+        "the 'could not confirm' message",
+      );
+      await reload(orderId);
+      expect(checkButton()).toBeDefined();
+      await openSheet();
+      await fillExcess("12000", "TRF-UNSURE-1", "Customer sent 12,000");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 2, "the replay");
+      expect(outcomes[1]).toBe("ok");
+      expect(sent[1]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+      expect(await excessPayments(orderId)).toHaveLength(1);
+    });
+  });
+
+  it("negative control: 'Failed to load outstanding balance' (nothing reached the server) keeps the key; the same details then record once under it", async () => {
+    await withExcessGrants(async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await openSheet();
+      await fillExcess("12000", "TRF-UNSURE-2", "Customer sent 12,000");
+      transportFailNext.set("payment", {
+        commit: false,
+        error: new Error("Failed to load outstanding balance"),
+      });
+      await submitExcess();
+      // 8db32ba settled the key here ("outstanding balance" → exceeds_outstanding).
+      await settle(6);
+      expect(remembered(orderId)).toBe(true);
+      await waitFor(
+        () => dialogText().includes(en.order.recordExcess.uncertain),
+        "the 'could not confirm' message",
+      );
+      // Not mistaken for "more than the order still owes".
+      expect(dialogText()).not.toContain(en.payments.errors.exceeds_outstanding);
+      expect(outcomes).toEqual([]);
+      await reload(orderId);
+      expect(checkButton()).toBeDefined();
+      await openSheet();
+      expect(dialogText()).toContain(en.order.recordExcess.attempts.title);
+      await fillExcess("12000", "TRF-UNSURE-2", "Customer sent 12,000");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 1, "the recording");
+      expect(outcomes).toEqual(["ok"]);
+      const payments = await excessPayments(orderId);
+      expect(payments).toHaveLength(1);
+      // The key minted before the uncertain failure is the one that recorded.
+      expect(payments[0]!.idempotency_key).toBe(sent[0]!.data.idempotencyKey);
+      await reload(orderId);
+      expect(checkButton()).toBeUndefined();
+    });
+  });
+
+  it("an unknown (sanitized) server error keeps the key", async () => {
+    await withExcessGrants(async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await openSheet();
+      await fillExcess("12000", "TRF-UNSURE-3", "Customer sent 12,000");
+      failNextWith.set("payment", new Error("database exploded")); // not public: sanitized
+      await submitExcess();
+      await waitFor(() => outcomes.length === 1, "the failure");
+      await waitFor(
+        () => dialogText().includes(en.order.recordExcess.uncertain),
+        "the 'could not confirm' message",
+      );
+      expect(await excessPayments(orderId)).toHaveLength(0);
+      await reload(orderId);
+      expect(checkButton()).toBeDefined();
+    });
+  });
+
+  it("capacity: a sixth different attempt is refused in the browser, nothing is sent, and the original still records under its own key", async () => {
+    await withExcessGrants(async () => {
+      const orderId = await seedConfirmed();
+      await openOrderDetail(orderId);
+      await openSheet();
+      for (const amount of ["12000", "12100", "12200", "12300", "12400"]) {
+        await fillExcess(amount, "TRF-CAP-1", "Customer sent more");
+        transportFailNext.set("payment", {
+          commit: false,
+          error: new TypeError("Failed to fetch"),
+        });
+        await submitExcess();
+        await settle(10);
+      }
+      const keys = sent.map((r) => r.data.idempotencyKey);
+      expect(sent).toHaveLength(0); // none reached the server's handler
+      await fillExcess("12500", "TRF-CAP-1", "Customer sent more");
+      await submitExcess();
+      await settle(6);
+      // 8db32ba sent it (and evicted the oldest key); now nothing is sent.
+      expect(sent).toHaveLength(0);
+      expect(dialogText()).toContain(en.order.recordExcess.intent.capacity);
+      expect(remembered(orderId)).toBe(true);
+      expect(keys).toEqual([]);
+      // The original (first) attempt's details: its own key, which records once.
+      await fillExcess("12000", "TRF-CAP-1", "Customer sent more");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 1, "the recording");
+      expect(outcomes).toEqual(["ok"]);
+      expect(await excessPayments(orderId)).toHaveLength(1);
+      // The four other attempts are still kept (nothing was evicted). Forgetting
+      // one is explicit, states its consequence, and removes only that one.
+      const attemptItems = () => dialog()?.querySelectorAll("li").length ?? 0;
+      await openSheet();
+      expect(attemptItems()).toBe(4);
+      await click(button(en.order.recordExcess.attempts.forget, dialog()!), "Forget this attempt");
+      expect(dialogText()).toContain(en.order.recordExcess.attempts.forgetConsequence);
+      await click(
+        button(en.order.recordExcess.attempts.forgetConfirm, dialog()!),
+        "Yes, forget it",
+      );
+      expect(attemptItems()).toBe(3);
+    });
   });
 
   it("without an unknown recording, a fully claimed order offers nothing", async () => {

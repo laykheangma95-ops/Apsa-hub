@@ -56,6 +56,8 @@ export function RecordExcessPaymentSheet({
   onConfirm,
   onStartOver,
   checkPending = false,
+  pendingAttempts = [],
+  onForgetAttempt,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -67,6 +69,19 @@ export function RecordExcessPaymentSheet({
    * presents the amount as a new excess over what is now owed.
    */
   checkPending?: boolean;
+  /**
+   * The attempts started here whose outcome is unknown (method, amount, when —
+   * never the reference or reason). Entering the same details checks one: it
+   * replays under its own key.
+   */
+  pendingAttempts?: ReadonlyArray<{
+    key: string;
+    method: string;
+    amountMinor: number;
+    startedAt: number;
+  }>;
+  /** The member explicitly forgets ONE attempt they confirmed was not recorded. */
+  onForgetAttempt?: (key: string) => void;
   pending: boolean;
   error: string | null;
   onConfirm: (submit: RecordExcessPaymentSubmit) => void;
@@ -78,6 +93,8 @@ export function RecordExcessPaymentSheet({
   const [amountText, setAmountText] = useState("");
   const [reference, setReference] = useState("");
   const [reason, setReason] = useState("");
+  /** The attempt whose "forget" the member asked for, awaiting confirmation. */
+  const [forgetting, setForgetting] = useState<string | null>(null);
 
   function clear() {
     setMethod("bank_transfer");
@@ -151,6 +168,61 @@ export function RecordExcessPaymentSheet({
           >
             {t("order.recordExcess.checkNote")}
           </p>
+        ) : null}
+        {pendingAttempts.length > 0 ? (
+          <div
+            className="flex flex-col gap-2"
+            role="group"
+            aria-label={t("order.recordExcess.attempts.title")}
+          >
+            <p className="text-label text-text-secondary">
+              {t("order.recordExcess.attempts.title")}
+            </p>
+            <ul className="flex flex-col gap-2">
+              {pendingAttempts.map((attempt) => (
+                <li
+                  key={attempt.key}
+                  className="flex flex-col gap-1 rounded-xl border border-border-default px-3 py-2"
+                >
+                  <span className="text-body-sm tnum text-text-primary">
+                    {t("order.recordExcess.attempts.item", {
+                      method: t(`pos.method.${attempt.method}`),
+                      amount: formatMoney({ amount: attempt.amountMinor, currency }),
+                      time: new Date(attempt.startedAt).toLocaleTimeString(),
+                    })}
+                  </span>
+                  {onForgetAttempt ? (
+                    forgetting === attempt.key ? (
+                      <span className="flex flex-col gap-1">
+                        <span className="text-caption text-text-secondary">
+                          {t("order.recordExcess.attempts.forgetConsequence")}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          className="tap-target h-11 justify-start px-0 text-status-danger-text"
+                          onClick={() => {
+                            setForgetting(null);
+                            onForgetAttempt(attempt.key);
+                          }}
+                        >
+                          {t("order.recordExcess.attempts.forgetConfirm")}
+                        </Button>
+                      </span>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        className="tap-target h-11 justify-start px-0 text-text-secondary"
+                        disabled={pending}
+                        onClick={() => setForgetting(attempt.key)}
+                      >
+                        {t("order.recordExcess.attempts.forget")}
+                      </Button>
+                    )
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : null}
         <p className="text-body-sm text-text-primary" role="status">
           {t("order.recordExcess.outstanding", { amount: formatMoney(outstanding) })}
