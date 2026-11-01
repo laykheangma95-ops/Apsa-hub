@@ -149,6 +149,11 @@ export interface PaymentExcessState {
   recorded: Money;
   returned: Money;
   returnable: Money;
+  /**
+   * The order still holds at least its total (net received ≥ total) — read
+   * now, so a later ordinary refund of the sale itself turns it false.
+   */
+  saleFullyPaid: boolean;
 }
 
 export interface PaymentDetail extends PaymentSummary {
@@ -594,6 +599,12 @@ function correctFailureToError(result: { status: string }): Error {
       return badRequest("A correction reason is required");
     case "no_changes":
       return badRequest("Provide at least one field to correct");
+    // Migration 068: a reference held by a payment recorded with excess (or,
+    // correcting such a payment, held by any payment) is never shared.
+    case "duplicate_transfer_reference":
+      return duplicateTransferReference();
+    case "reference_required":
+      return badRequest("The transfer reference is required");
     default:
       return new Error(`Payment correction failed: ${result.status}`);
   }
@@ -1379,6 +1390,7 @@ async function loadDetail(
             recorded: toMoney(excessState.recorded_excess_minor, excessState.currency),
             returned: toMoney(excessState.excess_returned_minor, excessState.currency),
             returnable: toMoney(excessState.returnable_excess_minor, excessState.currency),
+            saleFullyPaid: excessState.order_net_minor >= excessState.order_total_minor,
           }
         : null,
   };

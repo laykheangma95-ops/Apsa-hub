@@ -1300,7 +1300,10 @@
       "submit": "Record transfer",
       "working": "Recording…",
       "done": "Transfer recorded. Return the excess from the payment once it is confirmed.",
-      "startOver": "Start over"
+      "startOver": "Start over",
+      "checkOpen": "Check a transfer you recorded",
+      "checkNote": "A transfer you recorded here may already be saved — its answer did not come back. Enter exactly the same details to check: it is never recorded twice. Anything else is refused while nothing is owed.",
+      "checkAmountHint": "Enter the same full amount as before."
     },
     "recordPaymentSheet": {
       "title": "Record payment",
@@ -2510,7 +2513,8 @@
         "nothing_to_return": "Nothing left to return: this order no longer holds more than its total.",
         "not_a_claim": "This transfer is rejected or reversed, so there is nothing to return."
       },
-      "refundStatusNote": "The order shows “partly refunded” because the excess was returned. The sale itself is still paid in full."
+      "refundStatusNote": "The order shows “partly refunded” because the excess was returned. The sale itself is still paid in full.",
+      "refundStatusNoteSaleRefunded": "The excess was returned, and part or all of the sale itself has been refunded since. The order's refund status covers both."
     },
     "refunds": {
       "title": "Refunds on this payment",

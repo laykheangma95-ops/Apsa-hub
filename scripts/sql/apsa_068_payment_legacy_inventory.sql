@@ -68,6 +68,7 @@ ord AS (
 --   pending → paid    confirmed; an excess is created only when received + principal > total
 --                     (on a draft too — a draft claim under the total creates none)
 --   failed → pending  refused when received + other pending + principal − refunded > total
+--                     (no lifecycle rule: a rejected claim on a draft that fits is reinstatable)
 judged AS (
   SELECT pa.*, od.received_minor,
     od.pending_minor - CASE WHEN pa.status = 'pending' THEN pa.amount_minor ELSE 0 END
@@ -127,11 +128,10 @@ findings (check_id, category, currency, organizations, orders, payments, amount_
   UNION ALL
   SELECT '04.02', 'rejected_claim_068_refuses_to_reinstate', currency,
     COUNT(DISTINCT organization_id), COUNT(DISTINCT order_id), COUNT(*), SUM(amount_minor),
-    'Rejected (mismatch / failed) claims that 068 refuses to move back to pending.'
+    'Rejected (mismatch / failed) claims that 068 refuses to move back to pending: those that would take received + pending claims above the order total (claim_exceeds_total). The rule has no lifecycle condition, so a rejected claim on a draft that still fits is reinstatable and is not counted. (Claims recorded with excess, and references held by them, exist only after 068 and are not legacy.)'
   FROM judged
   WHERE status = 'failed'
-    AND (lifecycle = 'draft'
-      OR received_minor + other_pending - refunded + amount_minor > total_minor)
+    AND received_minor + other_pending - refunded + amount_minor > total_minor
   GROUP BY currency
   -- 9. Context
   UNION ALL

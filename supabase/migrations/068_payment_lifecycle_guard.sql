@@ -107,12 +107,12 @@
 -- payment_excess_state_v1, record_payment_with_excess_v1,
 -- return_payment_excess_v1, reinstate_excess_payment_v1,
 -- list_excess_to_return_v1; EXECUTE for service_role only where callable).
--- record_payment_v2 and verify_payment_v1 keep their signatures, owners and
--- grants (CREATE OR REPLACE). No existing row is changed: every existing
+-- record_payment_v2, verify_payment_v1 and correct_payment_v2 keep their
+-- signatures, owners and grants (CREATE OR REPLACE). No existing row is changed: every existing
 -- payment gets excess_recorded = false, so no index can meet a conflict.
 --
 -- Rollback (if 068 must be withdrawn before any excess payment exists):
--- re-apply 062's record_payment_v2 and 040's verify_payment_v1, drop the
+-- re-apply 062's record_payment_v2 and correct_payment_v2 and 040's verify_payment_v1, drop the
 -- functions, the two indexes, the trigger and the column, and delete the
 -- payments.record_excess permission rows. The enum value cannot be dropped
 -- and is harmless unused. After an excess payment exists, withdraw forward
@@ -128,6 +128,8 @@ BEGIN
      OR to_regprocedure('public.payment_replay_matches_v1(uuid,uuid,uuid,uuid,text,bigint,text,text)') IS NULL
      OR to_regprocedure('public.verify_payment_before_order_v1(uuid,uuid,uuid,text,text,text,jsonb)') IS NULL
      OR to_regprocedure('public.refund_payment_v2(uuid,uuid,uuid,bigint,text,text,bigint,uuid[])') IS NULL
+     OR to_regprocedure('public.correct_payment_v2(uuid,uuid,uuid,text,text,text)') IS NULL
+     OR to_regprocedure('public.correct_payment_v1(uuid,uuid,uuid,text,text,text)') IS NULL
      OR to_regclass('public.order_payment_totals') IS NULL THEN
     RAISE EXCEPTION '068_payment_lifecycle_guard requires migrations 040 and 062 to be applied first';
   END IF;
@@ -362,16 +364,20 @@ $$;
 --                longer a claim. Taking it back (failed → pending) rechecks
 --                the reference under the same lock, so a released reference
 --                can never be held twice.
---   record_payment_with_excess_v1 refuses a reference held by ANY payment
---   ('duplicate_transfer_reference'); record_payment_v2 refuses one held by a
---   payment recorded with excess. Race safety: every writer takes the
---   canonical-reference advisory lock (key space 68068) after the order lock
---   and rechecks after the wait; a partial unique index over payments recorded
---   with excess is the database's own backstop (excess vs excess, including a
---   reference changed later by correct_payment_v2).
---   Not covered: an ORDINARY payment's reference later corrected (owner-only,
---   audited correct_payment_v2) into one held by an ordinary payment — the 035
---   rule, unchanged.
+--   The ownership rule, one for every writer of a holding payment's reference:
+--     a payment recorded WITH EXCESS may not share it with ANY other holder;
+--     an ORDINARY payment may not share it with a holder recorded with excess.
+--   Applied by record_payment_with_excess_v1 and record_payment_v2 (recording),
+--   reinstate_excess_payment_v1 and verify_payment_v1 (taking a rejected claim
+--   back), and correct_payment_v2 (changing the reference) — each refuses
+--   'duplicate_transfer_reference' and writes nothing. Race safety: every one
+--   takes the canonical-reference advisory lock (key space 68068) after the
+--   order lock (correct_payment_v2: order → payment → reference, the order of
+--   reinstate_excess_payment_v1) and rechecks after the wait. The partial
+--   unique index over payments recorded with excess is only a backstop for
+--   excess vs excess; ordinary vs excess is enforced by the rule above, never
+--   by the index. Ordinary references among themselves keep the 035 rule
+--   (flagged duplicate_suspected, never refused) — also on correction.
 --
 -- ── record_payment_with_excess_v1 ───────────────────────────────────────────
 --   * khqr / bank_transfer only → otherwise 'method_not_allowed';
@@ -547,6 +553,10 @@ BEGIN
     'recorded_excess_minor', v_excess,
     'excess_returned_minor', v_returned,
     'returnable_excess_minor', v_returnable,
+    -- The order's CURRENT accounting, so what the screen says about a refund
+    -- (e.g. "the sale is still paid in full") follows later refunds too.
+    'order_net_minor', v_net,
+    'order_total_minor', v_total,
     'currency', v_payment.currency);
 END;
 $$;
@@ -950,6 +960,95 @@ BEGIN
 END;
 $$;
 
+-- ── correct_payment_v2 (062's wrapper + the reference ownership rule) ────────
+--
+-- 062 locked only the payment row and let 035's body change the reference.
+-- 068 takes the order lock first (040's Order BEFORE Payment), then the
+-- payment, then — when the new canonical reference differs from the current
+-- one on a payment that holds it (pending / paid / refunded) — the
+-- canonical-reference lock, and rechecks ownership after the wait. A refusal
+-- returns before 035's body: no reference change, no correction event, no
+-- audit row. A payment that holds nothing (rejected / reversed) may be
+-- corrected freely: taking it back rechecks its reference anyway.
+
+CREATE OR REPLACE FUNCTION public.correct_payment_v2(
+  p_organization_id uuid,
+  p_payment_id uuid,
+  p_actor uuid,
+  p_reason text,
+  p_new_reference text DEFAULT NULL,
+  p_new_note text DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth AS $$
+DECLARE
+  v_target uuid;
+  v_payment public.payments%ROWTYPE;
+  v_before record;
+  v_new_canonical text;
+  v_constraint text;
+  v_result jsonb;
+BEGIN
+  IF p_reason IS NULL OR length(trim(p_reason)) = 0 THEN
+    RETURN jsonb_build_object('status', 'reason_required');
+  END IF;
+
+  -- 068: Order BEFORE Payment, then the reference (an unknown payment is left
+  -- to 035's body to report).
+  v_target := public.lock_payment_order(p_organization_id, p_payment_id);
+  IF v_target IS NOT NULL THEN
+    SELECT * INTO v_payment FROM public.payments
+     WHERE id = p_payment_id AND organization_id = p_organization_id FOR UPDATE;
+    IF NULLIF(trim(p_new_reference), '') IS NOT NULL
+       AND v_payment.status IN ('pending', 'paid', 'refunded') THEN
+      v_new_canonical := public.payment_reference_canonical_v1(p_new_reference);
+      IF v_new_canonical IS NULL AND v_payment.excess_recorded THEN
+        RETURN jsonb_build_object('status', 'reference_required');
+      END IF;
+      IF v_new_canonical IS NOT NULL AND v_new_canonical IS DISTINCT FROM
+          public.payment_reference_canonical_v1(v_payment.reference) THEN
+        PERFORM pg_advisory_xact_lock(68068,
+          hashtext(p_organization_id::text || ':' || v_payment.method::text || ':' || v_new_canonical));
+        IF public.payment_reference_held_v1(p_organization_id, v_payment.method::text,
+            v_new_canonical, p_payment_id, NOT v_payment.excess_recorded) THEN
+          RETURN jsonb_build_object('status', 'duplicate_transfer_reference');
+        END IF;
+      END IF;
+    END IF;
+  END IF;
+
+  -- 062's body, unchanged: the values being replaced, 035's correction, and the
+  -- mandatory payments.override audit row in the same transaction.
+  SELECT reference, note INTO v_before FROM public.payments
+   WHERE id = p_payment_id AND organization_id = p_organization_id
+   FOR UPDATE;
+  BEGIN
+    v_result := public.correct_payment_v1(p_organization_id, p_payment_id, p_actor, p_reason,
+      p_new_reference, p_new_note);
+  EXCEPTION WHEN unique_violation THEN
+    GET STACKED DIAGNOSTICS v_constraint = CONSTRAINT_NAME;
+    IF v_constraint = 'uniq_payments_excess_reference_held' THEN
+      RETURN jsonb_build_object('status', 'duplicate_transfer_reference');
+    END IF;
+    RAISE;
+  END;
+  IF v_result ->> 'status' = 'success' THEN
+    BEGIN
+      INSERT INTO public.audit_logs(
+        organization_id, actor_user_id, action, resource_type, resource_id,
+        before_json, after_json, reason
+      ) VALUES (
+        p_organization_id, p_actor, 'payments.override', 'payments', p_payment_id::text,
+        jsonb_build_object('reference', v_before.reference, 'note', v_before.note),
+        jsonb_strip_nulls(jsonb_build_object('reference', p_new_reference, 'note', p_new_note)),
+        p_reason
+      );
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'apsa_audit_unavailable' USING DETAIL = SQLERRM;
+    END;
+  END IF;
+  RETURN v_result;
+END;
+$$;
+
 -- ── list_excess_to_return_v1 ────────────────────────────────────────────────
 
 CREATE FUNCTION public.list_excess_to_return_v1(
@@ -1050,7 +1149,11 @@ REVOKE ALL ON FUNCTION public.record_payment_v2(uuid,uuid,uuid,text,bigint,text,
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)
   FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.correct_payment_v2(uuid,uuid,uuid,text,text,text)
+  FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_payment_v2(uuid,uuid,uuid,text,bigint,text,text,text)
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.correct_payment_v2(uuid,uuid,uuid,text,text,text)
   TO service_role;

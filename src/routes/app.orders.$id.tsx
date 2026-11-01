@@ -36,7 +36,8 @@ import {
 import {
   beginExcessRecording,
   excessRecordingFingerprint,
-  excessRecordingSucceeded,
+  excessRecordingSettled,
+  hasPendingExcessRecording,
   resetExcessRecording,
 } from "@/lib/excess-intent";
 import {
@@ -95,6 +96,7 @@ import { canCreateDeliveryForOrder, isActiveDeliveryStatus } from "@/lib/deliver
 import { codDiffersFromTotal } from "@/lib/delivery-fee";
 import {
   classifyPaymentError,
+  paymentClaimRefusalOf,
   paymentErrorMessageKey,
   paymentNeedsReview,
   type UiPayment,
@@ -759,17 +761,33 @@ function RealOrderDetailScreen({ id }: { id: string }) {
     onMutate: (submit) => beginPaymentAttempt(submit),
     onSuccess: (_payment, submit, attempt) => {
       // Accepted (made now or replayed): this logical recording is done.
-      excessRecordingSucceeded({
-        userId: submit.startedAs.userId,
-        organizationId: submit.startedAs.organizationId,
-        orderId: submit.orderId,
-      });
+      excessRecordingSettled(
+        {
+          userId: submit.startedAs.userId,
+          organizationId: submit.startedAs.organizationId,
+          orderId: submit.orderId,
+        },
+        submit.idempotencyKey,
+      );
       if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
       setRecordExcessOpen(false);
       invalidateAfterPayment();
       setNotice(t("order.recordExcess.done"));
     },
-    onError: (_err, submit, attempt) => {
+    onError: (err, submit, attempt) => {
+      // A refusal is conclusive: the request under this key wrote nothing, so
+      // its key is settled. A lost response, a network or a server error is
+      // not: the key stays, so the same request later replays.
+      if (paymentClaimRefusalOf(err) !== null || classifyPaymentError(err) !== "server_error") {
+        excessRecordingSettled(
+          {
+            userId: submit.startedAs.userId,
+            organizationId: submit.startedAs.organizationId,
+            orderId: submit.orderId,
+          },
+          submit.idempotencyKey,
+        );
+      }
       if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
       // A stale outstanding amount is re-read so the sheet shows the new one.
       invalidateAfterPayment();
@@ -1001,11 +1019,22 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   // Offered only with the server's outstanding figure on screen, and only
   // while it is positive: a transfer received when nothing is owed is an
   // unallocated receipt, outside this action (the server refuses it too).
+  //
+  // One exception: a recording started here whose outcome is still unknown
+  // (its response was lost). It may have committed and taken the outstanding
+  // amount to zero, so it is offered as a CHECK — the same request replays
+  // under its retained key (the server answers a replay before any balance
+  // rule); anything else is refused (nothing_outstanding / duplicate
+  // reference), never recorded against zero.
+  const excessIntentScope = { ...principal, orderId: order.id };
+  const excessCheckPending =
+    canRecordExcess && settlement !== null && hasPendingExcessRecording(excessIntentScope);
   const showRecordExcess =
-    orderAcceptsPayment &&
-    canRecordExcess &&
-    settlement !== null &&
-    settlement.outstanding.amount > 0;
+    (orderAcceptsPayment &&
+      canRecordExcess &&
+      settlement !== null &&
+      settlement.outstanding.amount > 0) ||
+    excessCheckPending;
 
   const historyItems: TimelineItem[] = [...(order.statusHistory ?? [])]
     .sort((a, b) => b.changedAt.localeCompare(a.changedAt))
@@ -1337,7 +1366,9 @@ function RealOrderDetailScreen({ id }: { id: string }) {
                     setRecordExcessOpen(true);
                   }}
                 >
-                  {t("order.recordExcess.open")}
+                  {excessCheckPending
+                    ? t("order.recordExcess.checkOpen")
+                    : t("order.recordExcess.open")}
                 </Button>
               ) : null}
             </>
@@ -1680,12 +1711,15 @@ function RealOrderDetailScreen({ id }: { id: string }) {
             if (!next) recordExcessMutation.reset();
           }}
           outstanding={settlement.outstanding}
+          checkPending={excessCheckPending}
           pending={recordExcessMutation.isPending}
           error={recordExcessError}
           onConfirm={(submit) => {
-            const scope = { ...principal, orderId: order.id };
             // Persisted before the request is sent: a reload mid-flight keeps it.
-            const { key } = beginExcessRecording(scope, excessRecordingFingerprint(submit));
+            const { key } = beginExcessRecording(
+              excessIntentScope,
+              excessRecordingFingerprint(submit),
+            );
             recordExcessMutation.mutate({
               ...submit,
               idempotencyKey: key,
@@ -1695,7 +1729,7 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           }}
           onStartOver={() => {
             recordExcessMutation.reset();
-            resetExcessRecording({ ...principal, orderId: order.id });
+            resetExcessRecording(excessIntentScope);
           }}
         />
       ) : null}

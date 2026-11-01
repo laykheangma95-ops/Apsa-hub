@@ -9,6 +9,7 @@ import en from "@/locales/en.json";
 import km from "@/locales/km.json";
 import {
   excessAbove,
+  excessRefundNoteKeyOf,
   excessReturnRefundIds,
   excessReturnStateOf,
   paymentClaimRefusalOf,
@@ -51,6 +52,22 @@ describe("payment claim refusals (068)", () => {
     expect(
       paymentClaimRefusalOf(serverError("Payment verification changed concurrently", 409)),
     ).toBeNull();
+  });
+
+  it("recognises the refusal by its message alone — all that survives the real wire", () => {
+    const wire = (message: string) => new Error(message); // no statusCode, no code
+    expect(
+      paymentClaimRefusalOf(
+        wire("Nothing is outstanding on this order — this transfer cannot be recorded against it"),
+      ),
+    ).toBe("nothing_outstanding");
+    expect(
+      paymentClaimRefusalOf(wire("This transfer reference is already recorded on another payment")),
+    ).toBe("duplicate_transfer_reference");
+    expect(
+      paymentClaimRefusalOf(wire("The payment is more than the order's outstanding balance")),
+    ).toBe("exceeds_outstanding");
+    expect(paymentClaimRefusalOf(wire("Failed to fetch"))).toBeNull();
   });
 
   it("picks the specific message, else the classified one", () => {
@@ -116,7 +133,12 @@ describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
   const detail = (
     events: unknown[],
     status = "paid",
-    excess: { recorded: number; returned: number; returnable: number } | null = null,
+    excess: {
+      recorded: number;
+      returned: number;
+      returnable: number;
+      saleFullyPaid?: boolean;
+    } | null = null,
   ) =>
     ({
       amount: usd(10500),
@@ -128,6 +150,7 @@ describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
             recorded: usd(excess.recorded),
             returned: usd(excess.returned),
             returnable: usd(excess.returnable),
+            saleFullyPaid: excess.saleFullyPaid ?? true,
           }
         : null,
     }) as unknown as Detail;
@@ -173,6 +196,36 @@ describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
     expect(excessReturnStateOf(detail([], "reversed", excess))).toBe("not_a_claim");
   });
 
+  it("the refund explanation follows the server's current accounting (105 → return 5 → refund 20 / refund all)", () => {
+    // Excess returned, sale untouched: "still paid in full".
+    expect(
+      excessRefundNoteKeyOf(
+        detail([], "paid", { recorded: 500, returned: 500, returnable: 0, saleFullyPaid: true }),
+      ),
+    ).toBe("payments.excess.refundStatusNote");
+    // Then an ordinary 20 refund (net 80 < 100), or a full refund (net 0): never
+    // "still paid in full" again.
+    for (const status of ["paid", "refunded"]) {
+      expect(
+        excessRefundNoteKeyOf(
+          detail([], status, { recorded: 500, returned: 500, returnable: 0, saleFullyPaid: false }),
+        ),
+      ).toBe("payments.excess.refundStatusNoteSaleRefunded");
+    }
+    // Nothing returned as excess: no explanation.
+    expect(
+      excessRefundNoteKeyOf(detail([], "paid", { recorded: 500, returned: 0, returnable: 500 })),
+    ).toBeNull();
+    for (const locale of [en, km]) {
+      const excess = (locale.payments as unknown as Record<string, Record<string, string>>)[
+        "excess"
+      ]!;
+      expect(excess["refundStatusNote"]).toBeString();
+      expect(excess["refundStatusNoteSaleRefunded"]).toBeString();
+    }
+    expect(en.payments.excess.refundStatusNoteSaleRefunded).not.toMatch(/paid in full/i);
+  });
+
   it("an ordinary payment has no excess state and no labelled refund", () => {
     const d = detail([
       event("c", "created", 10000, { request_digest_version: 1 }),
@@ -213,7 +266,8 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     const {
       beginExcessRecording,
       excessRecordingFingerprint,
-      excessRecordingSucceeded,
+      excessRecordingSettled,
+      hasPendingExcessRecording,
       readExcessIntent,
       resetExcessRecording,
     } = await import("@/lib/excess-intent");
@@ -224,6 +278,7 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     const first = beginExcessRecording(scope, excessRecordingFingerprint(request), key);
     // "Reload": nothing in the component survives; the store does.
     expect(readExcessIntent(scope)?.key).toBe(first.key);
+    expect(hasPendingExcessRecording(scope)).toBe(true);
     expect(
       beginExcessRecording(
         scope,
@@ -239,16 +294,21 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     ]) {
       expect(readExcessIntent(other)).toBeNull();
     }
-    // A different request gets a new key (the server then refuses a second
-    // recording of the same transfer reference).
-    const changed = beginExcessRecording(
+    // A different (mistyped) request gets its own key and never displaces the
+    // unknown one: the original request still replays under its key.
+    const typo = beginExcessRecording(
       scope,
       excessRecordingFingerprint({ ...request, amountMinor: 10600 }),
       key,
     );
-    expect(changed.key).not.toBe(first.key);
-    excessRecordingSucceeded(scope);
+    expect(typo.key).not.toBe(first.key);
+    excessRecordingSettled(scope, typo.key); // the server refused it: settled
+    expect(beginExcessRecording(scope, excessRecordingFingerprint(request), key).key).toBe(
+      first.key,
+    );
+    excessRecordingSettled(scope, first.key); // accepted (replayed)
     expect(readExcessIntent(scope)).toBeNull();
+    expect(hasPendingExcessRecording(scope)).toBe(false);
     beginExcessRecording(scope, excessRecordingFingerprint(request), key);
     resetExcessRecording(scope);
     expect(readExcessIntent(scope)).toBeNull();
@@ -260,8 +320,9 @@ describe("068 repair — the excess sheet's key is durable and scoped (B2)", () 
     expect(sheet).not.toContain("idempotencyKey");
     const order = await Bun.file("src/routes/app.orders.$id.tsx").text();
     expect(order).toContain("settlement.outstanding.amount > 0");
-    expect(order).toContain("beginExcessRecording(scope, excessRecordingFingerprint(submit))");
-    expect(order).toContain("excessRecordingSucceeded(");
+    expect(order).toContain("beginExcessRecording(");
+    expect(order).toContain("hasPendingExcessRecording(excessIntentScope)");
+    expect(order).toContain("excessRecordingSettled(");
   });
 });
 

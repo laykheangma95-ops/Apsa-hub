@@ -147,10 +147,14 @@ overpaid flag) while the bank showed +$105 / −$5.
 Refund semantics: after the excess is returned, the order is `paid / partial`
 (money was returned) and net = total; the "Overpaid by …" warning clears.
 `refund_status = partial` keeps its ledger meaning — some money went back —
-also when only an excess was returned. The Payment detail says so in words
-("partly refunded because the excess was returned; the sale itself is still
-paid in full") wherever an `excess_returned` event exists, so the label never
-suggests the sale itself was partly returned.
+also when only an excess was returned. Once an `excess_returned` event exists
+the Payment detail explains it from the order's **current** accounting
+(`payment_excess_state_v1` returns the order's net and total): while net ≥
+total, "partly refunded because the excess was returned; the sale itself is
+still paid in full"; after a later ordinary refund of part or all of the sale
+(e.g. 105 received, 5 returned, then 20 or everything refunded), "the excess
+was returned, and part or all of the sale has been refunded since" — never
+"paid in full".
 
 ### 4.3 Server errors (all HTTP 409 unless noted)
 
@@ -205,10 +209,16 @@ action only while the server's outstanding figure is positive.
   rejected payment cannot be reversed, so this is what keeps a mistaken
   rejection recoverable). Taking a rejected claim back rechecks the
   reference under the same lock.
-- "Record with excess" refuses a reference held by any payment; ordinary
-  recording, and ordinary reinstatement of a rejected claim, refuse one held
-  by a payment recorded with excess. Ordinary references among themselves
-  keep the 035 rule (flagged `duplicate_suspected`, never refused).
+- One ownership rule for every writer of a holding payment's reference: a
+  payment recorded with excess may not share its canonical reference with any
+  other holder; an ordinary payment may not share one with a holder recorded
+  with excess. It is applied to recording ("record with excess" and ordinary
+  recording), to taking a rejected claim back (both reinstatements) and to
+  reference **correction** (`correct_payment_v2`) — each refuses
+  `duplicate_transfer_reference` and writes nothing (no reference change,
+  event or audit row). Ordinary references among themselves keep the 035 rule
+  (flagged `duplicate_suspected` when recorded, never refused — also when
+  corrected).
 - Race safety: every writer takes a canonical-reference advisory lock after
   the order lock and rechecks after the wait; a partial unique index over
   payments recorded with excess (`uniq_payments_excess_reference_held`) is
@@ -217,12 +227,27 @@ action only while the server's outstanding figure is positive.
   the index.
 - The sheet's idempotency key is kept per member + organization + order in
   this tab's session storage (`src/lib/excess-intent.ts`, the refund-intent
-  pattern): the same request after a reload replays; it is cleared by a
-  success or an explicit "Start over".
-- Residual: an owner-level, audited **correction** of an ordinary payment's
+  pattern): the same request after a reload replays. Every request whose
+  outcome is unknown keeps its own key (a different, mistyped request never
+  displaces it); an entry is settled by a conclusive answer (accepted, or
+  refused — a refusal wrote nothing) or by "Start over".
+- A lost response can leave the order owing nothing (the recording
+  committed). Order detail then offers **"Check a transfer you recorded"**
+  instead of the ordinary action: re-entering the same details replays under
+  the retained key (the server answers a replay before any balance rule);
+  anything else is refused (`nothing_outstanding`, or the duplicate
+  reference), so nothing new is ever recorded against zero.
+- The partial unique index covers **only excess vs excess**. An
+  ordinary/excess collision — in either direction, including by correction —
+  is refused by the ownership rule under the reference lock, never by the
+  index (an earlier draft of this document wrongly said the index refused
+  correction collisions; it does not see ordinary payments).
+- `correct_payment_v2` now takes the order lock first (040's Order BEFORE
+  Payment), then the payment, then the reference lock — the order
+  reinstatement uses.
+- Residual: an owner-level, audited correction of an ordinary payment's
   reference into one held by another ordinary payment is not refused (the 035
-  rule); one that collides with a payment recorded with excess is refused by
-  the index.
+  rule, unchanged).
 
 **B3 — "Excess to return" in Payments.** A chip on the Payments list for
 members holding `payments.reconcile` (Owner, Manager), backed by
@@ -310,17 +335,17 @@ Every correction goes through the application's audited actions — confirm,
 reject (mismatch), reverse, refund — never a direct edit of payment rows
 (payment history is append-only).
 
-| Row           | State                                                                       | Under 068                                           | Bounded path                                                                                                                                                                            |
-| ------------- | --------------------------------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 01.01         | pending claim on a cancelled order                                          | confirmable, rejectable, reversible                 | Money arrived → confirm, then refund. Did not → reject.                                                                                                                                 |
-| 01.02         | pending claim on a completed order                                          | confirmable; excess stamped, order flagged overpaid | Duplicate / wrong order → reject or reverse. Money really arrived → confirm, then refund the excess on that payment.                                                                    |
-| 01.03         | cancelled order still holding received money                                | refund possible                                     | Refund, or record why it is kept (063 decision).                                                                                                                                        |
-| 02.01 / 02.03 | received (net) above the total                                              | no new claim on the order                           | Refund the excess on the payment that over-collected (it is confirmed).                                                                                                                 |
-| 02.02         | claimed above the total                                                     | no new claim; pending claims confirmable            | Resolve each pending claim: confirm (then refund any excess) or reject/reverse.                                                                                                         |
-| 03.01         | pending claim on a draft                                                    | confirmable (P5); draft takes no new money          | Real sale → confirm the order, then the claim. Not a sale but money arrived → confirm the claim, refund it, cancel the draft. No money → reject.                                        |
-| 03.02 / 03.03 | confirmed / refunded payment on a draft                                     | refund possible                                     | Real sale → confirm the order. Otherwise refund, then cancel the draft.                                                                                                                 |
-| 04.01         | pending claims whose confirmation would take received money above the total | confirmable; excess stamped                         | As 01.02 / 02.02: confirm-then-refund only when the money is real.                                                                                                                      |
-| 04.02         | rejected claims that cannot be reopened                                     | stays rejected                                      | Usually right. If both payments are real: bank / KHQR money is returned through the ordinary refund of the confirmed payment; cash / COD money is change, handed back and not recorded. |
+| Row           | State                                                                                                                                                                                                            | Under 068                                           | Bounded path                                                                                                                                                                            |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 01.01         | pending claim on a cancelled order                                                                                                                                                                               | confirmable, rejectable, reversible                 | Money arrived → confirm, then refund. Did not → reject.                                                                                                                                 |
+| 01.02         | pending claim on a completed order                                                                                                                                                                               | confirmable; excess stamped, order flagged overpaid | Duplicate / wrong order → reject or reverse. Money really arrived → confirm, then refund the excess on that payment.                                                                    |
+| 01.03         | cancelled order still holding received money                                                                                                                                                                     | refund possible                                     | Refund, or record why it is kept (063 decision).                                                                                                                                        |
+| 02.01 / 02.03 | received (net) above the total                                                                                                                                                                                   | no new claim on the order                           | Refund the excess on the payment that over-collected (it is confirmed).                                                                                                                 |
+| 02.02         | claimed above the total                                                                                                                                                                                          | no new claim; pending claims confirmable            | Resolve each pending claim: confirm (then refund any excess) or reject/reverse.                                                                                                         |
+| 03.01         | pending claim on a draft                                                                                                                                                                                         | confirmable (P5); draft takes no new money          | Real sale → confirm the order, then the claim. Not a sale but money arrived → confirm the claim, refund it, cancel the draft. No money → reject.                                        |
+| 03.02 / 03.03 | confirmed / refunded payment on a draft                                                                                                                                                                          | refund possible                                     | Real sale → confirm the order. Otherwise refund, then cancel the draft.                                                                                                                 |
+| 04.01         | pending claims whose confirmation would take received money above the total                                                                                                                                      | confirmable; excess stamped                         | As 01.02 / 02.02: confirm-then-refund only when the money is real.                                                                                                                      |
+| 04.02         | rejected claims that cannot be reopened: reinstating them would take received + pending above the total (the rule has no lifecycle condition — a rejected draft claim that fits is reinstatable and not counted) | stays rejected                                      | Usually right. If both payments are real: bank / KHQR money is returned through the ordinary refund of the confirmed payment; cash / COD money is change, handed back and not recorded. |
 
 Order of operations: run the inventory on staging → review each non-empty row
 with the merchant's data owner → resolve through the audited actions → re-run

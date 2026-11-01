@@ -128,6 +128,8 @@ export interface UiPaymentExcess {
   returned: Money;
   /** What can still be returned now: 0 unless confirmed, never past the total. */
   returnable: Money;
+  /** The order's current net received still covers its total (server-derived). */
+  saleFullyPaid: boolean;
 }
 
 export interface UiPaymentDetail extends UiPayment {
@@ -573,6 +575,22 @@ export function excessAbove(amountMinor: number, outstanding: Money): Money | nu
 export type UiExcessReturnState =
   "awaiting_confirmation" | "returnable" | "all_returned" | "nothing_to_return" | "not_a_claim";
 
+/**
+ * The explanation shown beside the order's refund status once some excess was
+ * returned. refund_status = 'partial' then means "money went back"; whether the
+ * sale itself is still paid in full is the server's current accounting
+ * (saleFullyPaid), so a later ordinary refund — of part or all of the sale —
+ * never leaves "still paid in full" on screen. null when nothing was returned
+ * as excess.
+ */
+export function excessRefundNoteKeyOf(detail: UiPaymentDetail): string | null {
+  const excess = detail.excess;
+  if (!excess || excess.returned.amount <= 0) return null;
+  return excess.saleFullyPaid
+    ? "payments.excess.refundStatusNote"
+    : "payments.excess.refundStatusNoteSaleRefunded";
+}
+
 export function excessReturnStateOf(detail: UiPaymentDetail): UiExcessReturnState | null {
   const excess = detail.excess;
   if (!excess) return null;
@@ -680,7 +698,12 @@ export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null 
   if (code === "payment_duplicate_transfer_reference") return "duplicate_transfer_reference";
   if (code === "payment_excess_reinstatement_required") return "excess_reinstatement_required";
   if (code === "payment_excess_changed") return "excess_changed";
-  if (statusCodeOf(err) !== 409) return null;
+  // Over the real server-function wire only `message` survives (statusCode and
+  // code are dropped — src/tests/helpers/server-fn-wire.ts), so the message
+  // fallback must also run when no status arrived; a status other than 409 is
+  // never a claim refusal.
+  const status = statusCodeOf(err);
+  if (status !== undefined && status !== 409) return null;
   const message = messageOf(err);
   if (/cannot take a payment/i.test(message)) return "order_not_payable";
   if (/outstanding balance/i.test(message)) return "exceeds_outstanding";

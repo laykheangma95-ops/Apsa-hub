@@ -405,6 +405,21 @@ mock.module("@/api/payments", () => ({
         expectedPrincipal: data.expectedPrincipal,
       } as any);
     }),
+  // src/api/payments.ts recordPaymentWithExcessFn's handler, field for field.
+  recordPaymentWithExcessFn: async ({ data }: { data: Json }) =>
+    serve("payment", data, async (ctx) => {
+      const { recordPaymentWithExcess } = await import("@/server/payments/service");
+      return recordPaymentWithExcess(ctx, {
+        orderId: data.orderId,
+        method: data.method,
+        amountMinor: data.amountMinor,
+        reference: data.reference,
+        reason: data.reason,
+        idempotencyKey: data.idempotencyKey,
+        expectedOutstandingMinor: data.expectedOutstandingMinor,
+        expectedPrincipal: data.expectedPrincipal,
+      });
+    }),
   listPaymentsFn: async ({ data }: { data?: Json } = {}) => {
     const { listPayments } = await import("@/server/payments/service");
     return (listPayments as any)(serverContext(), data ?? {});
@@ -3409,5 +3424,119 @@ describe("Order detail: the refusal reason and the Next step action are on scree
     expect(
       action.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Migration 068: "Record a transfer above the total" — the response is lost
+// after the server committed, then the page is reloaded. The order now owes
+// nothing; the retained key must still replay, and nothing new may be recorded.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("Record with excess: a lost response, then a reload", () => {
+  const EXCESS_GRANTS = ["payments.record_excess", "payments.reconcile"];
+  const checkButton = () => button(en.order.recordExcess.checkOpen);
+  const openButton = () => button(en.order.recordExcess.open);
+  async function fillExcess(amount: string, reference: string, reason: string) {
+    await typeInto(document.querySelector("#order-excess-amount"), amount);
+    await typeInto(document.querySelector("#order-excess-reference"), reference);
+    await typeInto(document.querySelector("#order-excess-reason"), reason);
+  }
+  async function submitExcess() {
+    const submit = button(en.order.recordExcess.submit, dialog()!);
+    await waitFor(() => submit && !submit.disabled, "an enabled Record transfer");
+    await click(submit, "Record transfer");
+  }
+  /** A full page reload: the screen and its query cache go; sessionStorage stays. */
+  async function reload(orderId: string) {
+    await act(async () => root?.unmount());
+    container?.remove();
+    document.body.innerHTML = "";
+    client?.clear();
+    await openOrderDetail(orderId);
+    await readsSettled();
+  }
+  const excessPayments = async (orderId: string) =>
+    (
+      await f.db.query<Json>(
+        `select id, amount_minor, idempotency_key, excess_recorded from payments
+          where order_id = $1 and excess_recorded`,
+        [orderId],
+      )
+    ).rows;
+
+  it("offers a replay under the retained key at zero outstanding — it replays; nothing new is recorded", async () => {
+    for (const key of EXCESS_GRANTS) grants.get(USER_A)!.add(key);
+    const orderId = await seedConfirmed(); // ៛10,000 outstanding
+    try {
+      sessionStorage.clear();
+      await openOrderDetail(orderId);
+      await waitFor(() => openButton(), "Record a transfer above the total");
+      await click(openButton(), "Record a transfer above the total");
+      await fillExcess("12000", "TRF-LOST-1", "Customer sent 12,000");
+      loseNextResponse.add("payment");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 1, "the server's answer");
+      // The server committed; the browser only saw "Failed to fetch".
+      expect(outcomes).toEqual(["ok"]);
+      const committed = await excessPayments(orderId);
+      expect(committed).toHaveLength(1);
+      expect(committed[0]!.idempotency_key).toBe(sent[0]!.data.idempotencyKey);
+
+      await reload(orderId);
+      // Nothing is owed now, so the ordinary action is gone — but the unknown
+      // recording is offered as a check.
+      expect(openButton()).toBeUndefined();
+      // Negative control: c3c90b0 offered nothing here — no way to replay.
+      expect(checkButton()).toBeDefined();
+      await click(checkButton(), "Check a transfer you recorded");
+      expect(dialog()!.textContent).toContain(en.order.recordExcess.checkNote);
+
+      // A different request (a typo) is refused — never recorded against zero —
+      // and does not displace the retained key.
+      await fillExcess("13000", "TRF-LOST-1", "Customer sent 12,000");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 2, "the refusal");
+      expect(outcomes[1]).toBe("refused:payment_nothing_outstanding");
+      expect(sent[1]!.data.idempotencyKey).not.toBe(sent[0]!.data.idempotencyKey);
+      expect(await excessPayments(orderId)).toHaveLength(1);
+      expect(dialog()!.textContent).toContain(en.payments.errors.nothing_outstanding);
+
+      // The same request again: the retained key — a replay of the committed one.
+      await fillExcess("12000", "TRF-LOST-1", "Customer sent 12,000");
+      await submitExcess();
+      await waitFor(() => outcomes.length === 3, "the replay");
+      expect(outcomes[2]).toBe("ok");
+      expect(sent[2]!.data.idempotencyKey).toBe(sent[0]!.data.idempotencyKey);
+      const after = await excessPayments(orderId);
+      expect(after.map((p) => p.id)).toEqual(committed.map((p) => p.id));
+      expect(
+        audits.filter((a) => a.action === "payments.record_excess").length,
+      ).toBeLessThanOrEqual(1);
+
+      // Settled: after another reload nothing is offered on the paid order.
+      await reload(orderId);
+      expect(checkButton()).toBeUndefined();
+      expect(openButton()).toBeUndefined();
+    } finally {
+      for (const key of EXCESS_GRANTS) grants.get(USER_A)!.delete(key);
+      sessionStorage.clear();
+    }
+  });
+
+  it("without an unknown recording, a fully claimed order offers nothing", async () => {
+    for (const key of EXCESS_GRANTS) grants.get(USER_A)!.add(key);
+    const orderId = await seedConfirmed();
+    try {
+      sessionStorage.clear();
+      await f.record(10000, "cash", null, orderId, ORG_A);
+      await openOrderDetail(orderId);
+      await readsSettled();
+      expect(openButton()).toBeUndefined();
+      expect(checkButton()).toBeUndefined();
+    } finally {
+      for (const key of EXCESS_GRANTS) grants.get(USER_A)!.delete(key);
+      sessionStorage.clear();
+    }
   });
 });

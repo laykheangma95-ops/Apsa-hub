@@ -1328,3 +1328,181 @@ describe("B3 — Payments 'Excess to return'", () => {
     expect(paged).toEqual(full.rows);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// P1 — correct_payment_v2 applies the same reference ownership rule. Each
+// collision case is a behavioral negative control against c3c90b0's 068.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("P1 — a reference correction cannot bypass the ownership rule", () => {
+  const correctOn = (conn: SQL, payment: string, reference: string | null, org = ORG) =>
+    conn`select correct_payment_v2(${org}::uuid, ${payment}::uuid, ${ACTOR}::uuid,
+        'Typo in the reference', ${reference}, null) as r`.then((rows) => rows[0].r as Json);
+  const correct = (payment: string, reference: string | null, org = ORG) =>
+    svc((tx) => correctOn(tx, payment, reference, org));
+  async function snapshot(payment: string) {
+    const [p] = await sql`select reference from payments where id = ${payment}`;
+    const [e] = await sql`select count(*)::int as n from payment_events
+      where payment_id = ${payment} and event_type = 'correction'`;
+    const [a] = await sql`select count(*)::int as n from audit_logs
+      where resource_id = ${payment} and action = 'payments.override'`;
+    return { reference: p.reference as string, corrections: e.n as number, audits: a.n as number };
+  }
+
+  it("negative control: an ordinary payment cannot be corrected onto a reference held with excess", async () => {
+    const a = await confirmedOrder();
+    expect((await excess(a, 10500, 10000, { reference: "TRF-P1C-1" }))["status"]).toBe("success");
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-1"))["payment_id"] as string;
+    const before = await snapshot(o);
+    expect(await correct(o, " trf - p1c-1")).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await snapshot(o)).toEqual(before);
+    // Another method is another scope.
+    const c = await confirmedOrder();
+    const k = (await ordinary(c, 5000, "khqr", "ORD-P1C-1K"))["payment_id"] as string;
+    expect((await correct(k, "TRF-P1C-1"))["status"]).toBe("success");
+  });
+
+  it("negative control: an excess payment cannot be corrected onto a reference held by an ordinary payment", async () => {
+    const b = await confirmedOrder();
+    expect((await ordinary(b, 5000, "bank_transfer", "ORD-P1C-2"))["status"]).toBe("success");
+    const a = await confirmedOrder();
+    const e = (await excess(a, 10500, 10000, { reference: "TRF-P1C-2" }))["payment_id"] as string;
+    const before = await snapshot(e);
+    expect(await correct(e, "ord-p1c-2")).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await snapshot(e)).toEqual(before);
+    // An excess payment's reference may not become empty in canonical form.
+    expect(await correct(e, "​")).toEqual({ status: "reference_required" });
+    expect(await snapshot(e)).toEqual(before);
+  });
+
+  it("a refunded holder still holds its reference", async () => {
+    const a = await confirmedOrder();
+    const e = (await excess(a, 10500, 10000, { reference: "TRF-P1C-3" }))["payment_id"] as string;
+    await verify(e);
+    expect((await returnExcess(e, 500))["status"]).toBe("success");
+    expect((await refund(e, 10000, "Order refunded in full"))["status"]).toBe("success");
+    const [row] = await sql`select status::text from payments where id = ${e}`;
+    expect(row.status).toBe("refunded");
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-3"))["payment_id"] as string;
+    expect(await correct(o, "TRF-P1C-3")).toEqual({ status: "duplicate_transfer_reference" });
+  });
+
+  it("rejected and reversed holders release it; taking the rejected one back is then refused", async () => {
+    const a = await confirmedOrder();
+    const e = (await excess(a, 10500, 10000, { reference: "TRF-P1C-4" }))["payment_id"] as string;
+    expect((await verifyAs(e, "unverified", "mismatch"))["status"]).toBe("success");
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-4"))["payment_id"] as string;
+    expect((await correct(o, "trf-p1c-4"))["status"]).toBe("success");
+    expect(await reinstate(e)).toEqual({ status: "duplicate_transfer_reference" });
+
+    const c = await confirmedOrder();
+    const r = (await excess(c, 10500, 10000, { reference: "TRF-P1C-5" }))["payment_id"] as string;
+    expect((await reverse(r))["status"]).toBe("success");
+    const d = await confirmedOrder();
+    const q = (await ordinary(d, 5000, "bank_transfer", "ORD-P1C-5"))["payment_id"] as string;
+    expect((await correct(q, "TRF-P1C-5"))["status"]).toBe("success");
+    // A payment that holds nothing (rejected) may itself be corrected freely.
+    expect((await correct(e, "ORD-P1C-5"))["status"]).toBe("success");
+  });
+
+  it("a retry, or a correction within the same canonical reference, is never refused; ordinary vs ordinary keeps the 035 rule", async () => {
+    const a = await confirmedOrder();
+    const e = (await excess(a, 10500, 10000, { reference: "TRF-P1C-6" }))["payment_id"] as string;
+    expect((await correct(e, "TRF - P1C - 6"))["status"]).toBe("success");
+    expect((await correct(e, "TRF - P1C - 6"))["status"]).toBe("success");
+    expect((await snapshot(e)).corrections).toBe(2);
+    expect((await snapshot(e)).audits).toBe(2);
+    const b = await confirmedOrder();
+    const c = await confirmedOrder();
+    expect((await ordinary(b, 5000, "bank_transfer", "ORD-P1C-6"))["status"]).toBe("success");
+    const o = (await ordinary(c, 5000, "bank_transfer", "ORD-P1C-6X"))["payment_id"] as string;
+    expect((await correct(o, "ord-p1c-6"))["status"]).toBe("success");
+  });
+
+  it("another organization's reference is never a collision", async () => {
+    const other = await confirmedOrder(ORG_B);
+    expect(
+      (await excess(other, 10500, 10000, { reference: "TRF-P1C-7", org: ORG_B }))["status"],
+    ).toBe("success");
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-7"))["payment_id"] as string;
+    expect((await correct(o, "trf-p1c-7"))["status"]).toBe("success");
+    // And another organization cannot correct this one at all.
+    expect((await correct(o, "X-P1C-7", ORG_B))["status"]).toBe("not_found");
+  });
+
+  it("two concurrent corrections onto one canonical reference (excess first): the second waits, then is refused", async () => {
+    const a = await confirmedOrder();
+    const e = (await excess(a, 10500, 10000, { reference: "TRF-P1C-8A" }))["payment_id"] as string;
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-8B"))["payment_id"] as string;
+    const before = await snapshot(o);
+    const result = await pair(async (x, y, yPid) => {
+      await x`begin`;
+      expect((await correctOn(x, e, "TRF-P1C-8"))["status"]).toBe("success");
+      const pending = correctOn(y, o, "trf-p1c-8 ");
+      await waitUntilBlockedOnLock(yPid);
+      await x`commit`;
+      return pending;
+    });
+    expect(result).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await snapshot(o)).toEqual(before);
+  });
+
+  it("a correction racing an excess recording of the same canonical reference", async () => {
+    const b = await confirmedOrder();
+    const o = (await ordinary(b, 5000, "bank_transfer", "ORD-P1C-9"))["payment_id"] as string;
+    const a = await confirmedOrder();
+    const result = await pair(async (x, y, yPid) => {
+      await x`begin`;
+      expect((await correctOn(x, o, "TRF-P1C-9"))["status"]).toBe("success");
+      const pending = excessOn(y, a, 10500, 10000, { reference: "trf-p1c-9" });
+      await waitUntilBlockedOnLock(yPid);
+      await x`commit`;
+      return pending;
+    });
+    expect(result).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await ledger(a)).toMatchObject({ payments: 0, events: 0 });
+  });
+});
+
+describe("refund explanation follows the order's current accounting", () => {
+  async function returnedFiveOn105() {
+    const order = await confirmedOrder();
+    const p = (await excess(order, 10500, 10000))["payment_id"] as string;
+    await verify(p);
+    expect((await returnExcess(p, 500))["status"]).toBe("success");
+    expect(await excessState(p)).toMatchObject({
+      excess_returned_minor: 500,
+      order_net_minor: 10000,
+      order_total_minor: 10000,
+    });
+    return { order, p };
+  }
+
+  it("105 received, 5 excess returned, then an ordinary 20 refund: the sale is no longer fully paid", async () => {
+    const { order, p } = await returnedFiveOn105();
+    expect((await refund(p, 2000, "One cup returned"))["status"]).toBe("success");
+    expect(await excessState(p)).toMatchObject({
+      excess_returned_minor: 500,
+      returnable_excess_minor: 0,
+      order_net_minor: 8000,
+      order_total_minor: 10000,
+    });
+    expect(await ledger(order)).toMatchObject({ net: 8000, refund: "partial" });
+  });
+
+  it("105 received, 5 excess returned, then the rest refunded in full", async () => {
+    const { order, p } = await returnedFiveOn105();
+    expect((await refund(p, 10000, "Order refunded in full"))["status"]).toBe("success");
+    expect(await excessState(p)).toMatchObject({
+      order_net_minor: 0,
+      order_total_minor: 10000,
+      returnable_excess_minor: 0,
+    });
+    expect(await ledger(order)).toMatchObject({ net: 0, refund: "full" });
+  });
+});

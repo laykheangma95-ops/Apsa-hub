@@ -133,6 +133,9 @@ export interface PaymentExcessStateRpcResult {
   recorded_excess_minor: number;
   excess_returned_minor: number;
   returnable_excess_minor: number;
+  /** The order's current net received and total (order_payment_totals). */
+  order_net_minor: number;
+  order_total_minor: number;
   currency: PaymentCurrency;
 }
 

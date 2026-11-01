@@ -55,11 +55,18 @@ export function RecordExcessPaymentSheet({
   error,
   onConfirm,
   onStartOver,
+  checkPending = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** What the order still owes, from the server's settlement read. */
   outstanding: Money;
+  /**
+   * A recording started here has an unknown outcome (its response was lost):
+   * the sheet asks for the same details again, which replay it. It never
+   * presents the amount as a new excess over what is now owed.
+   */
+  checkPending?: boolean;
   pending: boolean;
   error: string | null;
   onConfirm: (submit: RecordExcessPaymentSubmit) => void;
@@ -137,6 +144,14 @@ export function RecordExcessPaymentSheet({
       }
     >
       <div className="flex flex-col gap-4">
+        {checkPending ? (
+          <p
+            className="text-body-sm rounded-xl bg-status-warning-soft px-3 py-2 text-status-warning-text"
+            role="status"
+          >
+            {t("order.recordExcess.checkNote")}
+          </p>
+        ) : null}
         <p className="text-body-sm text-text-primary" role="status">
           {t("order.recordExcess.outstanding", { amount: formatMoney(outstanding) })}
         </p>
@@ -181,11 +196,13 @@ export function RecordExcessPaymentSheet({
             onChange={(event) => setAmountText(event.target.value)}
           />
           <span id="order-excess-amount-hint" className="text-caption text-text-secondary">
-            {excess
-              ? t("order.recordExcess.excessPreview", { amount: formatMoney(excess) })
-              : parsed !== null
-                ? t("order.recordExcess.notAbove")
-                : t("order.recordExcess.amountHint")}
+            {checkPending && outstanding.amount <= 0
+              ? t("order.recordExcess.checkAmountHint")
+              : excess
+                ? t("order.recordExcess.excessPreview", { amount: formatMoney(excess) })
+                : parsed !== null
+                  ? t("order.recordExcess.notAbove")
+                  : t("order.recordExcess.amountHint")}
           </span>
         </div>
 

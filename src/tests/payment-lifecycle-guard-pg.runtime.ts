@@ -634,6 +634,7 @@ describe("068: organization isolation", () => {
 const GUARDED = [
   "record_payment_v2(uuid,uuid,uuid,text,bigint,text,text,text)",
   "verify_payment_v1(uuid,uuid,uuid,text,text,text,jsonb)",
+  "correct_payment_v2(uuid,uuid,uuid,text,text,text)",
 ];
 
 /** Every public function's identity and authority (bodies of the two guarded ones excluded). */
@@ -887,6 +888,16 @@ describe("legacy inventory (read-only, aggregates only)", () => {
     const khqr = await record(legacy, o6, TOTAL, undefined, "khqr");
     expect((await verify(legacy, khqr["payment_id"] as string))["status"]).toBe("success");
 
+    // The 04.02 counterexample: a rejected claim on a DRAFT that still fits the
+    // total. 068's reinstatement has no lifecycle rule, so it is reinstatable.
+    const o8 = await newOrder(legacy, "draft");
+    const draftRejected = await record(legacy, o8, 3000);
+    expect(
+      (await verify(legacy, draftRejected["payment_id"] as string, "unverified", "mismatch"))[
+        "status"
+      ],
+    ).toBe("success");
+
     const o7 = await newOrder(legacy); // paid in full, then cancelled: money held on a cancelled sale
     const held = await record(legacy, o7, TOTAL);
     expect((await verify(legacy, held["payment_id"] as string))["status"]).toBe("success");
@@ -915,7 +926,8 @@ describe("legacy inventory (read-only, aggregates only)", () => {
     // o2's 5000 only: o4's 4000 sits on a draft but within its total, so
     // confirming it creates no excess (it is counted in 03.01).
     expect(counts(r.get("04.01"))).toEqual(["USD", 1, 1, 1, 5000]);
-    expect(counts(r.get("04.02"))).toEqual(["USD", 1, 1, 1, TOTAL]); // o6's rejected COD
+    // o6's rejected COD only — not o8's rejected draft claim, which fits.
+    expect(counts(r.get("04.02"))).toEqual(["USD", 1, 1, 1, TOTAL]);
     expect(r.get("99.01")!.meaning).toStartWith("REVIEW");
 
     // The same claims, judged by 068 itself once applied: the inventory's 04.x
@@ -940,6 +952,12 @@ describe("legacy inventory (read-only, aggregates only)", () => {
     expect(
       (await verify(legacy, cod["payment_id"] as string, "mismatch", "unverified"))["status"],
     ).toBe("claim_exceeds_total");
+    // Not in 04.02: 068 does reinstate the rejected draft claim that fits.
+    expect(
+      (await verify(legacy, draftRejected["payment_id"] as string, "mismatch", "unverified"))[
+        "status"
+      ],
+    ).toBe("success");
     expect(r.get("99.01")).toBeDefined();
   });
 

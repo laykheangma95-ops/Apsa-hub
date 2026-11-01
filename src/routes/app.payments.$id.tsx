@@ -98,6 +98,7 @@ import {
   isTerminalUiPaymentStatus,
   paymentErrorMessageKey,
   paymentNeedsReview,
+  excessRefundNoteKeyOf,
   excessReturnRefundIds,
   excessReturnStateOf,
   refundEventsOf,
@@ -613,6 +614,7 @@ function PaymentDetailScreen() {
   const excess = payment.excess;
   const excessState = excessReturnStateOf(payment);
   const excessRefundIds = excessReturnRefundIds(payment);
+  const excessRefundNote = excessRefundNoteKeyOf(payment);
   const verificationTargets = availableVerificationTargets(payment).filter(
     (target) =>
       capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]) &&
@@ -816,10 +818,8 @@ function PaymentDetailScreen() {
                   ? t("payments.excess.unreturned", { amount: formatMoney(excess.returnable) })
                   : t(`payments.excess.state.${excessState}`)}
               </p>
-              {excess.returned.amount > 0 ? (
-                <p className="text-caption text-text-secondary">
-                  {t("payments.excess.refundStatusNote")}
-                </p>
+              {excessRefundNote ? (
+                <p className="text-caption text-text-secondary">{t(excessRefundNote)}</p>
               ) : null}
             </div>
           ) : null}

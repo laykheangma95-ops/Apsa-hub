@@ -1174,6 +1174,8 @@ describe("068 repair through the server functions", () => {
         recorded: { amount: 500, currency: "USD" },
         returned: { amount: 0, currency: "USD" },
         returnable: { amount: 0, currency: "USD" },
+        // Pending: nothing received yet, so the order holds less than its total.
+        saleFullyPaid: false,
       });
       await payments.verifyPaymentFn({
         data: { paymentId, to: "staff_confirmed", expectedPrincipal: P_A },
@@ -1295,5 +1297,116 @@ describe("068 repair through the server functions", () => {
         expect(codeOf(await call(payments.listExcessToReturnFn, {}))).toBe("ok");
       });
     });
+  });
+});
+
+describe("068 repair 2 through the server functions", () => {
+  const withGrants = async <T>(user: string, keys: string[], run: () => Promise<T>) => {
+    const set = grants.get(user)!;
+    const added = keys.filter((key) => !set.has(key));
+    for (const key of added) set.add(key);
+    try {
+      return await run();
+    } finally {
+      for (const key of added) set.delete(key);
+    }
+  };
+  async function confirmedExcess(reference: string) {
+    const orderId = await seedConfirmed();
+    const recorded = await withGrants(USER_A, ["payments.record_excess"], () =>
+      call(payments.recordPaymentWithExcessFn, {
+        orderId,
+        method: "bank_transfer",
+        amountMinor: 10500,
+        reference,
+        reason: "Customer transferred 105.00",
+        idempotencyKey: freshKey("excess"),
+        expectedOutstandingMinor: 10000,
+        expectedPrincipal: P_A,
+      }),
+    );
+    const paymentId = (recorded as { value: Json }).value["id"] as string;
+    await payments.verifyPaymentFn({
+      data: { paymentId, to: "staff_confirmed", expectedPrincipal: P_A },
+    });
+    return { orderId, paymentId };
+  }
+  const excessOf = async (paymentId: string) =>
+    ((await call(payments.getPaymentByIdFn, { paymentId })) as { value: Json }).value[
+      "excess"
+    ] as Json;
+
+  it("P1: correcting an ordinary reference onto one held with excess is 409, nothing written", async () => {
+    await confirmedExcess("TRF-SVR-P1");
+    const orderId = await seedConfirmed();
+    // Same method as the excess holder (references are scoped by method).
+    const plain = (
+      await payments.recordPaymentFn({
+        data: {
+          orderId,
+          method: "bank_transfer",
+          amountMinor: 10000,
+          reference: "ORD-SVR-P1",
+          idempotencyKey: freshKey("pay"),
+          expectedPrincipal: P_A,
+        },
+      })
+    ).id;
+    const before = await ledgerCounts();
+    expect(
+      await call(payments.correctPaymentFn, {
+        paymentId: plain,
+        reason: "Typo",
+        reference: "trf-svr-p1",
+        expectedPrincipal: P_A,
+      }),
+    ).toEqual({ ok: false, code: "payment_duplicate_transfer_reference", status: 409 });
+    expect(await ledgerCounts()).toEqual(before);
+  });
+
+  it("refund explanation: 105 → return 5 keeps the sale fully paid; a later ordinary 20 refund does not", async () => {
+    const { paymentId } = await confirmedExcess(`TRF-SVR-R-${crypto.randomUUID().slice(0, 6)}`);
+    expect(
+      codeOf(await call(payments.returnPaymentExcessFn, refund(paymentId, { amountMinor: 500 }))),
+    ).toBe("ok");
+    expect(await excessOf(paymentId)).toMatchObject({
+      returned: { amount: 500, currency: "USD" },
+      saleFullyPaid: true,
+    });
+    const ack = (await refundsOf(paymentId)).map((r) => r["id"] as string);
+    expect(
+      codeOf(
+        await call(
+          payments.refundPaymentFn,
+          refund(paymentId, {
+            amountMinor: 2000,
+            expectedRefundedMinor: 500,
+            acknowledgedRefundIds: ack,
+          }),
+        ),
+      ),
+    ).toBe("ok");
+    expect((await excessOf(paymentId))["saleFullyPaid"]).toBe(false);
+  });
+
+  it("refund explanation: 105 → return 5 → full refund is not 'paid in full' either", async () => {
+    const { paymentId } = await confirmedExcess(`TRF-SVR-F-${crypto.randomUUID().slice(0, 6)}`);
+    expect(
+      codeOf(await call(payments.returnPaymentExcessFn, refund(paymentId, { amountMinor: 500 }))),
+    ).toBe("ok");
+    const ack = (await refundsOf(paymentId)).map((r) => r["id"] as string);
+    expect(
+      codeOf(
+        await call(
+          payments.refundPaymentFn,
+          refund(paymentId, {
+            amountMinor: 10000,
+            expectedRefundedMinor: 500,
+            acknowledgedRefundIds: ack,
+          }),
+        ),
+      ),
+    ).toBe("ok");
+    expect((await excessOf(paymentId))["saleFullyPaid"]).toBe(false);
   });
 });
