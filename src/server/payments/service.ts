@@ -140,9 +140,22 @@ export interface PaymentSummary {
   updatedAt: string;
 }
 
+/**
+ * Migration 068: the excess a payment was recorded with, and what can still be
+ * returned — payment_excess_state_v1, the rule return_payment_excess_v1 applies
+ * (0 unless confirmed; never past the order total; never below zero).
+ */
+export interface PaymentExcessState {
+  recorded: Money;
+  returned: Money;
+  returnable: Money;
+}
+
 export interface PaymentDetail extends PaymentSummary {
   events: PaymentEventDetail[];
   evidence: PaymentEvidenceDetail[];
+  /** Present only for a payment recorded with excess. */
+  excess: PaymentExcessState | null;
 }
 
 // ── Mappers ───────────────────────────────────────────────────────────────────
@@ -426,6 +439,31 @@ function exceedsOutstanding(): Error {
   );
 }
 
+/**
+ * Migration 068: the transfer reference (canonical form) is already held by a
+ * payment of this method in this organization — recording it again would
+ * count one transfer twice. Nothing was written.
+ */
+function duplicateTransferReference(): Error {
+  return publicError(
+    "This transfer reference is already recorded on another payment",
+    409,
+    "payment_duplicate_transfer_reference",
+  );
+}
+
+/**
+ * Migration 068: nothing is outstanding on the order, so a transfer above it is
+ * an unallocated receipt — outside "record with excess". Nothing was written.
+ */
+function nothingOutstanding(): Error {
+  return publicError(
+    "Nothing is outstanding on this order — this transfer cannot be recorded against it",
+    409,
+    "payment_nothing_outstanding",
+  );
+}
+
 function recordFailureToError(result: { status: string }): Error {
   switch (result.status) {
     case "invalid_amount":
@@ -441,6 +479,8 @@ function recordFailureToError(result: { status: string }): Error {
       return orderNotPayable();
     case "exceeds_outstanding":
       return exceedsOutstanding();
+    case "duplicate_transfer_reference":
+      return duplicateTransferReference();
     default:
       return new Error(`Payment record failed: ${result.status}`);
   }
@@ -479,6 +519,16 @@ function verifyFailureToError(result: { status: string; current?: string }): Err
         409,
         "payment_claim_exceeds_total",
       );
+    case "excess_reinstatement_required":
+      // Migration 068: a payment recorded with excess is reinstated only by
+      // reinstateExcessPayment, which rechecks its excess and reference.
+      return publicError(
+        "This payment was recorded with an excess — reinstate it with the excess action",
+        409,
+        "payment_excess_reinstatement_required",
+      );
+    case "duplicate_transfer_reference":
+      return duplicateTransferReference();
     default:
       return new Error(`Payment verification failed: ${result.status}`);
   }
@@ -991,6 +1041,10 @@ function recordWithExcessFailureToError(result: { status: string }): Error {
       return notFound("Order not found");
     case "order_not_payable":
       return orderNotPayable();
+    case "nothing_outstanding":
+      return nothingOutstanding();
+    case "duplicate_transfer_reference":
+      return duplicateTransferReference();
     case "stale":
       return publicError(
         "The order's outstanding amount changed after this payment was started — re-read it and try again",
@@ -1118,6 +1172,129 @@ export async function returnPaymentExcess(
   return requireDetail(ctx, input.paymentId);
 }
 
+export interface ReinstateExcessPaymentServiceInput {
+  paymentId: string;
+  reason: string;
+  expectedPrincipal: ExpectedPrincipal;
+}
+
+/**
+ * Migration 068 (DRAFT): take a payment recorded with excess that was rejected
+ * (mismatch) by mistake back to pending — the SAME payment, its created event
+ * untouched — when its excess and reference still hold under the order lock.
+ * Manager-level (payments.record_excess), audited payments.reinstate_excess.
+ */
+export async function reinstateExcessPayment(
+  ctx: AuthorizationContext,
+  input: ReinstateExcessPaymentServiceInput,
+): Promise<PaymentDetail> {
+  assertExpectedPrincipal(ctx, input.expectedPrincipal);
+  ctx.require("payments.record_excess");
+  await enforcePaymentReversalLimit(ctx);
+  if (!input.reason?.trim()) throw badRequest("A reason is required");
+
+  const result = await repo.reinstateExcessPayment(
+    ctx.organizationId,
+    input.paymentId,
+    ctx.userId,
+    input.reason.trim(),
+  );
+  if (result.status !== "success") {
+    switch (result.status) {
+      case "reason_required":
+        throw badRequest("A reason is required");
+      case "not_found":
+        throw notFound("Payment not found");
+      case "no_recorded_excess":
+        throw publicError(
+          "This payment was not recorded with an excess",
+          409,
+          "payment_no_recorded_excess",
+        );
+      case "invalid_state":
+        throw conflict(`Cannot reinstate a payment in status '${result.current ?? "unknown"}'`);
+      case "order_not_payable":
+        throw orderNotPayable();
+      case "nothing_outstanding":
+        throw nothingOutstanding();
+      case "excess_changed":
+        throw publicError(
+          "Other payments changed what this order still owes, so this transfer's excess is no longer the one recorded — record the transfer again with its new excess",
+          409,
+          "payment_excess_changed",
+        );
+      case "duplicate_transfer_reference":
+        throw duplicateTransferReference();
+      default:
+        throw verifyFailureToError(result);
+    }
+  }
+  return requireDetail(ctx, input.paymentId);
+}
+
+export type ExcessToReturnKind = "returnable" | "awaiting_confirmation" | "legacy_overpaid";
+
+/** One row of the Payments "Excess to return" view (migration 068). */
+export interface ExcessToReturnItem {
+  kind: ExcessToReturnKind;
+  /** The payment recorded with excess; null for a legacy over-paid order. */
+  paymentId: string | null;
+  orderId: string;
+  orderNumber: string;
+  /** Withheld (null) unless the caller holds customers.read. */
+  customerName: string | null;
+  method: PaymentMethod | null;
+  /** The payment's own amount; null for a legacy over-paid order. */
+  amount: Money | null;
+  /**
+   * returnable: what can still be returned (the payment-detail figure);
+   * awaiting_confirmation: the recorded excess (nothing returnable before
+   * confirmation); legacy_overpaid: net received − order total.
+   */
+  excess: Money;
+  occurredAt: string;
+}
+
+export interface ExcessToReturnPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: ExcessToReturnItem[];
+}
+
+/**
+ * Payments "Excess to return" (migration 068): every confirmed payment with
+ * returnable excess, every pending payment recorded with excess, and every
+ * legacy order holding more than its total — one database statement, exact
+ * count, deterministic pages, organization-scoped. payments.reconcile.
+ */
+export async function listExcessToReturn(
+  ctx: AuthorizationContext,
+  opts: { limit?: number | undefined; offset?: number | undefined } = {},
+): Promise<ExcessToReturnPage> {
+  ctx.require("payments.reconcile");
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 25), 1), 100);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const page = await repo.listExcessToReturn(ctx.organizationId, limit, offset);
+  const canReadCustomers = ctx.can("customers.read");
+  return {
+    total: page.total,
+    limit: page.limit,
+    offset: page.offset,
+    items: page.rows.map((row) => ({
+      kind: row.kind,
+      paymentId: row.payment_id,
+      orderId: row.order_id,
+      orderNumber: row.order_number,
+      customerName: canReadCustomers ? row.customer_name : null,
+      method: row.method,
+      amount: row.amount_minor === null ? null : toMoney(row.amount_minor, row.currency),
+      excess: toMoney(row.excess_minor, row.currency),
+      occurredAt: row.occurred_at,
+    })),
+  };
+}
+
 /**
  * Owner-level correction of a payment's `reference` or `note`. Never touches
  * amount/method/currency — see migration 035's correct_payment_v1 header.
@@ -1180,10 +1357,30 @@ async function loadDetail(
     ? collectKnownReferences(null)
     : collectKnownReferences(payment.reference, extractedReferences);
 
+  const recordedWithExcess = events.some(
+    (row) =>
+      row.event_type === "created" &&
+      row.metadata !== null &&
+      typeof row.metadata === "object" &&
+      !Array.isArray(row.metadata) &&
+      "excess_minor" in row.metadata,
+  );
+  const excessState = recordedWithExcess
+    ? await repo.getPaymentExcessState(ctx.organizationId, paymentId)
+    : null;
+
   return {
     ...mapPayment(payment, canViewReference, "redact-known", extractedReferences),
     events: events.map((row) => mapEvent(row, canViewReference, knownReferences, ctx.userId)),
     evidence: evidence.map((row) => mapEvidence(row, canViewReference)),
+    excess:
+      excessState && excessState.status === "success"
+        ? {
+            recorded: toMoney(excessState.recorded_excess_minor, excessState.currency),
+            returned: toMoney(excessState.excess_returned_minor, excessState.currency),
+            returnable: toMoney(excessState.returnable_excess_minor, excessState.currency),
+          }
+        : null,
   };
 }
 

@@ -65,7 +65,8 @@ ord AS (
   JOIN public.orders o ON o.id = t.order_id AND o.organization_id = t.organization_id
 ),
 -- 068's verify rule, per claim:
---   pending → paid    confirmed; received + principal > total (or a draft) creates an excess
+--   pending → paid    confirmed; an excess is created only when received + principal > total
+--                     (on a draft too — a draft claim under the total creates none)
 --   failed → pending  refused when received + other pending + principal − refunded > total
 judged AS (
   SELECT pa.*, od.received_minor,
@@ -119,9 +120,9 @@ findings (check_id, category, currency, organizations, orders, payments, amount_
   UNION ALL
   SELECT '04.01', 'pending_claim_confirmation_creates_excess', currency,
     COUNT(DISTINCT organization_id), COUNT(DISTINCT order_id), COUNT(*), SUM(amount_minor),
-    'Pending claims whose confirmation would take received above the total (or that sit on a draft). 068 still confirms them, stamps the excess on the confirmation event and leaves the order flagged overpaid until the excess is rejected (mismatch/reverse) or refunded.'
+    'Pending claims whose confirmation would take received money above the order total (draft orders included only when they would). 068 still confirms them, stamps the excess on the confirmation event and leaves the order flagged overpaid until the excess is rejected (mismatch/reverse) or refunded. Draft claims within the total are counted in 03.01, not here.'
   FROM judged
-  WHERE status = 'pending' AND (lifecycle = 'draft' OR received_minor + amount_minor > total_minor)
+  WHERE status = 'pending' AND received_minor + amount_minor > total_minor
   GROUP BY currency
   UNION ALL
   SELECT '04.02', 'rejected_claim_068_refuses_to_reinstate', currency,

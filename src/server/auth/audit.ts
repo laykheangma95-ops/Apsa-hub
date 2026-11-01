@@ -45,6 +45,7 @@ export type AuditAction =
   // (migration 068) in the same transaction as the ledger write.
   | "payments.record_excess"
   | "payments.return_excess"
+  | "payments.reinstate_excess"
   | "inventory.adjust"
   | "products.price_change"
   | "products.delete"
@@ -74,6 +75,7 @@ export const MANDATORY_AUDIT_ACTIONS: ReadonlySet<AuditAction> = new Set([
   "payments.refund",
   "payments.record_excess",
   "payments.return_excess",
+  "payments.reinstate_excess",
   "inventory.adjust",
   "customers.export",
   "team.remove",

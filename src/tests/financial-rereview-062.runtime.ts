@@ -971,7 +971,9 @@ describe("068 record with excess through the server functions", () => {
     orderId,
     method: "bank_transfer",
     amountMinor: 10500,
-    reference: "TRF-105",
+    // Unique per request: a transfer reference recorded with excess is
+    // exclusive (migration 068), so tests must not share one by accident.
+    reference: `TRF-105-${crypto.randomUUID().slice(0, 8)}`,
     reason: "Customer transferred 105.00",
     idempotencyKey: freshKey("excess"),
     expectedOutstandingMinor: 10000,
@@ -1083,5 +1085,215 @@ describe("068 record with excess through the server functions", () => {
     } finally {
       set.add("payments.refund");
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Migration 068 repair — the reviewed blockers through the real server
+// functions: nothing_outstanding (B1), duplicate_transfer_reference (B2), the
+// server's returnable figure on the payment detail (M1), the excess-aware
+// reinstatement (M2) and Payments "Excess to return" (B3), with their grants.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("068 repair through the server functions", () => {
+  const withGrants = async <T>(user: string, keys: string[], run: () => Promise<T>) => {
+    const set = grants.get(user)!;
+    const added = keys.filter((key) => !set.has(key));
+    for (const key of added) set.add(key);
+    try {
+      return await run();
+    } finally {
+      for (const key of added) set.delete(key);
+    }
+  };
+  const without = async <T>(user: string, key: string, run: () => Promise<T>) => {
+    const set = grants.get(user)!;
+    const had = set.delete(key);
+    try {
+      return await run();
+    } finally {
+      if (had) set.add(key);
+    }
+  };
+  const excessRequest = (orderId: string, change: Json = {}) => ({
+    orderId,
+    method: "bank_transfer",
+    amountMinor: 10500,
+    reference: `TRF-${crypto.randomUUID().slice(0, 8)}`,
+    reason: "Customer transferred 105.00",
+    idempotencyKey: freshKey("excess"),
+    expectedOutstandingMinor: 10000,
+    expectedPrincipal: P_A,
+    ...change,
+  });
+  const MANAGER_LIKE = ["payments.record_excess", "payments.reconcile"];
+
+  it("B1: a fully paid order is 409 payment_nothing_outstanding, nothing written", async () => {
+    const { orderId } = await seedPaid();
+    await withGrants(USER_A, MANAGER_LIKE, async () => {
+      const before = await ledgerCounts();
+      expect(
+        await call(
+          payments.recordPaymentWithExcessFn,
+          excessRequest(orderId, { expectedOutstandingMinor: 0 }),
+        ),
+      ).toEqual({ ok: false, code: "payment_nothing_outstanding", status: 409 });
+      expect(await ledgerCounts()).toEqual(before);
+    });
+  });
+
+  it("B2: the same transfer reference (another case, spaces) on another order is 409 payment_duplicate_transfer_reference", async () => {
+    const first = await seedConfirmed();
+    const second = await seedConfirmed();
+    await withGrants(USER_A, MANAGER_LIKE, async () => {
+      expect(
+        codeOf(
+          await call(
+            payments.recordPaymentWithExcessFn,
+            excessRequest(first, { reference: "TRF-SVR-1" }),
+          ),
+        ),
+      ).toBe("ok");
+      const before = await ledgerCounts();
+      expect(
+        await call(
+          payments.recordPaymentWithExcessFn,
+          excessRequest(second, { reference: " trf - svr-1 " }),
+        ),
+      ).toEqual({ ok: false, code: "payment_duplicate_transfer_reference", status: 409 });
+      expect(await ledgerCounts()).toEqual(before);
+    });
+  });
+
+  it("M1: the payment detail carries the server's returnable amount — 0 after an ordinary refund took net to the total", async () => {
+    const orderId = await seedConfirmed();
+    await withGrants(USER_A, MANAGER_LIKE, async () => {
+      const recorded = await call(payments.recordPaymentWithExcessFn, excessRequest(orderId));
+      const paymentId = (recorded as { value: Json }).value["id"] as string;
+      expect((recorded as { value: Json }).value["excess"]).toEqual({
+        recorded: { amount: 500, currency: "USD" },
+        returned: { amount: 0, currency: "USD" },
+        returnable: { amount: 0, currency: "USD" },
+      });
+      await payments.verifyPaymentFn({
+        data: { paymentId, to: "staff_confirmed", expectedPrincipal: P_A },
+      });
+      const detail = await call(payments.getPaymentByIdFn, { paymentId });
+      expect(((detail as { value: Json }).value["excess"] as Json)["returnable"]).toEqual({
+        amount: 500,
+        currency: "USD",
+      });
+      expect(
+        codeOf(await call(payments.refundPaymentFn, refund(paymentId, { amountMinor: 500 }))),
+      ).toBe("ok");
+      const after = await call(payments.getPaymentByIdFn, { paymentId });
+      expect(((after as { value: Json }).value["excess"] as Json)["returnable"]).toEqual({
+        amount: 0,
+        currency: "USD",
+      });
+      // A screen that still showed 500 is refused, nothing written.
+      const refundIds = (await refundsOf(paymentId)).map((r) => r["id"] as string);
+      const before = await ledgerCounts();
+      expect(
+        await call(
+          payments.returnPaymentExcessFn,
+          refund(paymentId, {
+            amountMinor: 500,
+            expectedRefundedMinor: 500,
+            acknowledgedRefundIds: refundIds,
+          }),
+        ),
+      ).toEqual({ ok: false, code: "payment_exceeds_returnable_excess", status: 409 });
+      expect(await ledgerCounts()).toEqual(before);
+    });
+    // An ordinary payment has no excess state.
+    const { paymentId: plain } = await seedPaid();
+    const plainDetail = await call(payments.getPaymentByIdFn, { paymentId: plain });
+    expect((plainDetail as { value: Json }).value["excess"]).toBeNull();
+  });
+
+  it("M2: reinstatement needs payments.record_excess; ordinary reinstatement is 409; the excess-aware one is audited", async () => {
+    const orderId = await seedConfirmed();
+    const paymentId = await withGrants(USER_A, MANAGER_LIKE, async () => {
+      const recorded = await call(payments.recordPaymentWithExcessFn, excessRequest(orderId));
+      return (recorded as { value: Json }).value["id"] as string;
+    });
+    expect(
+      codeOf(
+        await call(payments.verifyPaymentFn, {
+          paymentId,
+          to: "mismatch",
+          reason: "Not on the statement (yet)",
+          expectedPrincipal: P_A,
+        }),
+      ),
+    ).toBe("ok");
+    const before = await ledgerCounts();
+    expect(
+      await call(payments.verifyPaymentFn, {
+        paymentId,
+        to: "unverified",
+        reason: "It was there after all",
+        expectedPrincipal: P_A,
+      }),
+    ).toEqual({ ok: false, code: "payment_excess_reinstatement_required", status: 409 });
+    const reinstate = { paymentId, reason: "Rejected by mistake", expectedPrincipal: P_A };
+    expect(await call(payments.reinstateExcessPaymentFn, reinstate)).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+    expect(
+      codeOf(
+        await call(payments.reinstateExcessPaymentFn, { ...reinstate, expectedPrincipal: P_B }),
+      ),
+    ).toBe("principal_changed");
+    expect(await ledgerCounts()).toEqual(before);
+    await withGrants(USER_A, ["payments.record_excess"], async () => {
+      const done = await call(payments.reinstateExcessPaymentFn, reinstate);
+      expect(done.ok).toBe(true);
+      expect((done as { value: Json }).value["status"]).toBe("pending");
+      expect((done as { value: Json }).value["id"]).toBe(paymentId);
+    });
+    expect(await auditsFor(paymentId, "payments.reinstate_excess")).toHaveLength(1);
+  });
+
+  it("B3: 'Excess to return' needs payments.reconcile (Owner, Manager), is exact and organization-scoped", async () => {
+    const orderId = await seedConfirmed();
+    const paymentId = await withGrants(USER_A, MANAGER_LIKE, async () => {
+      const recorded = await call(payments.recordPaymentWithExcessFn, excessRequest(orderId));
+      const id = (recorded as { value: Json }).value["id"] as string;
+      await payments.verifyPaymentFn({
+        data: { paymentId: id, to: "staff_confirmed", expectedPrincipal: P_A },
+      });
+      return id;
+    });
+    // A member without payments.reconcile (Cashier / Sales): 403.
+    expect(await call(payments.listExcessToReturnFn, {})).toMatchObject({ ok: false, status: 403 });
+    await withGrants(USER_A, ["payments.reconcile"], async () => {
+      const page = await call(payments.listExcessToReturnFn, { limit: 100, offset: 0 });
+      expect(page.ok).toBe(true);
+      const value = (page as { value: Json }).value as {
+        total: number;
+        items: Json[];
+      };
+      expect(value.total).toBe(value.items.length);
+      const mine = value.items.find((item) => item["paymentId"] === paymentId)!;
+      expect(mine).toMatchObject({
+        kind: "returnable",
+        orderId,
+        excess: { amount: 500, currency: "USD" },
+        // No customers.read in this harness: the name is withheld.
+        customerName: null,
+      });
+      // Out-of-range input is refused by the validator.
+      expect(codeOf(await call(payments.listExcessToReturnFn, { limit: 0 }))).toBe(
+        "invalid_request",
+      );
+    });
+    await without(USER_A, "payments.read", async () => {
+      await withGrants(USER_A, ["payments.reconcile"], async () => {
+        expect(codeOf(await call(payments.listExcessToReturnFn, {}))).toBe("ok");
+      });
+    });
   });
 });

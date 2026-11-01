@@ -34,6 +34,12 @@ import {
   type RecordExcessPaymentSubmit,
 } from "@/components/orders/RecordExcessPaymentSheet";
 import {
+  beginExcessRecording,
+  excessRecordingFingerprint,
+  excessRecordingSucceeded,
+  resetExcessRecording,
+} from "@/lib/excess-intent";
+import {
   RecordOrderPaymentSheet,
   type RecordOrderPaymentSubmit,
 } from "@/components/orders/RecordOrderPaymentSheet";
@@ -731,11 +737,16 @@ function RealOrderDetailScreen({ id }: { id: string }) {
 
   /*
    * Migration 068 (DRAFT): a bank / KHQR transfer above the outstanding amount,
-   * recorded at its full amount. One key per opened sheet; the outstanding
+   * recorded at its full amount. The key is durable for this member,
+   * organization and order (src/lib/excess-intent.ts): the same request again
+   * — after a lost response, a reload or leaving the order — replays; it is
+   * cleared only by a success or an explicit "Start over". The outstanding
    * amount the sheet showed is sent as a precondition.
    */
   const recordExcessMutation = useMutation({
-    mutationFn: (submit: RecordExcessPaymentSubmit & OrderActionStart) =>
+    mutationFn: (
+      submit: RecordExcessPaymentSubmit & OrderActionStart & { idempotencyKey: string },
+    ) =>
       recordRealPaymentWithExcess(submit.startedAs, {
         orderId: submit.orderId,
         method: submit.method,
@@ -747,6 +758,12 @@ function RealOrderDetailScreen({ id }: { id: string }) {
       }),
     onMutate: (submit) => beginPaymentAttempt(submit),
     onSuccess: (_payment, submit, attempt) => {
+      // Accepted (made now or replayed): this logical recording is done.
+      excessRecordingSucceeded({
+        userId: submit.startedAs.userId,
+        organizationId: submit.startedAs.organizationId,
+        orderId: submit.orderId,
+      });
       if (!isCurrentPaymentAttempt(attempt)) return invalidatePaymentOf(submit);
       setRecordExcessOpen(false);
       invalidateAfterPayment();
@@ -981,8 +998,14 @@ function RealOrderDetailScreen({ id }: { id: string }) {
   const recordExcessError = recordExcessMutation.error
     ? t(paymentErrorMessageKey(recordExcessMutation.error))
     : null;
-  // Offered only with the server's outstanding figure on screen.
-  const showRecordExcess = orderAcceptsPayment && canRecordExcess && settlement !== null;
+  // Offered only with the server's outstanding figure on screen, and only
+  // while it is positive: a transfer received when nothing is owed is an
+  // unallocated receipt, outside this action (the server refuses it too).
+  const showRecordExcess =
+    orderAcceptsPayment &&
+    canRecordExcess &&
+    settlement !== null &&
+    settlement.outstanding.amount > 0;
 
   const historyItems: TimelineItem[] = [...(order.statusHistory ?? [])]
     .sort((a, b) => b.changedAt.localeCompare(a.changedAt))
@@ -1659,9 +1682,21 @@ function RealOrderDetailScreen({ id }: { id: string }) {
           outstanding={settlement.outstanding}
           pending={recordExcessMutation.isPending}
           error={recordExcessError}
-          onConfirm={(submit) =>
-            recordExcessMutation.mutate({ ...submit, orderId: order.id, startedAs: principal })
-          }
+          onConfirm={(submit) => {
+            const scope = { ...principal, orderId: order.id };
+            // Persisted before the request is sent: a reload mid-flight keeps it.
+            const { key } = beginExcessRecording(scope, excessRecordingFingerprint(submit));
+            recordExcessMutation.mutate({
+              ...submit,
+              idempotencyKey: key,
+              orderId: order.id,
+              startedAs: principal,
+            });
+          }}
+          onStartOver={() => {
+            recordExcessMutation.reset();
+            resetExcessRecording({ ...principal, orderId: order.id });
+          }}
         />
       ) : null}
       <InternalParcelLabelDialog

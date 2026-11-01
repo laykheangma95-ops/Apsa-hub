@@ -48,8 +48,9 @@ describe("PaymentActionSheets — aria-busy while a mutation is pending", () => 
     const disabledCount = (source.match(/disabled=\{pending/g) ?? []).length;
     const busyCount = (source.match(/aria-busy=\{pending\}/g) ?? []).length;
     expect(busyCount).toBe(disabledCount);
-    // Verify, refund and reverse submits, plus the refund review step's two
-    // choices (refund more / do not refund again — migration 062).
-    expect(busyCount).toBe(5);
+    // Verify, refund and reverse submits, the refund review step's two
+    // choices (refund more / do not refund again — migration 062), and the
+    // reinstatement of a rejected excess payment (migration 068).
+    expect(busyCount).toBe(6);
   });
 });

@@ -10,10 +10,9 @@ import km from "@/locales/km.json";
 import {
   excessAbove,
   excessReturnRefundIds,
+  excessReturnStateOf,
   paymentClaimRefusalOf,
   paymentErrorMessageKey,
-  recordedExcessOf,
-  unreturnedExcessOf,
 } from "@/lib/payments";
 
 function serverError(message: string, statusCode: number, code?: string) {
@@ -100,11 +99,12 @@ describe("Order detail offers Record payment only where the server accepts it", 
 });
 
 describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
-  type Detail = Parameters<typeof recordedExcessOf>[0];
+  type Detail = Parameters<typeof excessReturnStateOf>[0];
+  const usd = (amount: number) => ({ amount, currency: "USD" as const });
   const event = (id: string, eventType: string, amount: number | null, metadata: unknown) => ({
     id,
     eventType,
-    amount: amount === null ? null : { amount, currency: "USD" },
+    amount: amount === null ? null : usd(amount),
     fromVerification: null,
     toVerification: null,
     actorUserId: null,
@@ -113,31 +113,72 @@ describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
     metadata,
     createdAt: "2026-10-31T00:00:00Z",
   });
-  const detail = (events: unknown[]) =>
-    ({ amount: { amount: 10500, currency: "USD" }, events, evidence: [] }) as unknown as Detail;
+  const detail = (
+    events: unknown[],
+    status = "paid",
+    excess: { recorded: number; returned: number; returnable: number } | null = null,
+  ) =>
+    ({
+      amount: usd(10500),
+      status,
+      events,
+      evidence: [],
+      excess: excess
+        ? {
+            recorded: usd(excess.recorded),
+            returned: usd(excess.returned),
+            returnable: usd(excess.returnable),
+          }
+        : null,
+    }) as unknown as Detail;
 
-  it("reads the excess only from the created event, and labels only refunds named by evidence", () => {
-    const d = detail([
-      event("c", "created", 10500, { excess_minor: 500, request_digest_version: 1 }),
-      event("r1", "refund", 500, { status: "success" }), // ordinary, same amount: not labelled
-      event("r2", "refund", 300, { status: "success" }),
-      event("x2", "excess_returned", 300, {
-        refund_event_id: "r2",
-        excess_returned_total_minor: 300,
-      }),
-    ]);
-    expect(recordedExcessOf(d)).toEqual({ amount: 500, currency: "USD" });
+  it("labels only refunds named by excess_returned evidence", () => {
+    const d = detail(
+      [
+        event("c", "created", 10500, { excess_minor: 500, request_digest_version: 1 }),
+        event("r1", "refund", 500, { status: "success" }), // ordinary, same amount: not labelled
+        event("r2", "refund", 300, { status: "success" }),
+        event("x2", "excess_returned", 300, {
+          refund_event_id: "r2",
+          excess_returned_total_minor: 300,
+        }),
+      ],
+      "paid",
+      { recorded: 500, returned: 300, returnable: 0 },
+    );
     expect([...excessReturnRefundIds(d)]).toEqual(["r2"]);
-    expect(unreturnedExcessOf(d)).toEqual({ amount: 200, currency: "USD" });
   });
 
-  it("an ordinary payment has no recorded excess and no labelled refund", () => {
+  it("negative control (M1): 'still to return' is the server's figure, never recorded − returned", () => {
+    // Recorded 500, nothing returned as excess, but an ordinary refund already
+    // brought net to the total: the server says 0 — no "still to return 500".
+    const d = detail([event("c", "created", 10500, { excess_minor: 500 })], "paid", {
+      recorded: 500,
+      returned: 0,
+      returnable: 0,
+    });
+    expect(excessReturnStateOf(d)).toBe("nothing_to_return");
+    expect(
+      excessReturnStateOf(detail([], "paid", { recorded: 500, returned: 0, returnable: 500 })),
+    ).toBe("returnable");
+    expect(
+      excessReturnStateOf(detail([], "paid", { recorded: 500, returned: 500, returnable: 0 })),
+    ).toBe("all_returned");
+  });
+
+  it("nothing is returnable before confirmation, nor once rejected or reversed", () => {
+    const excess = { recorded: 500, returned: 0, returnable: 0 };
+    expect(excessReturnStateOf(detail([], "pending", excess))).toBe("awaiting_confirmation");
+    expect(excessReturnStateOf(detail([], "failed", excess))).toBe("not_a_claim");
+    expect(excessReturnStateOf(detail([], "reversed", excess))).toBe("not_a_claim");
+  });
+
+  it("an ordinary payment has no excess state and no labelled refund", () => {
     const d = detail([
       event("c", "created", 10000, { request_digest_version: 1 }),
       event("r", "refund", 500, {}),
     ]);
-    expect(recordedExcessOf(d)).toBeNull();
-    expect(unreturnedExcessOf(d)).toBeNull();
+    expect(excessReturnStateOf(d)).toBeNull();
     expect(excessReturnRefundIds(d).size).toBe(0);
   });
 
@@ -155,10 +196,119 @@ describe("recorded excess and the 'excess returned' label (068, DRAFT)", () => {
       ["payment_no_excess", "no_excess"],
       ["payment_no_recorded_excess", "no_recorded_excess"],
       ["payment_exceeds_returnable_excess", "exceeds_returnable_excess"],
+      ["payment_nothing_outstanding", "nothing_outstanding"],
+      ["payment_duplicate_transfer_reference", "duplicate_transfer_reference"],
+      ["payment_excess_reinstatement_required", "excess_reinstatement_required"],
+      ["payment_excess_changed", "excess_changed"],
     ] as const) {
       expect(paymentErrorMessageKey(serverError("x", 409, code))).toBe(`payments.errors.${key}`);
       expect((en.payments.errors as Record<string, string>)[key]).toBeString();
       expect((km.payments.errors as Record<string, string>)[key]).toBeString();
     }
+  });
+});
+
+describe("068 repair — the excess sheet's key is durable and scoped (B2)", () => {
+  it("the same request after a reload reuses its key; another request, order, member or organization does not", async () => {
+    const {
+      beginExcessRecording,
+      excessRecordingFingerprint,
+      excessRecordingSucceeded,
+      readExcessIntent,
+      resetExcessRecording,
+    } = await import("@/lib/excess-intent");
+    const scope = { userId: "u1", organizationId: "o1", orderId: "order-1" };
+    const request = { method: "khqr", amountMinor: 10500, reference: "TRF-1", reason: "More" };
+    let n = 0;
+    const key = () => `k${++n}`;
+    const first = beginExcessRecording(scope, excessRecordingFingerprint(request), key);
+    // "Reload": nothing in the component survives; the store does.
+    expect(readExcessIntent(scope)?.key).toBe(first.key);
+    expect(
+      beginExcessRecording(
+        scope,
+        excessRecordingFingerprint({ ...request, reference: " TRF-1 " }),
+        key,
+      ).key,
+    ).toBe(first.key);
+    // Scoped: another order / member / organization never sees it.
+    for (const other of [
+      { ...scope, orderId: "order-2" },
+      { ...scope, userId: "u2" },
+      { ...scope, organizationId: "o2" },
+    ]) {
+      expect(readExcessIntent(other)).toBeNull();
+    }
+    // A different request gets a new key (the server then refuses a second
+    // recording of the same transfer reference).
+    const changed = beginExcessRecording(
+      scope,
+      excessRecordingFingerprint({ ...request, amountMinor: 10600 }),
+      key,
+    );
+    expect(changed.key).not.toBe(first.key);
+    excessRecordingSucceeded(scope);
+    expect(readExcessIntent(scope)).toBeNull();
+    beginExcessRecording(scope, excessRecordingFingerprint(request), key);
+    resetExcessRecording(scope);
+    expect(readExcessIntent(scope)).toBeNull();
+  });
+
+  it("the sheet no longer mints a per-open key; Order detail persists it and offers the sheet only while something is owed", async () => {
+    const sheet = await Bun.file("src/components/orders/RecordExcessPaymentSheet.tsx").text();
+    expect(sheet).not.toContain("randomUUID");
+    expect(sheet).not.toContain("idempotencyKey");
+    const order = await Bun.file("src/routes/app.orders.$id.tsx").text();
+    expect(order).toContain("settlement.outstanding.amount > 0");
+    expect(order).toContain("beginExcessRecording(scope, excessRecordingFingerprint(submit))");
+    expect(order).toContain("excessRecordingSucceeded(");
+  });
+});
+
+describe("068 repair — ordinary refund and excess return keys are domain-separated", () => {
+  it("a lost ordinary refund is never re-sent as an excess return under its key", async () => {
+    const { beginRefund, refundFingerprint } = await import("@/lib/refund-intent");
+    expect(refundFingerprint(500, "Excess")).not.toBe(
+      refundFingerprint(500, "Excess", "excess_return"),
+    );
+    // The ordinary fingerprint is unchanged by the purpose parameter.
+    expect(refundFingerprint(500, "Excess", "refund")).toBe(refundFingerprint(500, "Excess"));
+    const scope = { userId: "u1", organizationId: "o1", paymentId: "p-sep" };
+    let n = 0;
+    const key = () => `r${++n}`;
+    const ordinary = beginRefund(scope, 500, "Excess", key);
+    const excess = beginRefund(scope, 500, "Excess", key, Date.now(), "excess_return");
+    expect(excess.key).not.toBe(ordinary.key);
+    // The same excess return again reuses its own key.
+    expect(beginRefund(scope, 500, "Excess", key, Date.now(), "excess_return").key).toBe(
+      excess.key,
+    );
+  });
+});
+
+describe("068 repair — Payment detail and Payments use the server's figures", () => {
+  it("no client-side 'still to return'; the excess view is gated by payments.reconcile", async () => {
+    const detail = await Bun.file("src/routes/app.payments.$id.tsx").text();
+    expect(detail).not.toContain("unreturnedExcessOf");
+    expect(detail).toContain('excessState === "returnable"');
+    expect(detail).toContain("formatMoney(excess.returnable)");
+    const payments = await Bun.file("src/routes/app.payments.tsx").text();
+    expect(payments).toContain("const excessView = excessSelected && canReconcile;");
+    expect(payments).toContain("{canReconcile ? (");
+  });
+
+  it("both locales carry the new copy, and the Khmer keys match the English ones", () => {
+    const flat = (value: unknown, prefix = ""): string[] =>
+      value && typeof value === "object"
+        ? Object.entries(value as Record<string, unknown>).flatMap(([k, v]) =>
+            flat(v, `${prefix}${k}.`),
+          )
+        : [prefix.slice(0, -1)];
+    const enKeys = flat(en).filter((k) => /excess|Excess/.test(k));
+    const kmKeys = flat(km).filter((k) => /excess|Excess/.test(k));
+    expect(kmKeys.sort()).toEqual(enKeys.sort());
+    expect(enKeys).toContain("payments.excessToReturn.filter");
+    expect(enKeys).toContain("payments.actions.reinstateExcess.submit");
+    expect(enKeys).toContain("payments.excess.state.nothing_to_return");
   });
 });

@@ -303,6 +303,53 @@ export const returnPaymentExcessFn = createServerFn({ method: "POST" })
     });
   });
 
+// ── reinstateExcessPaymentFn (migration 068, DRAFT) ───────────────────────────
+//
+// A payment recorded with excess that was rejected by mistake, taken back to
+// pending on the same payment row (payments.record_excess). The server
+// rechecks its excess and its transfer reference under the order lock.
+
+export const reinstateExcessPaymentFn = createServerFn({ method: "POST" })
+  .validator((data: unknown) =>
+    z
+      .object({
+        paymentId: z.string().uuid("Invalid payment ID"),
+        reason: z.string().trim().min(1, "A reason is required").max(1000),
+        expectedPrincipal: expectedPrincipalSchema,
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { reinstateExcessPayment } = await import("@/server/payments/service");
+    return reinstateExcessPayment(authCtx, {
+      paymentId: data.paymentId,
+      reason: data.reason,
+      expectedPrincipal: data.expectedPrincipal,
+    });
+  });
+
+// ── listExcessToReturnFn (migration 068, DRAFT) ───────────────────────────────
+//
+// Payments "Excess to return": payments.reconcile, organization-scoped, exact
+// count and deterministic pages from one database statement.
+
+export const listExcessToReturnFn = createServerFn()
+  .validator((data: unknown) =>
+    z
+      .object({
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(1_000_000).optional(),
+      })
+      .optional()
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const authCtx = await resolveAuthContext();
+    const { listExcessToReturn } = await import("@/server/payments/service");
+    return listExcessToReturn(authCtx, { limit: data?.limit, offset: data?.offset });
+  });
+
 // ── correctPaymentFn ──────────────────────────────────────────────────────────
 
 export const correctPaymentFn = createServerFn({ method: "POST" })

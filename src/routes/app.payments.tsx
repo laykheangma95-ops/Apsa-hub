@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
+import { ExcessToReturnList } from "@/components/payments/ExcessToReturnList";
 import {
   PaymentMethodChip,
   PaymentReviewChip,
@@ -257,6 +258,13 @@ function PaymentsListScreen() {
 
   const [filterId, setFilterId] = useState<PaymentFilterId>("all");
   const activeFilter = findPaymentFilter(filterId);
+  /*
+   * Migration 068 (DRAFT): "Excess to return" — its own server view (exact
+   * count, the server's returnable amounts), not a filter over this list, and
+   * offered only with payments.reconcile.
+   */
+  const [excessSelected, setExcessSelected] = useState(false);
+  const excessView = excessSelected && canReconcile;
 
   const paymentsQuery = useInfiniteQuery({
     queryKey: [
@@ -277,7 +285,7 @@ function PaymentsListScreen() {
     initialPageParam: 0,
     getNextPageParam: (lastPage, pages) =>
       lastPage.hasMore ? pages.reduce((total, page) => total + page.items.length, 0) : undefined,
-    enabled: !detailOpen && canReadPayments,
+    enabled: !detailOpen && canReadPayments && !excessView,
   });
 
   const reconciliationQuery = useQuery({
@@ -344,90 +352,104 @@ function PaymentsListScreen() {
               <Chip
                 key={filter.id}
                 role="tab"
-                selected={filter.id === filterId}
-                onClick={() => setFilterId(filter.id)}
+                selected={!excessView && filter.id === filterId}
+                onClick={() => {
+                  setExcessSelected(false);
+                  setFilterId(filter.id);
+                }}
               >
                 {t(filter.labelKey)}
               </Chip>
             ))}
+            {canReconcile ? (
+              <Chip role="tab" selected={excessView} onClick={() => setExcessSelected(true)}>
+                {t("payments.excessToReturn.filter")}
+              </Chip>
+            ) : null}
           </ChipRow>
 
-          {/*
-           * Said plainly: these chips are server filters over the whole
-           * organization, and there is no combined "needs review" chip
-           * because the list endpoint cannot express that union.
-           */}
-          <p className="text-caption px-1 text-text-secondary" role="note">
-            {t("payments.list.filterScope")}
-          </p>
+          {excessView ? (
+            <ExcessToReturnList userId={userId} organizationId={routeOrganizationId} />
+          ) : (
+            <>
+              {/*
+               * Said plainly: these chips are server filters over the whole
+               * organization, and there is no combined "needs review" chip
+               * because the list endpoint cannot express that union.
+               */}
+              <p className="text-caption px-1 text-text-secondary" role="note">
+                {t("payments.list.filterScope")}
+              </p>
 
-          <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
-            {paymentsQuery.isLoading ? <ListSkeleton rows={6} /> : null}
+              <div className="list-enter overflow-hidden rounded-2xl border border-border-default">
+                {paymentsQuery.isLoading ? <ListSkeleton rows={6} /> : null}
 
-            {errorKind ? (
-              <OperationalState
-                tone="danger"
-                title={
-                  errorKind === "forbidden"
-                    ? t("payments.list.forbidden.title")
-                    : t("payments.list.error.title")
-                }
-                body={
-                  errorKind === "forbidden"
-                    ? t("payments.list.forbidden.body")
-                    : t("payments.list.error.body")
-                }
-                {...(errorKind === "forbidden"
-                  ? {}
-                  : { onRetry: () => void paymentsQuery.refetch() })}
-                className="rounded-none border-0"
-              />
-            ) : null}
+                {errorKind ? (
+                  <OperationalState
+                    tone="danger"
+                    title={
+                      errorKind === "forbidden"
+                        ? t("payments.list.forbidden.title")
+                        : t("payments.list.error.title")
+                    }
+                    body={
+                      errorKind === "forbidden"
+                        ? t("payments.list.forbidden.body")
+                        : t("payments.list.error.body")
+                    }
+                    {...(errorKind === "forbidden"
+                      ? {}
+                      : { onRetry: () => void paymentsQuery.refetch() })}
+                    className="rounded-none border-0"
+                  />
+                ) : null}
 
-            {showEmpty ? (
-              <OperationalState
-                title={
-                  filterId === "all"
-                    ? t("payments.list.empty.title")
-                    : t("payments.list.emptyFilter.title")
-                }
-                body={
-                  filterId === "all"
-                    ? t("payments.list.empty.body")
-                    : t("payments.list.emptyFilter.body")
-                }
-                className="rounded-none border-0"
-              />
-            ) : null}
+                {showEmpty ? (
+                  <OperationalState
+                    title={
+                      filterId === "all"
+                        ? t("payments.list.empty.title")
+                        : t("payments.list.emptyFilter.title")
+                    }
+                    body={
+                      filterId === "all"
+                        ? t("payments.list.empty.body")
+                        : t("payments.list.emptyFilter.body")
+                    }
+                    className="rounded-none border-0"
+                  />
+                ) : null}
 
-            {items.map((payment) => (
-              <PaymentRow key={payment.id} payment={payment} />
-            ))}
-          </div>
+                {items.map((payment) => (
+                  <PaymentRow key={payment.id} payment={payment} />
+                ))}
+              </div>
 
-          {/*
-           * The list is never silently capped: while another page exists the
-           * merchant is told so and can load it, and when the button is gone
-           * the list really is the end of the filtered set.
-           */}
-          {paymentsQuery.hasNextPage ? (
-            <Button
-              variant="ghost"
-              className="tap-target h-11 w-full"
-              disabled={paymentsQuery.isFetchingNextPage}
-              onClick={() => void paymentsQuery.fetchNextPage()}
-            >
-              {paymentsQuery.isFetchingNextPage
-                ? t("payments.list.loadingMore")
-                : t("payments.list.loadMore")}
-            </Button>
-          ) : null}
+              {/*
+               * The list is never silently capped: while another page exists the
+               * merchant is told so and can load it, and when the button is gone
+               * the list really is the end of the filtered set.
+               */}
+              {paymentsQuery.hasNextPage ? (
+                <Button
+                  variant="ghost"
+                  className="tap-target h-11 w-full"
+                  disabled={paymentsQuery.isFetchingNextPage}
+                  onClick={() => void paymentsQuery.fetchNextPage()}
+                >
+                  {paymentsQuery.isFetchingNextPage
+                    ? t("payments.list.loadingMore")
+                    : t("payments.list.loadMore")}
+                </Button>
+              ) : null}
 
-          {items.length > 0 ? (
-            <p className="text-caption px-1 pb-2 text-text-secondary" role="note">
-              {t("payments.list.partialRefundNote")}
-            </p>
-          ) : null}
+              {items.length > 0 ? (
+                <p className="text-caption px-1 pb-2 text-text-secondary" role="note">
+                  {t("payments.list.partialRefundNote")}
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
       </main>
 

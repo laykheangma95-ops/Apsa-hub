@@ -267,7 +267,11 @@ describe("a refund is one logical request, with one key, end to end", () => {
       /const refundScope: RefundIntentScope = \{\s*userId,\s*organizationId: routeOrganizationId,\s*paymentId: id,\s*\};/,
     );
     const submit = between(route, "function submitRefund(", "\n  }\n");
-    expect(submit).toContain("const pending = beginRefund(refundScope, amountMinor, reason);");
+    // Migration 068: the same durable key, domain-separated by purpose so a
+    // lost ordinary refund is never re-sent as an excess return.
+    expect(submit).toMatch(
+      /const pending = beginRefund\(\s*refundScope,\s*amountMinor,\s*reason,\s*undefined,\s*undefined,\s*refundExcess \? "excess_return" : "refund",\s*\);/,
+    );
     expect(submit).toContain("idempotencyKey: pending.key,");
     expect(submit).toContain("acknowledgedRefundIds: readRefundIntent(refundScope).acknowledged,");
     expect(submit).toContain("expectedRefundedMinor: refundedMinorOf(current),");

@@ -30,6 +30,7 @@ import {
   type RealDeliveryListPage,
 } from "@/lib/deliveries";
 import {
+  mapExcessToReturnPageToUi,
   mapOrderSettlementToUi,
   mapPaymentDetailToUi,
   mapPaymentReconciliationToUi,
@@ -40,6 +41,7 @@ import {
   type UiPayment,
   type UiPaymentDetail,
   type UiPaymentReconciliation,
+  type UiExcessToReturnPage,
 } from "@/lib/payments";
 import { visibleCustomerPhone } from "@/lib/customers-query";
 import type { CustomerInsightsResult } from "@/lib/customer-insights-view";
@@ -2266,6 +2268,36 @@ export async function returnRealPaymentExcess(
     },
   });
   return mapPaymentDetailToUi(detail);
+}
+
+/**
+ * Take a mistakenly rejected payment recorded with excess back to pending — the
+ * same payment (migration 068, payments.record_excess).
+ */
+export async function reinstateRealExcessPayment(
+  paymentId: string,
+  principal: InitiatingPrincipal,
+  reason: string,
+): Promise<UiPaymentDetail> {
+  const { reinstateExcessPaymentFn } = await import("@/api/payments");
+  const detail = await reinstateExcessPaymentFn({
+    data: { paymentId, reason, expectedPrincipal: principal },
+  });
+  return mapPaymentDetailToUi(detail);
+}
+
+/** One page of Payments "Excess to return" (migration 068, payments.reconcile). */
+export async function listRealExcessToReturn(
+  options: { limit?: number; offset?: number } = {},
+): Promise<UiExcessToReturnPage> {
+  const { listExcessToReturnFn } = await import("@/api/payments");
+  const page = await listExcessToReturnFn({
+    data: {
+      ...(options.limit !== undefined ? { limit: options.limit } : {}),
+      ...(options.offset !== undefined ? { offset: options.offset } : {}),
+    },
+  });
+  return mapExcessToReturnPageToUi(page);
 }
 
 /** Reverse a claimed or settled payment. Appends an event; never deletes the record. */

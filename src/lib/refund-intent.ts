@@ -135,12 +135,33 @@ function update(
 }
 
 /**
- * A stable, non-reversible-at-a-glance fingerprint of what a refund asks for
- * (cyrb53 over "amount|reason"). Equality only — it identifies the same
- * request again; it is not a secret and never leaves the browser.
+ * What a refund on this screen is for. An excess return (migration 068) is a
+ * refund through a different server action: its fingerprint is domain-
+ * separated, so a lost ordinary refund of the same amount and reason is never
+ * re-sent as an excess return under its key (the server would refuse it as an
+ * idempotency conflict) — the excess return gets its own key, and the server's
+ * acknowledgement rule still surfaces the ordinary refund if it committed.
  */
-export function refundFingerprint(amountMinor: number, reason: string): string {
-  const text = `${amountMinor}|${reason}`;
+export type RefundPurpose = "refund" | "excess_return";
+
+/**
+ * A stable, non-reversible-at-a-glance fingerprint of what a refund asks for
+ * (cyrb53 over "amount|reason", prefixed by the purpose for an excess return).
+ * Equality only — it identifies the same request again; it is not a secret
+ * and never leaves the browser.
+ */
+export function refundFingerprint(
+  amountMinor: number,
+  reason: string,
+  purpose: RefundPurpose = "refund",
+): string {
+  return cyrb53(
+    purpose === "refund" ? `${amountMinor}|${reason}` : `${purpose}|${amountMinor}|${reason}`,
+  );
+}
+
+/** cyrb53 — a small, stable string hash for equality checks (not a secret). */
+export function cyrb53(text: string): string {
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
   for (let i = 0; i < text.length; i++) {
@@ -170,8 +191,9 @@ export function beginRefund(
   reason: string,
   newKey: () => string = () => crypto.randomUUID(),
   now = Date.now(),
+  purpose: RefundPurpose = "refund",
 ): PendingRefund {
-  const fingerprint = refundFingerprint(amountMinor, reason);
+  const fingerprint = refundFingerprint(amountMinor, reason, purpose);
   const record = update(
     scope,
     (current) =>

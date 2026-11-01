@@ -1293,13 +1293,14 @@
       "excessPreview": "Excess to refund to the customer: {{amount}}",
       "notAbove": "That is not more than the order still owes. Use Record payment instead.",
       "referenceLabel": "Transfer reference",
-      "referenceHint": "Required so the transfer can be traced. It does not prove the money arrived — check the bank statement.",
+      "referenceHint": "Required so the transfer can be traced, and each transfer can be recorded only once. It does not prove the money arrived — check the bank statement.",
       "reasonLabel": "Reason",
       "reasonHint": "Why more than the order total was received.",
       "pendingNote": "This is recorded as a claim. It counts as paid only after someone confirms the money arrived. Cash is never recorded here: give change in hand and record only the amount kept.",
       "submit": "Record transfer",
       "working": "Recording…",
-      "done": "Transfer recorded. Return the excess from the payment once it is confirmed."
+      "done": "Transfer recorded. Return the excess from the payment once it is confirmed.",
+      "startOver": "Start over"
     },
     "recordPaymentSheet": {
       "title": "Record payment",
@@ -1747,8 +1748,14 @@
     "currencyLabel": "Main selling currency",
     "currencyHint": "Your product prices and orders use this currency. It cannot be changed in the app later, so choose the one you price in.",
     "currency": {
-      "USD": { "label": "US dollar (USD)", "example": "$12.50" },
-      "KHR": { "label": "Khmer riel (KHR)", "example": "50,000៛" }
+      "USD": {
+        "label": "US dollar (USD)",
+        "example": "$12.50"
+      },
+      "KHR": {
+        "label": "Khmer riel (KHR)",
+        "example": "50,000៛"
+      }
     },
     "submit": "Create business",
     "submitting": "Creating your business",
@@ -2497,7 +2504,13 @@
     "excess": {
       "recorded": "Recorded with an excess of {{amount}} above the order total.",
       "unreturned": "Still to return to the customer: {{amount}}",
-      "allReturned": "The excess has been returned."
+      "state": {
+        "awaiting_confirmation": "Awaiting confirmation — the excess can be returned once the transfer is confirmed.",
+        "all_returned": "The excess has been returned.",
+        "nothing_to_return": "Nothing left to return: this order no longer holds more than its total.",
+        "not_a_claim": "This transfer is rejected or reversed, so there is nothing to return."
+      },
+      "refundStatusNote": "The order shows “partly refunded” because the excess was returned. The sale itself is still paid in full."
     },
     "refunds": {
       "title": "Refunds on this payment",
@@ -2619,6 +2632,15 @@
         "note": "Use this when the payment should never have been recorded. If money genuinely went back to the customer, record a refund instead.",
         "submit": "Reverse payment",
         "done": "Payment reversed."
+      },
+      "reinstateExcess": {
+        "label": "Reinstate this transfer",
+        "rowBody": "Rejected by mistake? Take it back as a claim to confirm.",
+        "title": "Reinstate this transfer",
+        "body": "The same payment becomes a claim again. It is checked again first: the order must still owe the amount it was recorded against, and no other payment may hold its transfer reference.",
+        "note": "This does not confirm the money. Confirm it separately once it is on the bank statement.",
+        "submit": "Reinstate",
+        "done": "Transfer reinstated as a claim."
       }
     },
     "errors": {
@@ -2634,7 +2656,33 @@
       "outstanding_changed": "What this order still owes changed after you started. The new amount is shown — check it and try again.",
       "no_excess": "That is not more than the order still owes. Use Record payment instead.",
       "no_recorded_excess": "This payment was not recorded with an excess.",
-      "exceeds_returnable_excess": "That is more than the excess that can still be returned."
+      "exceeds_returnable_excess": "That is more than the excess that can still be returned.",
+      "nothing_outstanding": "Nothing is owed on this order any more, so this transfer can't be recorded against it. Money received after an order is fully paid is outside this action.",
+      "duplicate_transfer_reference": "This transfer reference is already recorded on another payment. If that payment was wrong, reverse or reject it first.",
+      "excess_reinstatement_required": "This payment was recorded with an excess. Use “Reinstate this transfer” instead.",
+      "excess_changed": "Other payments changed what this order still owes, so this transfer can't be reinstated as it was recorded. Record the transfer again with its new excess."
+    },
+    "excessToReturn": {
+      "filter": "Excess to return",
+      "note": "Transfers recorded above an order's total, and orders that hold more than their total. Amounts are worked out by the server.",
+      "count": "To review: {{count}}",
+      "order": "Order {{number}}",
+      "orderWithCustomer": "Order {{number}} · {{customer}}",
+      "received": "Received {{amount}}",
+      "empty": {
+        "title": "No excess to return",
+        "body": "Nothing recorded above an order's total is waiting to be returned."
+      },
+      "kind": {
+        "returnable": "To return",
+        "awaiting_confirmation": "Awaiting confirmation",
+        "legacy_overpaid": "Overpaid order"
+      },
+      "amount": {
+        "returnable": "{{amount}} to return",
+        "awaiting_confirmation": "{{amount}} excess, not yet confirmed",
+        "legacy_overpaid": "{{amount}} above the total"
+      }
     }
   },
   "apsi": {

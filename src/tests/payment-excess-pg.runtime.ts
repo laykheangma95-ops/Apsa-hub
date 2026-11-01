@@ -454,7 +454,7 @@ describe("concurrency on the order lock (two connections)", () => {
     expect((await ledger(order)).payments).toBe(1);
   });
 
-  it("two excess recordings for the same outstanding amount: the second waits, then is stale", async () => {
+  it("two excess recordings for the same outstanding amount: the second waits, then nothing is outstanding (B1)", async () => {
     const order = await confirmedOrder();
     const result = await pair(async (a, b, bPid) => {
       await a`begin`;
@@ -464,7 +464,13 @@ describe("concurrency on the order lock (two connections)", () => {
       await a`commit`;
       return pending;
     });
-    expect(result).toMatchObject({ status: "stale", outstanding_minor: 0 });
+    // The first committed 10500 against 10000: the order is fully claimed.
+    expect(result).toEqual({
+      status: "nothing_outstanding",
+      outstanding_minor: 0,
+      currency: "USD",
+    });
+    expect(await ledger(order)).toMatchObject({ payments: 1 });
   });
 
   it("a cancellation holds the lock → the excess recording waits, then is refused; nothing written", async () => {
@@ -485,13 +491,20 @@ describe("concurrency on the order lock (two connections)", () => {
 // ── references and retries ───────────────────────────────────────────────────
 
 describe("duplicate references and idempotent retries", () => {
-  it("a reference already on another active payment is suspicious, never a refusal", async () => {
+  it("a reference held by another active payment of the same method is refused; another method is only flagged", async () => {
     const first = await confirmedOrder();
     const second = await confirmedOrder();
+    const third = await confirmedOrder();
     expect((await excess(first, 10500, 10000, { reference: "TRF-SHARED" }))["status"]).toBe(
       "success",
     );
-    const dup = await excess(second, 10500, 10000, { reference: "TRF-SHARED" });
+    // Same method, same canonical reference: refused, nothing written (B2).
+    expect(await excess(second, 10500, 10000, { reference: "TRF-SHARED" })).toEqual({
+      status: "duplicate_transfer_reference",
+    });
+    expect(await ledger(second)).toMatchObject({ payments: 0, events: 0 });
+    // The same text under ANOTHER method is the 035 rule: suspicious, flagged.
+    const dup = await excess(third, 10500, 10000, { reference: "TRF-SHARED", method: "khqr" });
     expect(dup).toMatchObject({ status: "success", duplicate_suspected: true });
     const events = (
       await sql`select event_type::text from payment_events where payment_id = ${dup["payment_id"] as string}
@@ -581,11 +594,26 @@ describe("authority", () => {
       'khqr', 10500, 'TRF-X', 'k-${crypto.randomUUID()}', 'r', 10000)`;
     const ret = `select return_payment_excess_v1('${ORG}'::uuid, gen_random_uuid(), '${ACTOR}'::uuid,
       1, 'r', 'k', 0, '{}'::uuid[])`;
+    const others = [
+      `select reinstate_excess_payment_v1('${ORG}'::uuid, gen_random_uuid(), '${ACTOR}'::uuid, 'r')`,
+      `select list_excess_to_return_v1('${ORG}'::uuid, 10, 0)`,
+      `select payment_excess_state_v1('${ORG}'::uuid, gen_random_uuid())`,
+      `select payment_reference_canonical_v1('x')`,
+    ];
     for (const role of ["anon", "authenticated"]) {
       expect(await sqlState(role, call)).toBe("42501");
       expect(await sqlState(role, ret)).toBe("42501");
+      for (const statement of others) expect(await sqlState(role, statement)).toBe("42501");
     }
     expect(await sqlState("service_role", call)).toBe("ok");
+    for (const statement of others) expect(await sqlState("service_role", statement)).toBe("ok");
+    // The internal helpers are not callable even by service_role.
+    expect(
+      await sqlState(
+        "service_role",
+        `select payment_reference_held_v1('${ORG}'::uuid, 'khqr', 'x', null, false)`,
+      ),
+    ).toBe("42501");
   });
 
   it("payments.record_excess is seeded to OWNER and MANAGER only; refunds stay OWNER-only", async () => {
@@ -705,5 +733,598 @@ describe("legacy over-claims", () => {
     expect((await refund(over, 500, "Duplicate transfer returned"))["status"]).toBe("success");
     expect(await labelledRefunds(over)).toEqual([]);
     expect(await ledger(order)).toMatchObject({ net: TOTAL, payment: "paid", refund: "partial" });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Repair of the independently reproduced defects (B1, B2, M1, M2, B3). Each
+// "negative control" below fails against bc7533b's 068.
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function counts(order: string) {
+  const l = await ledger(order);
+  const [a] = await sql`select count(*)::int as n from audit_logs where action like 'payments.%'`;
+  return { ...l, allAudits: a.n as number };
+}
+
+const ordinary = (order: string, amount: number, method: string, reference: string | null) =>
+  svc((tx) =>
+    tx`select record_payment_v2(${ORG}::uuid, ${order}::uuid, ${ACTOR}::uuid, ${method},
+        ${amount}::bigint, ${reference}, ${crypto.randomUUID()}, null) as r`.then(
+      (rows) => rows[0].r as Json,
+    ),
+  );
+const verifyAs = (payment: string, from: string, to: string, org = ORG) =>
+  svc((tx) =>
+    tx`select verify_payment_v1(${org}::uuid, ${payment}::uuid, ${ACTOR}::uuid, ${from}, ${to},
+        'review probe', null) as r`.then((rows) => rows[0].r as Json),
+  );
+const reverse = (payment: string) =>
+  svc((tx) =>
+    tx`select reverse_payment_v2(${ORG}::uuid, ${payment}::uuid, ${ACTOR}::uuid, 'recorded in error') as r`.then(
+      (rows) => rows[0].r as Json,
+    ),
+  );
+const reinstate = (payment: string, reason: string | null = "Rejected by mistake", org = ORG) =>
+  svc((tx) =>
+    tx`select reinstate_excess_payment_v1(${org}::uuid, ${payment}::uuid, ${ACTOR}::uuid, ${reason}) as r`.then(
+      (rows) => rows[0].r as Json,
+    ),
+  );
+const excessState = (payment: string, org = ORG) =>
+  svc((tx) =>
+    tx`select payment_excess_state_v1(${org}::uuid, ${payment}::uuid) as r`.then(
+      (rows) => rows[0].r as Json,
+    ),
+  );
+const listExcess = (org: string, limit: number, offset: number) =>
+  svc((tx) =>
+    tx`select list_excess_to_return_v1(${org}::uuid, ${limit}, ${offset}) as r`.then(
+      (rows) => rows[0].r as { total: number; rows: Json[]; status: string },
+    ),
+  );
+
+describe("B1 — record with excess needs a still-positive outstanding amount", () => {
+  it("negative control: a second recording of a transfer on a fully paid order is refused (TRF-P1 / 'trf-p1 ')", async () => {
+    const order = await confirmedOrder();
+    const paid = await ordinary(order, 10000, "bank_transfer", "TRF-P1-B1");
+    expect((await verify(paid["payment_id"] as string))["status"]).toBe("success");
+    const before = await counts(order);
+    expect(await excess(order, 10000, 0, { reference: "trf-p1-b1 " })).toEqual({
+      status: "nothing_outstanding",
+      outstanding_minor: 0,
+      currency: "USD",
+    });
+    expect(await counts(order)).toEqual(before);
+  });
+
+  it("outstanding = 0 from a pending claim: refused, nothing written", async () => {
+    const order = await confirmedOrder();
+    expect((await record(order, 10000, "cod"))["status"]).toBe("success");
+    const before = await counts(order);
+    expect((await excess(order, 10500, 0))["status"]).toBe("nothing_outstanding");
+    expect(await counts(order)).toEqual(before);
+  });
+
+  it("outstanding < 0 from a legacy over-claim: refused, nothing written", async () => {
+    const order = await confirmedOrder();
+    await legacyClaim(order, 15000);
+    const before = await counts(order);
+    expect(await excess(order, 10500, 0)).toMatchObject({
+      status: "nothing_outstanding",
+      outstanding_minor: 0,
+    });
+    expect(await counts(order)).toEqual(before);
+  });
+
+  it("a stale screen: outstanding went from positive to zero → nothing_outstanding, nothing written", async () => {
+    const order = await confirmedOrder();
+    // The screen showed 10000; another member then recorded the whole total.
+    expect((await record(order, 10000, "khqr"))["status"]).toBe("success");
+    const before = await counts(order);
+    expect((await excess(order, 10500, 10000))["status"]).toBe("nothing_outstanding");
+    expect(await counts(order)).toEqual(before);
+  });
+});
+
+describe("B2 — a transfer reference recorded with excess is exclusive", () => {
+  it("negative control: case and edge whitespace ('TRF-P1' / 'trf-p1 ') are one reference", async () => {
+    const a = await confirmedOrder();
+    const b = await confirmedOrder();
+    expect((await excess(a, 10500, 10000, { reference: "TRF-B2-1" }))["status"]).toBe("success");
+    const before = await counts(b);
+    expect(await excess(b, 10500, 10000, { reference: "trf-b2-1 " })).toEqual({
+      status: "duplicate_transfer_reference",
+    });
+    expect(await counts(b)).toEqual(before);
+  });
+
+  it("internal whitespace variants (spaces, tab, line break, NBSP, zero-width) are one reference", async () => {
+    const a = await confirmedOrder();
+    expect((await excess(a, 10500, 10000, { reference: "TRF-B2-2" }))["status"]).toBe("success");
+    for (const variant of [
+      "TRF - B2 - 2",
+      "T R F-B2-2",
+      "TRF-\tB2-\n2",
+      "TRF- B2-2",
+      "TRF-​B2-2",
+    ]) {
+      const b = await confirmedOrder();
+      expect(await excess(b, 10500, 10000, { reference: variant })).toEqual({
+        status: "duplicate_transfer_reference",
+      });
+      expect(await ledger(b)).toMatchObject({ payments: 0, events: 0 });
+    }
+    // Punctuation is NOT normalized: a different identifier stays different.
+    const c = await confirmedOrder();
+    expect((await excess(c, 10500, 10000, { reference: "TRFB22" }))["status"]).toBe("success");
+  });
+
+  it("a reference that canonicalizes to nothing is reference_required", async () => {
+    const order = await confirmedOrder();
+    for (const blank of ["   ", "​", "\t\n"]) {
+      expect(await excess(order, 10500, 10000, { reference: blank })).toEqual({
+        status: "reference_required",
+      });
+    }
+  });
+
+  it("negative control: the same transfer with a new key (a lost key after reload) is refused — on another order, and on the same one", async () => {
+    const a = await confirmedOrder();
+    const key = crypto.randomUUID();
+    expect((await excess(a, 10500, 10000, { reference: "TRF-B2-3", key }))["status"]).toBe(
+      "success",
+    );
+    // Same key, same payload: the replay.
+    expect(await excess(a, 10500, 10000, { reference: "TRF-B2-3", key })).toMatchObject({
+      status: "success",
+      replayed: true,
+    });
+    // Same key, changed payload: conflict.
+    expect((await excess(a, 10600, 10000, { reference: "TRF-B2-3", key }))["status"]).toBe(
+      "idempotency_conflict",
+    );
+    // New key, same order: nothing is outstanding any more.
+    expect((await excess(a, 10500, 0, { reference: "TRF-B2-3" }))["status"]).toBe(
+      "nothing_outstanding",
+    );
+    // New key, another order: the reference is held.
+    const b = await confirmedOrder();
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-3" }))["status"]).toBe(
+      "duplicate_transfer_reference",
+    );
+    expect(await ledger(b)).toMatchObject({ payments: 0, events: 0 });
+  });
+
+  it("held after confirmation, and after the excess was returned (refunded still happened)", async () => {
+    const a = await confirmedOrder();
+    const p = (await excess(a, 10500, 10000, { reference: "TRF-B2-4" }))["payment_id"] as string;
+    await verify(p);
+    const b = await confirmedOrder();
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-4" }))["status"]).toBe(
+      "duplicate_transfer_reference",
+    );
+    expect((await returnExcess(p, 500))["status"]).toBe("success");
+    expect((await refund(p, 10000, "Order refunded in full"))["status"]).toBe("success");
+    const [row] = await sql`select status::text from payments where id = ${p}`;
+    expect(row.status).toBe("refunded");
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-4" }))["status"]).toBe(
+      "duplicate_transfer_reference",
+    );
+  });
+
+  it("released by a reversal, and by a rejection — and only then reusable", async () => {
+    const a = await confirmedOrder();
+    const p = (await excess(a, 10500, 10000, { reference: "TRF-B2-5" }))["payment_id"] as string;
+    const b = await confirmedOrder();
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-5" }))["status"]).toBe(
+      "duplicate_transfer_reference",
+    );
+    expect((await reverse(p))["status"]).toBe("success");
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-5" }))["status"]).toBe("success");
+
+    const c = await confirmedOrder();
+    const q = (await excess(c, 10500, 10000, { reference: "TRF-B2-6" }))["payment_id"] as string;
+    expect((await verifyAs(q, "unverified", "mismatch"))["status"]).toBe("success");
+    const d = await confirmedOrder();
+    expect((await excess(d, 10500, 10000, { reference: "TRF-B2-6" }))["status"]).toBe("success");
+  });
+
+  it("scoped by organization and by method", async () => {
+    const a = await confirmedOrder();
+    expect((await excess(a, 10500, 10000, { reference: "TRF-B2-7" }))["status"]).toBe("success");
+    const other = await confirmedOrder(ORG_B);
+    expect(
+      (await excess(other, 10500, 10000, { reference: "trf-b2-7", org: ORG_B }))["status"],
+    ).toBe("success");
+    const khqr = await confirmedOrder();
+    expect(
+      (await excess(khqr, 10500, 10000, { reference: "trf-b2-7", method: "khqr" }))["status"],
+    ).toBe("success");
+  });
+
+  it("an ordinary claim, or the reinstatement of a rejected one, cannot take a reference held with excess", async () => {
+    const a = await confirmedOrder();
+    // An ordinary claim recorded first, then rejected: its reference is released.
+    const o = await confirmedOrder();
+    const op = (await ordinary(o, 10000, "bank_transfer", "TRF-B2-8"))["payment_id"] as string;
+    expect((await verifyAs(op, "unverified", "mismatch"))["status"]).toBe("success");
+    expect((await excess(a, 10500, 10000, { reference: "TRF-B2-8" }))["status"]).toBe("success");
+    // Taking the ordinary claim back would count the transfer twice.
+    expect(await verifyAs(op, "mismatch", "unverified")).toEqual({
+      status: "duplicate_transfer_reference",
+    });
+    // A new ordinary claim under the same canonical reference and method too.
+    const n = await confirmedOrder();
+    expect(await ordinary(n, 5000, "bank_transfer", " trf-b2-8")).toEqual({
+      status: "duplicate_transfer_reference",
+    });
+    expect(await ledger(n)).toMatchObject({ payments: 0, events: 0 });
+    // Ordinary references among themselves keep the 035 rule (flag, never refuse).
+    const m1 = await confirmedOrder();
+    const m2 = await confirmedOrder();
+    expect((await ordinary(m1, 5000, "bank_transfer", "ORD-SHARED"))["status"]).toBe("success");
+    expect(await ordinary(m2, 5000, "bank_transfer", "ORD-SHARED")).toMatchObject({
+      status: "success",
+      duplicate_suspected: true,
+    });
+  });
+
+  it("negative control: the duplicate never exists, so it can never be confirmed or returned as fictional money", async () => {
+    const a = await confirmedOrder();
+    const p = (await excess(a, 10500, 10000, { reference: "TRF-B2-9" }))["payment_id"] as string;
+    await verify(p);
+    const b = await confirmedOrder();
+    expect((await excess(b, 10500, 10000, { reference: "TRF-B2-9" }))["status"]).toBe(
+      "duplicate_transfer_reference",
+    );
+    const [n] = await sql`select count(*)::int as n from payments
+      where organization_id = ${ORG} and payment_reference_canonical_v1(reference) = 'trf-b2-9'`;
+    expect(n.n).toBe(1);
+    // Only the real excess is returnable — once.
+    expect((await excessState(p))["returnable_excess_minor"]).toBe(500);
+  });
+
+  it("two concurrent recordings of one canonical reference: the second waits, then is refused", async () => {
+    const a = await confirmedOrder();
+    const b = await confirmedOrder();
+    const result = await pair(async (x, y, yPid) => {
+      await x`begin`;
+      expect((await excessOn(x, a, 10500, 10000, { reference: "TRF-RACE" }))["status"]).toBe(
+        "success",
+      );
+      const pending = excessOn(y, b, 10500, 10000, { reference: "trf-race " });
+      await waitUntilBlockedOnLock(yPid);
+      await x`commit`;
+      return pending;
+    });
+    expect(result).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await ledger(b)).toMatchObject({ payments: 0, events: 0 });
+  });
+
+  it("an ordinary recording racing an excess recording of one canonical reference", async () => {
+    const a = await confirmedOrder();
+    const b = await confirmedOrder();
+    const result = await pair(async (x, y, yPid) => {
+      await x`begin`;
+      expect((await excessOn(x, a, 10500, 10000, { reference: "TRF-RACE-2" }))["status"]).toBe(
+        "success",
+      );
+      const pending = y`select record_payment_v2(${ORG}::uuid, ${b}::uuid, ${ACTOR}::uuid,
+          'bank_transfer', 5000::bigint, 'TRF-race-2', ${crypto.randomUUID()}, null) as r`.then(
+        (rows) => rows[0].r as Json,
+      );
+      await waitUntilBlockedOnLock(yPid);
+      await x`commit`;
+      return pending;
+    });
+    expect(result).toEqual({ status: "duplicate_transfer_reference" });
+  });
+
+  it("the partial unique index is the database's own backstop (excess vs excess)", async () => {
+    const a = await confirmedOrder();
+    const b = await confirmedOrder();
+    // Bypassing every function (as the owner), in a transaction rolled back
+    // afterwards: the index still refuses the second holder at once.
+    const seen = await sql
+      .begin(async (tx) => {
+        await tx`insert into payments(organization_id,order_id,method,currency,amount_minor,reference,recorded_by,excess_recorded)
+          values(${ORG},${a},'bank_transfer','USD',100,'TRF-IDX',${ACTOR},true)`;
+        await tx`savepoint s`;
+        const err =
+          await tx`insert into payments(organization_id,order_id,method,currency,amount_minor,reference,recorded_by,excess_recorded)
+            values(${ORG},${b},'bank_transfer','USD',100,' trf-idx',${ACTOR},true)`.then(
+            () => "ok",
+            (error: { errno?: string }) => String(error.errno),
+          );
+        await tx`rollback to savepoint s`;
+        // excess_recorded is immutable.
+        const immutable =
+          await tx`update payments set excess_recorded = false where reference = 'TRF-IDX'`.then(
+            () => "updated",
+            (error: Error) => error.message,
+          );
+        throw Object.assign(new Error("__rollback__"), { seen: { err, immutable } });
+      })
+      .catch((error: { seen?: unknown }) => error.seen);
+    expect(seen).toEqual({ err: "23505", immutable: "Payment excess_recorded is immutable" });
+  });
+});
+
+describe("M1 — the returnable excess is the server's figure", () => {
+  it("negative control: an ordinary refund that brings net to the total leaves nothing returnable", async () => {
+    const order = await confirmedOrder();
+    const p = (await excess(order, 10500, 10000))["payment_id"] as string;
+    expect(await excessState(p)).toMatchObject({
+      status: "success",
+      payment_status: "pending",
+      recorded_excess_minor: 500,
+      returnable_excess_minor: 0,
+    });
+    await verify(p);
+    expect((await excessState(p))["returnable_excess_minor"]).toBe(500);
+    // Loaded with 500 returnable; an ordinary refund then brings net to the total.
+    expect((await refund(p, 500, "Refunded outside the excess action"))["status"]).toBe("success");
+    expect(await excessState(p)).toMatchObject({
+      recorded_excess_minor: 500,
+      excess_returned_minor: 0,
+      returnable_excess_minor: 0,
+    });
+    // The stale submission is still refused, and writes nothing.
+    const before = await counts(order);
+    expect(await returnExcess(p, 500)).toMatchObject({
+      status: "exceeds_returnable_excess",
+      returnable_excess_minor: 0,
+    });
+    expect(await counts(order)).toEqual(before);
+    expect(await ledger(order)).toMatchObject({ net: TOTAL, refund: "partial" });
+  });
+
+  it("rejected and reversed payments have nothing returnable; another organization sees not_found", async () => {
+    const a = await confirmedOrder();
+    const p = (await excess(a, 10500, 10000))["payment_id"] as string;
+    await verifyAs(p, "unverified", "mismatch");
+    expect((await excessState(p))["returnable_excess_minor"]).toBe(0);
+    const b = await confirmedOrder();
+    const q = (await excess(b, 10500, 10000))["payment_id"] as string;
+    await reverse(q);
+    expect((await excessState(q))["returnable_excess_minor"]).toBe(0);
+    expect(await excessState(q, ORG_B)).toEqual({ status: "not_found" });
+  });
+});
+
+describe("M2 — a mistakenly rejected excess payment is recoverable", () => {
+  it("negative control: ordinary reinstatement is refused; the excess-aware one restores the same payment, audited", async () => {
+    const order = await confirmedOrder();
+    const p = (await excess(order, 10500, 10000, { reference: "TRF-M2-1" }))[
+      "payment_id"
+    ] as string;
+    const created = await createdMetadata(p);
+    expect((await verifyAs(p, "unverified", "mismatch"))["status"]).toBe("success");
+    const before = await counts(order);
+    expect(await verifyAs(p, "mismatch", "unverified")).toEqual({
+      status: "excess_reinstatement_required",
+    });
+    expect(await counts(order)).toEqual(before);
+
+    expect((await reinstate(p, "  "))["status"]).toBe("reason_required");
+    expect((await reinstate(p, "x", ORG_B))["status"]).toBe("not_found");
+    expect(await reinstate(p)).toMatchObject({
+      status: "success",
+      reinstated: true,
+      excess_minor: 500,
+    });
+    const after = await counts(order);
+    expect(after.payments).toBe(1);
+    expect(after.allAudits).toBe(before.allAudits + 1);
+    const [row] =
+      await sql`select status::text, verification_state::text from payments where id = ${p}`;
+    expect(row).toEqual({ status: "pending", verification_state: "unverified" });
+    expect(await createdMetadata(p)).toEqual(created);
+    const [ev] = await sql`select event_type::text, metadata from payment_events
+      where payment_id = ${p} order by created_at desc, id desc limit 1`;
+    expect(ev.event_type).toBe("correction");
+    expect(ev.metadata).toMatchObject({ excess_reinstated: true, recorded_excess_minor: 500 });
+    const [audit] = await sql`select action from audit_logs where resource_id = ${p}
+      order by created_at desc limit 1`;
+    expect(audit.action).toBe("payments.reinstate_excess");
+    // Retrying is not a second reinstatement.
+    expect((await reinstate(p))["status"]).toBe("invalid_state");
+    // And it is usable: confirmed, then its excess returned.
+    await verify(p);
+    expect((await returnExcess(p, 500))["status"]).toBe("success");
+  });
+
+  it("refused when other claims took the outstanding amount, or changed the excess — then recorded again (released), never twice", async () => {
+    const order = await confirmedOrder();
+    const p = (await excess(order, 10500, 10000, { reference: "TRF-M2-2" }))[
+      "payment_id"
+    ] as string;
+    await verifyAs(p, "unverified", "mismatch");
+    expect((await record(order, 2000, "cash"))["status"]).toBe("success");
+    expect(await reinstate(p)).toMatchObject({
+      status: "excess_changed",
+      outstanding_minor: 8000,
+      recorded_excess_minor: 500,
+    });
+    // The rejection released the reference: the transfer is recorded again.
+    const again = await excess(order, 10500, 8000, { reference: "TRF-M2-2" });
+    expect(again).toMatchObject({ status: "success", excess_minor: 2500 });
+    // Now nothing is outstanding for the old row: it can never be reinstated.
+    expect((await reinstate(p))["status"]).toBe("nothing_outstanding");
+    const [n] = await sql`select count(*)::int as n from payments
+      where order_id = ${order} and status in ('pending','paid','refunded') and excess_recorded`;
+    expect(n.n).toBe(1);
+  });
+
+  it("refused when its released reference was taken by another payment meanwhile", async () => {
+    const a = await confirmedOrder();
+    const p = (await excess(a, 10500, 10000, { reference: "TRF-M2-3" }))["payment_id"] as string;
+    await verifyAs(p, "unverified", "mismatch");
+    const b = await confirmedOrder();
+    expect((await excess(b, 10500, 10000, { reference: "trf-m2-3" }))["status"]).toBe("success");
+    const before = await counts(a);
+    expect(await reinstate(p)).toEqual({ status: "duplicate_transfer_reference" });
+    expect(await counts(a)).toEqual(before);
+  });
+
+  it("only a rejected payment recorded with excess, on a confirmed order", async () => {
+    const a = await confirmedOrder();
+    const plain = (await record(a, 1000, "cash"))["payment_id"] as string;
+    expect((await reinstate(plain))["status"]).toBe("no_recorded_excess");
+    const b = await confirmedOrder();
+    const p = (await excess(b, 10500, 10000))["payment_id"] as string;
+    expect((await reinstate(p))["status"]).toBe("invalid_state");
+    await verifyAs(p, "unverified", "mismatch");
+    expect((await svc((tx) => transitionOn(tx, b, "confirmed", "cancelled")))["status"]).toBe(
+      "success",
+    );
+    expect((await reinstate(p))["status"]).toBe("order_not_payable");
+  });
+});
+
+describe("B3 — Payments 'Excess to return'", () => {
+  const ORG_C = "cccccccc-0000-4000-8000-000000000001";
+  const ORG_D = "dddddddd-0000-4000-8000-000000000001";
+
+  beforeAll(async () => {
+    await sql`insert into organizations(id,legal_name,display_name,slug,created_by)
+      values(${ORG_C},'C','C','excess-c',${ACTOR}),(${ORG_D},'D','D','excess-d',${ACTOR})`;
+  });
+
+  const inOrg = (org: string, run: (tx: SQL) => Promise<Json>) => svc(run);
+  const xs = (org: string, order: string, amount: number, outstanding: number) =>
+    inOrg(org, (tx) => excessOn(tx, order, amount, outstanding, { org }));
+  const confirmIn = (org: string, payment: string) =>
+    verifyAs(payment, "unverified", "bank_verified", org);
+  async function refundIn(org: string, payment: string, amount: number, excessReturn: boolean) {
+    const ack = (
+      await sql`select id from payment_events where payment_id = ${payment} and event_type = 'refund'`
+    ).map((r: { id: string }) => r.id);
+    const [t] = await sql`select coalesce(sum(amount_minor),0)::int as n from payment_events
+      where payment_id = ${payment} and event_type = 'refund'`;
+    const fn = excessReturn ? "return_payment_excess_v1" : "refund_payment_v2";
+    return svc((tx) =>
+      tx
+        .unsafe(
+          `select ${fn}($1::uuid,$2::uuid,$3::uuid,$4::bigint,$5,$6,$7::bigint,$8::uuid[]) as r`,
+          [org, payment, ACTOR, amount, "probe refund", crypto.randomUUID(), t.n, ack],
+        )
+        .then((rows: { r: Json }[]) => rows[0]!.r),
+    );
+  }
+
+  it("negative control: lists every kind once, with the authoritative amount, exact count and stable pages", async () => {
+    // A: confirmed, returnable 500.
+    const a = await confirmedOrder(ORG_C);
+    const pa = (await xs(ORG_C, a, 10500, 10000))["payment_id"] as string;
+    await confirmIn(ORG_C, pa);
+    // A with two partial returns: 1000 excess, 300 + 200 returned → 500.
+    const a2 = await confirmedOrder(ORG_C);
+    const pa2 = (await xs(ORG_C, a2, 11000, 10000))["payment_id"] as string;
+    await confirmIn(ORG_C, pa2);
+    expect((await refundIn(ORG_C, pa2, 300, true))["status"]).toBe("success");
+    expect((await refundIn(ORG_C, pa2, 200, true))["status"]).toBe("success");
+    // A with several payments on the order: 4000 ordinary + 6500 against 6000.
+    const a3 = await confirmedOrder(ORG_C);
+    const o3 = await inOrg(ORG_C, (tx) =>
+      tx`select record_payment_v2(${ORG_C}::uuid, ${a3}::uuid, ${ACTOR}::uuid, 'cash', 4000::bigint, null, ${crypto.randomUUID()}, null) as r`.then(
+        (rows) => rows[0].r as Json,
+      ),
+    );
+    await confirmIn(ORG_C, o3["payment_id"] as string);
+    const pa3 = (await xs(ORG_C, a3, 6500, 6000))["payment_id"] as string;
+    await confirmIn(ORG_C, pa3);
+    // C: pending, awaiting confirmation (its recorded excess).
+    const c = await confirmedOrder(ORG_C);
+    const pc = (await xs(ORG_C, c, 10700, 10000))["payment_id"] as string;
+    // B: legacy over-claim confirmed (no recorded excess): net 15000 > 10000.
+    const b = await confirmedOrder(ORG_C);
+    const legacy = await sql.begin(async (tx) => {
+      const [row] = await tx`select record_payment_before_order_v1(${ORG_C}::uuid, ${b}::uuid,
+          ${ACTOR}::uuid, 'khqr', 15000::bigint, ${"LEGACY-" + crypto.randomUUID()}, null, null) as r`;
+      await tx`select sync_order_payment_state(${ORG_C}::uuid, ${b}::uuid, ${ACTOR}::uuid, 'legacy')`;
+      return (row.r as Json)["payment_id"] as string;
+    });
+    await confirmIn(ORG_C, legacy);
+    // Not listed: fully returned; returnable 0 after an ordinary refund; rejected; reversed.
+    const n1 = await confirmedOrder(ORG_C);
+    const pn1 = (await xs(ORG_C, n1, 10500, 10000))["payment_id"] as string;
+    await confirmIn(ORG_C, pn1);
+    expect((await refundIn(ORG_C, pn1, 500, true))["status"]).toBe("success");
+    const n2 = await confirmedOrder(ORG_C);
+    const pn2 = (await xs(ORG_C, n2, 10500, 10000))["payment_id"] as string;
+    await confirmIn(ORG_C, pn2);
+    expect((await refundIn(ORG_C, pn2, 500, false))["status"]).toBe("success");
+    const n3 = await confirmedOrder(ORG_C);
+    const pn3 = (await xs(ORG_C, n3, 10500, 10000))["payment_id"] as string;
+    await verifyAs(pn3, "unverified", "mismatch", ORG_C);
+    // Another tenant's excess never appears.
+    const d = await confirmedOrder(ORG_D);
+    await confirmIn(ORG_D, (await xs(ORG_D, d, 10500, 10000))["payment_id"] as string);
+
+    const all = await listExcess(ORG_C, 100, 0);
+    expect(all.status).toBe("success");
+    expect(all.total).toBe(5);
+    expect(all.rows).toHaveLength(5);
+    const byKey = Object.fromEntries(
+      all.rows.map((r) => [`${r["kind"]}:${r["payment_id"] ?? r["order_id"]}`, r["excess_minor"]]),
+    );
+    expect(byKey).toEqual({
+      [`returnable:${pa}`]: 500,
+      [`returnable:${pa2}`]: 500,
+      [`returnable:${pa3}`]: 500,
+      [`awaiting_confirmation:${pc}`]: 700,
+      [`legacy_overpaid:${b}`]: 5000,
+    });
+    for (const r of all.rows) expect(r["currency"]).toBe("USD");
+    // Every listed amount is the payment-detail figure.
+    for (const p of [pa, pa2, pa3]) {
+      expect((await excessState(p, ORG_C))["returnable_excess_minor"]).toBe(500);
+    }
+
+    // Pagination: pages of 2 partition the list in the same order; the count
+    // is exact on every page, also past the end.
+    const pages = [];
+    for (let offset = 0; offset < 6; offset += 2) pages.push(await listExcess(ORG_C, 2, offset));
+    expect(pages.map((p) => p.total)).toEqual([5, 5, 5]);
+    expect(pages.map((p) => p.rows.length)).toEqual([2, 2, 1]);
+    expect(pages.flatMap((p) => p.rows)).toEqual(all.rows);
+    expect(await listExcess(ORG_C, 2, 10)).toMatchObject({ total: 5, rows: [] });
+    // Bounds: limit clamped to 1..100, offset to ≥ 0.
+    expect((await listExcess(ORG_C, 0, -5)).rows).toHaveLength(1);
+
+    const other = await listExcess(ORG_D, 100, 0);
+    expect(other.total).toBe(1);
+    expect(other.rows.map((r) => r["order_id"])).toEqual([d]);
+    expect(await listExcess("eeeeeeee-0000-4000-8000-000000000001", 100, 0)).toMatchObject({
+      total: 0,
+      rows: [],
+    });
+  });
+
+  it("timestamp ties are ordered deterministically", async () => {
+    const ORG_T = "eeeeeeee-0000-4000-8000-0000000000aa";
+    await sql`insert into organizations(id,legal_name,display_name,slug,created_by)
+      values(${ORG_T},'T','T','excess-t',${ACTOR})`;
+    const orders = [];
+    for (let i = 0; i < 4; i++) orders.push(await confirmedOrder(ORG_T));
+    // One transaction: one now() → identical created_at for all four payments.
+    await sql.begin(async (tx) => {
+      await tx`set local role service_role`;
+      for (const order of orders) {
+        const r = await excessOn(tx, order, 10500, 10000, { org: ORG_T });
+        expect(r["status"]).toBe("success");
+      }
+    });
+    const [ties] =
+      await sql`select count(distinct created_at)::int as n from payments where organization_id = ${ORG_T}`;
+    expect(ties.n).toBe(1);
+    const full = await listExcess(ORG_T, 100, 0);
+    expect(full.rows.map((r) => r["order_id"])).toEqual([...orders].sort());
+    const paged = [];
+    for (let offset = 0; offset < 4; offset++)
+      paged.push(...(await listExcess(ORG_T, 1, offset)).rows);
+    expect(paged).toEqual(full.rows);
   });
 });

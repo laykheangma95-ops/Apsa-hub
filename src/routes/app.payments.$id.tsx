@@ -59,6 +59,7 @@ import {
 } from "@/components/payments/PaymentStateChips";
 import {
   PaymentRefundSheet,
+  PaymentReinstateExcessSheet,
   PaymentReverseSheet,
   PaymentVerifySheet,
 } from "@/components/payments/PaymentActionSheets";
@@ -67,6 +68,7 @@ import {
   getRealOrderSettlement,
   getRealPaymentDetail,
   refundRealPayment,
+  reinstateRealExcessPayment,
   returnRealPaymentExcess,
   reverseRealPayment,
   verifyRealPayment,
@@ -97,10 +99,9 @@ import {
   paymentErrorMessageKey,
   paymentNeedsReview,
   excessReturnRefundIds,
-  recordedExcessOf,
+  excessReturnStateOf,
   refundEventsOf,
   refundedMinorOf,
-  unreturnedExcessOf,
   UI_VERIFICATION_TRANSITION_PERMISSIONS,
   type PaymentVerificationState,
   type UiPaymentDetail,
@@ -204,6 +205,9 @@ function PaymentDetailScreen() {
   const canReadOrders = identityOk && capabilities.can("orders.read");
   const canRefund = identityOk && capabilities.can("payments.refund");
   const canReverse = identityOk && capabilities.can("payments.reverse");
+  // Migration 068 (DRAFT): reinstating a mistakenly rejected payment recorded
+  // with excess is the manager-level excess grant, re-checked server-side.
+  const canRecordExcess = identityOk && capabilities.can("payments.record_excess");
 
   const validId = isPaymentId(id);
 
@@ -247,6 +251,7 @@ function PaymentDetailScreen() {
     paymentId: id,
   };
   const [reverseOpen, setReverseOpen] = useState(false);
+  const [reinstateOpen, setReinstateOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   /**
@@ -424,7 +429,16 @@ function PaymentDetailScreen() {
    * reload), the refunded total on screen, and the refunds already seen.
    */
   function submitRefund(current: UiPaymentDetail, amountMinor: number, reason: string) {
-    const pending = beginRefund(refundScope, amountMinor, reason);
+    // Domain-separated by purpose: a lost ordinary refund is never re-sent as
+    // an excess return under its key (src/lib/refund-intent.ts).
+    const pending = beginRefund(
+      refundScope,
+      amountMinor,
+      reason,
+      undefined,
+      undefined,
+      refundExcess ? "excess_return" : "refund",
+    );
     refundMutation.mutate({
       ...start,
       amountMinor,
@@ -454,6 +468,25 @@ function PaymentDetailScreen() {
     },
   });
 
+  const reinstateMutation = useMutation({
+    mutationFn: ({ paymentId, reason, startedAs }: PaymentActionStart & { reason: string }) =>
+      reinstateRealExcessPayment(paymentId, startedAs, reason),
+    onMutate: beginActionAttempt,
+    onSuccess: (_detail, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
+      setReinstateOpen(false);
+      setActionError(null);
+      invalidatePayments();
+      notifySuccess(t("payments.actions.reinstateExcess.done"));
+    },
+    onError: (err, variables, attempt) => {
+      if (!isCurrentActionAttempt(attempt)) return invalidatePaymentsOf(variables);
+      // Re-read: the refusal may come from a change another member made.
+      invalidatePayments();
+      handleActionError(err);
+    },
+  });
+
   /*
    * A change of member, organization or payment, committed: what was started,
    * typed or reported for the previous one is not the next one's. No pending or
@@ -468,6 +501,7 @@ function PaymentDetailScreen() {
   const { reset: resetVerify } = verifyMutation;
   const { reset: resetRefund } = refundMutation;
   const { reset: resetReverse } = reverseMutation;
+  const { reset: resetReinstate } = reinstateMutation;
   useLayoutEffect(() => {
     const current = actionRef.current;
     if (current.scope === actionScope) return;
@@ -476,12 +510,14 @@ function PaymentDetailScreen() {
     resetVerify();
     resetRefund();
     resetReverse();
+    resetReinstate();
     setVerifyTarget(null);
     setRefundOpen(false);
     setRefundReview(false);
     setReverseOpen(false);
+    setReinstateOpen(false);
     setActionError(null);
-  }, [actionScope, resetVerify, resetRefund, resetReverse]);
+  }, [actionScope, resetVerify, resetRefund, resetReverse, resetReinstate]);
   useLayoutEffect(() => {
     const current = actionRef.current;
     return () => {
@@ -570,21 +606,36 @@ function PaymentDetailScreen() {
     ? (refunds.find((event) => event.idempotencyKey === pendingRefund.key) ?? null)
     : null;
   const frozen = isTerminalUiPaymentStatus(payment.status);
-  const verificationTargets = availableVerificationTargets(payment).filter((target) =>
-    capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]),
+  // Migration 068 (DRAFT): a payment recorded with an excess. Every figure is
+  // the server's (payment_excess_state_v1 — the rule the return itself
+  // applies); the refunds that returned it are only those its excess_returned
+  // evidence names.
+  const excess = payment.excess;
+  const excessState = excessReturnStateOf(payment);
+  const excessRefundIds = excessReturnRefundIds(payment);
+  const verificationTargets = availableVerificationTargets(payment).filter(
+    (target) =>
+      capabilities.can(UI_VERIFICATION_TRANSITION_PERMISSIONS[target]) &&
+      // A rejected payment recorded with excess comes back only through the
+      // excess-aware reinstatement below; the server refuses this one.
+      !(excess && payment.status === "failed" && target === "unverified"),
   );
   const showRefund = canRefund && canRefundUiPayment(payment);
-  // Migration 068 (DRAFT): a payment recorded with an excess, and the refunds
-  // that returned it — only those its excess_returned evidence names.
-  const recordedExcess = recordedExcessOf(payment);
-  const unreturnedExcess = unreturnedExcessOf(payment);
-  const excessRefundIds = excessReturnRefundIds(payment);
-  const showReturnExcess = showRefund && unreturnedExcess !== null && unreturnedExcess.amount > 0;
+  const showReturnExcess = showRefund && excessState === "returnable" && excess !== null;
+  const showReinstate =
+    canRecordExcess &&
+    excess !== null &&
+    payment.status === "failed" &&
+    payment.verificationState === "mismatch";
   const showReverse = canReverse && canReverseUiPayment(payment);
-  const hasAnyAction = verificationTargets.length > 0 || showRefund || showReverse;
+  const hasAnyAction = verificationTargets.length > 0 || showRefund || showReverse || showReinstate;
 
   const settlement = settlementQuery.data;
-  const pending = verifyMutation.isPending || refundMutation.isPending || reverseMutation.isPending;
+  const pending =
+    verifyMutation.isPending ||
+    refundMutation.isPending ||
+    reverseMutation.isPending ||
+    reinstateMutation.isPending;
 
   /**
    * One ledger event as a history line. The amount and the reason are two
@@ -755,16 +806,21 @@ function PaymentDetailScreen() {
               })}
             </p>
           ) : null}
-          {recordedExcess ? (
+          {excess && excessState ? (
             <div className="mb-2 flex flex-col gap-1" role="status">
               <p className="text-body-sm text-text-primary">
-                {t("payments.excess.recorded", { amount: formatMoney(recordedExcess) })}
+                {t("payments.excess.recorded", { amount: formatMoney(excess.recorded) })}
               </p>
               <p className="text-body-sm text-text-secondary">
-                {unreturnedExcess && unreturnedExcess.amount > 0
-                  ? t("payments.excess.unreturned", { amount: formatMoney(unreturnedExcess) })
-                  : t("payments.excess.allReturned")}
+                {excessState === "returnable"
+                  ? t("payments.excess.unreturned", { amount: formatMoney(excess.returnable) })
+                  : t(`payments.excess.state.${excessState}`)}
               </p>
+              {excess.returned.amount > 0 ? (
+                <p className="text-caption text-text-secondary">
+                  {t("payments.excess.refundStatusNote")}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {refunds.length === 0 ? (
@@ -917,6 +973,19 @@ function PaymentDetailScreen() {
                 />
               ) : null}
 
+              {showReinstate ? (
+                <ActionRow
+                  icon={Undo2}
+                  label={t("payments.actions.reinstateExcess.label")}
+                  description={t("payments.actions.reinstateExcess.rowBody")}
+                  disabled={pending}
+                  onClick={() => {
+                    setActionError(null);
+                    setReinstateOpen(true);
+                  }}
+                />
+              ) : null}
+
               {showReverse ? (
                 <ActionRow
                   icon={Undo2}
@@ -965,7 +1034,9 @@ function PaymentDetailScreen() {
           if (!open) setRefundReview(false);
         }}
         principal={payment.amount}
-        excess={refundExcess && unreturnedExcess ? unreturnedExcess : null}
+        // The server's current figure; if it dropped to zero while the sheet
+        // was open, the sheet says so and the server refuses the return.
+        excess={refundExcess && excess ? excess.returnable : null}
         pending={refundMutation.isPending}
         error={actionError}
         review={
@@ -993,6 +1064,15 @@ function PaymentDetailScreen() {
           setRefundReview(false);
           setRefundOpen(false);
         }}
+      />
+
+      <PaymentReinstateExcessSheet
+        key={`reinstate:${actionScope}`}
+        open={reinstateOpen}
+        onOpenChange={setReinstateOpen}
+        pending={reinstateMutation.isPending}
+        error={actionError}
+        onConfirm={(reason) => reinstateMutation.mutate({ ...start, reason })}
       />
 
       <PaymentReverseSheet

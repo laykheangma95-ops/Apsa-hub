@@ -673,36 +673,58 @@ async function sqlState(db: Db, role: string, statement: string): Promise<string
 }
 
 describe("068: authority under Supabase's default privileges", () => {
-  it("keeps every existing function's owner, SECURITY DEFINER, search_path, volatility and ACL; adds only the two excess entry points", async () => {
+  it("keeps every existing function's owner, SECURITY DEFINER, search_path, volatility and ACL; adds only the excess functions, each with its declared authority", async () => {
     const beforeAuthority = await functionAuthority(supabase);
     await supabase.sql.unsafe(readFileSync(`supabase/migrations/${MIGRATION}`, "utf8"));
     const afterAuthority = await functionAuthority(supabase);
-    const ADDED = [
-      "record_payment_with_excess_v1(uuid,uuid,uuid,text,bigint,text,text,text,bigint)",
-      "return_payment_excess_v1(uuid,uuid,uuid,bigint,text,text,bigint,uuid[])",
-    ];
-    const isAdded = (r: { sig: string }) =>
-      ADDED.some((sig) =>
-        r.sig
-          .replace(/^public\./, "")
-          .replace(/, /g, ",")
-          .startsWith(sig.split("(")[0]!),
-      );
+    const SERVICE = "{postgres=X/postgres,service_role=X/postgres}";
+    const OWNER_ONLY = "{postgres=X/postgres}";
+    const ENTRY = { definer: true, config: '{"search_path=public, auth"}', acl: SERVICE };
+    // Every function 068 adds, and the authority each must have despite
+    // Supabase's default EXECUTE grants to anon / authenticated.
+    const ADDED: Record<string, { definer: boolean; config: string; acl: string }> = {
+      record_payment_with_excess_v1: ENTRY,
+      return_payment_excess_v1: ENTRY,
+      reinstate_excess_payment_v1: ENTRY,
+      list_excess_to_return_v1: ENTRY,
+      payment_excess_state_v1: ENTRY,
+      // Pure (IMMUTABLE, no table access); the index expression.
+      payment_reference_canonical_v1: {
+        definer: false,
+        config: "{search_path=pg_catalog}",
+        acl: SERVICE,
+      },
+      // Internal helpers: callable only by the owner's SECURITY DEFINER bodies.
+      payment_reference_held_v1: {
+        definer: false,
+        config: '{"search_path=public, auth"}',
+        acl: OWNER_ONLY,
+      },
+      guard_payment_excess_recorded: {
+        definer: false,
+        config: '{"search_path=public, auth"}',
+        acl: OWNER_ONLY,
+      },
+    };
+    const nameOf = (r: { sig: string }) => r.sig.replace(/^public\./, "").split("(")[0]!;
+    const isAdded = (r: { sig: string }) => nameOf(r) in ADDED;
     expect(afterAuthority.filter((r: { sig: string }) => !isAdded(r))).toEqual(beforeAuthority);
-    expect(afterAuthority.filter(isAdded)).toHaveLength(2);
-    for (const r of afterAuthority.filter(isAdded) as {
+    const added = afterAuthority.filter(isAdded) as {
+      sig: string;
       owner: string;
       definer: boolean;
       config: string;
       acl: string;
-    }[]) {
-      // Owner + service_role only, despite the default EXECUTE grants.
-      expect({ owner: r.owner, definer: r.definer, config: r.config }).toEqual({
-        owner: "postgres",
-        definer: true,
-        config: '{"search_path=public, auth"}',
-      });
-      expect(r.acl).toBe("{postgres=X/postgres,service_role=X/postgres}");
+    }[];
+    expect(added.map(nameOf).sort()).toEqual(Object.keys(ADDED).sort());
+    for (const r of added) {
+      expect({
+        name: nameOf(r),
+        owner: r.owner,
+        definer: r.definer,
+        config: r.config,
+        acl: r.acl,
+      }).toEqual({ name: nameOf(r), owner: "postgres", ...ADDED[nameOf(r)]! });
     }
     for (const sig of GUARDED) {
       const [meta] = await supabase.sql`
@@ -890,7 +912,9 @@ describe("legacy inventory (read-only, aggregates only)", () => {
     expect(counts(r.get("03.01"))).toEqual(["USD", 1, 1, 1, 4000]);
     expect(counts(r.get("03.02"))).toEqual(["USD", 1, 1, 1, TOTAL]);
     expect(counts(r.get("03.03"))).toEqual([null, 0, 0, 0, 0]);
-    expect(counts(r.get("04.01"))).toEqual(["USD", 1, 2, 2, 9000]); // o2's 5000 + o4's 4000
+    // o2's 5000 only: o4's 4000 sits on a draft but within its total, so
+    // confirming it creates no excess (it is counted in 03.01).
+    expect(counts(r.get("04.01"))).toEqual(["USD", 1, 1, 1, 5000]);
     expect(counts(r.get("04.02"))).toEqual(["USD", 1, 1, 1, TOTAL]); // o6's rejected COD
     expect(r.get("99.01")!.meaning).toStartWith("REVIEW");
 

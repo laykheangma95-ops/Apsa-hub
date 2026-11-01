@@ -16,8 +16,15 @@
  *   - A calculation of what is owed. `outstanding` is the server's figure; it
  *     is sent back as a precondition, and the server refuses the payment
  *     (nothing written) if the outstanding amount changed meanwhile.
+ *   - For an order that owes nothing. The parent offers this sheet only while
+ *     the outstanding amount is positive; the server refuses otherwise
+ *     (nothing_outstanding) — such money is an unallocated receipt.
+ *
+ * The idempotency key is not minted here: the parent keeps it durable across a
+ * reload or navigation (src/lib/excess-intent.ts), so a retry of the same
+ * request replays instead of recording twice.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,7 +43,6 @@ export interface RecordExcessPaymentSubmit {
   amountMinor: number;
   reference: string;
   reason: string;
-  idempotencyKey: string;
   /** The outstanding amount this sheet showed — a precondition, never an amount. */
   expectedOutstandingMinor: number;
 }
@@ -48,6 +54,7 @@ export function RecordExcessPaymentSheet({
   pending,
   error,
   onConfirm,
+  onStartOver,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -56,22 +63,24 @@ export function RecordExcessPaymentSheet({
   pending: boolean;
   error: string | null;
   onConfirm: (submit: RecordExcessPaymentSubmit) => void;
+  /** The member explicitly discards this recording (and its remembered key). */
+  onStartOver: () => void;
 }) {
   const { t } = useTranslation();
   const [method, setMethod] = useState<ExcessMethod>("bank_transfer");
   const [amountText, setAmountText] = useState("");
   const [reference, setReference] = useState("");
   const [reason, setReason] = useState("");
-  // One key per opened sheet: every retry from it replays onto one payment.
-  const idempotencyKeyRef = useRef<string>("");
 
-  useEffect(() => {
-    if (!open) return;
+  function clear() {
     setMethod("bank_transfer");
     setAmountText("");
     setReference("");
     setReason("");
-    idempotencyKeyRef.current = newIdempotencyKey();
+  }
+
+  useEffect(() => {
+    if (open) clear();
   }, [open]);
 
   const currency = outstanding.currency;
@@ -107,12 +116,22 @@ export function RecordExcessPaymentSheet({
                 amountMinor: parsed,
                 reference: trimmedReference,
                 reason: trimmedReason,
-                idempotencyKey: idempotencyKeyRef.current,
                 expectedOutstandingMinor: outstanding.amount,
               });
             }}
           >
             {pending ? t("order.recordExcess.working") : t("order.recordExcess.submit")}
+          </Button>
+          <Button
+            variant="ghost"
+            className="tap-target mt-1 h-11 w-full text-text-secondary"
+            disabled={pending}
+            onClick={() => {
+              clear();
+              onStartOver();
+            }}
+          >
+            {t("order.recordExcess.startOver")}
           </Button>
         </div>
       }
@@ -213,12 +232,4 @@ export function RecordExcessPaymentSheet({
       </div>
     </BottomSheet>
   );
-}
-
-function newIdempotencyKey(): string {
-  const globalCrypto = globalThis.crypto;
-  if (globalCrypto && typeof globalCrypto.randomUUID === "function") {
-    return globalCrypto.randomUUID();
-  }
-  return `excess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }

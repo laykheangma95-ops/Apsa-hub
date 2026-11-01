@@ -126,6 +126,48 @@ export interface ReturnPaymentExcessRpcResult extends RefundPaymentRpcResult {
   returnable_excess_minor?: number;
 }
 
+/** payment_excess_state_v1 (migration 068) — the one returnable-excess rule. */
+export interface PaymentExcessStateRpcResult {
+  status: string;
+  payment_status?: string;
+  recorded_excess_minor: number;
+  excess_returned_minor: number;
+  returnable_excess_minor: number;
+  currency: PaymentCurrency;
+}
+
+/** Result envelope returned by reinstate_excess_payment_v1 (migration 068). */
+export interface ReinstateExcessPaymentRpcResult {
+  status: string;
+  current?: string;
+  reinstated?: boolean;
+  excess_minor?: number;
+  outstanding_minor?: number;
+  recorded_excess_minor?: number;
+}
+
+/** One row of list_excess_to_return_v1 (migration 068). */
+export interface ExcessToReturnRow {
+  kind: "returnable" | "awaiting_confirmation" | "legacy_overpaid";
+  payment_id: string | null;
+  order_id: string;
+  order_number: string;
+  customer_name: string | null;
+  method: PaymentMethod | null;
+  amount_minor: number | null;
+  currency: PaymentCurrency;
+  excess_minor: number;
+  occurred_at: string;
+}
+
+export interface ExcessToReturnRpcResult {
+  status: string;
+  total: number;
+  limit: number;
+  offset: number;
+  rows: ExcessToReturnRow[];
+}
+
 /** Result envelope returned by attach_payment_evidence_v1. */
 export interface AttachEvidenceRpcResult {
   status: string;

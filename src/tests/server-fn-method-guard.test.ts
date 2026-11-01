@@ -79,6 +79,7 @@ export const READ_ONLY_SERVER_FNS: ReadOnlyRegistry = {
   listPaymentsFn: { reason: "list read" },
   getPaymentReconciliationFn: { reason: "summary read" },
   getOrderSettlementFn: { reason: "settlement read" },
+  listExcessToReturnFn: { reason: "list read (Payments 'Excess to return', migration 068)" },
   // fulfillment / packing / parcels / deliveries / handoff
   listReadyToPackFn: { reason: "queue read" },
   getParcelLabelDataFn: { reason: "label data read; never creates a parcel (CORRECTION-003)" },
@@ -196,6 +197,7 @@ describe("APSA rule: mutations are POST, GET is read-only", () => {
       "refundPaymentFn",
       "recordPaymentWithExcessFn",
       "returnPaymentExcessFn",
+      "reinstateExcessPaymentFn",
       "correctPaymentFn",
       "attachPaymentEvidenceFn",
       // returns / inventory

@@ -41,6 +41,8 @@
  * status x verification_state combinations.
  */
 import type {
+  ExcessToReturnKind,
+  ExcessToReturnPage as ServerExcessToReturnPage,
   PaymentDetail as ServerPaymentDetail,
   PaymentEventDetail as ServerPaymentEventDetail,
   PaymentEvidenceDetail as ServerPaymentEvidenceDetail,
@@ -117,9 +119,21 @@ export interface UiPaymentEvidence {
   createdAt: string;
 }
 
+/**
+ * The server's excess figures for a payment recorded with excess (migration
+ * 068, payment_excess_state_v1) — never derived in the browser.
+ */
+export interface UiPaymentExcess {
+  recorded: Money;
+  returned: Money;
+  /** What can still be returned now: 0 unless confirmed, never past the total. */
+  returnable: Money;
+}
+
 export interface UiPaymentDetail extends UiPayment {
   events: UiPaymentEvent[];
   evidence: UiPaymentEvidence[];
+  excess: UiPaymentExcess | null;
 }
 
 export function mapPaymentSummaryToUi(row: ServerPaymentSummary): UiPayment {
@@ -182,6 +196,40 @@ export function mapPaymentDetailToUi(detail: ServerPaymentDetail): UiPaymentDeta
     ...mapPaymentSummaryToUi(detail),
     events: detail.events.map(mapPaymentEventToUi),
     evidence: detail.evidence.map(mapPaymentEvidenceToUi),
+    excess: detail.excess ?? null,
+  };
+}
+
+// ── Excess to return (migration 068, payments.reconcile) ─────────────────────
+
+export type UiExcessToReturnKind = ExcessToReturnKind;
+
+export interface UiExcessToReturnItem {
+  kind: UiExcessToReturnKind;
+  paymentId: string | null;
+  orderId: string;
+  orderNumber: string;
+  customerName: string | null;
+  method: PaymentMethod | null;
+  amount: Money | null;
+  /** The server's figure: returnable now / recorded (awaiting) / net − total (legacy). */
+  excess: Money;
+  occurredAt: string;
+}
+
+export interface UiExcessToReturnPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: UiExcessToReturnItem[];
+}
+
+export function mapExcessToReturnPageToUi(page: ServerExcessToReturnPage): UiExcessToReturnPage {
+  return {
+    total: page.total,
+    limit: page.limit,
+    offset: page.offset,
+    items: page.items.map((item) => ({ ...item })),
   };
 }
 
@@ -483,18 +531,6 @@ function metadataNumber(metadata: JsonValue | null, key: string): number | null 
 }
 
 /**
- * The excess this payment was recorded with ("Record with excess"), read from
- * its immutable created event; null for every other payment.
- */
-export function recordedExcessOf(detail: UiPaymentDetail): Money | null {
-  const created = detail.events.find((event) => event.eventType === "created");
-  const excess = created ? metadataNumber(created.metadata, "excess_minor") : null;
-  return excess !== null && excess > 0
-    ? { amount: excess, currency: detail.amount.currency }
-    : null;
-}
-
-/**
  * The refunds that returned this payment's recorded excess: exactly those an
  * `excess_returned` evidence event names. An ordinary refund is never in this
  * set, even when its amount equals the excess.
@@ -524,22 +560,27 @@ export function excessAbove(amountMinor: number, outstanding: Money): Money | nu
 }
 
 /**
- * The recorded excess not yet returned, by the ledger's own running total (the
- * latest `excess_returned` event's excess_returned_total_minor). The server
- * bounds a return further — never past the sale itself.
+ * What the Payment detail says about a payment recorded with excess, from the
+ * server's figures only (UiPaymentExcess) and the payment's own status:
+ *   awaiting_confirmation — pending: nothing can be returned before confirmation;
+ *   returnable            — confirmed, and the server says some can be returned;
+ *   all_returned          — the linked excess returns cover the recorded excess;
+ *   nothing_to_return     — confirmed, but the order no longer holds more than
+ *                           its total (e.g. an ordinary refund already did it);
+ *   not_a_claim           — rejected or reversed: there is nothing to return.
+ * null for a payment recorded without excess.
  */
-export function unreturnedExcessOf(detail: UiPaymentDetail): Money | null {
-  const recorded = recordedExcessOf(detail);
-  if (!recorded) return null;
-  let returned = 0;
-  for (const event of detail.events) {
-    if (event.eventType !== "excess_returned") continue;
-    returned = Math.max(
-      returned,
-      metadataNumber(event.metadata, "excess_returned_total_minor") ?? 0,
-    );
-  }
-  return { amount: Math.max(recorded.amount - returned, 0), currency: recorded.currency };
+export type UiExcessReturnState =
+  "awaiting_confirmation" | "returnable" | "all_returned" | "nothing_to_return" | "not_a_claim";
+
+export function excessReturnStateOf(detail: UiPaymentDetail): UiExcessReturnState | null {
+  const excess = detail.excess;
+  if (!excess) return null;
+  if (detail.status === "failed" || detail.status === "reversed") return "not_a_claim";
+  if (detail.status === "pending") return "awaiting_confirmation";
+  if (excess.returnable.amount > 0) return "returnable";
+  if (excess.returned.amount >= excess.recorded.amount) return "all_returned";
+  return "nothing_to_return";
 }
 
 // ── Error classification ──────────────────────────────────────────────────────
@@ -620,7 +661,11 @@ export type PaymentClaimRefusal =
   | "outstanding_changed"
   | "no_excess"
   | "no_recorded_excess"
-  | "exceeds_returnable_excess";
+  | "exceeds_returnable_excess"
+  | "nothing_outstanding"
+  | "duplicate_transfer_reference"
+  | "excess_reinstatement_required"
+  | "excess_changed";
 
 export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null {
   const code = (err as { code?: unknown } | null)?.code;
@@ -631,6 +676,10 @@ export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null 
   if (code === "payment_no_excess") return "no_excess";
   if (code === "payment_no_recorded_excess") return "no_recorded_excess";
   if (code === "payment_exceeds_returnable_excess") return "exceeds_returnable_excess";
+  if (code === "payment_nothing_outstanding") return "nothing_outstanding";
+  if (code === "payment_duplicate_transfer_reference") return "duplicate_transfer_reference";
+  if (code === "payment_excess_reinstatement_required") return "excess_reinstatement_required";
+  if (code === "payment_excess_changed") return "excess_changed";
   if (statusCodeOf(err) !== 409) return null;
   const message = messageOf(err);
   if (/cannot take a payment/i.test(message)) return "order_not_payable";
@@ -640,6 +689,12 @@ export function paymentClaimRefusalOf(err: unknown): PaymentClaimRefusal | null 
   if (/not above the outstanding amount/i.test(message)) return "no_excess";
   if (/not recorded with an excess/i.test(message)) return "no_recorded_excess";
   if (/excess that can still be returned/i.test(message)) return "exceeds_returnable_excess";
+  if (/nothing is outstanding/i.test(message)) return "nothing_outstanding";
+  if (/reference is already recorded/i.test(message)) return "duplicate_transfer_reference";
+  if (/reinstate it with the excess action/i.test(message)) {
+    return "excess_reinstatement_required";
+  }
+  if (/excess is no longer the one recorded/i.test(message)) return "excess_changed";
   return null;
 }
 

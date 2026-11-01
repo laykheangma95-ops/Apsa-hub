@@ -381,3 +381,73 @@ export function PaymentReverseSheet({
     </BottomSheet>
   );
 }
+
+/**
+ * Migration 068 (DRAFT): take a payment recorded with excess that was rejected
+ * by mistake back to a pending claim — the same payment, rechecked by the
+ * server (its excess and transfer reference) under the order lock. It does
+ * not confirm the money: that stays a separate step.
+ */
+export function PaymentReinstateExcessSheet({
+  open,
+  onOpenChange,
+  pending,
+  error,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  pending: boolean;
+  error: string | null;
+  onConfirm: (reason: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    if (!open) setReason("");
+  }, [open]);
+
+  const trimmed = reason.trim();
+
+  return (
+    <BottomSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t("payments.actions.reinstateExcess.title")}
+      description={t("payments.actions.reinstateExcess.body")}
+      snap="half"
+    >
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="payment-reinstate-reason" className="text-label text-text-secondary">
+          {t("payments.actions.reasonRequired")}
+        </Label>
+        <Input
+          id="payment-reinstate-reason"
+          className="h-12"
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+        />
+      </div>
+
+      <p className="text-caption mt-3 text-text-secondary">
+        {t("payments.actions.reinstateExcess.note")}
+      </p>
+
+      {error ? (
+        <p className="text-caption mt-3 text-status-danger-text" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <Button
+        className="tap-target mt-5 h-12 w-full"
+        disabled={pending || trimmed.length === 0}
+        aria-busy={pending}
+        onClick={() => onConfirm(trimmed)}
+      >
+        {pending ? t("payments.actions.working") : t("payments.actions.reinstateExcess.submit")}
+      </Button>
+    </BottomSheet>
+  );
+}

@@ -48,6 +48,9 @@ import type {
   RefundPaymentRpcResult,
   RecordPaymentWithExcessRpcResult,
   ReturnPaymentExcessRpcResult,
+  ReinstateExcessPaymentRpcResult,
+  PaymentExcessStateRpcResult,
+  ExcessToReturnRpcResult,
   CorrectPaymentRpcResult,
   ListPaymentsOptions,
   PaymentReconciliationRow,
@@ -302,6 +305,56 @@ export async function returnPaymentExcess(
 
   if (error) throw rpcError("returnPaymentExcess", "payments.refund", error);
   return data as ReturnPaymentExcessRpcResult;
+}
+
+/**
+ * Migration 068: take a rejected payment recorded with excess back to pending
+ * (same payment row), with its verification event and the mandatory
+ * payments.reinstate_excess audit row — one transaction.
+ */
+export async function reinstateExcessPayment(
+  organizationId: string,
+  paymentId: string,
+  actor: string | null,
+  reason: string,
+): Promise<ReinstateExcessPaymentRpcResult> {
+  const { data, error } = await db.rpc("reinstate_excess_payment_v1", {
+    p_organization_id: organizationId,
+    p_payment_id: paymentId,
+    p_actor: actor,
+    p_reason: reason,
+  });
+
+  if (error) throw rpcError("reinstateExcessPayment", "payments.reinstate_excess", error);
+  return data as ReinstateExcessPaymentRpcResult;
+}
+
+/** Migration 068: recorded / returned / returnable excess of one payment (org-scoped). */
+export async function getPaymentExcessState(
+  organizationId: string,
+  paymentId: string,
+): Promise<PaymentExcessStateRpcResult> {
+  const { data, error } = await db.rpc("payment_excess_state_v1", {
+    p_organization_id: organizationId,
+    p_payment_id: paymentId,
+  });
+  if (error) throw rpcError("getPaymentExcessState", null, error);
+  return data as PaymentExcessStateRpcResult;
+}
+
+/** Migration 068: one page of "Excess to return", with the exact total (org-scoped). */
+export async function listExcessToReturn(
+  organizationId: string,
+  limit: number,
+  offset: number,
+): Promise<ExcessToReturnRpcResult> {
+  const { data, error } = await db.rpc("list_excess_to_return_v1", {
+    p_organization_id: organizationId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  if (error) throw rpcError("listExcessToReturn", null, error);
+  return data as ExcessToReturnRpcResult;
 }
 
 export async function correctPayment(
