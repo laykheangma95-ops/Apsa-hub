@@ -218,6 +218,25 @@ export type PosCartAction =
   | { type: "discount"; discount: CartDiscountInput }
   | { type: "reset" };
 
+/**
+ * What adding ONE unit of `line` would do to the cart, decided by the same
+ * posCartReducer "add" that mutates it — no stock rule of its own. `added` only
+ * when that line's quantity grows by exactly one; any refusal (no unit left,
+ * the line already at its limit, a quantity the cart rejects) is `refused`, and
+ * the caller must then leave the cart untouched.
+ */
+export type PosAddOneOutcome =
+  { kind: "added"; action: PosCartAction; next: PosCartState } | { kind: "refused" };
+
+export function proposeAddOne(state: PosCartState, line: CartLine): PosAddOneOutcome {
+  const action: PosCartAction = { type: "add", line: { ...line, quantity: 1 } };
+  const next = posCartReducer(state, action);
+  const quantityOf = (lines: CartLine[]) => lines.find((l) => l.key === line.key)?.quantity ?? 0;
+  return quantityOf(next.lines) === quantityOf(state.lines) + 1
+    ? { kind: "added", action, next }
+    : { kind: "refused" };
+}
+
 /** The cart's currency context: "" (empty), "USD", "KHR" or "KHR+USD" (mixed). */
 export function cartCurrencyContext(lines: readonly PricedLine[]): string {
   return [...cartCurrencies(lines)].sort().join("+");

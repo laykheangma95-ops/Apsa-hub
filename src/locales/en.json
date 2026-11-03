@@ -1039,6 +1039,7 @@
     },
     "scanNotFound": "No product found for that barcode",
     "scanAdded": "Added to cart",
+    "scanLimitReached": "Not added — no more of this item can go in the cart",
     "scanMode": "Scan mode",
     "scanModeOn": "Scan mode on — scan a barcode",
     "scanError": "Could not look up that barcode. Please try again."

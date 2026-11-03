@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { BottomSheet } from "@/design-system/BottomSheet";
 import { useCameraBarcodeScanner } from "@/hooks/use-camera-barcode-scanner";
 import { normalizeScannedCode, type CameraScanStatus } from "@/lib/barcode/camera-scan";
+import { prepareScanSound } from "@/lib/barcode/scan-sound";
 import { cn } from "@/lib/utils";
 
 /**
@@ -41,6 +42,7 @@ export function CameraScanSheet({
 
   const submitManual = (event: FormEvent) => {
     event.preventDefault();
+    prepareScanSound();
     const code = normalizeScannedCode(manual);
     if (code !== null) finish(code);
   };
@@ -97,7 +99,10 @@ export function CameraScanSheet({
           type="button"
           variant="outline"
           className="tap-target mt-3 h-12 w-full"
-          onClick={retry}
+          onClick={() => {
+            prepareScanSound();
+            retry();
+          }}
         >
           {t("barcodeScanner.retry")}
         </Button>

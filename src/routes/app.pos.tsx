@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, LayoutGrid, List, ScanLine, Search, ShoppingCart } from "lucide-react";
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,7 +26,8 @@ import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
 import { getPosProducts, lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
-import { playAcceptedScanSound } from "@/lib/barcode/scan-sound";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
+import { resolvePosScan } from "@/lib/pos-scan";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { visibleCustomerPhone } from "@/lib/customers-query";
 import { createScopedIdempotencyHolders, type ScopedIdempotencyHolders } from "@/lib/idempotency";
@@ -41,6 +42,8 @@ import {
   NO_DISCOUNT,
   posCartReducer,
   type CartDiscountInput,
+  type PosCartAction,
+  type PosCartState,
 } from "@/lib/pos-cart";
 import type { Customer, Product, ProductCategory } from "@/types";
 
@@ -170,7 +173,19 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
    * change — tap, scan, quantity, remove, clear — passes the same rule: a
    * change of the cart's currency context clears the discount (src/lib/pos-cart.ts).
    */
-  const [{ lines, discount }, dispatchCart] = useReducer(posCartReducer, EMPTY_POS_CART);
+  const [{ lines, discount }, dispatchCartState] = useReducer(posCartReducer, EMPTY_POS_CART);
+  /*
+   * The cart as it is NOW, for code that runs after an await (a barcode
+   * lookup). Every cart change goes through dispatchCart, which advances this
+   * ref with the same pure reducer React applies, so it never lags a render:
+   * two scans finishing in one tick see each other's add, and the second
+   * cannot claim a unit the first already took.
+   */
+  const cartRef = useRef<PosCartState>(EMPTY_POS_CART);
+  const dispatchCart = useCallback((action: PosCartAction) => {
+    cartRef.current = posCartReducer(cartRef.current, action);
+    dispatchCartState(action);
+  }, []);
   const [customer, setCustomer] = useState<Customer | null>(null);
   /*
    * The selected customer as it may be SHOWN: the phone masked against the
@@ -195,7 +210,7 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
   // plugged-in scanner just works; the merchant can toggle it off.
   const [scanEnabled, setScanEnabled] = useState(true);
   const [scanNotice, setScanNotice] = useState<{
-    kind: "added" | "notFound" | "error";
+    kind: "added" | "limit" | "notFound" | "error";
     label?: string;
   } | null>(null);
 
@@ -288,39 +303,24 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
 
   /**
    * A completed barcode scan: resolve the EXACT variant server-side and add one
-   * to the cart, or show a non-destructive "not found" notice (§8). A repeated
-   * scan of the same code increments that variant's line (addToCart is keyed by
+   * to the cart, or show a non-destructive notice (§8). A repeated scan of the
+   * same code increments that variant's line (addToCart is keyed by
    * product+variant). Stock policy is unchanged — availableStock drives the line
-   * max exactly as a tap does; no new policy is invented here.
+   * max exactly as a tap does. The success notice and sound follow only an add
+   * the cart actually accepted (resolvePosScan); a refused add says so instead.
    */
   async function handleScan(code: string) {
-    try {
-      const result = await lookupVariantByBarcode(code.trim());
-      if (!result) {
-        setScanNotice({ kind: "notFound" });
-        return;
-      }
-      const { product, variant } = result;
-      dispatchCart({
-        type: "add",
-        line: {
-          key: lineKey(product.id, variant.id),
-          productId: product.id,
-          variantId: variant.id,
-          nameKm: product.nameKm,
-          nameEn: product.nameEn,
-          sku: variant.sku || product.sku,
-          ...(variant.name ? { variant: variant.name } : {}),
-          quantity: 1,
-          unitPrice: variant.price,
-          stock: availableStock(product),
-        },
-      });
-      playAcceptedScanSound();
-      setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });
-    } catch {
-      setScanNotice({ kind: "error" });
-    }
+    const result = await resolvePosScan(code, {
+      lookup: lookupVariantByBarcode,
+      readCart: () => cartRef.current,
+      dispatch: dispatchCart,
+      playAccepted: playAcceptedScanSound,
+    });
+    setScanNotice(
+      result.kind === "added" || result.kind === "limit"
+        ? { kind: result.kind, label: result.label }
+        : { kind: result.kind },
+    );
   }
 
   // The wedge listener stands down while the camera sheet is open, so one code
@@ -409,9 +409,11 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
           >
             {scanNotice.kind === "added"
               ? t("pos.scanAdded")
-              : scanNotice.kind === "notFound"
-                ? t("pos.scanNotFound")
-                : t("pos.scanError")}
+              : scanNotice.kind === "limit"
+                ? t("pos.scanLimitReached")
+                : scanNotice.kind === "notFound"
+                  ? t("pos.scanNotFound")
+                  : t("pos.scanError")}
           </p>
         ) : null}
       </div>
@@ -463,7 +465,11 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
               <button
                 type="button"
                 aria-label={t("barcodeScanner.open")}
-                onClick={() => setCameraOpen(true)}
+                onClick={() => {
+                  // Unlock audio inside this tap; the beep itself waits for an accepted scan.
+                  prepareScanSound();
+                  setCameraOpen(true);
+                }}
                 className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
               >
                 <Camera className="size-5" aria-hidden />
