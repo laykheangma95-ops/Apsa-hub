@@ -26,6 +26,7 @@ import { PosVariantSheet } from "@/components/pos/PosVariantSheet";
 import { getPosProducts, lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound } from "@/lib/barcode/scan-sound";
 import { catalogKeys, enforceCatalogCachePrincipal } from "@/lib/catalog";
 import { visibleCustomerPhone } from "@/lib/customers-query";
 import { createScopedIdempotencyHolders, type ScopedIdempotencyHolders } from "@/lib/idempotency";
@@ -315,6 +316,7 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
           stock: availableStock(product),
         },
       });
+      playAcceptedScanSound();
       setScanNotice({ kind: "added", label: product.nameEn || product.nameKm });
     } catch {
       setScanNotice({ kind: "error" });

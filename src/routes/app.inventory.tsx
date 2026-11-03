@@ -36,6 +36,7 @@ import { useTranslation } from "react-i18next";
 import { lookupVariantByBarcode } from "@/lib/api";
 import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound } from "@/lib/barcode/scan-sound";
 import { AppHeader, BottomNav, Chip, ChipRow, ListSkeleton, ScreenBleed } from "@/design-system";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -268,6 +269,7 @@ function InventoryListScreen() {
         const result = await lookupVariantByBarcode(code.trim());
         if (result) {
           setScanNotFound(false);
+          playAcceptedScanSound();
           void navigate({
             to: "/app/inventory/$variantId",
             params: { variantId: result.variant.id },

@@ -6,6 +6,7 @@ import { getOrganizationProfileFn } from "@/api/org";
 import { getHomeSummary, lookupVariantByBarcode } from "@/lib/api";
 import { notifyInfo } from "@/lib/feedback";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound } from "@/lib/barcode/scan-sound";
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeQuickActions } from "@/components/home/HomeQuickActions";
@@ -213,6 +214,7 @@ function BusinessHome() {
       try {
         const result = await lookupVariantByBarcode(code.trim());
         if (result) {
+          playAcceptedScanSound();
           void navigate({
             to: "/app/inventory/$variantId",
             params: { variantId: result.variant.id },

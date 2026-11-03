@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound } from "@/lib/barcode/scan-sound";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { LocationChoice } from "@/components/inventory/LocationChoice";
 import { SCAN_INPUT_ATTRIBUTE, useBarcodeScanner } from "@/hooks/use-barcode-scanner";
@@ -136,6 +137,7 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
     try {
       const result = await resolveReceivingScan(code);
       if (result.kind === "product") {
+        playAcceptedScanSound();
         setCodeText("");
         setQuantityText("");
         setFormError(null);
