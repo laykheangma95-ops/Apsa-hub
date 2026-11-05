@@ -1,0 +1,185 @@
+name: Native PostgreSQL integration (PR #121 + PR #128)
+
+# Verification only. Builds a THROWAWAY integration tree of main + PR #121 +
+# PR #128 at the commits pinned in ci/native-pg-integration/pins.env, applies
+# the complete migration chain (through 061, 062, 063) to disposable
+# PostgreSQL service databases, and runs real concurrent-session and
+# cross-principal tests against it. Nothing is pushed, merged or deployed;
+# no Supabase project, Vercel project or repository secret is used.
+# See ci/native-pg-integration/README.md.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ci/native-pg-integration/**"
+      - ".github/workflows/native-pg-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-pg-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: "1.4.2"
+  APSA_TEST_PG_URL: postgres://postgres@localhost:5432/postgres
+
+jobs:
+  native-pg:
+    name: Races + cross-principal (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build integration tree (pinned main + #121 + #128)
+        run: ci/native-pg-integration/integrate.sh . "$RUNNER_TEMP/integ"
+      - name: Install integration tree dependencies
+        working-directory: ${{ runner.temp }}/integ
+        run: bun install --frozen-lockfile
+
+      - name: Record tested commits
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/logs"
+          {
+            cat ci/native-pg-integration/pins.env | grep -E '^[A-Z0-9_]+_SHA='
+            echo "HARNESS_SHA=$GITHUB_SHA"
+            echo "INTEGRATION_TREE=$(git -C "$RUNNER_TEMP/integ" rev-parse 'HEAD^{tree}')"
+            psql "$APSA_TEST_PG_URL" -Atc 'select version()'
+          } | tee "$RUNNER_TEMP/logs/tested-commits.txt"
+
+      - name: Concurrent-session cancellation races
+        run: ci/native-pg-integration/run-suites.sh "$RUNNER_TEMP/integ" "$RUNNER_TEMP/logs" races
+      - name: Cross-principal A → B → A through the integrated services
+        if: ${{ !cancelled() }}
+        run: ci/native-pg-integration/run-suites.sh "$RUNNER_TEMP/integ" "$RUNNER_TEMP/logs" cross-principal
+
+      # Negative controls: the suites must FAIL without the change they prove.
+      # A control that passes means a suite has gone blind, and fails the job.
+      - name: "Control: races without migration 063 must fail"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          if APSA_HARNESS_WITHHOLD_MIGRATION=063 ci/native-pg-integration/run-suites.sh \
+            "$RUNNER_TEMP/integ" "$RUNNER_TEMP/logs/control-without-063" races; then
+            echo "::error::races passed without 063"; exit 1
+          fi
+          grep -q '(fail) cancellation vs courier handoff' "$RUNNER_TEMP/logs/control-without-063/races.log"
+          grep -q '(fail) cancellation vs delivery completion' "$RUNNER_TEMP/logs/control-without-063/races.log"
+          grep -q '(fail) cancellation vs counter handoff' "$RUNNER_TEMP/logs/control-without-063/races.log"
+          echo "control OK: custody races fail without 063"
+      - name: "Control: cross-principal without PR #121 must fail"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          HARNESS_SKIP_PR121=1 ci/native-pg-integration/integrate.sh . "$RUNNER_TEMP/control-121"
+          ln -s "$RUNNER_TEMP/integ/node_modules" "$RUNNER_TEMP/control-121/node_modules"
+          if ci/native-pg-integration/run-suites.sh \
+            "$RUNNER_TEMP/control-121" "$RUNNER_TEMP/logs/control-without-121" cross-principal; then
+            echo "::error::cross-principal passed without PR #121"; exit 1
+          fi
+          grep -q '(fail) A → B → A: cancellation' "$RUNNER_TEMP/logs/control-without-121/cross-principal.log"
+          echo "control OK: cross-principal refusals fail without PR #121"
+
+      - name: Upload test logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-pg-integration-logs-pg${{ matrix.postgres }}
+          path: ${{ runner.temp }}/logs
+          retention-days: 14
+
+  integrated-ci:
+    # The existing CI checks (ci.yml), run on the INTEGRATED tree: proves the
+    # two PRs are compatible with each other and with main, not only that each
+    # passes alone.
+    name: Existing CI checks on the integrated tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Build integration tree (pinned main + #121 + #128)
+        run: ci/native-pg-integration/integrate.sh . "$RUNNER_TEMP/integ"
+      - name: Install
+        working-directory: ${{ runner.temp }}/integ
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        working-directory: ${{ runner.temp }}/integ
+        run: bun run typecheck 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
+        shell: bash
+      - name: Lint (whole repo)
+        if: ${{ !cancelled() }}
+        working-directory: ${{ runner.temp }}/integ
+        run: bun run lint 2>&1 | tee "$RUNNER_TEMP/lint.log"
+        shell: bash
+      - name: Production build
+        if: ${{ !cancelled() }}
+        working-directory: ${{ runner.temp }}/integ
+        run: bun run build 2>&1 | tail -50 | tee "$RUNNER_TEMP/build.log"
+        shell: bash
+      - name: Full test suite (same exclusion as ci.yml)
+        if: ${{ !cancelled() }}
+        working-directory: ${{ runner.temp }}/integ
+        env:
+          CI: "true"
+        run: bun test src/tests/ --test-name-pattern '^(?!.*auth hardening).*$' 2>&1 | tee "$RUNNER_TEMP/full-suite.log"
+        shell: bash
+      - name: Migration safety (integrated tree vs pinned main)
+        if: ${{ !cancelled() }}
+        working-directory: ${{ runner.temp }}/integ
+        run: |
+          set -o pipefail
+          git branch -f harness-main "$(grep MAIN_SHA= "$GITHUB_WORKSPACE/ci/native-pg-integration/pins.env" | cut -d= -f2)"
+          bun run scripts/check-migration-safety.ts --base=harness-main 2>&1 | tee "$RUNNER_TEMP/migration-safety.log"
+        shell: bash
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrated-ci-logs
+          path: ${{ runner.temp }}/*.log
+          retention-days: 14
