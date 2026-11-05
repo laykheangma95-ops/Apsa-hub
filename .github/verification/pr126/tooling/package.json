@@ -1,0 +1,9 @@
+{
+  "name": "apsa-pr126-verification-tooling",
+  "private": true,
+  "description": "Browser tooling for the PR #126 verification workflow only; never part of the app.",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.56.1"
+  }
+}
