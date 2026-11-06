@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useBarcodeScanner, SCAN_INPUT_ATTRIBUTE } from "@/hooks/use-barcode-scanner";
 import { packingKeys } from "@/lib/packing-query";
@@ -299,6 +300,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
         addFeedback(result);
         if (result.kind === "parcel_accepted" && sessionRef.current) {
           commit(applyServerParcelAccepted(sessionRef.current));
+          playAcceptedScanSound();
         }
         return;
       }
@@ -325,6 +327,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
       commit(
         applyServerProductAccepted(latest, { orderItemId: lineId, variantId: result.variantId }),
       );
+      playAcceptedScanSound();
       addFeedback(result);
     },
     [orderId, addFeedback, commit],
@@ -509,7 +512,10 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                 <Button
                   type="button"
                   className="tap-target mb-3 h-12 w-full gap-2 rounded-xl"
-                  onClick={() => setCameraOpen(true)}
+                  onClick={() => {
+                    prepareScanSound();
+                    setCameraOpen(true);
+                  }}
                 >
                   <Camera className="size-5" aria-hidden />
                   {t("packSession.camera")}

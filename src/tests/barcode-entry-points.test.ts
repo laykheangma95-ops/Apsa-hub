@@ -147,7 +147,10 @@ describe("Home header scan control", () => {
   const header = read("components/home/HomeHeader.tsx");
 
   it("opens the camera directly, never a disabled Coming soon row", () => {
-    expect(home).toContain("onScan={canScan ? () => setCameraOpen(true) : undefined}");
+    // Opening also prepares scan audio inside the tap (it plays nothing).
+    expect(home).toMatch(
+      /onScan=\{\s*canScan\s*\?\s*\(\) => \{\s*prepareScanSound\(\);\s*setCameraOpen\(true\);\s*\}\s*:\s*undefined\s*\}/,
+    );
     expect(home).not.toContain("nav.comingSoon");
     // The header renders the control only when it was handed an onScan.
     expect(header).toMatch(/\{onScan \? \(\s*<button[\s\S]*?onClick=\{onScan\}/);

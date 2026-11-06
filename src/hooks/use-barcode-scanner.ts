@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { initialScanState, stepScan, type ScanState } from "@/hooks/barcode-scan-machine";
+import { prepareScanSound } from "@/lib/barcode/scan-sound";
 
 /**
  * Listen for an ordinary USB / Bluetooth barcode scanner, which presents itself
@@ -73,7 +74,12 @@ export function useBarcodeScanner({
       );
       stateRef.current = step.state;
       if (step.preventDefault) event.preventDefault();
-      if (step.scan !== null) onScanRef.current(step.scan);
+      if (step.scan !== null) {
+        // The completing key is the last user gesture before the async lookup:
+        // unlock audio now so an accepted scan can be confirmed (plays nothing).
+        if (event.isTrusted) prepareScanSound();
+        onScanRef.current(step.scan);
+      }
     };
 
     window.addEventListener("keydown", handler);

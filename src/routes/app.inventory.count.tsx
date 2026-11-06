@@ -40,6 +40,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { LocationChoice } from "@/components/inventory/LocationChoice";
 import { SCAN_INPUT_ATTRIBUTE, useBarcodeScanner } from "@/hooks/use-barcode-scanner";
@@ -161,8 +162,12 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
     setFindMessage(null);
     try {
       const result = await resolveStockCountScan(code, locationId);
-      if (result.kind === "item") openItem(result.item);
-      else setFindMessage(t(stockCountScanMessageKey(result) ?? "stockCount.scan.notFound"));
+      if (result.kind === "item") {
+        playAcceptedScanSound();
+        openItem(result.item);
+      } else {
+        setFindMessage(t(stockCountScanMessageKey(result) ?? "stockCount.scan.notFound"));
+      }
     } catch (err) {
       setFindMessage(t(stockCountErrorKey(classifyStockCountError(err))));
     } finally {
@@ -353,7 +358,10 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
                       <button
                         type="button"
                         aria-label={t("barcodeScanner.open")}
-                        onClick={() => setCameraOpen(true)}
+                        onClick={() => {
+                          prepareScanSound();
+                          setCameraOpen(true);
+                        }}
                         className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
                       >
                         <Camera className="size-5" aria-hidden />
