@@ -14,9 +14,11 @@ import { createElement } from "react";
 GlobalRegistrator.register({ url: "http://localhost/app/pos" });
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+const ORG_A = "3f2504e0-4f89-41d3-9a0c-00000000b001";
+const ORG_B = "3f2504e0-4f89-41d3-9a0c-00000000b002";
 const routeContext = {
   session: { userId: "3f2504e0-4f89-41d3-9a0c-00000000a001" },
-  organizationId: "3f2504e0-4f89-41d3-9a0c-00000000b001",
+  organizationId: ORG_A,
 };
 const realRouter = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({
@@ -76,16 +78,79 @@ const CODES: Record<string, (typeof CATALOG)[number]> = {
 const ERROR_CODE = "885000500";
 const MISSING_CODE = "885000999";
 
+/**
+ * While `holdLookups` is set, each lookup waits in `heldLookups` until the test
+ * releases it — a slow network. `productReads` counts every read of a result's
+ * product: a lookup dropped as stale must never be read at all.
+ */
+let holdLookups = false;
+const heldLookups: Array<{ code: string; release: () => void }> = [];
+let productReads = 0;
+
+function lookupResultFor(code: string) {
+  if (code === ERROR_CODE) throw new Error("network down");
+  const p = CODES[code];
+  if (!p) return null;
+  return {
+    get product() {
+      productReads += 1;
+      return p;
+    },
+    variant: { id: p.variantId, sku: p.sku, name: "", price: p.price },
+  };
+}
+
+function orderFor(input: any, lifecycleStatus: "draft" | "confirmed") {
+  const money = (amount: number) => ({ amount, currency: "USD" });
+  return {
+    order: {
+      id: id("f1"),
+      code: "POS-1",
+      customerId: null,
+      channel: "pos",
+      items: [],
+      subtotal: money(1000),
+      discount: money(0),
+      deliveryFee: money(0),
+      total: money(1000),
+      paymentStatus: "unpaid",
+      fulfillmentStatus: "unfulfilled",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      source: "pos",
+      lifecycleStatus,
+    },
+    items: [],
+    input,
+  };
+}
+
 const realApi = await import("@/lib/api");
 mock.module("@/lib/api", () => ({
   ...realApi,
   getPosProducts: async () => CATALOG,
-  lookupVariantByBarcode: async (code: string) => {
-    if (code === ERROR_CODE) throw new Error("network down");
-    const p = CODES[code];
-    return p
-      ? { product: p, variant: { id: p.variantId, sku: p.sku, name: "", price: p.price } }
-      : null;
+  lookupVariantByBarcode: (code: string) =>
+    holdLookups
+      ? new Promise((resolve, reject) => {
+          heldLookups.push({
+            code,
+            release: () => {
+              try {
+                resolve(lookupResultFor(code));
+              } catch (err) {
+                reject(err);
+              }
+            },
+          });
+        })
+      : Promise.resolve().then(() => lookupResultFor(code)),
+  createRealOrder: async (input: any) => orderFor(input, "draft"),
+  confirmRealOrder: async () => orderFor(null, "confirmed"),
+  getRealOrderDetail: async () => {
+    throw new Error("not used");
+  },
+  recordRealPayment: async () => ({ id: "pay" }),
+  createSale: async () => {
+    throw new Error("a production cart must never reach createSale");
   },
 }));
 
@@ -127,24 +192,26 @@ async function settle(rounds = 4) {
   }
 }
 
+let client: InstanceType<typeof QueryClient> | null = null;
+
+function tree() {
+  return React.createElement(
+    QueryClientProvider,
+    { client: client! },
+    React.createElement(
+      CapabilityFixtureProvider,
+      { permissions: ["orders.create", "orders.confirm", "payments.record"] },
+      React.createElement(PosScreen),
+    ),
+  );
+}
+
 async function mount() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  await act(async () =>
-    root!.render(
-      React.createElement(
-        QueryClientProvider,
-        { client },
-        React.createElement(
-          CapabilityFixtureProvider,
-          { permissions: ["orders.create", "orders.confirm", "payments.record"] },
-          React.createElement(PosScreen),
-        ),
-      ),
-    ),
-  );
+  await act(async () => root!.render(tree()));
   await settle(8);
 }
 
@@ -155,6 +222,10 @@ afterEach(async () => {
   document.body.innerHTML = "";
   sound.accepted = 0;
   sound.prepared = 0;
+  holdLookups = false;
+  heldLookups.length = 0;
+  productReads = 0;
+  routeContext.organizationId = ORG_A;
 });
 
 beforeAll(async () => {
@@ -284,5 +355,139 @@ describe("POS scan feedback (mounted)", () => {
     await mount();
     await scan("885000111");
     expect(sound.prepared).toBe(0);
+  });
+});
+
+// ── Sale boundaries vs. a lookup still in flight ─────────────────────────────
+
+function buttonIn(scope: ParentNode, label: string): HTMLButtonElement | undefined {
+  return [...scope.querySelectorAll("button")].find(
+    (b) => b.textContent?.trim() === label || b.getAttribute("aria-label") === label,
+  ) as HTMLButtonElement | undefined;
+}
+
+async function click(el: Element | null | undefined, label: string) {
+  if (!el) throw new Error(`no ${label} to click`);
+  await act(async () => (el as HTMLElement).click());
+  await settle();
+}
+
+/** Start a wedge scan whose lookup is held until `release` is called. */
+async function startHeldScan(code: string) {
+  holdLookups = true;
+  const before = heldLookups.length;
+  await act(async () => keys(code));
+  await settle(2);
+  if (heldLookups.length !== before + 1) throw new Error("scan lookup did not start");
+  const entry = heldLookups[heldLookups.length - 1]!;
+  return async () => {
+    await act(async () => entry.release());
+    await settle(10);
+  };
+}
+
+const cartLines = () => document.querySelector("aside")?.querySelectorAll("li").length ?? 0;
+
+describe("POS scan vs. sale boundaries (mounted)", () => {
+  it("a scan finishing within the same sale still adds and beeps", async () => {
+    await mount();
+    const release = await startHeldScan("885000111");
+    await release();
+    expect(lineQuantity("Serum")).toBe(1);
+    expect(notice()).toBe(en.pos.scanAdded);
+    expect(sound.accepted).toBe(1);
+  });
+
+  it("start a lookup, Clear cart (reset), release: cart empty, no notice, no beep", async () => {
+    await mount();
+    await tap("Pair");
+    const release = await startHeldScan("885000111");
+    await click(buttonIn(cartPanel(), en.pos.cart.clear), "Clear cart");
+    expect(cartLines()).toBe(0);
+    await release();
+    expect(cartLines()).toBe(0);
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+    expect(productReads).toBe(0);
+  });
+
+  it("start a lookup, complete checkout, release: the result never enters the next sale", async () => {
+    await mount();
+    await tap("Pair");
+    const release = await startHeldScan("885000111");
+    await click(buttonIn(cartPanel(), en.pos.checkout), "cart Checkout");
+    const sheet = document.querySelector("[role=dialog]") as HTMLElement;
+    await click(buttonIn(sheet, en.pos.confirmSale), "Confirm sale");
+    await settle(10);
+    // The order exists, so the sale is cleared (PosCheckoutSheet → onCompleted).
+    expect(lineQuantity("Pair")).toBeNull();
+    await release();
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(cartLines()).toBe(0);
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+    expect(productReads).toBe(0);
+  });
+
+  it("start a lookup, change organization, release: no mutation, no feedback", async () => {
+    await mount();
+    const release = await startHeldScan("885000111");
+    routeContext.organizationId = ORG_B;
+    await act(async () => root!.render(tree()));
+    await settle(8);
+    await release();
+    expect(cartLines()).toBe(0);
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+    expect(productReads).toBe(0);
+  });
+
+  it("start a lookup, unmount POS, release: nothing is read, committed or played", async () => {
+    await mount();
+    const release = await startHeldScan("885000111");
+    const errors: unknown[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      await act(async () => root!.unmount());
+      root = null;
+      await release();
+    } finally {
+      console.error = originalError;
+    }
+    // The resolver stopped before touching the result: no cart line was built,
+    // no commit, no notice, and the sound (so no AudioContext) was never asked for.
+    expect(productReads).toBe(0);
+    expect(sound.accepted).toBe(0);
+    expect(sound.prepared).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it("two held scans in one sale share the latest cart and respect the final unit", async () => {
+    await mount();
+    await tap("Pair"); // 1 of 2 taken by a tap
+    const first = await startHeldScan("885000222");
+    const second = await startHeldScan("885000222");
+    await second();
+    await first();
+    expect(lineQuantity("Pair")).toBe(2);
+    expect(sound.accepted).toBe(1);
+    expect(notice()).toBe(en.pos.scanLimitReached);
+  });
+
+  it("an obsolete lookup and a new-sale lookup resolving out of order do not interfere", async () => {
+    await mount();
+    await tap("Serum");
+    const obsolete = await startHeldScan("885000222");
+    await click(buttonIn(cartPanel(), en.pos.cart.clear), "Clear cart");
+    const current = await startHeldScan("885000222");
+    await current();
+    expect(lineQuantity("Pair")).toBe(1);
+    await obsolete();
+    expect(lineQuantity("Pair")).toBe(1);
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(sound.accepted).toBe(1);
+    expect(notice()).toBe(en.pos.scanAdded);
   });
 });

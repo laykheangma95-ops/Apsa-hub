@@ -15,6 +15,7 @@ import { describe, expect, it } from "bun:test";
 import type { BarcodeLookupResult } from "@/lib/api";
 import {
   EMPTY_POS_CART,
+  lineKey,
   posCartReducer,
   proposeAddOne,
   type CartLine,
@@ -48,6 +49,9 @@ function lookupResult(p: Product): BarcodeLookupResult {
   };
 }
 
+/** One sale on a mounted screen: the generation never moves. */
+const SAME_SALE = { saleGeneration: () => 0, isLive: () => true };
+
 /** The route's cart: a ref advanced by the same pure reducer on every dispatch. */
 function store(initial: PosCartState = EMPTY_POS_CART) {
   let state = initial;
@@ -71,6 +75,7 @@ function harness(catalog: Record<string, Product | "throw">, initial?: PosCartSt
       },
       readCart: cart.read,
       dispatch: cart.dispatch,
+      ...SAME_SALE,
       playAccepted: () => {
         beeps += 1;
       },
@@ -181,6 +186,7 @@ describe("rapid and overlapping scans", () => {
         }),
       readCart: cart.read,
       dispatch: cart.dispatch,
+      ...SAME_SALE,
       playAccepted: () => {
         beeps += 1;
       },
@@ -207,6 +213,7 @@ describe("rapid and overlapping scans", () => {
           }),
         readCart: cart.read,
         dispatch: cart.dispatch,
+        ...SAME_SALE,
         playAccepted: () => {
           beeps += 1;
         },
@@ -263,5 +270,199 @@ describe("tap-to-add is unchanged (it does not go through the scan path)", () =>
     expect(tap(EMPTY_POS_CART, 0)).toEqual(EMPTY_POS_CART);
     // The variant sheet adds a chosen quantity in one go, capped as before.
     expect(tap(EMPTY_POS_CART, 3, 5).lines[0]!.quantity).toBe(3);
+  });
+});
+
+describe("proposeAddOne defensive checks (malformed carts are refused, never repaired)", () => {
+  const p = product("p", 5);
+  const base = scannedCartLine(lookupResult(p));
+  const other = scannedCartLine(lookupResult(product("other", 5)));
+  const cart = (...lines: CartLine[]): PosCartState => ({ ...EMPTY_POS_CART, lines });
+
+  it("duplicate line keys in the cart: invalid, cart object left as it was", () => {
+    const state = cart({ ...base, quantity: 1 }, { ...base, quantity: 2 });
+    const frozen = JSON.stringify(state);
+    expect(proposeAddOne(state, base).kind).toBe("invalid");
+    expect(JSON.stringify(state)).toBe(frozen);
+  });
+
+  it("an existing matching line with an invalid quantity: invalid", () => {
+    for (const quantity of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(proposeAddOne(cart({ ...base, quantity }), base).kind).toBe("invalid");
+    }
+  });
+
+  it("a malformed UNRELATED line: invalid (the scan is refused, nothing is dropped)", () => {
+    const state = cart({ ...other, quantity: 0 });
+    expect(proposeAddOne(state, base).kind).toBe("invalid");
+    expect(state.lines).toHaveLength(1);
+  });
+
+  it("a proposed line whose result would be invalid is not accepted", () => {
+    // A negative stock figure makes the reducer cap the line below its current
+    // quantity: the result is not "grew by exactly one", so nothing is confirmed.
+    const state = cart({ ...base, quantity: 1, stock: -3 });
+    expect(proposeAddOne(state, { ...base, stock: -3 }).kind).not.toBe("added");
+  });
+
+  it("a multi-variant product: distinct line keys are separate, valid lines", () => {
+    const red = { ...base, key: lineKey(p.id, "v-red"), variantId: "v-red" };
+    const blue = { ...base, key: lineKey(p.id, "v-blue"), variantId: "v-blue" };
+    const first = proposeAddOne(EMPTY_POS_CART, red);
+    expect(first.kind).toBe("added");
+    if (first.kind !== "added") return;
+    const second = proposeAddOne(first.next, blue);
+    expect(second.kind).toBe("added");
+    if (second.kind !== "added") return;
+    expect(second.next.lines.map((l) => [l.key, l.quantity])).toEqual([
+      [red.key, 1],
+      [blue.key, 1],
+    ]);
+    // The red line is the same object: the proposal did not touch it.
+    expect(second.next.lines[0]).toBe(first.next.lines[0]);
+  });
+
+  it("a newly inserted valid line enters at exactly one", () => {
+    const outcome = proposeAddOne(cart({ ...other, quantity: 3 }), base);
+    expect(outcome.kind).toBe("added");
+    if (outcome.kind !== "added") return;
+    expect(outcome.next.lines.find((l) => l.key === base.key)!.quantity).toBe(1);
+  });
+
+  it("a valid existing line increments by exactly one, unrelated lines untouched", () => {
+    const state = cart({ ...other, quantity: 3 }, { ...base, quantity: 2 });
+    const outcome = proposeAddOne(state, base);
+    expect(outcome.kind).toBe("added");
+    if (outcome.kind !== "added") return;
+    expect(outcome.next.lines[1]!.quantity).toBe(3);
+    expect(outcome.next.lines[0]).toBe(state.lines[0]);
+  });
+
+  it("resolvePosScan turns an invalid cart into a silent generic error", async () => {
+    const h = harness(
+      { "111": p },
+      {
+        ...EMPTY_POS_CART,
+        lines: [
+          { ...base, quantity: 1 },
+          { ...base, quantity: 1 },
+        ],
+      },
+    );
+    expect(await h.scan("111")).toEqual({ kind: "error" });
+    expect(h.cart.read().lines).toHaveLength(2);
+    expect(h.beeps()).toBe(0);
+  });
+});
+
+describe("sale-generation guard", () => {
+  function held(p: Product) {
+    let release!: () => void;
+    let fail!: () => void;
+    const lookup = () =>
+      new Promise<BarcodeLookupResult>((resolve, reject) => {
+        release = () => resolve(lookupResult(p));
+        fail = () => reject(new Error("network"));
+      });
+    return { lookup, release: () => release(), fail: () => fail() };
+  }
+
+  function guarded() {
+    const cart = store();
+    const sale = { generation: 0, live: true };
+    let beeps = 0;
+    let dispatches = 0;
+    const run = (lookup: () => Promise<BarcodeLookupResult | null>) =>
+      resolvePosScan("111", {
+        lookup,
+        readCart: cart.read,
+        dispatch: (a) => {
+          dispatches += 1;
+          cart.dispatch(a);
+        },
+        playAccepted: () => {
+          beeps += 1;
+        },
+        saleGeneration: () => sale.generation,
+        isLive: () => sale.live,
+      });
+    return { cart, sale, run, beeps: () => beeps, dispatches: () => dispatches };
+  }
+
+  it("a lookup that outlives its sale is stale: no read, no dispatch, no sound", async () => {
+    const h = guarded();
+    const l = held(product("serum", null));
+    const pending = h.run(l.lookup);
+    h.sale.generation += 1; // Reset / completed checkout
+    l.release();
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(h.dispatches()).toBe(0);
+    expect(h.beeps()).toBe(0);
+    expect(h.cart.read()).toBe(EMPTY_POS_CART);
+  });
+
+  it("an error from a lookup that outlived its sale is stale too, not an error notice", async () => {
+    const h = guarded();
+    const l = held(product("serum", null));
+    const pending = h.run(l.lookup);
+    h.sale.generation += 1;
+    l.fail();
+    expect(await pending).toEqual({ kind: "stale" });
+  });
+
+  it("a lookup that outlives the screen is stale", async () => {
+    const h = guarded();
+    const l = held(product("serum", null));
+    const pending = h.run(l.lookup);
+    h.sale.live = false;
+    l.release();
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(h.dispatches()).toBe(0);
+    expect(h.beeps()).toBe(0);
+  });
+
+  it("ordinary cart edits within the sale do not invalidate a scan", async () => {
+    const h = guarded();
+    const serum = product("serum", null);
+    const l = held(serum);
+    const pending = h.run(l.lookup);
+    h.cart.dispatch({ type: "add", line: scannedCartLine(lookupResult(product("x", null))) });
+    l.release();
+    expect((await pending).kind).toBe("added");
+    expect(h.beeps()).toBe(1);
+  });
+
+  it("an obsolete lookup and a new-sale lookup resolving out of order do not interfere", async () => {
+    const h = guarded();
+    const single = product("single", 1);
+    const old = held(single);
+    const oldScan = h.run(old.lookup);
+    h.sale.generation += 1; // new sale
+    const fresh = held(single);
+    const newScan = h.run(fresh.lookup);
+    fresh.release();
+    expect((await newScan).kind).toBe("added");
+    old.release(); // the old sale's last unit claim arrives late
+    expect((await oldScan).kind).toBe("stale");
+    expect(h.cart.read().lines[0]!.quantity).toBe(1);
+    expect(h.beeps()).toBe(1);
+  });
+});
+
+describe("audio never decides the business outcome", () => {
+  it("an accepted scan stays added when the sound throws", async () => {
+    const serum = product("serum", null);
+    const cart = store();
+    const result = await resolvePosScan("111", {
+      lookup: async () => lookupResult(serum),
+      readCart: cart.read,
+      dispatch: cart.dispatch,
+      playAccepted: () => {
+        throw new Error("audio device gone");
+      },
+      ...SAME_SALE,
+    });
+    expect(result.kind).toBe("added");
+    expect(cart.read().lines[0]!.quantity).toBe(1);
   });
 });

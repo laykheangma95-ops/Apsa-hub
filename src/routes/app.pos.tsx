@@ -186,6 +186,31 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
     cartRef.current = posCartReducer(cartRef.current, action);
     dispatchCartState(action);
   }, []);
+  /*
+   * The active sale's generation. A barcode lookup captures it when it starts
+   * and is dropped if it has moved on by the time the lookup returns
+   * (resolvePosScan), so a scan begun for one sale can never land in the next.
+   * It moves on at every sale boundary — Reset/Clear, a completed checkout
+   * (both through resetSale), a principal or organization change, unmount —
+   * and never for ordinary cart edits within a sale.
+   */
+  const saleGenerationRef = useRef(0);
+  const liveRef = useRef(false);
+  useEffect(() => {
+    liveRef.current = true;
+    return () => {
+      liveRef.current = false;
+      saleGenerationRef.current += 1;
+    };
+  }, []);
+  // PosScreen already remounts this till per principal (its key); this keeps
+  // the boundary explicit should that ever change.
+  useEffect(
+    () => () => {
+      saleGenerationRef.current += 1;
+    },
+    [userId, routeOrganizationId],
+  );
   const [customer, setCustomer] = useState<Customer | null>(null);
   /*
    * The selected customer as it may be SHOWN: the phone masked against the
@@ -315,7 +340,11 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
       readCart: () => cartRef.current,
       dispatch: dispatchCart,
       playAccepted: playAcceptedScanSound,
+      saleGeneration: () => saleGenerationRef.current,
+      isLive: () => liveRef.current,
     });
+    // A lookup that outlived its sale or this screen shows nothing at all.
+    if (result.kind === "stale") return;
     setScanNotice(
       result.kind === "added" || result.kind === "limit"
         ? { kind: result.kind, label: result.label }
@@ -338,6 +367,8 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
   }, [scanNotice]);
 
   function resetSale() {
+    // A new sale: every scan still in flight belonged to the old one.
+    saleGenerationRef.current += 1;
     dispatchCart({ type: "reset" });
     setCustomer(null);
     setCartOpen(false);

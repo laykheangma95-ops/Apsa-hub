@@ -220,21 +220,63 @@ export type PosCartAction =
 
 /**
  * What adding ONE unit of `line` would do to the cart, decided by the same
- * posCartReducer "add" that mutates it — no stock rule of its own. `added` only
- * when that line's quantity grows by exactly one; any refusal (no unit left,
- * the line already at its limit, a quantity the cart rejects) is `refused`, and
- * the caller must then leave the cart untouched.
+ * posCartReducer "add" that mutates it — no stock rule of its own.
+ *
+ * - `added`: the reducer grew that line by exactly one (a new line enters at
+ *   quantity 1) and left every other line as it was.
+ * - `refused`: the cart's own rules turned the unit down (no unit left, the
+ *   line already at its limit). The caller leaves the cart untouched.
+ * - `invalid`: the cart given is not one the reducer produces (two lines with
+ *   one key, a quantity that is not a positive safe integer), or the proposal
+ *   came back in a shape it should never have. Nothing is repaired or dropped
+ *   here; the caller leaves the cart untouched and confirms nothing.
  */
 export type PosAddOneOutcome =
-  { kind: "added"; action: PosCartAction; next: PosCartState } | { kind: "refused" };
+  | { kind: "added"; action: PosCartAction; next: PosCartState }
+  | { kind: "refused" }
+  | { kind: "invalid" };
+
+/** The cart lines are ones the reducer could have produced: unique keys, valid quantities. */
+function isWellFormedLines(lines: readonly CartLine[]): boolean {
+  const keys = new Set<string>();
+  for (const l of lines) {
+    if (keys.has(l.key) || !isLineQuantity(l.quantity)) return false;
+    keys.add(l.key);
+  }
+  return true;
+}
 
 export function proposeAddOne(state: PosCartState, line: CartLine): PosAddOneOutcome {
+  if (!isWellFormedLines(state.lines)) return { kind: "invalid" };
+
   const action: PosCartAction = { type: "add", line: { ...line, quantity: 1 } };
   const next = posCartReducer(state, action);
-  const quantityOf = (lines: CartLine[]) => lines.find((l) => l.key === line.key)?.quantity ?? 0;
-  return quantityOf(next.lines) === quantityOf(state.lines) + 1
-    ? { kind: "added", action, next }
-    : { kind: "refused" };
+  const before = state.lines.find((l) => l.key === line.key);
+  const matches = next.lines.filter((l) => l.key === line.key);
+
+  // Nothing grew: the cart's own rule refused the unit.
+  if (next.lines === state.lines || (before && matches[0]?.quantity === before.quantity)) {
+    return isWellFormedLines(next.lines) ? { kind: "refused" } : { kind: "invalid" };
+  }
+
+  const after = matches.length === 1 ? matches[0]! : null;
+  const others = (lines: readonly CartLine[]) => lines.filter((l) => l.key !== line.key);
+  const othersBefore = others(state.lines);
+  const othersAfter = others(next.lines);
+  const unrelatedUntouched =
+    othersBefore.length === othersAfter.length &&
+    othersBefore.every((l, i) => othersAfter[i] === l);
+
+  if (
+    after === null ||
+    !isLineQuantity(after.quantity) ||
+    after.quantity !== (before?.quantity ?? 0) + 1 ||
+    after.quantity > lineQuantityLimit(after.stock) ||
+    !unrelatedUntouched
+  ) {
+    return { kind: "invalid" };
+  }
+  return { kind: "added", action, next };
 }
 
 /** The cart's currency context: "" (empty), "USD", "KHR" or "KHR+USD" (mixed). */
