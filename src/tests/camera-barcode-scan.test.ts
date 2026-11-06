@@ -378,7 +378,9 @@ describe("camera scan wiring", () => {
   it("POS routes the camera code through the same handleScan (org-scoped lookup)", () => {
     expect(pos).toContain("<CameraScanSheet");
     expect(pos).toContain("onCode={(code) => void handleScan(code)}");
-    expect(pos).toContain("lookupVariantByBarcode(code.trim())");
+    // handleScan resolves through resolvePosScan with the org-scoped lookup.
+    expect(pos).toContain("lookup: lookupVariantByBarcode,");
+    expect(read("lib/pos-scan.ts")).toContain("deps.lookup(code.trim())");
   });
 
   it("POS wedge listener stands down while the camera sheet is open", () => {
