@@ -191,8 +191,9 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
    * and is dropped if it has moved on by the time the lookup returns
    * (resolvePosScan), so a scan begun for one sale can never land in the next.
    * It moves on at every sale boundary — Reset/Clear, a completed checkout
-   * (both through resetSale), a principal or organization change, unmount —
-   * and never for ordinary cart edits within a sale.
+   * (both through resetSale), opening checkout (openCheckout), a principal or
+   * organization change, unmount — and never for ordinary cart edits within a
+   * sale.
    */
   const saleGenerationRef = useRef(0);
   const liveRef = useRef(false);
@@ -366,6 +367,19 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
     return () => clearTimeout(timer);
   }, [scanNotice]);
 
+  /**
+   * Open the checkout sheet. Every scan still in flight was started for the
+   * cart BEFORE the cashier began reviewing it, so it becomes stale for good:
+   * it can no longer change the lines or total being checked out. The cart
+   * itself is kept; cancelling checkout returns to it, and new scans (the
+   * scanner stands down while the sheet is open) work under the new
+   * generation. Only the closed → open transition counts.
+   */
+  function openCheckout() {
+    if (!checkoutOpen) saleGenerationRef.current += 1;
+    setCheckoutOpen(true);
+  }
+
   function resetSale() {
     // A new sale: every scan still in flight belonged to the old one.
     saleGenerationRef.current += 1;
@@ -398,7 +412,7 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
     onClear: resetSale,
     onCheckout: () => {
       setCartOpen(false);
-      setCheckoutOpen(true);
+      openCheckout();
     },
     offline,
   };
@@ -620,7 +634,7 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
               <Button
                 className="press-tactile tap-target elevation-action h-12 shrink-0 rounded-2xl px-5"
                 disabled={block !== null || offline}
-                onClick={() => setCheckoutOpen(true)}
+                onClick={openCheckout}
               >
                 {t("pos.checkout")}
               </Button>
@@ -679,7 +693,7 @@ function PosTill({ userId, routeOrganizationId, replayHolders }: PosTillProps) {
 
       <PosCheckoutSheet
         open={checkoutOpen}
-        onOpenChange={setCheckoutOpen}
+        onOpenChange={(next) => (next ? openCheckout() : setCheckoutOpen(false))}
         lines={lines}
         totals={totals}
         customer={shownCustomer}

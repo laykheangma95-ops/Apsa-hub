@@ -491,3 +491,103 @@ describe("POS scan vs. sale boundaries (mounted)", () => {
     expect(notice()).toBe(en.pos.scanAdded);
   });
 });
+
+// ── Opening checkout is a sale-operation boundary ────────────────────────────
+
+const checkoutDialog = () => document.querySelector("[role=dialog]") as HTMLElement | null;
+
+async function openCheckout() {
+  await click(buttonIn(cartPanel(), en.pos.checkout), "cart Checkout");
+  if (!checkoutDialog()) throw new Error("checkout sheet did not open");
+}
+
+async function cancelCheckout() {
+  // The sheet's own tap-outside close: onOpenChange(false), no sale completed.
+  const scrim = checkoutDialog()?.parentElement?.querySelector(":scope > button[aria-label]");
+  await click(scrim, "checkout close");
+  if (checkoutDialog()) throw new Error("checkout sheet did not close");
+}
+
+describe("POS scan vs. opening checkout (mounted)", () => {
+  it("hold a lookup, open checkout, release: cart and total unchanged, no notice, no beep", async () => {
+    await mount();
+    await tap("Pair");
+    const release = await startHeldScan("885000111");
+    await openCheckout();
+    const cartBefore = cartPanel().textContent;
+    const sheetBefore = checkoutDialog()!.textContent;
+    await release();
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(lineQuantity("Pair")).toBe(1);
+    expect(cartPanel().textContent).toBe(cartBefore);
+    expect(checkoutDialog()!.textContent).toBe(sheetBefore);
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+    expect(productReads).toBe(0);
+  });
+
+  it("a lookup that fails after checkout opened shows no error notice either", async () => {
+    await mount();
+    await tap("Pair");
+    const release = await startHeldScan(ERROR_CODE);
+    await openCheckout();
+    await release();
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+  });
+
+  it("the scanner stays off while checkout is open: no lookup starts", async () => {
+    await mount();
+    await tap("Pair");
+    await openCheckout();
+    holdLookups = true;
+    await act(async () => keys("885000111"));
+    await settle(4);
+    expect(heldLookups).toHaveLength(0);
+  });
+
+  it("cancel checkout: the cart is kept, new scans work, the pre-checkout lookup stays stale", async () => {
+    await mount();
+    await tap("Pair");
+    const old = await startHeldScan("885000111");
+    await openCheckout();
+    await cancelCheckout();
+    expect(lineQuantity("Pair")).toBe(1);
+    // A new scan after cancelling belongs to the current generation.
+    holdLookups = false;
+    await scan("885000222");
+    expect(lineQuantity("Pair")).toBe(2);
+    expect(sound.accepted).toBe(1);
+    expect(notice()).toBe(en.pos.scanAdded);
+    // The pre-checkout lookup arrives late: still stale.
+    await old();
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(sound.accepted).toBe(1);
+  });
+
+  it("opening and closing checkout repeatedly never revives an older lookup", async () => {
+    await mount();
+    await tap("Pair");
+    const old = await startHeldScan("885000111");
+    for (let i = 0; i < 3; i++) {
+      await openCheckout();
+      await cancelCheckout();
+    }
+    await old();
+    expect(lineQuantity("Serum")).toBeNull();
+    expect(lineQuantity("Pair")).toBe(1);
+    expect(notice()).toBe("");
+    expect(sound.accepted).toBe(0);
+    expect(productReads).toBe(0);
+  });
+
+  it("a successful checkout still resets the sale", async () => {
+    await mount();
+    await tap("Pair");
+    await openCheckout();
+    await click(buttonIn(checkoutDialog()!, en.pos.confirmSale), "Confirm sale");
+    await settle(10);
+    expect(lineQuantity("Pair")).toBeNull();
+    expect(cartLines()).toBe(0);
+  });
+});
