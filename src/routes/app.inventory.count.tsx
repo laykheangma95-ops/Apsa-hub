@@ -215,7 +215,12 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
 
   function submitCode(event: FormEvent) {
     event.preventDefault();
-    void resolveCode(codeText);
+    const code = codeText.trim();
+    if (code === "" || busy) return;
+    // This submit is the last user gesture before the async lookup: unlock audio
+    // now (it plays nothing). The beep itself waits for a resolved count item.
+    prepareScanSound();
+    void resolveCode(code);
   }
 
   const counted = parseCountedQuantity(countedText);

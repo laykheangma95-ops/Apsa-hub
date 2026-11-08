@@ -371,11 +371,13 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
       e.preventDefault();
       const input = scanInputRef.current;
       if (!input) return;
-      const value = input.value.trim();
-      if (value.length > 0) {
-        handleScan(value);
-        input.value = "";
-      }
+      const code = normalizeScanInput(input.value);
+      if (code === null) return;
+      // This submit is the last user gesture before the server check: unlock
+      // audio now (it plays nothing). The beep waits for an accepted scan.
+      prepareScanSound();
+      handleScan(code);
+      input.value = "";
     },
     [handleScan],
   );

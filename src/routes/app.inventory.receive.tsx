@@ -161,7 +161,12 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
 
   function submitCode(event: FormEvent) {
     event.preventDefault();
-    void resolveCode(codeText);
+    const code = codeText.trim();
+    if (code === "" || resolving) return;
+    // This submit is the last user gesture before the async lookup: unlock audio
+    // now (it plays nothing). The beep itself waits for a resolved product.
+    prepareScanSound();
+    void resolveCode(code);
   }
 
   const supplierValid = isSupplierInputValid(supplierText);
