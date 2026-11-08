@@ -40,6 +40,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
+import { normalizeScanInput } from "@/lib/barcode/normalize";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { LocationChoice } from "@/components/inventory/LocationChoice";
 import { SCAN_INPUT_ATTRIBUTE, useBarcodeScanner } from "@/hooks/use-barcode-scanner";
@@ -161,8 +163,12 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
     setFindMessage(null);
     try {
       const result = await resolveStockCountScan(code, locationId);
-      if (result.kind === "item") openItem(result.item);
-      else setFindMessage(t(stockCountScanMessageKey(result) ?? "stockCount.scan.notFound"));
+      if (result.kind === "item") {
+        playAcceptedScanSound();
+        openItem(result.item);
+      } else {
+        setFindMessage(t(stockCountScanMessageKey(result) ?? "stockCount.scan.notFound"));
+      }
     } catch (err) {
       setFindMessage(t(stockCountErrorKey(classifyStockCountError(err))));
     } finally {
@@ -210,7 +216,14 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
 
   function submitCode(event: FormEvent) {
     event.preventDefault();
-    void resolveCode(codeText);
+    // The shared scan normalizer, synchronously: blank, control-only or
+    // overlength input is refused here, before any audio or request.
+    const code = normalizeScanInput(codeText);
+    if (code === null || busy) return;
+    // This submit is the last user gesture before the async lookup: unlock audio
+    // now (it plays nothing). The beep itself waits for a resolved count item.
+    prepareScanSound();
+    void resolveCode(code);
   }
 
   const counted = parseCountedQuantity(countedText);
@@ -353,7 +366,10 @@ function StockCountScreen({ userId, organizationId }: { userId: string; organiza
                       <button
                         type="button"
                         aria-label={t("barcodeScanner.open")}
-                        onClick={() => setCameraOpen(true)}
+                        onClick={() => {
+                          prepareScanSound();
+                          setCameraOpen(true);
+                        }}
                         className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
                       >
                         <Camera className="size-5" aria-hidden />

@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { OperationalState } from "@/components/common/OperationalState";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useBarcodeScanner, SCAN_INPUT_ATTRIBUTE } from "@/hooks/use-barcode-scanner";
 import { packingKeys } from "@/lib/packing-query";
@@ -248,6 +249,9 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const sessionRef = useRef<PackSession | null>(null);
   const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [pendingScans, setPendingScans] = useState(0);
+  // The same count, readable synchronously: the typed form refuses a submit
+  // while any scan is still being checked, even before a re-render.
+  const pendingScansRef = useRef(0);
   const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -299,6 +303,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
         addFeedback(result);
         if (result.kind === "parcel_accepted" && sessionRef.current) {
           commit(applyServerParcelAccepted(sessionRef.current));
+          playAcceptedScanSound();
         }
         return;
       }
@@ -325,6 +330,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
       commit(
         applyServerProductAccepted(latest, { orderItemId: lineId, variantId: result.variantId }),
       );
+      playAcceptedScanSound();
       addFeedback(result);
     },
     [orderId, addFeedback, commit],
@@ -332,6 +338,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
 
   const handleScan = useCallback(
     (raw: string) => {
+      pendingScansRef.current += 1;
       setPendingScans((n) => n + 1);
       scanQueueRef.current = scanQueueRef.current
         .then(() => processScan(raw))
@@ -339,6 +346,7 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
           if (activeRef.current) addFeedback({ kind: "invalid_order" });
         })
         .finally(() => {
+          pendingScansRef.current -= 1;
           if (activeRef.current) setPendingScans((n) => n - 1);
         });
     },
@@ -366,13 +374,19 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
   const handleTypedEntry = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
+      // Busy: a scan is still being checked. The typed form starts nothing —
+      // no audio preparation, no second check — until it settles. (Wedge and
+      // camera scans keep their ordered queue; this guards the form only.)
+      if (pendingScansRef.current > 0) return;
       const input = scanInputRef.current;
       if (!input) return;
-      const value = input.value.trim();
-      if (value.length > 0) {
-        handleScan(value);
-        input.value = "";
-      }
+      const code = normalizeScanInput(input.value);
+      if (code === null) return;
+      // This submit is the last user gesture before the server check: unlock
+      // audio now (it plays nothing). The beep waits for an accepted scan.
+      prepareScanSound();
+      handleScan(code);
+      input.value = "";
     },
     [handleScan],
   );
@@ -509,7 +523,10 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                 <Button
                   type="button"
                   className="tap-target mb-3 h-12 w-full gap-2 rounded-xl"
-                  onClick={() => setCameraOpen(true)}
+                  onClick={() => {
+                    prepareScanSound();
+                    setCameraOpen(true);
+                  }}
                 >
                   <Camera className="size-5" aria-hidden />
                   {t("packSession.camera")}
@@ -526,11 +543,14 @@ export function PackOrderSession({ userId, organizationId, orderId }: PackOrderI
                     autoCorrect="off"
                     spellCheck={false}
                     maxLength={100}
+                    disabled={pendingScans > 0}
                     {...{ [SCAN_INPUT_ATTRIBUTE]: "" }}
                   />
                   <button
                     type="submit"
-                    className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40 active:opacity-90"
+                    disabled={pendingScans > 0}
+                    aria-busy={pendingScans > 0}
+                    className="tap-target h-12 shrink-0 rounded-xl bg-brand-primary px-4 text-label text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/40 active:opacity-90 disabled:opacity-60"
                   >
                     {pendingScans > 0 ? <Spinner className="size-5" /> : t("packSession.submit")}
                   </button>

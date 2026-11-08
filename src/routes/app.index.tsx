@@ -6,6 +6,7 @@ import { getOrganizationProfileFn } from "@/api/org";
 import { getHomeSummary, lookupVariantByBarcode } from "@/lib/api";
 import { notifyInfo } from "@/lib/feedback";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
 import { CreateRealOrderSheet } from "@/components/orders/CreateRealOrderSheet";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeQuickActions } from "@/components/home/HomeQuickActions";
@@ -213,6 +214,7 @@ function BusinessHome() {
       try {
         const result = await lookupVariantByBarcode(code.trim());
         if (result) {
+          playAcceptedScanSound();
           void navigate({
             to: "/app/inventory/$variantId",
             params: { variantId: result.variant.id },
@@ -230,7 +232,14 @@ function BusinessHome() {
     <ScreenBleed bottom="nav" contentClassName="home-column">
       <HomeHeader
         businessName={businessName}
-        onScan={canScan ? () => setCameraOpen(true) : undefined}
+        onScan={
+          canScan
+            ? () => {
+                prepareScanSound();
+                setCameraOpen(true);
+              }
+            : undefined
+        }
       />
 
       {/* .home-main: header-sized rows, then the rest of the screen for the tiles. */}

@@ -27,6 +27,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
+import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
+import { normalizeScanInput } from "@/lib/barcode/normalize";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { LocationChoice } from "@/components/inventory/LocationChoice";
 import { SCAN_INPUT_ATTRIBUTE, useBarcodeScanner } from "@/hooks/use-barcode-scanner";
@@ -136,6 +138,7 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
     try {
       const result = await resolveReceivingScan(code);
       if (result.kind === "product") {
+        playAcceptedScanSound();
         setCodeText("");
         setQuantityText("");
         setFormError(null);
@@ -159,7 +162,14 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
 
   function submitCode(event: FormEvent) {
     event.preventDefault();
-    void resolveCode(codeText);
+    // The shared scan normalizer, synchronously: blank, control-only or
+    // overlength input is refused here, before any audio or request.
+    const code = normalizeScanInput(codeText);
+    if (code === null || resolving) return;
+    // This submit is the last user gesture before the async lookup: unlock audio
+    // now (it plays nothing). The beep itself waits for a resolved product.
+    prepareScanSound();
+    void resolveCode(code);
   }
 
   const supplierValid = isSupplierInputValid(supplierText);
@@ -274,7 +284,10 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
                     <button
                       type="button"
                       aria-label={t("barcodeScanner.open")}
-                      onClick={() => setCameraOpen(true)}
+                      onClick={() => {
+                        prepareScanSound();
+                        setCameraOpen(true);
+                      }}
                       className="press-tactile tap-target flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border-default bg-surface-primary text-text-primary"
                     >
                       <Camera className="size-5" aria-hidden />
