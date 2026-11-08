@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CameraScanSheet } from "@/components/barcode/CameraScanSheet";
 import { playAcceptedScanSound, prepareScanSound } from "@/lib/barcode/scan-sound";
+import { normalizeScanInput } from "@/lib/barcode/normalize";
 import { CapabilityDeniedState } from "@/components/common/CapabilityDeniedState";
 import { LocationChoice } from "@/components/inventory/LocationChoice";
 import { SCAN_INPUT_ATTRIBUTE, useBarcodeScanner } from "@/hooks/use-barcode-scanner";
@@ -161,8 +162,10 @@ function ReceiveScreen({ userId, organizationId }: { userId: string; organizatio
 
   function submitCode(event: FormEvent) {
     event.preventDefault();
-    const code = codeText.trim();
-    if (code === "" || resolving) return;
+    // The shared scan normalizer, synchronously: blank, control-only or
+    // overlength input is refused here, before any audio or request.
+    const code = normalizeScanInput(codeText);
+    if (code === null || resolving) return;
     // This submit is the last user gesture before the async lookup: unlock audio
     // now (it plays nothing). The beep itself waits for a resolved product.
     prepareScanSound();

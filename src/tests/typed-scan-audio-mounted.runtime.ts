@@ -138,6 +138,13 @@ const BARCODE_B = "4006381333948";
 const PARCEL = `APSA:PCL:v1:${"A".repeat(22)}`;
 let productVerdict: "accept" | "wrong_product" = "accept";
 let parcelVerdict: "accept" | "wrong_parcel" = "accept";
+/** When set, each packing server check waits until `releasePack()` is called. */
+let packHold = false;
+const packHeld: Array<() => void> = [];
+function packAnswer<T>(value: T): Promise<T> {
+  if (!packHold) return Promise.resolve(value);
+  return new Promise((resolve) => packHeld.push(() => resolve(value)));
+}
 
 const line = (n: string, barcode: string) => ({
   orderItemId: `item-${n}`,
@@ -163,20 +170,22 @@ mock.module("@/api/packing", () => ({
   validatePackProductScanFn: async ({ data }: any) => {
     log.push(`resolve:${data.barcode}`);
     if (productVerdict === "wrong_product")
-      return { kind: "wrong_product", scannedBarcode: data.barcode };
+      return packAnswer({ kind: "wrong_product", scannedBarcode: data.barcode });
     const n = data.barcode === BARCODE_A ? "A" : "B";
-    return {
+    return packAnswer({
       kind: "accepted",
       orderItemId: `item-${n}`,
       variantId: `var-${n}`,
       productName: `Shirt ${n}`,
-    };
+    });
   },
   validatePackParcelScanFn: async ({ data }: any) => {
     log.push(`resolve:${data.scannedCode}`);
-    return parcelVerdict === "accept"
-      ? { kind: "parcel_accepted", parcelCode: data.scannedCode }
-      : { kind: "wrong_parcel", scannedCode: data.scannedCode };
+    return packAnswer(
+      parcelVerdict === "accept"
+        ? { kind: "parcel_accepted", parcelCode: data.scannedCode }
+        : { kind: "wrong_parcel", scannedCode: data.scannedCode },
+    );
   },
   markOrderPackedFn: async () => ({ kind: "packed", deliveryId: null }),
 }));
@@ -271,6 +280,8 @@ afterEach(async () => {
   realPrepare = false;
   productVerdict = "accept";
   parcelVerdict = "accept";
+  packHold = false;
+  packHeld.length = 0;
   delete (window as any).AudioContext;
   resetRealScanSound();
 });
@@ -552,3 +563,111 @@ describe("Packing typed form", () => {
     expect(count("beep")).toBe(1);
   });
 });
+
+// ── Finding A: the Packing typed form while a check is pending ───────────────
+
+describe("Packing typed form while a scan is pending", () => {
+  const field = () => byLabel(en.packSession.product.placeholder);
+  const submitButton = () =>
+    field().form!.querySelector("button[type=submit]") as HTMLButtonElement;
+
+  async function busyCase(first: string, second: string, beepsAfterRelease: number) {
+    await mount("pack");
+    packHold = true;
+    await submitTyped(field(), first);
+    // One preparation, one server check, nothing confirmed yet.
+    expect(log).toEqual(["prepare", `resolve:${first}`]);
+    expect(packHeld).toHaveLength(1);
+    expect(field().disabled).toBe(true);
+    expect(submitButton().disabled).toBe(true);
+    expect(submitButton().getAttribute("aria-busy")).toBe("true");
+
+    const pageBefore = document.body.textContent;
+    // A second direct submission while busy (the event still reaches the form).
+    await submitTyped(field(), second);
+    expect(log).toEqual(["prepare", `resolve:${first}`]);
+    expect(packHeld).toHaveLength(1);
+    expect(count("beep")).toBe(0);
+    expect(document.body.textContent).toBe(pageBefore);
+
+    await act(async () => packHeld[0]!());
+    await settle();
+    expect(count("prepare")).toBe(1);
+    expect(resolves()).toEqual([`resolve:${first}`]);
+    expect(count("beep")).toBe(beepsAfterRelease);
+    // Usable again.
+    expect(field().disabled).toBe(false);
+    expect(submitButton().disabled).toBe(false);
+  }
+
+  it("product: a second typed submit while busy prepares nothing and starts nothing", async () => {
+    await busyCase(BARCODE_A, BARCODE_B, 1);
+    // ...and the form works again afterwards.
+    packHold = false;
+    await submitTyped(field(), BARCODE_B);
+    expect(count("prepare")).toBe(2);
+    expect(count("beep")).toBe(2);
+  });
+
+  it("parcel: a second typed submit while busy prepares nothing and starts nothing", async () => {
+    await busyCase(PARCEL, BARCODE_A, 1);
+  });
+
+  it("a refused first check: still one preparation, one check, and no beep", async () => {
+    productVerdict = "wrong_product";
+    await busyCase(BARCODE_A, BARCODE_B, 0);
+  });
+
+  it("the hardware scanner keeps its ordered queue while a typed check is pending", async () => {
+    await mount("pack");
+    packHold = true;
+    await submitTyped(field(), BARCODE_A);
+    await wedge(BARCODE_B); // queued behind the typed check, not refused
+    expect(resolves()).toEqual([`resolve:${BARCODE_A}`]);
+    await act(async () => packHeld[0]!());
+    await settle();
+    expect(resolves()).toEqual([`resolve:${BARCODE_A}`, `resolve:${BARCODE_B}`]);
+    await act(async () => packHeld[1]!());
+    await settle();
+    expect(count("beep")).toBe(2);
+    expect(count("prepare")).toBe(1); // the typed submit only (synthetic keys are untrusted)
+  });
+});
+
+// ── Finding B: Receiving / Stock Count refuse what the shared normalizer refuses
+
+const INVALID: Array<[string, string]> = [
+  ["101 printable characters", "8".repeat(101)],
+  ["control-only input", "\u0001\u0002\u001f"],
+  ["whitespace-only input", " \t "],
+  ["blank input", ""],
+];
+
+for (const [screen, fieldId] of [
+  ["receive", "receive-code"],
+  ["count", "count-code"],
+] as const) {
+  describe(`${screen === "receive" ? "Receiving" : "Stock Count"}: invalid typed input`, () => {
+    for (const [name, value] of INVALID) {
+      it(`${name}: no preparation, no request, no sound`, async () => {
+        await mount(screen);
+        await submitTyped(byId(fieldId), value);
+        expect(log).toEqual([]);
+      });
+    }
+
+    it("100 characters (the shared maximum) is still a valid code", async () => {
+      await mount(screen);
+      const code = "8".repeat(100);
+      const atSubmit = await submitTyped(byId(fieldId), code);
+      expect(atSubmit).toEqual(["prepare", `resolve:${code}`]);
+      expect(log).toEqual(["prepare", `resolve:${code}`, "beep"]);
+    });
+
+    it("control characters around a valid code are stripped before the resolver", async () => {
+      await mount(screen);
+      await submitTyped(byId(fieldId), "\u0002885000111\u0003");
+      expect(log).toEqual(["prepare", "resolve:885000111", "beep"]);
+    });
+  });
+}
